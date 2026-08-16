@@ -182,6 +182,12 @@ struct MockResponseYaml {
     /// the events are written without a `hat` field (legacy behavior).
     #[serde(default)]
     hat: Option<String>,
+    /// Plan 2026-08-16-1015 U4: explicit `target` to stamp on the
+    /// emitted event's `Event.target` field. Mirrors the production
+    /// `ralph emit --triggered <HAT>` CLI behavior for BDD scenarios
+    /// that need to drive `required_target_hat` contract checks.
+    #[serde(default)]
+    triggered: Option<String>,
 }
 
 fn deserialize_mock_responses<'de, D>(deserializer: D) -> Result<Vec<MockResponseYaml>, D::Error>
@@ -197,7 +203,7 @@ where
     let mut out = Vec::with_capacity(raw.len());
     for (i, v) in raw.into_iter().enumerate() {
         match v {
-            serde_yaml::Value::String(s) => out.push(MockResponseYaml { text: s, hat: None }),
+            serde_yaml::Value::String(s) => out.push(MockResponseYaml { text: s, hat: None, triggered: None }),
             serde_yaml::Value::Mapping(_) => {
                 let parsed: MockResponseYaml = serde_yaml::from_value(v)
                     .map_err(|e| D::Error::custom(format!("mock_responses[{i}]: {e}")))?;
@@ -1335,6 +1341,13 @@ fn run_scenario_with_snapshots(
                 });
                 if let Some(ref hat) = response.hat {
                     entry["hat"] = serde_json::Value::String(hat.clone());
+                }
+                // Plan 2026-08-16-1015 U4: wire `triggered` from the mock
+                // response into `target` so BDD scenarios can exercise the
+                // `required_target_hat` contract (e.g. report.done targeted
+                // at the reporter hat itself).
+                if let Some(ref triggered) = response.triggered {
+                    entry["target"] = serde_json::Value::String(triggered.clone());
                 }
                 writeln!(file, "{}", entry).unwrap();
             }
@@ -4437,6 +4450,22 @@ fn test_ce_executor_pipeline_fail_gate_rejected_then_pass() {
 #[test]
 fn test_ce_executor_pipeline_fail_gate_exhaust() {
     let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_fail_gate_exhaust.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// plan 2026-08-16-1015 U4: acceptance BDD for the `triggered`
+/// field in mock responses. The reporter hat self-targets its
+/// terminal events (`report.done` and `LOOP_COMPLETE`) with
+/// `triggered: reporter`. The scenario drives the full
+/// `align.done → report.done{triggered=reporter} → LOOP_COMPLETE{triggered=reporter}`
+/// chain through the real `run_workflow_guard_scenario` driver,
+/// proving the `required_target_hat` contract is satisfied for
+/// self-targeted reporter completion.
+#[test]
+fn test_ce_executor_pipeline_reporter_targeted_completion() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_pipeline_reporter_targeted_completion.yml",
+    );
     run_workflow_guard_scenario(yaml);
 }
 

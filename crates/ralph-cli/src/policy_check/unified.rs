@@ -702,6 +702,19 @@ pub fn check_emit_provenance(
 /// allowed (R12) — only present-but-unknown values are
 /// rejected.
 ///
+/// U2 (plan 2026-08-16-1015): look up `EventSchema::required_target_hat`
+/// for `topic` in the loaded config. Empty-string values are treated as
+/// absent (mirrors the runtime guard's defensive semantics).
+pub(crate) fn required_target_hat_for_topic(topic: &str, config: &RalphConfig) -> Option<String> {
+    let policy = config.event_loop.event_policy.as_ref()?;
+    let schema = policy.schemas.get(topic)?;
+    schema
+        .required_target_hat
+        .as_ref()
+        .filter(|t| !t.is_empty())
+        .cloned()
+}
+
 /// Returns `Ok(())` when:
 /// - `triggered` is `None` (R12)
 /// - `triggered` is `Some(_)` AND the value matches a hat id
@@ -719,9 +732,27 @@ pub fn check_envelope_triggered(
     triggered: Option<&str>,
     config: &RalphConfig,
 ) -> std::result::Result<(), ValidationError> {
-    let Some(value) = triggered else {
+    // U2 (plan 2026-08-16-1015): EventSchema::required_target_hat contract gate.
+    // When the schema declares a non-empty required_target_hat for this topic,
+    // triggered MUST be present and match exactly. Mirror the runtime guard's
+    // reason codes so agent repair tooling can dispatch on the same vocabulary.
+    if triggered.is_none() {
+        if let Some(target) = required_target_hat_for_topic(topic, config) {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "triggered".to_string(),
+                reason_code: "terminal_target_missing".to_string(),
+                message: format!(
+                    "topic '{topic}' has required_target_hat='{target}'; --triggered must be \
+                     set to '{target}' (or via RALPH_TRIGGERED_HAT)"
+                ),
+                ..Default::default()
+            });
+        }
         return Ok(());
-    };
+    }
+
+    let value = triggered.unwrap();
     if value.is_empty() {
         return Ok(());
     }
@@ -748,6 +779,27 @@ pub fn check_envelope_triggered(
     if is_ralph_control_topic(topic) || is_orchestrator_diagnostic_topic(topic) {
         return Ok(());
     }
+
+    // U2 (plan 2026-08-16-1015): EventSchema::required_target_hat contract gate.
+    // When the schema declares a non-empty required_target_hat for this topic,
+    // triggered MUST be Some(<that exact hat>). Mirror the runtime guard's
+    // reason codes so agent repair tooling can dispatch on the same vocabulary.
+    if let Some(target) = required_target_hat_for_topic(topic, config) {
+        if value != target {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "triggered".to_string(),
+                reason_code: "terminal_target_mismatch".to_string(),
+                message: format!(
+                    "topic '{topic}' requires triggered='{target}'; got triggered='{value}'"
+                ),
+                actual: Some(value.to_string()),
+                ..Default::default()
+            });
+        }
+        // matches required target — fall through to existing checks
+    }
+
     if config.event_loop.execution_mode == HatExecutionMode::Isolated && source_hat == Some(value) {
         return Err(ValidationError {
             payload_index: 0,

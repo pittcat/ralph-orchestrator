@@ -7,6 +7,8 @@
 //! detector is intentionally self-contained so a schema mismatch in one path
 //! silently skips instead of aborting the loop.
 
+use serde::Deserialize;
+
 use block_executor_resend::block_executor_resend_storm;
 use dedupe_stall_recovery::dedupe_stall_recovery_with_missing_event_gate;
 use finalize_recovery_outcome::finalize_recovery_outcome_on_flapping;
@@ -48,7 +50,7 @@ pub struct RetryKeyState {
 
 /// Context passed to every detector. Only the fields a detector cares about
 /// need to be populated; missing/empty fields are treated as "no signal".
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RuntimeContext {
     pub current_iteration: u32,
     pub recovery_envelopes: Vec<EnvelopeSnapshot>,
@@ -63,6 +65,55 @@ pub struct RuntimeContext {
     /// that renames the executor hat (e.g. `executor-fix`,
     /// `executor-integration`) still triggers the detector.
     pub executor_hat_ids: Vec<String>,
+    /// Plan 2026-08-16-1015 Unit 3: cap on consecutive
+    /// `handoff_dispatch_timeout` envelopes for a single retry key
+    /// before `finalize_recovery_outcome` escalates to
+    /// `ForcePlanBlocked`. Source-of-truth is the existing
+    /// `TelemetryConfig::max_repeated_recoveries` (default 3, 0
+    /// rejected by config validation). A safe Default of 3 lets
+    /// hand-rolled test contexts opt out of plumbing the cap.
+    pub handoff_retry_cap: u32,
+}
+
+fn default_handoff_retry_cap() -> u32 {
+    3
+}
+
+impl Default for RuntimeContext {
+    fn default() -> Self {
+        Self {
+            current_iteration: 0,
+            recovery_envelopes: Vec::new(),
+            events: Vec::new(),
+            retry_key_states: Vec::new(),
+            current_retry_key: None,
+            current_hat: None,
+            executor_hat_ids: Vec::new(),
+            handoff_retry_cap: default_handoff_retry_cap(),
+        }
+    }
+}
+
+/// U7: serde `Deserialize` only for `handoff_retry_cap`; all other fields fall
+/// back to `Default::default()`. This avoids propagating serde onto the snapshot
+/// types (`EnvelopeSnapshot`, `EventSnapshot`, `RetryKeyState`), keeping the
+/// surface area minimal.
+impl<'de> Deserialize<'de> for RuntimeContext {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Start from Default so all unparsed fields get safe values.
+        let mut ctx = Self::default();
+        #[derive(serde::Deserialize)]
+        struct Helper {
+            #[serde(default = "default_handoff_retry_cap")]
+            handoff_retry_cap: u32,
+        }
+        let helper = Helper::deserialize(deserializer)?;
+        ctx.handoff_retry_cap = helper.handoff_retry_cap;
+        Ok(ctx)
+    }
 }
 
 /// Corrective action produced by a detector. Callers apply actions in the
@@ -115,6 +166,21 @@ mod tests {
     fn dispatch_returns_empty_when_no_signals() {
         let ctx = RuntimeContext::default();
         assert!(dispatch(&ctx).is_empty());
+    }
+
+    #[test]
+    fn runtime_context_default_handoff_retry_cap_is_three() {
+        // U7: default_handoff_retry_cap() is the single source-of-truth;
+        // impl Default delegates to it, so Default::default() must also yield 3.
+        assert_eq!(RuntimeContext::default().handoff_retry_cap, 3);
+    }
+
+    #[test]
+    fn runtime_context_serde_default_handoff_retry_cap_is_three() {
+        // U7: #[serde(default = "default_handoff_retry_cap")] drives missing-field
+        // deserialization; verify both paths agree on the cap value.
+        let ctx: RuntimeContext = serde_json::from_str("{}").unwrap();
+        assert_eq!(ctx.handoff_retry_cap, 3);
     }
 
     #[test]

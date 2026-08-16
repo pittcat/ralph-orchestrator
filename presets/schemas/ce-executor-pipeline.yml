@@ -1163,6 +1163,10 @@ schemas:
         fill_rule: "non-empty array of strings; length must equal failure_dimensions"
   report.done:
     required_fields: ["plan_name", "report_path", "verdict"]
+    # Plan 2026-08-16-1015 Unit 4: report.done must target the reporter
+    # hat; this is the P0 fail-close gate that prevents the
+    # `report.done -> triggered=executor` misroute.
+    required_target_hat: reporter
     field_docs:
       plan_name:
         meaning: "plan file basename without extension; identifies which plan this report belongs to"

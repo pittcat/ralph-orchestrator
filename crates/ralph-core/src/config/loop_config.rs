@@ -113,6 +113,17 @@ pub struct EventSchema {
     /// document and hint on optional fields without weakening policy.
     #[serde(default)]
     pub known_fields: Vec<String>,
+
+    /// Plan 2026-08-16-1015 Unit 4: when `Some(hat)`, this terminal
+    /// topic requires an explicit `target` matching `hat` on every
+    /// emit (CLI / JSONL). Used to fail-close the
+    /// `report.done → reporter` misrouting discovered in the
+    /// P0 diagnosis (`triggered: executor` was accepted and the
+    /// handoff tracker registered `reporter`'s deadline instead of
+    /// blocking on a target mismatch). When `None`, the existing
+    /// explicit-target / auto-derive semantics apply unchanged.
+    #[serde(default)]
+    pub required_target_hat: Option<String>,
 }
 
 /// 2026-07-09-003 plan (U1): schema-backed declaration of the trigger
@@ -1572,6 +1583,49 @@ allowed_values:
         let schema = EventSchema::default();
         assert!(schema.field_docs.is_empty());
         assert!(schema.examples.is_empty());
+    }
+
+    // ----------------------------------------------------------------
+    // Plan 2026-08-16-1015 Unit 4 schema contract tests
+    // ----------------------------------------------------------------
+
+    /// Unit 4 S8: `required_target_hat` round-trips through
+    /// `EventSchema` YAML; absent in old fixtures stays `None`.
+    #[test]
+    fn u4_event_schema_required_target_hat_round_trips() {
+        let yaml = r#"
+required_fields:
+  - plan_name
+required_target_hat: reporter
+"#;
+        let schema: EventSchema = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(schema.required_target_hat.as_deref(), Some("reporter"));
+    }
+
+    /// Unit 4 compatibility: legacy fixtures without
+    /// `required_target_hat` deserialize with the field set to
+    /// `None`, so existing presets remain compatible.
+    #[test]
+    fn u4_event_schema_required_target_hat_defaults_to_none() {
+        let yaml = r#"
+required_fields:
+  - plan_name
+"#;
+        let schema: EventSchema = serde_yaml::from_str(yaml).unwrap();
+        assert!(schema.required_target_hat.is_none());
+    }
+
+    /// Unit 4: explicit `required_target_hat: ~` (YAML null)
+    /// also deserializes to `None`.
+    #[test]
+    fn u4_event_schema_required_target_hat_explicit_null_is_none() {
+        let yaml = r#"
+required_fields:
+  - plan_name
+required_target_hat: ~
+"#;
+        let schema: EventSchema = serde_yaml::from_str(yaml).unwrap();
+        assert!(schema.required_target_hat.is_none());
     }
 
     /// U1 non-goal guard: a `field_docs` entry that points at a

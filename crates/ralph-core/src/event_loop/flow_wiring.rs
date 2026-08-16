@@ -6,6 +6,8 @@
 //! an `EventLoop`. Behaviour is identical to the previous mod.rs
 //! location; only module scope changed.
 
+use std::collections::HashMap;
+
 use super::prompt_types::{PromptGates, PromptPreview, default_evidence_level};
 use crate::config::RalphConfig;
 use crate::hat_registry::HatRegistry;
@@ -331,4 +333,25 @@ where
         // 2026-07-27-002 plan Unit 2: candidate emit preview.
         candidate_emit: None,
     })
+}
+
+/// Plan 2026-08-16-1015 U1: walk `EventLoopConfig.event_policy.schemas`
+/// and collect `topic -> required_target_hat` for entries whose
+/// `required_target_hat` is `Some(non_empty)`. Empty-string contracts
+/// are omitted (mirrors the runtime guard's `Some(target) if
+/// !target.is_empty()` semantic in `TerminalTargetGuardStage`).
+pub fn build_terminal_target_contracts_from_loop_config(
+    loop_cfg: &crate::config::EventLoopConfig,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if let Some(policy) = &loop_cfg.event_policy {
+        for (topic, schema) in &policy.schemas {
+            if let Some(target) = schema.required_target_hat.as_ref() {
+                if !target.is_empty() {
+                    out.insert(topic.clone(), target.clone());
+                }
+            }
+        }
+    }
+    out
 }

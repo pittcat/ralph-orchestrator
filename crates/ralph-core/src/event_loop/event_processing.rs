@@ -651,14 +651,34 @@ impl EventLoop {
         );
         let mut rejection = rejection;
         rejection.kind = Some(RejectionKind::MissingEventGate);
-        let mut payload = crate::event_loop::rejection::build_task_resume_payload(
-            &rejection,
-            &allowed_topics,
-            terminal_topics,
-            Some(trigger_topic.as_str()),
-            Some(trigger_payload.as_str()),
-            None,
-        );
+        // Plan 2026-08-16-1015 Unit 2: compute the per-topic
+        // required fields from the unified ProtocolView so the
+        // resumed hat sees real schema field names (not topic
+        // names) in both the legacy `required_fields` array and
+        // the new `terminal_required_fields` map.
+        let protocol_view =
+            crate::preset::engine::protocol::ProtocolView::from_event_loop(&self.config.event_loop);
+        let mut terminal_required_fields: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for topic in terminal_topics {
+            let mut fields: Vec<String> = protocol_view
+                .required_fields_for(topic)
+                .map(|set| set.iter().cloned().collect())
+                .unwrap_or_default();
+            fields.sort();
+            terminal_required_fields.insert(topic.clone(), fields);
+        }
+        let mut payload =
+            crate::event_loop::rejection::build_task_resume_payload_with_terminal_contract(
+                &rejection,
+                &allowed_topics,
+                terminal_topics,
+                primary_terminal_topic,
+                &terminal_required_fields,
+                Some(trigger_topic.as_str()),
+                Some(trigger_payload.as_str()),
+                None,
+            );
         // Keep retry attempts distinct in the live queue. The stable
         // rejection key groups the budget, while this attempt field lets
         // the resume dedup layer collapse only an exact duplicate of the

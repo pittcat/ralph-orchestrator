@@ -1,4 +1,6 @@
+use crate::config::{EventLoopConfig, EventPolicyConfig, EventSchema, RalphConfig};
 use crate::event_loop::flow_declaration::FlowDeclaration;
+use crate::event_loop::flow_wiring::build_terminal_target_contracts_from_loop_config;
 use crate::event_loop::stage_pipeline::{
     EmitStage, FlowStep, RepairStateMachine, StageContext, StagePipeline, StageReject,
 };
@@ -225,9 +227,13 @@ mechanism:
         // `StepCloseObligation` is now part of
         // the locked emit order (between
         // `FlowStepScope` and `VerdictGate`).
+        // Plan 2026-08-16-1015 U1: `TerminalTargetGuard` is
+        // inserted after `EmitSchemaGate` (schema validation first,
+        // then terminal-target contract check).
         vec![
             "RepairDispatch",
             "EmitSchemaGate",
+            "TerminalTargetGuard",
             "FlowStepScope",
             "StepCloseObligation",
             "VerdictGate"
@@ -244,7 +250,10 @@ fn hat_only_pipeline_omits_flow_step_scope_and_accepts_plan_ready() {
     let pipeline = StagePipeline::with_hat_only_stages_for_loop_config(None);
     assert_eq!(
         pipeline.names(),
-        vec!["RepairDispatch", "EmitSchemaGate", "VerdictGate"]
+        // Plan 2026-08-16-1015 U1: `TerminalTargetGuard` is inserted
+        // after `EmitSchemaGate` (schema validation first, then
+        // terminal-target contract check).
+        vec!["RepairDispatch", "EmitSchemaGate", "TerminalTargetGuard", "VerdictGate"]
     );
 
     let mut sm: std::collections::HashMap<String, RepairStateMachine> =
@@ -275,4 +284,132 @@ fn stage_pipeline_skeleton_wrong_order_fails_at_runtime() {
         actual, expected,
         "deliberately wrong order to test assertion utility"
     );
+}
+
+// Plan 2026-08-16-1015 U1: all three pipeline constructors must
+// inject `TerminalTargetGuardStage` so the guard actually fires in
+// production runs (previously it was only unit-tested in isolation).
+//
+// Slot: after `EmitSchemaGate` and before the next stage in each
+// constructor — schema validation fires first, then terminal-target
+// guard, then preset-specific stages.
+//
+// Test entry: `cargo nextest run -p ralph-core -- test_stage_pipeline_constructors_wire_terminal_target_guard`
+
+/// Build a minimal `RalphConfig` with one schema entry.
+fn config_with_required_target_hat(topic: &str, required_target_hat: Option<&str>) -> RalphConfig {
+    let mut cfg = RalphConfig::default();
+    let mut schemas = std::collections::HashMap::new();
+    schemas.insert(
+        topic.to_string(),
+        EventSchema {
+            required_target_hat: required_target_hat.map(String::from),
+            ..Default::default()
+        },
+    );
+    cfg.event_loop.event_policy = Some(EventPolicyConfig {
+        enabled: true,
+        schemas,
+        ..EventPolicyConfig::default()
+    });
+    cfg
+}
+
+/// Build an `EventLoopConfig` with no schemas (empty contract map).
+#[allow(dead_code)]
+fn empty_event_loop_config() -> EventLoopConfig {
+    EventLoopConfig::default()
+}
+
+/// Helper: assert `TerminalTargetGuard` is in the pipeline names.
+fn assert_terminal_target_guard_present(pipeline: &StagePipeline) {
+    assert!(
+        pipeline.names().contains(&"TerminalTargetGuard"),
+        "pipeline.names() = {:?}",
+        pipeline.names()
+    );
+}
+
+#[test]
+fn test_stage_pipeline_constructors_wire_terminal_target_guard() {
+    // config_a: `report.done` requires `reporter`
+    let config_a = config_with_required_target_hat("report.done", Some("reporter"));
+
+    // config_b: no schemas at all
+    let config_b = RalphConfig::default();
+
+    // config_c: `report.done` has `required_target_hat: ""` (empty string —
+    // guard must omit it, per `!target.is_empty()` semantic)
+    let config_c = config_with_required_target_hat("report.done", Some(""));
+
+    // --- Helper unit tests (build_terminal_target_contracts_from_loop_config) ---
+    let contracts_a = build_terminal_target_contracts_from_loop_config(&config_a.event_loop);
+    assert_eq!(
+        contracts_a.get("report.done"),
+        Some(&"reporter".to_string()),
+        "config_a: report.done should map to reporter"
+    );
+
+    let contracts_b = build_terminal_target_contracts_from_loop_config(&config_b.event_loop);
+    assert!(
+        contracts_b.is_empty(),
+        "config_b (no schemas): helper should return empty map"
+    );
+
+    let contracts_c = build_terminal_target_contracts_from_loop_config(&config_c.event_loop);
+    assert!(
+        contracts_c.get("report.done").is_none(),
+        "config_c (empty-string contract): helper must omit the topic"
+    );
+
+    // --- Constructor wiring: with_default_stages_for_loop_config ---
+    let flow = FlowDeclaration::from_yaml(
+        r"
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: unit_loop
+        allowed_emits: [work.ready]
+",
+    )
+    .unwrap();
+
+    let pipeline_default_a = StagePipeline::with_default_stages_for_loop_config(
+        flow.clone(),
+        Some(&config_a.event_loop),
+    );
+    assert_terminal_target_guard_present(&pipeline_default_a);
+
+    let pipeline_default_none =
+        StagePipeline::with_default_stages_for_loop_config(flow.clone(), None);
+    assert_terminal_target_guard_present(&pipeline_default_none);
+
+    // --- Constructor wiring: with_phase_authority_stages_for_loop_config ---
+    use crate::event_loop::phase_authority::WorkflowPhaseAuthority;
+    let authority = WorkflowPhaseAuthority::disabled();
+
+    let pipeline_phase_a = StagePipeline::with_phase_authority_stages_for_loop_config(
+        flow.clone(),
+        Some(&config_a.event_loop),
+        Arc::new(authority.clone()),
+    );
+    assert_terminal_target_guard_present(&pipeline_phase_a);
+
+    let pipeline_phase_none = StagePipeline::with_phase_authority_stages_for_loop_config(
+        flow.clone(),
+        None,
+        Arc::new(authority),
+    );
+    assert_terminal_target_guard_present(&pipeline_phase_none);
+
+    // --- Constructor wiring: with_hat_only_stages_for_loop_config ---
+    let pipeline_hat_a =
+        StagePipeline::with_hat_only_stages_for_loop_config(Some(&config_a.event_loop));
+    assert_terminal_target_guard_present(&pipeline_hat_a);
+
+    let pipeline_hat_none = StagePipeline::with_hat_only_stages_for_loop_config(None);
+    assert_terminal_target_guard_present(&pipeline_hat_none);
 }

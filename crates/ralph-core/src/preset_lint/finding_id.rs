@@ -716,6 +716,23 @@ pub const FINDING_STRICT_READONLY_MISSING_WRITE_CONTRACT: &str =
 pub const FINDING_STRICT_READONLY_INVALID_WRITE_PATH: &str =
     "preset.strict_readonly_invalid_write_path";
 
+/// 2026-08-16-1015 plan U3: `required_target_hat = ""` defensive
+/// fallback. The empty string bypasses the terminal target guard
+/// entirely; Warn.
+pub const FINDING_TERMINAL_TARGET_CONTRACT_EMPTY_STRING: &str =
+    "preset.terminal_target_contract_empty_string";
+
+/// 2026-08-16-1015 plan U3: topic declares `required_target_hat`
+/// but no hat subscribes to the topic. The contract can never be
+/// enforced; Error.
+pub const FINDING_TERMINAL_TARGET_NOT_REGISTERED: &str = "preset.terminal_target_not_registered";
+
+/// 2026-08-16-1015 plan U3: `required_target_hat` doesn't match the
+/// unique consumer registered in the handoff index. The contract
+/// would silently pass for the wrong target; Error.
+pub const FINDING_TERMINAL_TARGET_CONSUMER_MISMATCH: &str =
+    "preset.terminal_target_consumer_mismatch";
+
 /// Inventory of every finding id in this module. Use this in tests
 /// that assert the lint surface does not silently re-introduce a
 /// serial-only or coordinator-loop finding. Plan 2026-07-07-006
@@ -790,4 +807,7 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_FLOW_TRANSITION_EMIT_NO_FORWARD_TARGET,
     FINDING_STRICT_READONLY_MISSING_WRITE_CONTRACT,
     FINDING_STRICT_READONLY_INVALID_WRITE_PATH,
+    FINDING_TERMINAL_TARGET_CONTRACT_EMPTY_STRING,
+    FINDING_TERMINAL_TARGET_NOT_REGISTERED,
+    FINDING_TERMINAL_TARGET_CONSUMER_MISMATCH,
 ];

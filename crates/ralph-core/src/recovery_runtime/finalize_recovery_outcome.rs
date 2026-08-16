@@ -91,12 +91,24 @@ fn count_flips(history: &[String]) -> usize {
 }
 
 /// True when a `handoff_dispatch_timeout` envelope from StallRecovery
-/// is present for the same retry key and the key is still in a
-/// non-terminal outcome. This prevents the 600s timeout from simply
-/// injecting yet another `task.resume`; instead we escalate to
-/// `plan.blocked`.
+/// is present for the same retry key, the key is still in a
+/// non-terminal outcome, AND the attempt count has reached the
+/// configured cap (`ctx.handoff_retry_cap`, sourced from
+/// `TelemetryConfig::max_repeated_recoveries`). This used to be
+/// a single-shot force-block on every pending timeout (plan
+/// 2026-08-16-1015 Unit 3): the first timeout must now be allowed
+/// to traverse the targeted `task.resume` route and only escalate
+/// once the bounded retry budget is exhausted.
 fn handoff_timeout_pending(ctx: &RuntimeContext, state: &super::RetryKeyState) -> bool {
     if !is_nonterminal_outcome(&state.last_outcome) {
+        return false;
+    }
+    // Saturate to at least 1 so a misconfigured 0 cannot silently
+    // bypass the bounded-retry intent. Production context always
+    // passes >= 1 (config validation rejects 0); manual Default
+    // for tests uses 3.
+    let cap = ctx.handoff_retry_cap.max(1);
+    if state.attempt_count < cap {
         return false;
     }
     let state_key = normalize_retry_key(&state.retry_key);
@@ -279,5 +291,182 @@ mod tests {
             ..Default::default()
         };
         assert!(finalize_recovery_outcome_on_flapping(&ctx).is_empty());
+    }
+
+    // ----------------------------------------------------------------
+    // Plan 2026-08-16-1015 Unit 3 acceptance tests
+    // ----------------------------------------------------------------
+
+    /// Unit 3 S5: a handoff timeout with attempt_count below the
+    /// cap must NOT produce `ForcePlanBlocked`; the targeted
+    /// `task.resume` route is allowed to run.
+    #[test]
+    fn handoff_dispatch_timeout_does_not_block_before_retry_cap() {
+        use super::super::EnvelopeSnapshot;
+        for attempt in 1..3 {
+            let ctx = RuntimeContext {
+                retry_key_states: vec![RetryKeyState {
+                    retry_key:
+                        "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:*"
+                            .to_string(),
+                    last_outcome: "Pending".to_string(),
+                    outcome_history: vec!["Pending".to_string(); 3],
+                    attempt_count: attempt,
+                }],
+                recovery_envelopes: vec![EnvelopeSnapshot {
+                    retry_key:
+                        "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:r1"
+                            .to_string(),
+                    source: "StallRecovery".to_string(),
+                    outcome: "Pending".to_string(),
+                    iteration: 10,
+                    attempt: 1,
+                }],
+                // Default cap (3) is greater than every attempt.
+                ..Default::default()
+            };
+            let actions = finalize_recovery_outcome_on_flapping(&ctx);
+            assert!(
+                !actions.iter().any(|a| matches!(
+                    a,
+                    RecoveryAction::ForcePlanBlocked { reason, .. } if reason.contains("handoff_timeout_recovery_finalized")
+                )),
+                "attempt={attempt} under default cap=3 must not produce handoff finalizer block; got {actions:?}"
+            );
+        }
+    }
+
+    /// Unit 3 S6: handoff timeout at attempt == cap must produce
+    /// exactly one `ForcePlanBlocked` action; attempt == cap + 1 must
+    /// not produce a second one (caller-side idempotence on the
+    /// retry key).
+    #[test]
+    fn handoff_dispatch_timeout_blocks_at_configured_retry_cap() {
+        use super::super::EnvelopeSnapshot;
+        let key = "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:*";
+        let envelope = EnvelopeSnapshot {
+            retry_key:
+                "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:r1"
+                    .to_string(),
+            source: "StallRecovery".to_string(),
+            outcome: "Pending".to_string(),
+            iteration: 10,
+            attempt: 1,
+        };
+        // Exact cap: 3 attempts vs cap=3 → block exactly once.
+        let ctx_exact = RuntimeContext {
+            retry_key_states: vec![RetryKeyState {
+                retry_key: key.to_string(),
+                last_outcome: "Pending".to_string(),
+                outcome_history: vec!["Pending".to_string(); 3],
+                attempt_count: 3,
+            }],
+            recovery_envelopes: vec![envelope.clone()],
+            handoff_retry_cap: 3,
+            ..Default::default()
+        };
+        let actions = finalize_recovery_outcome_on_flapping(&ctx_exact);
+        let blocks: Vec<_> = actions
+            .iter()
+            .filter(|a| matches!(a, RecoveryAction::ForcePlanBlocked { reason, .. } if reason.contains("handoff_timeout_recovery_finalized")))
+            .collect();
+        assert_eq!(blocks.len(), 1, "exact cap must produce one block");
+        // Over cap: 4 attempts (caller retries) — already blocked once,
+        // finalizer still produces exactly one block action (caller is
+        // responsible for dedup).
+        let ctx_over = RuntimeContext {
+            retry_key_states: vec![RetryKeyState {
+                retry_key: key.to_string(),
+                last_outcome: "Pending".to_string(),
+                outcome_history: vec!["Pending".to_string(); 4],
+                attempt_count: 4,
+            }],
+            recovery_envelopes: vec![envelope],
+            handoff_retry_cap: 3,
+            ..Default::default()
+        };
+        let actions_over = finalize_recovery_outcome_on_flapping(&ctx_over);
+        let blocks_over: Vec<_> = actions_over
+            .iter()
+            .filter(|a| matches!(a, RecoveryAction::ForcePlanBlocked { reason, .. } if reason.contains("handoff_timeout_recovery_finalized")))
+            .collect();
+        assert_eq!(blocks_over.len(), 1, "over cap still produces one block");
+    }
+
+    /// Unit 3 S7: terminal outcome (`Failed`) makes
+    /// `handoff_timeout_pending` short-circuit to false regardless of
+    /// attempt count.
+    #[test]
+    fn handoff_dispatch_timeout_ignores_terminal_outcome() {
+        use super::super::EnvelopeSnapshot;
+        let ctx = RuntimeContext {
+            retry_key_states: vec![RetryKeyState {
+                retry_key:
+                    "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:*"
+                        .to_string(),
+                last_outcome: "Failed".to_string(),
+                outcome_history: vec!["Failed".to_string(); 5],
+                attempt_count: 5,
+            }],
+            recovery_envelopes: vec![EnvelopeSnapshot {
+                retry_key:
+                    "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:r1"
+                        .to_string(),
+                source: "StallRecovery".to_string(),
+                outcome: "Failed".to_string(),
+                iteration: 10,
+                attempt: 5,
+            }],
+            ..Default::default()
+        };
+        let actions = finalize_recovery_outcome_on_flapping(&ctx);
+        assert!(
+            !actions.iter().any(
+                |a| matches!(a, RecoveryAction::ForcePlanBlocked { reason, .. }
+                    if reason.contains("handoff_timeout_recovery_finalized"))
+            ),
+            "terminal outcome must never trigger handoff finalizer block; got {actions:?}"
+        );
+    }
+
+    /// Unit 3: cap=0 must saturate to 1 (config validation already
+    /// rejects cap=0; this guards hand-rolled test contexts).
+    #[test]
+    fn handoff_retry_cap_saturates_to_one_when_zero() {
+        use super::super::EnvelopeSnapshot;
+        let ctx = RuntimeContext {
+            retry_key_states: vec![RetryKeyState {
+                retry_key:
+                    "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:*"
+                        .to_string(),
+                last_outcome: "Pending".to_string(),
+                outcome_history: vec!["Pending".to_string(); 2],
+                attempt_count: 1,
+            }],
+            recovery_envelopes: vec![EnvelopeSnapshot {
+                retry_key:
+                    "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:r1"
+                        .to_string(),
+                source: "StallRecovery".to_string(),
+                outcome: "Pending".to_string(),
+                iteration: 10,
+                attempt: 1,
+            }],
+            handoff_retry_cap: 0,
+            ..Default::default()
+        };
+        let actions = finalize_recovery_outcome_on_flapping(&ctx);
+        // attempt_count (1) >= saturated cap (1) → block.
+        assert_eq!(
+            actions
+                .iter()
+                .filter(
+                    |a| matches!(a, RecoveryAction::ForcePlanBlocked { reason, .. }
+                    if reason.contains("handoff_timeout_recovery_finalized"))
+                )
+                .count(),
+            1,
+            "cap=0 must saturate to 1; got {actions:?}"
+        );
     }
 }

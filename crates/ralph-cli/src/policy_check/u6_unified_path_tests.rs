@@ -618,3 +618,101 @@ hats:
         report.reason_codes
     );
 }
+
+// ─────────────────────────────────────────────────────────────────
+// U2 of plan 2026-08-16-1015 (R2, cross:U4-dormant-guard-chain,
+// A2): EventSchema::required_target_hat CLI-layer contract gate.
+// `check_envelope_triggered` must reject missing / mismatched
+// `triggered` on required-target topics before the runtime guard.
+// ─────────────────────────────────────────────────────────────────
+
+/// Build a RalphConfig with two hats (reporter + executor) and an
+/// event_policy.schema entry declaring required_target_hat for the
+/// given topic.
+fn cfg_with_required_target_hat(topic: &str, target_hat: &str) -> RalphConfig {
+    let yaml = format!(
+        r#"
+hats:
+  reporter:
+    name: reporter
+    triggers: []
+    publishes: []
+  executor:
+    name: executor
+    triggers: []
+    publishes: []
+event_loop:
+  execution_mode: isolated
+  event_policy:
+    enabled: true
+    mode: enforce
+    schemas:
+      {topic}:
+        required_target_hat: "{target_hat}"
+"#,
+    );
+    serde_yaml::from_str(&yaml).expect("synthetic RalphConfig yaml")
+}
+
+#[test]
+fn u2_check_envelope_triggered_rejects_wrong_target_on_required_target_hat_topic() {
+    let cfg = cfg_with_required_target_hat("report.done", "reporter");
+    let err = check_envelope_triggered("report.done", Some("executor"), Some("executor"), &cfg)
+        .expect_err("wrong target on required-target topic must be rejected");
+    assert_eq!(err.reason_code, "terminal_target_mismatch");
+    assert!(err.message.contains("reporter"));
+    assert!(err.message.contains("executor"));
+}
+
+#[test]
+fn u2_check_envelope_triggered_rejects_missing_target_on_required_target_hat_topic() {
+    let cfg = cfg_with_required_target_hat("report.done", "reporter");
+    let err = check_envelope_triggered("report.done", Some("executor"), None, &cfg)
+        .expect_err("missing triggered on required-target topic must be rejected");
+    assert_eq!(err.reason_code, "terminal_target_missing");
+    assert!(err.message.contains("reporter"));
+}
+
+#[test]
+fn u2_check_envelope_triggered_accepts_correct_target_on_required_target_hat_topic() {
+    let cfg = cfg_with_required_target_hat("report.done", "reporter");
+    check_envelope_triggered("report.done", Some("executor"), Some("reporter"), &cfg)
+        .expect("correct target on required-target topic must be accepted");
+}
+
+#[test]
+fn u2_check_envelope_triggered_falls_through_for_non_contract_topic() {
+    // report.done has required_target_hat=reporter; work.done has no schema entry.
+    // work.done should fall through to existing semantics — use None (R12).
+    let cfg = cfg_with_required_target_hat("report.done", "reporter");
+    check_envelope_triggered("work.done", Some("executor"), None, &cfg)
+        .expect("non-contract topic must fall through to existing semantics");
+}
+
+#[test]
+fn u2_check_envelope_triggered_treats_empty_string_contract_as_absent() {
+    // Config with required_target_hat: "" (empty string) — treated as absent.
+    let yaml = r#"
+hats:
+  reporter:
+    name: reporter
+    triggers: []
+    publishes: []
+  executor:
+    name: executor
+    triggers: []
+    publishes: []
+event_loop:
+  execution_mode: isolated
+  event_policy:
+    enabled: true
+    mode: enforce
+    schemas:
+      report.done:
+        required_target_hat: ""
+"#;
+    let cfg: RalphConfig = serde_yaml::from_str(yaml).expect("valid yaml");
+    // Empty-string contract = no gate; missing triggered must be Ok.
+    check_envelope_triggered("report.done", Some("executor"), None, &cfg)
+        .expect("empty-string required_target_hat must be treated as absent");
+}

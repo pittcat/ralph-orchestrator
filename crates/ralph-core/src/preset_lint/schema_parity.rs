@@ -201,7 +201,12 @@ fn prune_empty_mappings(value: &serde_yaml::Value) -> serde_yaml::Value {
             let mut out = serde_yaml::Mapping::new();
             for (k, v) in m {
                 let pv = prune_empty_mappings(v);
-                if is_empty_mapping(&pv) || is_empty_sequence(&pv) {
+                // Plan 2026-08-16-1015 Unit 4: also prune explicit
+                // nulls (serde_yaml serialises `Option::None` as `~`)
+                // so an absent field on one side does not mismatch a
+                // present-but-null field on the other. New optional
+                // fields such as `required_target_hat` rely on this.
+                if is_empty_mapping(&pv) || is_empty_sequence(&pv) || is_null_scalar(&pv) {
                     continue;
                 }
                 out.insert(k.clone(), pv);
@@ -221,6 +226,10 @@ fn is_empty_mapping(value: &serde_yaml::Value) -> bool {
 
 fn is_empty_sequence(value: &serde_yaml::Value) -> bool {
     matches!(value, serde_yaml::Value::Sequence(s) if s.is_empty())
+}
+
+fn is_null_scalar(value: &serde_yaml::Value) -> bool {
+    matches!(value, serde_yaml::Value::Null)
 }
 
 fn yaml_key_cmp(a: &serde_yaml::Value, b: &serde_yaml::Value) -> std::cmp::Ordering {

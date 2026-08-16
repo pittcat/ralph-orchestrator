@@ -130,4 +130,15 @@ Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文
 
 **禁止：** 收到该恢复后重启整个流程，或把它当作协议违规去找 `violation` / `required_fields` 修复。
 
+## 动态终态契约消费顺序（dynamic terminal contract）
+
+每个 hat 的终态事件（terminal topic）由当前 preset 的 `event_policy.schemas` 声明，不是固定的全局顺序。
+
+**消费顺序规则：**
+1. 当前 hat 的 `allowed_topics`（与 `publishes` 交集）中，取 `terminal_topics` 或唯一的 `primary_terminal_topic`。
+2. 若 schema 的 `required_fields` 包含 `target_hat`，emit 时必须通过 `--triggered <HAT>` 显式指定。
+3. 终态事件必须满足 `recorded=true` 才算正式发布；`ok=true` 但 `recorded=false` 只是预检通过，不是终态。
+
+preset 的 `event_policy.schemas` 是 `required_fields` 的权威来源；不要凭记忆或跨 preset 的示例构造 payload。
+
 ---

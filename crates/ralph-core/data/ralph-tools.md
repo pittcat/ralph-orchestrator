@@ -100,6 +100,19 @@ metadata:
 7. **仍不明**：`RALPH_DIAGNOSTICS=1` 启的 loop 把 envelope 写到 `recovery.jsonl`；`ralph diagnose --session latest` 出报告（`docs/guide/runtime-diagnosis.md` §10）。
 8. **缺少可用上下文时停止**：如果必须使用的字段为 `<missing>`，或字段之间互相矛盾，不要自己重新广播或重发同一 payload；读 `ralph inspect loop --format json` / `ralph tools task list` 复核当前状态。仍无法确认时停止并报告阻塞原因。
 
+## Activation exit protocol（激活退出协议）
+
+每个 hat 的终态事件（terminal topic）由当前 preset 的 `event_policy.schemas` 声明。退出协议如下：
+
+1. **确定终态 topic**：当前 hat 的 `publishes` 中存在 `terminal_topics`；若有 `primary_terminal_topic`（单条）则直接用，否则从 `terminal_topics` 中按 preset 拓扑选一条。
+2. **检查 `required_fields`**：用 `ralph emit --schema <TOPIC>` 查该 topic 的 `required_fields` 数组，payload 必须包含全部必填字段且不自相矛盾。
+3. **Precheck**：执行 `ralph emit <TOPIC> --policy-check -j '<PAYLOAD>' --output json`，确认 `ok=true`。
+4. **Apply + Confirm**：去掉 `--policy-check` 正式 emit，必须同时满足 `ok=true` 和 **`recorded=true`** 才算发布完成。`recorded=true` 是**唯一**合法的完成信号；`ok=true` 但 `recorded=false` 表示预检通过但未落盘，不是终态。
+5. **`required_target_hat`**：若 schema 的 `EventSchema.required_target_hat` 声明了 X（例如 `presets/schemas/ce-executor-pipeline.yml` 中 `report.done` 的 `required_target_hat: reporter`），emit 时必须通过 `--triggered <HAT>` 或 `RALPH_TRIGGERED_HAT` 显式指定目标 hat。
+6. **禁止在终态事件前夹带其他业务事件**：isolated 模式下，同一 activation 只保留第一个业务事件，终态前夹带会被丢弃。
+
+preset 的 `event_policy.schemas` 是 `required_fields` 的权威来源；不要凭记忆构造 payload。
+
 ## 命令速查表
 
 ### `ralph tools` 命名空间（已注入，按需读取对应子 skill）

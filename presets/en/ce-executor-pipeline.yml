@@ -1842,6 +1842,9 @@ event_loop:
             fill_rule: "non-empty array of strings; length must equal failure_dimensions"
       report.done:
         required_fields: ["plan_name", "report_path", "verdict"]
+        # Plan 2026-08-16-1015 Unit 4: terminal-target contract —
+        # report.done must target reporter; see schema for rationale.
+        required_target_hat: reporter
         field_docs:
           plan_name:
             meaning: "plan file basename without extension; identifies which plan this report belongs to"

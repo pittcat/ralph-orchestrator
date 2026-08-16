@@ -123,16 +123,20 @@ fn wiring_composition_emit_to_eventbus() {
     // `ArchiveVersion` stage is a loop-start
     // hook, not an emit stage, so it does not
     // appear in the runtime pipeline.
+    // Plan 2026-08-16-1015 U1: `TerminalTargetGuard` is
+    // inserted after `EmitSchemaGate` (schema validation first,
+    // then terminal-target contract check).
     assert_eq!(
         names,
         vec![
             "RepairDispatch",
             "EmitSchemaGate",
+            "TerminalTargetGuard",
             "FlowStepScope",
             "StepCloseObligation",
             "VerdictGate"
         ],
-        "locked stage order (baseline = 5 stages)"
+        "locked stage order (baseline = 6 stages)"
     );
 
     // 1. Dispatcher 路由契约：repair topic 在 pipeline.run 之前被拦截，

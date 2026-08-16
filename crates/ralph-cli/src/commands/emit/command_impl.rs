@@ -775,6 +775,15 @@ pub(super) fn maybe_derive_triggered_for_isolated(
         return triggered;
     }
 
+    // U2 (plan 2026-08-16-1015): required_target_hat topics must NOT
+    // auto-derive triggered. The agent MUST explicitly declare the
+    // contract target via --triggered / RALPH_TRIGGERED_HAT.
+    if let Some(target) = crate::policy_check::required_target_hat_for_topic(topic, cfg) {
+        if !target.is_empty() {
+            return triggered;
+        }
+    }
+
     let index = ralph_core::workflow_contract::HandoffIndex::from_config(cfg);
     index.consumer_of(topic).and_then(|consumer| {
         (!ralph_core::event_origin::is_virtual_runtime_consumer(consumer))

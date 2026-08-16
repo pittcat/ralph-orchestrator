@@ -25,6 +25,7 @@ use crate::execution_contract::ExecutionContractFinding;
 use crate::preset::engine::gates::RejectionKind;
 use ralph_proto::HatId;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Which layer rejected the event.  Used both for diagnostics and for
 /// the `stage` portion of the rejection key.
@@ -614,6 +615,90 @@ pub fn build_task_resume_payload(
         }
     }
     serde_json::Value::Object(payload).to_string()
+}
+
+/// Build the additive terminal-contract shape for the `task.resume`
+/// payload used by missing-terminal recovery. Plan 2026-08-16-1015
+/// Unit 2: instead of stuffing the terminal topic *names* into the
+/// legacy `required_fields` array (which the agent then mis-reads as
+/// schema field names), surface the per-topic contract side-by-side
+/// with the legacy fields so the resumed hat can:
+///   * see every legal terminal topic in `terminal_topics`,
+///   * see which topic the resume targets in `primary_terminal_topic`,
+///   * look up the real `required_fields` for each topic from the
+///     `terminal_required_fields` map (built from
+///     `ProtocolView::required_fields_for`).
+///
+/// The legacy `required_fields` array is rewritten to the primary
+/// topic's real field set (not topic names) so existing consumers
+/// reading the legacy field continue to see real schema fields.
+///
+/// `terminal_required_fields` is a `BTreeMap` so the wire shape is
+/// stable across runs (lexicographic key order). Unknown / schema-less
+/// topics map to an empty array.
+pub fn build_task_resume_payload_with_terminal_contract(
+    rejection: &Rejection,
+    allowed_topics: &[String],
+    terminal_topics: &[String],
+    primary_terminal_topic: &str,
+    terminal_required_fields: &BTreeMap<String, Vec<String>>,
+    original_trigger_topic: Option<&str>,
+    original_trigger_payload: Option<&str>,
+    wave_context: Option<&WaveContextForResume>,
+) -> String {
+    // Build a synthetic primary-required-fields slice that mirrors
+    // the legacy `required_fields` contract (primary topic's real
+    // fields, NOT topic names). Sort for stable wire shape.
+    let mut primary_fields: Vec<String> = terminal_required_fields
+        .get(primary_terminal_topic)
+        .cloned()
+        .unwrap_or_default();
+    primary_fields.sort();
+    let payload_str = build_task_resume_payload(
+        rejection,
+        allowed_topics,
+        &primary_fields,
+        original_trigger_topic,
+        original_trigger_payload,
+        wave_context,
+    );
+    let mut value = match serde_json::from_str::<serde_json::Value>(&payload_str) {
+        Ok(v) => v,
+        Err(_) => return payload_str,
+    };
+    let Some(object) = value.as_object_mut() else {
+        return payload_str;
+    };
+    object.insert(
+        "terminal_topics".into(),
+        serde_json::Value::Array(
+            terminal_topics
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect(),
+        ),
+    );
+    object.insert(
+        "primary_terminal_topic".into(),
+        serde_json::Value::String(primary_terminal_topic.to_string()),
+    );
+    let mut map = serde_json::Map::new();
+    for (topic, fields) in terminal_required_fields {
+        // Sort for stable wire shape across runs.
+        let mut sorted: Vec<String> = fields.clone();
+        sorted.sort();
+        map.insert(
+            topic.clone(),
+            serde_json::Value::Array(
+                sorted
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    object.insert("terminal_required_fields".into(), serde_json::Value::Object(map));
+    value.to_string()
 }
 
 /// Minimal wave metadata carried into a `task.resume` payload by the
@@ -1913,6 +1998,104 @@ mod tests {
             r.retry_key
                 .contains("unknown:BAD_TOPIC:invalid_topic_format")
         );
+    }
+
+    // ----------------------------------------------------------------
+    // Plan 2026-08-16-1015 Unit 2 acceptance tests
+    // ----------------------------------------------------------------
+
+    /// Unit 2 S4: builder wire shape — additive `terminal_topics`,
+    /// `primary_terminal_topic`, `terminal_required_fields` are
+    /// written, legacy `required_fields` carries the primary topic's
+    /// real schema fields (NOT topic names), and other legacy
+    /// fields remain intact.
+    #[test]
+    fn build_task_resume_payload_with_terminal_contract_preserves_legacy_fields() {
+        let r = Rejection::from_topic_format(
+            Some("executor".into()),
+            "work.done".into(),
+            &["work.done".into(), "work.failed".into()],
+        );
+        let mut map: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        map.insert("work.done".into(), vec!["plan_path".into(), "executor_head_sha".into()]);
+        map.insert("work.failed".into(), vec!["reason".into()]);
+        let payload_str = build_task_resume_payload_with_terminal_contract(
+            &r,
+            &["work.done".into(), "work.failed".into()],
+            &["work.done".into(), "work.failed".into()],
+            "work.done",
+            &map,
+            Some("plan.ready"),
+            Some("{\"plan_name\":\"p\"}"),
+            None,
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload_str).unwrap();
+        // Legacy fields
+        assert_eq!(v["allowed_topics"][0], "work.done");
+        assert_eq!(v["allowed_topics"][1], "work.failed");
+        assert_eq!(v["original_trigger_topic"], "plan.ready");
+        assert_eq!(v["original_trigger_payload"]["plan_name"], "p");
+        assert!(v["retry_key"].as_str().unwrap().contains("executor"));
+        // New terminal contract fields
+        assert_eq!(v["terminal_topics"][0], "work.done");
+        assert_eq!(v["terminal_topics"][1], "work.failed");
+        assert_eq!(v["primary_terminal_topic"], "work.done");
+        // Per-topic required fields (alphabetically sorted for stable wire shape)
+        let req = v["terminal_required_fields"].as_object().unwrap();
+        assert_eq!(req["work.done"][0], "executor_head_sha");
+        assert_eq!(req["work.done"][1], "plan_path");
+        assert_eq!(req["work.failed"][0], "reason");
+        // Legacy `required_fields` carries the primary topic's real
+        // field set, NOT topic names. Sorted alphabetically.
+        let legacy = v["required_fields"].as_array().unwrap();
+        assert_eq!(legacy.len(), 2);
+        assert_eq!(legacy[0], "executor_head_sha");
+        assert_eq!(legacy[1], "plan_path");
+        for f in legacy {
+            let s = f.as_str().unwrap();
+            assert_ne!(s, "work.done", "topic name must not appear as field");
+            assert_ne!(s, "work.failed", "topic name must not appear as field");
+        }
+    }
+
+    /// Unit 2 S4: schema-less / unknown terminal topics map to an
+    /// empty field array; field sets are stably sorted.
+    #[test]
+    fn build_task_resume_payload_with_terminal_contract_handles_empty_and_sorted_fields() {
+        let r = Rejection::from_topic_format(
+            Some("executor".into()),
+            "work.done".into(),
+            &["work.done".into()],
+        );
+        let mut map: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        map.insert(
+            "work.done".into(),
+            vec!["zeta".into(), "alpha".into(), "mu".into()],
+        );
+        map.insert("work.unknown".into(), vec![]);
+        let payload_str = build_task_resume_payload_with_terminal_contract(
+            &r,
+            &["work.done".into()],
+            &["work.done".into(), "work.unknown".into()],
+            "work.done",
+            &map,
+            None,
+            None,
+            None,
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload_str).unwrap();
+        let req = v["terminal_required_fields"].as_object().unwrap();
+        assert_eq!(req["work.done"][0], "alpha");
+        assert_eq!(req["work.done"][1], "mu");
+        assert_eq!(req["work.done"][2], "zeta");
+        let empty = req["work.unknown"].as_array().unwrap();
+        assert!(empty.is_empty());
+        let legacy = v["required_fields"].as_array().unwrap();
+        assert_eq!(legacy[0], "alpha");
+        assert_eq!(legacy[1], "mu");
+        assert_eq!(legacy[2], "zeta");
     }
 
     // U4 (plan 2026-06-23-004, anti-pattern 4): coordinator dispatcher 测试。

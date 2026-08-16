@@ -27,4 +27,10 @@ pub mod repair_dispatch_stage;
 pub mod step_close_obligation_stage;
 pub mod target_hat_guard_stage;
 pub mod terminal_state_guard_stage;
+// Plan 2026-08-16-1015 Unit 4: `TerminalTargetGuardStage` enforces
+// `EventSchema::required_target_hat` for terminal topics (e.g.
+// `report.done → reporter`). Lives in the same module family as
+// `TargetHatGuardStage` but covers a different invariant: target
+// matches the schema contract, not just non-self-loop.
+pub mod terminal_target_guard_stage;
 pub mod verdict_gate_stage;

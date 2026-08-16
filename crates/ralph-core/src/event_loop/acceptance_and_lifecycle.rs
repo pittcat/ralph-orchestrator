@@ -1149,3 +1149,189 @@ impl EventLoop {
         }
     }
 }
+
+// Plan 2026-08-16-1015 U5: acceptance lifecycle tests for the
+// `TerminalTargetGuardStage` + `HandoffTracker` integration.
+//
+// Covers three scenarios:
+// 1. `report.done{triggered=reporter}` with `required_target_hat=reporter`
+//    schema contract → handoff tracker registers ONLY `reporter`.
+// 2. `report.done{triggered=executor}` with the same contract → pipeline
+//    rejects with `terminal_target_mismatch`, handoff tracker registers
+//    NOTHING.
+// 3. (regression) `work.done{triggered=executor}` without a
+//    `required_target_hat` contract → existing acceptance semantics
+//    preserved, no regression.
+//
+// Test entry: `cargo nextest run -p ralph-core -- accepted_report_done_with_reporter_target`
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{EventPolicyConfig, EventSchema, HatConfig, HatExecutionMode, RalphConfig};
+    use crate::event_loop::stage_pipeline::{FlowStep, StageContext};
+    use crate::event_reader::Event as JsonlEvent;
+    use ralph_proto::Event;
+    use std::collections::HashMap;
+
+    /// Build a `RalphConfig` with `event_policy.schemas` declaring
+    /// `required_target_hat` for one topic AND a hat definition that
+    /// publishes that topic (so the handoff index finds a consumer).
+    fn config_with_required_target_hat(topic: &str, required_target_hat: Option<&str>) -> RalphConfig {
+        let mut cfg = RalphConfig::default();
+        let mut schemas = HashMap::new();
+        schemas.insert(
+            topic.to_string(),
+            EventSchema {
+                required_target_hat: required_target_hat.map(String::from),
+                ..Default::default()
+            },
+        );
+        cfg.event_loop.event_policy = Some(EventPolicyConfig {
+            enabled: true,
+            schemas,
+            ..EventPolicyConfig::default()
+        });
+        cfg.event_loop.execution_mode = HatExecutionMode::Isolated;
+        // Add a hat that triggers on `topic` so `HandoffGraph::from_config`
+        // populates `topic_subscribers` and the handoff index resolves a consumer.
+        let mut hats = HashMap::new();
+        hats.insert(
+            "reporter".to_string(),
+            HatConfig {
+                name: "Reporter".to_string(),
+                triggers: vec![topic.to_string()],
+                publishes: vec![],
+                ..Default::default()
+            },
+        );
+        cfg.hats = hats;
+        cfg
+    }
+
+    /// Build a minimal `EventLoop` from a `RalphConfig`.
+    fn make_loop(config: RalphConfig) -> EventLoop {
+        EventLoop::new(config)
+    }
+
+    /// Run an event through the loop's stage pipeline and return the result.
+    fn drive_event_through_pipeline(loop_: &mut EventLoop, event: Event) -> Result<(), crate::event_loop::stage_pipeline::StageReject> {
+        let mut repair_states = std::collections::HashMap::new();
+        let mut ctx = StageContext::new(
+            FlowStep::new("unit_loop"),
+            "loop-test",
+            1,
+            &mut repair_states,
+        );
+        loop_.stage_pipeline.run(&mut ctx, &event)
+    }
+
+    // Test 1: `report.done{triggered=reporter}` with `required_target_hat=reporter`
+    // schema contract → handoff tracker registers ONLY `reporter`.
+    #[test]
+    fn accepted_report_done_with_reporter_target_registers_only_reporter_in_handoff_tracker() {
+        let config = config_with_required_target_hat("report.done", Some("reporter"));
+        let mut loop_ = make_loop(config);
+
+        // Build a `report.done` event with `triggered=reporter`.
+        let event = Event::new("report.done", r#"{"triggered":"reporter"}"#);
+
+        // Pipeline must accept it.
+        let result = drive_event_through_pipeline(&mut loop_, event.clone());
+        assert!(
+            result.is_ok(),
+            "report.done{{triggered=reporter}} should pass TerminalTargetGuard: {result:?}"
+        );
+
+        // Simulate handoff acceptance by calling `apply_contract_committed_side_effects`
+        // with the accepted event.  This is the production path that registers the
+        // pending handoff on the consumer from the handoff index.
+        let jsonl_event = JsonlEvent {
+            topic: "report.done".into(),
+            ts: "2026-08-16T10:00:00Z".into(),
+            source: Some("reporter".into()),
+            hat: Some("reporter".into()),
+            triggered: Some("reporter".into()),
+            payload: Some(r#"{"triggered":"reporter"}"#.into()),
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+            system_injected: None,
+        };
+        loop_.apply_contract_committed_side_effects(&[jsonl_event]);
+
+        // The handoff tracker must have exactly 1 pending entry (for `reporter`).
+        assert_eq!(
+            loop_.state.handoff_tracker.pending_count(),
+            1,
+            "handoff tracker should have 1 pending entry for reporter"
+        );
+
+        // Simulate `reporter` hat activation — pending count should drop to 0.
+        loop_.state.handoff_tracker.on_hat_activated("reporter");
+        assert_eq!(
+            loop_.state.handoff_tracker.pending_count(),
+            0,
+            "after reporter activation, handoff tracker should be empty"
+        );
+    }
+
+    // Test 2: `report.done{triggered=executor}` with the same contract
+    // → pipeline rejects with `terminal_target_mismatch`, handoff tracker
+    // registers NOTHING.
+    #[test]
+    fn rejected_report_done_with_executor_target_does_not_register_any_handoff_tracker_entry() {
+        let config = config_with_required_target_hat("report.done", Some("reporter"));
+        let mut loop_ = make_loop(config);
+
+        // Build a `report.done` event with `triggered=executor` (wrong target).
+        let event = Event::new("report.done", r#"{"triggered":"executor"}"#);
+
+        // Pipeline must reject it.
+        let result = drive_event_through_pipeline(&mut loop_, event.clone());
+        let reject = result.expect_err("report.done{{triggered=executor}} should be rejected");
+        assert_eq!(
+            reject.reason_code, "terminal_target_mismatch",
+            "rejection reason should be terminal_target_mismatch, got: {}",
+            reject.reason_code
+        );
+
+        // Handoff tracker must still be empty — the event never reached
+        // `apply_contract_committed_side_effects`.
+        assert_eq!(
+            loop_.state.handoff_tracker.pending_count(),
+            0,
+            "rejected event should not register any handoff tracker entry"
+        );
+    }
+
+    // Test 3 (regression): `work.done{triggered=executor}` without a
+    // `required_target_hat` contract → existing acceptance semantics
+    // preserved, no regression.
+    #[test]
+    fn non_contract_topic_work_done_with_executor_target_passes_through_unchanged() {
+        // `work.done` has NO entry in schemas → no terminal-target contract.
+        let config = config_with_required_target_hat("report.done", Some("reporter"));
+        let mut loop_ = make_loop(config);
+
+        // Build a `work.done` event (topic not in the schema map).
+        let event = Event::new("work.done", r#"{"triggered":"executor","plan_name":"p","step":"S1","task_id":"t1"}"#);
+
+        // Pipeline must accept it (no contract applies).
+        let result = drive_event_through_pipeline(&mut loop_, event.clone());
+        assert!(
+            result.is_ok(),
+            "work.done{{triggered=executor}} should pass through unchanged: {result:?}"
+        );
+
+        // Handoff tracker must be empty (work.done is not a terminal event
+        // that goes through handoff registration in the same way — or at
+        // minimum, no pending entry should appear for executor here).
+        assert_eq!(
+            loop_.state.handoff_tracker.pending_count(),
+            0,
+            "work.done without contract should not register handoff tracker entry"
+        );
+    }
+
+}
