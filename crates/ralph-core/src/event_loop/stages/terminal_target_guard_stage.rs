@@ -21,6 +21,11 @@ use ralph_proto::Event;
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// Plan 2026-08-16-1015 U9: lifted from `extract_payload_target`
+/// so the test module can also reference the same canonical list
+/// when asserting 5-source priority.
+const PAYLOAD_TARGET_KEYS: &[&str] = &["target_hat", "triggered", "target"];
+
 /// Per-stage reason codes. Stable strings used by callers and
 /// downstream diagnostic tooling.
 pub const REASON_MISSING_TARGET: &str = "terminal_target_missing";
@@ -64,26 +69,19 @@ impl EmitStage for TerminalTargetGuardStage {
             _ => return Ok(()), // No contract declared → no gate.
         };
 
-        // The explicit target hat comes from one of three places,
+        // The explicit target hat comes from one of FIVE places,
         // in priority order:
         //   1. payload.target_hat — explicit emit override.
-        //   2. event.target — runtime carrier field (set by
+        //   2. payload.triggered — CLI/agent alias.
+        //   3. payload.target — generic schema field alias.
+        //   4. event.target — runtime carrier field (set by
         //      `EventReader` from the JSONL `triggered` field).
-        //   3. event.source_hat — older semantic, sometimes carried
-        //      alongside target.
+        //   5. event.source — last-resort carrier.
         let payload_target = extract_payload_target(&event.payload);
-        let carrier_target = event
-            .target
-            .as_ref()
-            .map(|h| h.as_str().to_string());
-        let carrier_source = event
-            .source
-            .as_ref()
-            .map(|h| h.as_str().to_string());
+        let carrier_target = event.target.as_ref().map(|h| h.as_str().to_string());
+        let carrier_source = event.source.as_ref().map(|h| h.as_str().to_string());
 
-        let actual = payload_target
-            .or(carrier_target)
-            .or(carrier_source);
+        let actual = payload_target.or(carrier_target).or(carrier_source);
 
         match actual {
             None => Err(StageReject::new(self.name(), REASON_MISSING_TARGET)),
@@ -99,8 +97,8 @@ impl EmitStage for TerminalTargetGuardStage {
 fn extract_payload_target(payload: &str) -> Option<String> {
     let value: Value = serde_json::from_str(payload).ok()?;
     let obj = value.as_object()?;
-    for key in ["target_hat", "triggered", "target"] {
-        if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
+    for key in PAYLOAD_TARGET_KEYS {
+        if let Some(s) = obj.get(*key).and_then(|v| v.as_str()) {
             return Some(s.to_string());
         }
     }
@@ -183,6 +181,43 @@ mod tests {
         let mut repair = RepairStateMachine::default();
         let mut c = ctx(&mut repair);
         let e = event_for("report.done", None, None);
+        let err = s.check(&mut c, &e).unwrap_err();
+        assert_eq!(err.reason_code, "terminal_target_missing");
+    }
+
+    // --- U9: new coverage tests (5-source priority + non-JSON fallthrough) ---
+
+    /// `triggered` key carries the wrong target → mismatch, not missing.
+    #[test]
+    fn triggered_field_carries_wrong_target_rejected() {
+        let s = stage();
+        let mut repair = RepairStateMachine::default();
+        let mut c = ctx(&mut repair);
+        let e = event_for("report.done", None, Some("executor"));
+        let err = s.check(&mut c, &e).unwrap_err();
+        assert_eq!(err.reason_code, "terminal_target_mismatch");
+    }
+
+    /// Non-JSON payload: `extract_payload_target` returns None, falling
+    /// through to "terminal_target_missing" — no panic.
+    #[test]
+    fn non_json_payload_falls_through_to_terminal_target_missing() {
+        let s = stage();
+        let mut repair = RepairStateMachine::default();
+        let mut c = ctx(&mut repair);
+        let e = Event::new("report.done", "not-json");
+        let err = s.check(&mut c, &e).unwrap_err();
+        assert_eq!(err.reason_code, "terminal_target_missing");
+    }
+
+    /// JSON array payload is valid JSON but not an object → None from
+    /// `extract_payload_target` → falls through to "terminal_target_missing".
+    #[test]
+    fn json_array_payload_falls_through_to_terminal_target_missing() {
+        let s = stage();
+        let mut repair = RepairStateMachine::default();
+        let mut c = ctx(&mut repair);
+        let e = Event::new("report.done", "[\"executor\"]");
         let err = s.check(&mut c, &e).unwrap_err();
         assert_eq!(err.reason_code, "terminal_target_missing");
     }
