@@ -343,11 +343,11 @@ mod tests {
     #[test]
     fn handoff_dispatch_timeout_blocks_at_configured_retry_cap() {
         use super::super::EnvelopeSnapshot;
-        let key =
-            "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:*";
+        let key = "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:*";
         let envelope = EnvelopeSnapshot {
-            retry_key: "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:r1"
-                .to_string(),
+            retry_key:
+                "stall_recovery:review-synthesizer:review_complete:handoff_dispatch_timeout:r1"
+                    .to_string(),
             source: "StallRecovery".to_string(),
             outcome: "Pending".to_string(),
             iteration: 10,
@@ -421,10 +421,10 @@ mod tests {
         };
         let actions = finalize_recovery_outcome_on_flapping(&ctx);
         assert!(
-            !actions
-                .iter()
-                .any(|a| matches!(a, RecoveryAction::ForcePlanBlocked { reason, .. }
-                    if reason.contains("handoff_timeout_recovery_finalized"))),
+            !actions.iter().any(
+                |a| matches!(a, RecoveryAction::ForcePlanBlocked { reason, .. }
+                    if reason.contains("handoff_timeout_recovery_finalized"))
+            ),
             "terminal outcome must never trigger handoff finalizer block; got {actions:?}"
         );
     }
@@ -460,8 +460,10 @@ mod tests {
         assert_eq!(
             actions
                 .iter()
-                .filter(|a| matches!(a, RecoveryAction::ForcePlanBlocked { reason, .. }
-                    if reason.contains("handoff_timeout_recovery_finalized")))
+                .filter(
+                    |a| matches!(a, RecoveryAction::ForcePlanBlocked { reason, .. }
+                    if reason.contains("handoff_timeout_recovery_finalized"))
+                )
                 .count(),
             1,
             "cap=0 must saturate to 1; got {actions:?}"

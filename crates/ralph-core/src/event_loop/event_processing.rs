@@ -656,9 +656,8 @@ impl EventLoop {
         // resumed hat sees real schema field names (not topic
         // names) in both the legacy `required_fields` array and
         // the new `terminal_required_fields` map.
-        let protocol_view = crate::preset::engine::protocol::ProtocolView::from_event_loop(
-            &self.config.event_loop,
-        );
+        let protocol_view =
+            crate::preset::engine::protocol::ProtocolView::from_event_loop(&self.config.event_loop);
         let mut terminal_required_fields: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
         for topic in terminal_topics {

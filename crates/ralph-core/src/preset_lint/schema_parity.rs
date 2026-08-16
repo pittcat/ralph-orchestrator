@@ -206,10 +206,7 @@ fn prune_empty_mappings(value: &serde_yaml::Value) -> serde_yaml::Value {
                 // so an absent field on one side does not mismatch a
                 // present-but-null field on the other. New optional
                 // fields such as `required_target_hat` rely on this.
-                if is_empty_mapping(&pv)
-                    || is_empty_sequence(&pv)
-                    || is_null_scalar(&pv)
-                {
+                if is_empty_mapping(&pv) || is_empty_sequence(&pv) || is_null_scalar(&pv) {
                     continue;
                 }
                 out.insert(k.clone(), pv);
