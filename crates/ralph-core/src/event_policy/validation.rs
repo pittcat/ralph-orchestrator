@@ -1874,6 +1874,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                         "Rebuild the payload from the artifact so {topic} satisfies the rule (run `ralph emit {topic} --policy-check` to re-validate before re-emitting)."
                     ),
                     synthetic: false,
+                    guidance: None,
                 };
                 findings.push(PolicyFinding {
                     topic: topic.to_string(),

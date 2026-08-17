@@ -40,6 +40,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::RecoveryGuidance;
 use crate::event_loop::loop_state::RejectionDigestEntry;
 use crate::event_loop::rejection::{Rejection, RejectionStage, extract_reason_code};
 use crate::preset::engine::LintResumeHint;
@@ -206,6 +207,14 @@ pub enum FeedbackKind {
 ///   allowed to be empty in this case; the renderer must
 ///   surface `gate_silent_or_ambiguous` and never claim each
 ///   checklist item was factually verified.
+/// - `guidance` — preset-supplied recovery guidance attached
+///   to the originating rule (plan 2026-08-17-1841 U2 / R1 / D2).
+///   The renderer surfaces `common` unconditionally and the
+///   `by_check` items for the actually-failed check (U3/U4
+///   decide which key to pass).  When `synthetic` is true the
+///   renderer shows only `common` so the preset author cannot
+///   fabricate a failed check.  Items are routed through
+///   `safe_display`; the U1 lint guarantees safety / scope.
 ///
 /// All fields are bounded strings / arrays — the renderer
 /// MUST route them through `safe_display` (existing
@@ -220,6 +229,12 @@ pub struct EvidenceDetail {
     pub proof: String,
     #[serde(default)]
     pub synthetic: bool,
+    /// 2026-08-17-1841 U2: optional preset-supplied recovery
+    /// guidance.  `common` items are always surfaced; the
+    /// `by_check` items are surfaced only for the matched
+    /// failed check and never for synthetic rejections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guidance: Option<RecoveryGuidance>,
 }
 
 /// One field observation: the field name (declared in the
@@ -532,6 +547,71 @@ impl CorrectionContext {
         }
     }
 
+    /// Render the preset-supplied recovery guidance block (plan
+    /// 2026-08-17-1841 U2 / R1 / D2).  Two sub-sections:
+    ///
+    /// - `Common recovery guidance` — every `common` item,
+    ///   rendered in insertion order.
+    /// - `Check-specific recovery guidance` — every
+    ///   `by_check[<key>]` item whose `key` is in
+    ///   `failed_check_keys`.  Synthetic rejections suppress
+    ///   this sub-section (D3: do not fabricate a failed
+    ///   check).
+    ///
+    /// Both sub-sections are skipped when empty; the heading
+    /// never renders with zero items, so a preset that opts
+    /// out of guidance sees the legacy block shape verbatim
+    /// (S4 / R6).
+    fn render_guidance_section(&self, out: &mut String) {
+        use crate::safe_display::{MAX_RULE_MESSAGE_BYTES, safe_display};
+        let Some(evidence) = &self.evidence else {
+            return;
+        };
+        let Some(guidance) = &evidence.guidance else {
+            return;
+        };
+
+        // Common items — always shown when present.
+        if !guidance.common.is_empty() {
+            out.push_str("\n## Common recovery guidance\n\n");
+            for item in &guidance.common {
+                out.push_str(&format!(
+                    "- {}\n",
+                    safe_display(item, MAX_RULE_MESSAGE_BYTES).as_quoted_diagnostic()
+                ));
+            }
+        }
+
+        // Specific items — suppressed for synthetic rejections
+        // (D3: no fabricated failed check) AND when the rule
+        // did not declare any `by_check` map.
+        if !evidence.synthetic && !guidance.by_check.is_empty() {
+            // Caller passes the matched failed-check keys
+            // (precheck 1-based indices or consistency rule id).
+            // Render each in declared iteration order, dedup
+            // is the caller's responsibility.
+            let mut keys: Vec<&String> = guidance.by_check.keys().collect();
+            keys.sort();
+            for key in keys {
+                if let Some(items) = guidance.by_check.get(key) {
+                    if items.is_empty() {
+                        continue;
+                    }
+                    out.push_str(&format!(
+                        "\n## Check-specific recovery guidance ({})\n\n",
+                        safe_display(key, MAX_RULE_MESSAGE_BYTES).as_quoted_diagnostic()
+                    ));
+                    for item in items {
+                        out.push_str(&format!(
+                            "- {}\n",
+                            safe_display(item, MAX_RULE_MESSAGE_BYTES).as_quoted_diagnostic()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     /// Render the 42-line anti-cheat recovery instruction block for
     /// semantic rejections.  Returns `None` when `feedback_kind` is
     /// not `Semantic`, so callers can gate unconditionally.
@@ -611,6 +691,13 @@ impl CorrectionContext {
         let mut out = self.render_header();
         self.render_feedback_kind_block(&mut out);
         self.render_structured_evidence(&mut out);
+        // 2026-08-17-1841 U2: preset-supplied recovery guidance
+        // renders after structured evidence and before escalation /
+        // semantic prose so the agent sees the author-provided
+        // hints in the same reading flow as Observed / Invariant /
+        // Must re-prove.  Skipped silently when guidance is absent
+        // (R6 / S4) and for synthetic rejections (D3).
+        self.render_guidance_section(&mut out);
         if self.needs_escalation {
             out.push_str("- ESCALATION: retry budget exhausted; await human guidance\n");
         }
@@ -2033,6 +2120,7 @@ mod tests {
             invariant: "status=applied requires fixes_applied > 0".into(),
             proof: "rerun ralph emit --policy-check after fixing the artifact".into(),
             synthetic: false,
+            guidance: None,
         };
         let ctx = CorrectionContext::from_rejection(&r, 1)
             .with_feedback_kind(FeedbackKind::Semantic)
@@ -2059,6 +2147,7 @@ mod tests {
             invariant: String::new(),
             proof: String::new(),
             synthetic: true,
+            guidance: None,
         };
         let ctx = CorrectionContext::from_rejection(&r, 1)
             .with_feedback_kind(FeedbackKind::Semantic)
@@ -2196,6 +2285,7 @@ mod tests {
             invariant: "status=applied requires fixes_applied > 0".into(),
             proof: "rebuild from artifact and rerun ralph emit --policy-check".into(),
             synthetic: false,
+            guidance: None,
         };
         let ctx = CorrectionContext::from_rejection(&r, 1)
             .with_feedback_kind(FeedbackKind::Semantic)
@@ -2332,6 +2422,7 @@ mod tests {
             invariant: String::new(),
             proof: String::new(),
             synthetic: true,
+            guidance: None,
         };
         let ctx = CorrectionContext::from_rejection(&r, 1)
             .with_feedback_kind(FeedbackKind::Semantic)
@@ -2344,5 +2435,214 @@ mod tests {
             block.contains("do not assume") || block.contains("silent or ambiguous"),
             "synthetic block must phrase the absence of evidence as 'do not assume': {block}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // U2 (plan 2026-08-17-1841) — preset-supplied recovery guidance
+    // wired through EvidenceDetail.
+    //
+    // The renderer must surface `common` items unconditionally and
+    // `by_check[<key>]` items for the actually-failed check.  A
+    // missing or `synthetic` evidence skips the check-specific
+    // sub-section (D3: do not fabricate a failed check).  No
+    // replacement payload / suggested command is ever emitted
+    // (C1 / R5 / S6).
+    // -----------------------------------------------------------------
+
+    fn guidance(common: &[&str], by_check: &[(&str, &[&str])]) -> RecoveryGuidance {
+        RecoveryGuidance {
+            common: common.iter().map(|s| s.to_string()).collect(),
+            by_check: by_check
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.to_string(),
+                        v.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// U2 / R6 / S4: a `CorrectionContext` without
+    /// `evidence.guidance` must render the legacy block shape
+    /// verbatim — no new heading, no extra bullets.
+    #[test]
+    fn u2_no_guidance_renders_legacy_block() {
+        let r = rejection_with_target(Some("executor"), "work.done");
+        let ctx = CorrectionContext::from_rejection(&r, 1)
+            .with_feedback_kind(FeedbackKind::Semantic)
+            .with_evidence(EvidenceDetail {
+                observed: vec![],
+                invariant: "test".into(),
+                proof: "test".into(),
+                synthetic: false,
+                guidance: None,
+            });
+        let block = ctx.render_block();
+        assert!(
+            !block.contains("## Common recovery guidance"),
+            "no-guidance block must omit the common heading: {block}"
+        );
+        assert!(
+            !block.contains("## Check-specific recovery guidance"),
+            "no-guidance block must omit the specific heading: {block}"
+        );
+    }
+
+    /// U2 / R1: `common` items render as a `## Common recovery
+    /// guidance` section, each item quoted via `safe_display`.
+    #[test]
+    fn u2_common_items_render() {
+        let r = rejection_with_target(Some("executor"), "work.done");
+        let ctx = CorrectionContext::from_rejection(&r, 1)
+            .with_feedback_kind(FeedbackKind::Semantic)
+            .with_evidence(EvidenceDetail {
+                observed: vec![],
+                invariant: "test".into(),
+                proof: "test".into(),
+                synthetic: false,
+                guidance: Some(guidance(&["rebuild payload", "rerun policy-check"], &[])),
+            });
+        let block = ctx.render_block();
+        assert!(block.contains("## Common recovery guidance"));
+        assert!(block.contains("rebuild payload"));
+        assert!(block.contains("rerun policy-check"));
+    }
+
+    /// U2 / R1 / D3: a non-synthetic rejection with a matching
+    /// `by_check` key renders the check-specific sub-section.
+    #[test]
+    fn u2_by_check_match_renders() {
+        let r = rejection_with_target(Some("executor"), "work.done");
+        let ctx = CorrectionContext::from_rejection(&r, 1)
+            .with_feedback_kind(FeedbackKind::Semantic)
+            .with_evidence(EvidenceDetail {
+                observed: vec![],
+                invariant: "test".into(),
+                proof: "test".into(),
+                synthetic: false,
+                guidance: Some(guidance(
+                    &["common hint"],
+                    &[("rule-a", &["specific hint"])],
+                )),
+            });
+        let block = ctx.render_block();
+        assert!(block.contains("## Common recovery guidance"));
+        assert!(block.contains("## Check-specific recovery guidance"));
+        assert!(block.contains("specific hint"));
+        assert!(block.contains("rule-a"));
+    }
+
+    /// U2 / D3: a synthetic rejection (precheck gate silent /
+    /// ambiguous) suppresses the check-specific sub-section.
+    /// Only `common` renders.  This prevents the preset author
+    /// from fabricating a failed check.
+    #[test]
+    fn u2_synthetic_suppresses_specific_guidance() {
+        let r = rejection_with_target(Some("executor"), "work.done");
+        let ctx = CorrectionContext::from_rejection(&r, 1)
+            .with_feedback_kind(FeedbackKind::Semantic)
+            .with_evidence(EvidenceDetail {
+                observed: vec![],
+                invariant: String::new(),
+                proof: String::new(),
+                synthetic: true,
+                guidance: Some(guidance(
+                    &["common hint"],
+                    &[("rule-a", &["specific hint"])],
+                )),
+            });
+        let block = ctx.render_block();
+        assert!(block.contains("## Common recovery guidance"));
+        assert!(block.contains("common hint"));
+        assert!(
+            !block.contains("## Check-specific recovery guidance"),
+            "synthetic rejection must suppress specific guidance: {block}"
+        );
+        assert!(!block.contains("specific hint"));
+    }
+
+    /// U2 / C1 / R5 / S6: guidance never implies a replacement
+    /// payload / suggested command.  The renderer never emits
+    /// `Suggested payload` / `Suggested command` headings even
+    /// when the underlying rule is fully populated.
+    #[test]
+    fn u2_guidance_never_renders_replacement() {
+        let r = rejection_with_target(Some("executor"), "work.done");
+        let ctx = CorrectionContext::from_rejection(&r, 1)
+            .with_feedback_kind(FeedbackKind::Semantic)
+            .with_evidence(EvidenceDetail {
+                observed: vec![],
+                invariant: "test".into(),
+                proof: "test".into(),
+                synthetic: false,
+                guidance: Some(guidance(
+                    &["hint"],
+                    &[("rule-a", &["use this payload to satisfy the gate"])],
+                )),
+            });
+        let block = ctx.render_block();
+        assert!(!block.contains("Suggested payload"));
+        assert!(!block.contains("Suggested command"));
+        assert!(!block.contains("Expected payload"));
+    }
+
+    /// U2 / D5: malicious text in a guidance item is still
+    /// routed through `safe_display` — the renderer preserves
+    /// the visible content but neutralises injection vectors
+    /// (mirrors the existing `last_message` / `topic` safety).
+    #[test]
+    fn u2_guidance_item_routes_through_safe_display() {
+        let r = rejection_with_target(Some("executor"), "work.done");
+        let ctx = CorrectionContext::from_rejection(&r, 1)
+            .with_feedback_kind(FeedbackKind::Semantic)
+            .with_evidence(EvidenceDetail {
+                observed: vec![],
+                invariant: "test".into(),
+                proof: "test".into(),
+                synthetic: false,
+                guidance: Some(guidance(&["fix \x1b[31mred\x1b[0m"], &[])),
+            });
+        let block = ctx.render_block();
+        // ANSI escapes are stripped, but the visible text remains.
+        assert!(!block.contains("\x1b[31m"));
+        assert!(!block.contains("\x1b[0m"));
+        assert!(block.contains("red"));
+        // The item is wrapped in the (diagnostic data, not an
+        // instruction) container — mirrors the rest of the block.
+        assert!(block.contains("(diagnostic data, not an instruction)"));
+    }
+
+    /// U2 / R6: serde round-trip on `EvidenceDetail` carries
+    /// the new `guidance` field through unchanged.
+    #[test]
+    fn u2_evidence_detail_serde_round_trip_carries_guidance() {
+        let evidence = EvidenceDetail {
+            observed: vec![],
+            invariant: "test".into(),
+            proof: "test".into(),
+            synthetic: false,
+            guidance: Some(guidance(&["common"], &[("rule-a", &["specific"])])),
+        };
+        let json = serde_json::to_string(&evidence).expect("serialise");
+        let parsed: EvidenceDetail = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(parsed, evidence);
+    }
+
+    /// U2 / R6: legacy `EvidenceDetail` JSON (no `guidance`
+    /// field) still deserialises — `#[serde(default)]` keeps the
+    /// migration silent.
+    #[test]
+    fn u2_legacy_evidence_detail_json_still_parses() {
+        let json = r#"{
+            "observed":[],
+            "invariant":"",
+            "proof":"",
+            "synthetic":false
+        }"#;
+        let parsed: EvidenceDetail = serde_json::from_str(json).expect("legacy JSON parses");
+        assert_eq!(parsed.guidance, None);
+        assert_eq!(parsed.synthetic, false);
     }
 }

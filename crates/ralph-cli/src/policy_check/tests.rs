@@ -897,6 +897,7 @@ fn u4_semantic_finding_carries_observed_invariant_required_proof() {
             invariant: "status=blocked requires fixes_applied > 0".into(),
             proof: "rebuild from artifact and rerun ralph emit --policy-check".into(),
             synthetic: false,
+            guidance: None,
         }),
     };
     let error = finding_record(&finding);

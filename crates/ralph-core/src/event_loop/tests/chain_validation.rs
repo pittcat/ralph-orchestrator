@@ -623,6 +623,7 @@ fn u1_semantic_evidence_block_renders_in_correction_prompt() {
         invariant: "status=applied requires fixes_applied > 0".into(),
         proof: "rebuild payload from the artifact and rerun ralph emit --policy-check".into(),
         synthetic: false,
+        guidance: None,
     };
     pc.push_correction(
         CorrectionContext::from_rejection(&target, 1)

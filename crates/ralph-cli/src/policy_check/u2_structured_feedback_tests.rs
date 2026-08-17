@@ -40,6 +40,7 @@ fn finding_with_evidence_unavailable() -> PolicyFinding {
             invariant: String::new(),
             proof: String::new(),
             synthetic: false,
+            guidance: None,
         }),
     }
 }

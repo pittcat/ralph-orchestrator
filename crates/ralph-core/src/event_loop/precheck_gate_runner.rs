@@ -369,6 +369,7 @@ pub fn build_precheck_evidence(
         invariant,
         proof,
         synthetic,
+        guidance: None,
     })
 }
 
