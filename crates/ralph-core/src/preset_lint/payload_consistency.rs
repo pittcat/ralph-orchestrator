@@ -636,43 +636,11 @@ fn non_object_when_finding(severity: LintSeverity, rule_id: &str, kind: &str) ->
 /// - Contains C1 control characters (`U+0080`–`U+009F`).
 /// - Contains zero-width characters (`U+200B`, `U+200C`, `U+200D`,
 ///   `U+FEFF`, `U+2060`, `U+00AD`).
+/// Plan 2026-08-17-1841 U3 / M1 / R8: thin forward to the shared
+/// `safe_display::is_unsafe_for_prompt` helper so both lint modules
+/// stay in lock-step on the byte / ANSI / C0 / C1 / zero-width policy.
 fn check_message_unsafe(message: &str) -> Option<&'static str> {
-    use crate::safe_display::MAX_RULE_MESSAGE_BYTES;
-
-    if message.len() > MAX_RULE_MESSAGE_BYTES {
-        return Some("exceeds the 1024-byte limit");
-    }
-
-    // Check for ANSI escape sequences and control characters.
-    let bytes = message.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        // ESC character — start of ANSI escape
-        if bytes[i] == 0x1B {
-            return Some("contains ANSI escape sequences");
-        }
-        // C0 control chars (except \n=0x0A and \t=0x09)
-        if bytes[i] < 0x20 && bytes[i] != 0x0A && bytes[i] != 0x09 {
-            return Some("contains C0 control characters");
-        }
-        i += 1;
-    }
-
-    // Check for C1 control chars and zero-width chars (multibyte).
-    for ch in message.chars() {
-        let code = ch as u32;
-        if (0x80..=0x9F).contains(&code) {
-            return Some("contains C1 control characters");
-        }
-        if matches!(
-            ch,
-            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{2060}' | '\u{00AD}'
-        ) {
-            return Some("contains zero-width characters");
-        }
-    }
-
-    None
+    crate::safe_display::is_unsafe_for_prompt(message)
 }
 
 fn unsafe_message_finding(severity: LintSeverity, rule_id: &str, reason: &str) -> LintFinding {

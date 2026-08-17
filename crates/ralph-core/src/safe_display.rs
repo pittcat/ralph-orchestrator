@@ -227,6 +227,48 @@ fn is_control_strip(ch: char) -> bool {
     (0x80..=0x9F).contains(&code)
 }
 
+/// Predicate: is `s` unsafe for prompt rendering? Returns `true` when
+/// the input would be flagged by the `recovery_guidance` /
+/// `payload_consistency` lint families — oversized, ANSI-bearing,
+/// C0/C1 control-bearing, or zero-width. Plan 2026-08-17-1841 U3 /
+/// M1 / R8: shared helper so both lint modules stop drifting apart
+/// after every safe-display policy tweak.
+///
+/// Returns `Some(reason)` with the first failing predicate, or `None`
+/// when the input is clean. The reason string is the same vocabulary
+/// the legacy `check_item_unsafe` / `check_message_unsafe` helpers
+/// returned, so existing finding messages keep working without
+/// further edits.
+pub fn is_unsafe_for_prompt(s: &str) -> Option<&'static str> {
+    if s.len() > MAX_RULE_MESSAGE_BYTES {
+        return Some("exceeds the 1024-byte limit");
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1B {
+            return Some("contains ANSI escape sequences");
+        }
+        if bytes[i] < 0x20 && bytes[i] != 0x0A && bytes[i] != 0x09 {
+            return Some("contains C0 control characters");
+        }
+        i += 1;
+    }
+    for ch in s.chars() {
+        let code = ch as u32;
+        if (0x80..=0x9F).contains(&code) {
+            return Some("contains C1 control characters");
+        }
+        if matches!(
+            ch,
+            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{2060}' | '\u{00AD}'
+        ) {
+            return Some("contains zero-width characters");
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +488,63 @@ mod tests {
         // but the surrounding container (correction block) uses
         // a fixed structure that doesn't interpret `#` as a heading.
         assert!(s.text.contains("## MALICIOUS HEADING"));
+    }
+
+    // ── U3 (plan 2026-08-17-1841) — `is_unsafe_for_prompt` shared
+    // helper. The predicate drives both the
+    // `recovery_guidance::check_item_unsafe` and the
+    // `payload_consistency::check_message_unsafe` forwards, so its
+    // vocabulary must stay stable across the legacy finding reasons
+    // (oversized / ANSI / C0 / C1 / zero-width). These tests pin the
+    // exact reason strings the lint modules report.
+
+    #[test]
+    fn is_unsafe_clean_text_returns_none() {
+        assert_eq!(is_unsafe_for_prompt("normal text"), None);
+        assert_eq!(is_unsafe_for_prompt("修复状态不一致"), None);
+        assert_eq!(is_unsafe_for_prompt("field 'x' != 5; expected: 3"), None);
+    }
+
+    #[test]
+    fn is_unsafe_ansi_returns_ansi_reason() {
+        assert_eq!(
+            is_unsafe_for_prompt("\u{1B}[31mred\u{1B}[0m"),
+            Some("contains ANSI escape sequences")
+        );
+    }
+
+    #[test]
+    fn is_unsafe_c0_returns_c0_reason() {
+        assert_eq!(
+            is_unsafe_for_prompt("has\u{01}ctrl"),
+            Some("contains C0 control characters")
+        );
+    }
+
+    #[test]
+    fn is_unsafe_c1_returns_c1_reason() {
+        assert_eq!(
+            is_unsafe_for_prompt("a\u{0080}b"),
+            Some("contains C1 control characters")
+        );
+    }
+
+    #[test]
+    fn is_unsafe_zero_width_returns_zero_width_reason() {
+        // Zero-width is intentionally NOT stripped by the predicate —
+        // the legacy lint surfaces it so the rule author rewrites it.
+        assert_eq!(
+            is_unsafe_for_prompt("fix\u{200B}_status"),
+            Some("contains zero-width characters")
+        );
+    }
+
+    #[test]
+    fn is_unsafe_oversized_returns_byte_limit_reason() {
+        let big = "x".repeat(MAX_RULE_MESSAGE_BYTES + 1);
+        assert_eq!(
+            is_unsafe_for_prompt(&big),
+            Some("exceeds the 1024-byte limit")
+        );
     }
 }

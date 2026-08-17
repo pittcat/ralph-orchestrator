@@ -84,18 +84,24 @@ pub fn check_recovery_guidance(
     findings
 }
 
-/// Per-precheck-rule guidance lint. The precheck `by_check` key MUST
-/// be a 1-based decimal string in `1..=prompt.len()`. `prompt`
-/// index `n` is rendered with key `(n + 1).to_string()` (the gate
-/// hat surfaces the checklist index that way per E3).
-fn check_precheck_rule_guidance(
+/// Plan 2026-08-17-1841 U3 / M2 / R9: shared core loop for both
+/// the precheck and the consistency rule guidance lints. The only
+/// per-family difference is the predicate that decides whether a
+/// `by_check` key is in scope. By parameterising on that predicate we
+/// keep the common / safety / cap / iteration code in one place; the
+/// two callers each supply a closure that returns a `(bool, detail)`
+/// pair — `bool` is "key is in scope", `detail` is the human-readable
+/// reason when the key is out of scope.
+fn check_rule_guidance_with<F>(
     topic: &str,
-    rule: &PrecheckRule,
     guidance: &RecoveryGuidance,
     severity: LintSeverity,
-) -> Vec<LintFinding> {
+    key_in_scope: F,
+) -> Vec<LintFinding>
+where
+    F: Fn(&str) -> (bool, String),
+{
     let mut findings = Vec::new();
-    let max_index = rule.prompt.len();
 
     // Common items.
     for item in &guidance.common {
@@ -112,16 +118,9 @@ fn check_precheck_rule_guidance(
 
     // by_check keys.
     for (key, items) in &guidance.by_check {
-        if !is_precheck_key_in_range(key, max_index) {
-            findings.push(unknown_check_finding(
-                severity,
-                topic,
-                key,
-                &format!(
-                    "precheck key \"{key}\" must be a 1-based decimal string in 1..={max_index} \
-                     (the rule's prompt has {max_index} items)"
-                ),
-            ));
+        let (in_scope, detail) = key_in_scope(key);
+        if !in_scope {
+            findings.push(unknown_check_finding(severity, topic, key, &detail));
             continue;
         }
         for item in items {
@@ -145,6 +144,27 @@ fn check_precheck_rule_guidance(
     findings
 }
 
+/// Per-precheck-rule guidance lint. The precheck `by_check` key MUST
+/// be a 1-based decimal string in `1..=prompt.len()`. `prompt`
+/// index `n` is rendered with key `(n + 1).to_string()` (the gate
+/// hat surfaces the checklist index that way per E3).
+fn check_precheck_rule_guidance(
+    topic: &str,
+    rule: &PrecheckRule,
+    guidance: &RecoveryGuidance,
+    severity: LintSeverity,
+) -> Vec<LintFinding> {
+    let max_index = rule.prompt.len();
+    check_rule_guidance_with(topic, guidance, severity, |key| {
+        let in_scope = is_precheck_key_in_range(key, max_index);
+        let detail = format!(
+            "precheck key \"{key}\" must be a 1-based decimal string in 1..={max_index} \
+             (the rule's prompt has {max_index} items)"
+        );
+        (in_scope, detail)
+    })
+}
+
 /// Per-consistency-rule guidance lint. The `by_check` key MUST equal
 /// the rule's stable `id`. Only the rule's own id may select a
 /// specific item; every other key would silently render zero
@@ -154,55 +174,17 @@ fn check_consistency_rule_guidance(
     guidance: &RecoveryGuidance,
     severity: LintSeverity,
 ) -> Vec<LintFinding> {
-    let mut findings = Vec::new();
     let topic = rule.topic.as_str();
     let rule_id = rule.id.as_str();
-
-    for item in &guidance.common {
-        findings.extend(check_item_safety(topic, "common", item, severity));
-    }
-    if guidance.common.len() > MAX_ITEMS_PER_LIST {
-        findings.push(oversized_list_finding(
-            severity,
-            topic,
-            "common",
-            guidance.common.len(),
-        ));
-    }
-
-    for (key, items) in &guidance.by_check {
-        if key != rule_id {
-            findings.push(unknown_check_finding(
-                severity,
-                topic,
-                key,
-                &format!(
-                    "consistency by_check key \"{key}\" must equal the rule's id \
-                     \"{rule_id}\"; the runtime selects guidance by rule id, so any \
-                     other key would silently render zero guidance"
-                ),
-            ));
-            continue;
-        }
-        for item in items {
-            findings.extend(check_item_safety(
-                topic,
-                &format!("by_check[\"{key}\"]"),
-                item,
-                severity,
-            ));
-        }
-        if items.len() > MAX_ITEMS_PER_LIST {
-            findings.push(oversized_list_finding(
-                severity,
-                topic,
-                &format!("by_check[\"{key}\"]"),
-                items.len(),
-            ));
-        }
-    }
-
-    findings
+    check_rule_guidance_with(topic, guidance, severity, |key| {
+        let in_scope = key == rule_id;
+        let detail = format!(
+            "consistency by_check key \"{key}\" must equal the rule's id \
+             \"{rule_id}\"; the runtime selects guidance by rule id, so any \
+             other key would silently render zero guidance"
+        );
+        (in_scope, detail)
+    })
 }
 
 /// Single-item safety check shared by both rule families. Mirrors
@@ -226,43 +208,13 @@ fn check_item_safety(
     }
 }
 
-/// Predicate: is the item unsafe for prompt rendering? Mirrors
-/// `check_message_unsafe` in `payload_consistency.rs` so the same
-/// renderer (`safe_display`) handles both message bodies and guidance
-/// items consistently.
+/// Predicate: is the item unsafe for prompt rendering? Plan
+/// 2026-08-17-1841 U3 / M1 / R8: thin forward to the shared
+/// `safe_display::is_unsafe_for_prompt` helper so the lint and the
+/// renderer stay in lock-step on the byte / ANSI / C0 / C1 /
+/// zero-width policy.
 fn check_item_unsafe(item: &str) -> Option<&'static str> {
-    use crate::safe_display::MAX_RULE_MESSAGE_BYTES;
-
-    if item.len() > MAX_RULE_MESSAGE_BYTES {
-        return Some("exceeds the 1024-byte limit");
-    }
-
-    let bytes = item.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == 0x1B {
-            return Some("contains ANSI escape sequences");
-        }
-        if bytes[i] < 0x20 && bytes[i] != 0x0A && bytes[i] != 0x09 {
-            return Some("contains C0 control characters");
-        }
-        i += 1;
-    }
-
-    for ch in item.chars() {
-        let code = ch as u32;
-        if (0x80..=0x9F).contains(&code) {
-            return Some("contains C1 control characters");
-        }
-        if matches!(
-            ch,
-            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{2060}' | '\u{00AD}'
-        ) {
-            return Some("contains zero-width characters");
-        }
-    }
-
-    None
+    crate::safe_display::is_unsafe_for_prompt(item)
 }
 
 /// Predicate: is `key` a positive decimal string in `1..=max`?

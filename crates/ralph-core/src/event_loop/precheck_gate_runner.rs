@@ -309,22 +309,57 @@ pub fn build_exhausted_payload(topic: &str, reason: &str) -> String {
 /// renderer can filter `by_check` to only the actually-failed
 /// checks.  Synthetic rejections carry the guidance block too,
 /// but the renderer suppresses the specific sub-section (D3).
+///
+/// U3 / M3 / R10: the body is split into four single-purpose
+/// helpers (`parse_payload_for_precheck` /
+/// `extract_synthetic_and_failed_keys` /
+/// `build_observed_invariant_proof` /
+/// `inject_recovery_guidance_into_proof`). The top-level
+/// function is now a 12-line orchestrator.
 pub fn build_precheck_evidence(
     guarded_topic: &str,
     rejected_payload_json: &str,
     rule: Option<&crate::config::PrecheckRule>,
 ) -> Option<crate::correction::EvidenceDetail> {
-    use crate::correction::{EvidenceDetail, ObservationEntry, ObservationValue};
-    let parsed: serde_json::Value = match serde_json::from_str(rejected_payload_json) {
-        Ok(v) => v,
-        Err(_) => {
-            // Malformed JSON: no observed data, no invariant,
-            // no proof.  Caller decides whether to surface this
-            // as "rejected payload malformed" or skip the
-            // evidence block entirely.
-            return None;
-        }
-    };
+    let parsed = parse_payload_for_precheck(rejected_payload_json)?;
+    let (synthetic, failed_checks, reason) =
+        extract_synthetic_and_failed_keys(&parsed);
+    let (observed, invariant, proof) =
+        build_observed_invariant_proof(guarded_topic, synthetic, &failed_checks, &reason);
+    inject_recovery_guidance_into_proof(
+        crate::correction::EvidenceDetail {
+            observed,
+            invariant,
+            proof,
+            synthetic,
+            guidance: None,
+            failed_check_keys: None,
+        },
+        rule,
+        &failed_checks,
+    )
+}
+
+/// U3 / M3 / R10: parse the rejected payload JSON. Returns `None`
+/// when the payload is malformed so the caller can fall back to
+/// the legacy "rejected payload malformed" path without inventing
+/// evidence.
+fn parse_payload_for_precheck(
+    rejected_payload_json: &str,
+) -> Option<serde_json::Value> {
+    match serde_json::from_str(rejected_payload_json) {
+        Ok(v) => Some(v),
+        Err(_) => None,
+    }
+}
+
+/// U3 / M3 / R10: pull the structured `synthetic` /
+/// `failed_checks` / `reason` triple out of the parsed payload.
+/// Defaults: `synthetic = false`, `failed_checks = []`,
+/// `reason = "precheck_rejected"`.
+fn extract_synthetic_and_failed_keys(
+    parsed: &serde_json::Value,
+) -> (bool, Vec<String>, String) {
     let synthetic = parsed
         .get("synthetic")
         .and_then(serde_json::Value::as_bool)
@@ -347,7 +382,20 @@ pub fn build_precheck_evidence(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("precheck_rejected")
         .to_string();
+    (synthetic, failed_checks, reason)
+}
 
+/// U3 / M3 / R10: produce the `(observed, invariant, proof)` triple
+/// for the evidence. Synthetic rejections suppress observed
+/// entries and use the silent/ambiguous invariant; LLM-emitted
+/// rejections keep per-check `Unchecked` observations.
+fn build_observed_invariant_proof(
+    guarded_topic: &str,
+    synthetic: bool,
+    failed_checks: &[String],
+    reason: &str,
+) -> (Vec<crate::correction::ObservationEntry>, String, String) {
+    use crate::correction::{ObservationEntry, ObservationValue};
     let observed: Vec<ObservationEntry> = if synthetic {
         Vec::new()
     } else {
@@ -359,7 +407,6 @@ pub fn build_precheck_evidence(
             })
             .collect()
     };
-
     let invariant = if synthetic {
         format!(
             "precheck gate for `{guarded_topic}` was silent or ambiguous; cannot confirm any checklist item passed"
@@ -370,32 +417,29 @@ pub fn build_precheck_evidence(
             failed_checks
         )
     };
-
     let proof = format!(
         "Reinvestigate the artifact / test for `{guarded_topic}` against the gate's checklist; do not change only the failed_check indices. After fixing the underlying artifact, re-run `ralph emit --policy-check` and re-emit the original `{guarded_topic}` event."
     );
+    (observed, invariant, proof)
+}
 
-    // U3: thread the preset-supplied recovery guidance (when
-    // present) into the evidence so the U2 correction renderer
-    // can surface the common / by_check items at the target
-    // hat's prompt.  Also record `failed_check_keys` so the
-    // renderer can filter `by_check` to the actually-failed
-    // checks (mirrors the gate's reported failed_checks).
-    let guidance = rule.and_then(|r| r.recovery_guidance.clone());
-    let failed_check_keys = if failed_checks.is_empty() {
+/// U3 / M3 / R10: thread the preset-supplied recovery guidance
+/// into the evidence so the U2 correction renderer can surface
+/// the common / by_check items at the target hat's prompt, and
+/// record `failed_check_keys` so the renderer can filter
+/// `by_check` to the actually-failed checks.
+fn inject_recovery_guidance_into_proof(
+    mut evidence: crate::correction::EvidenceDetail,
+    rule: Option<&crate::config::PrecheckRule>,
+    failed_checks: &[String],
+) -> Option<crate::correction::EvidenceDetail> {
+    evidence.guidance = rule.and_then(|r| r.recovery_guidance.clone());
+    evidence.failed_check_keys = if failed_checks.is_empty() {
         None
     } else {
-        Some(failed_checks.clone())
+        Some(failed_checks.to_vec())
     };
-
-    Some(EvidenceDetail {
-        observed,
-        invariant,
-        proof,
-        synthetic,
-        guidance,
-        failed_check_keys,
-    })
+    Some(evidence)
 }
 
 #[cfg(test)]
