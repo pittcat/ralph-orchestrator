@@ -105,6 +105,10 @@ event_loop:
           retry_budget: 3
           on_exhausted: "plan.blocked(reason=precheck_failed)"
           reason: "dead_end_evidence_insufficient"
+        recovery_guidance:
+          common:
+            - "Open the payload `dead_end_evidence_file` and repair evidence against the fail-confidence rubric; do not only raise `dead_end_confidence`."
+            - "A missing, empty, or fabricated evidence path fails the next gate. After repair, rerun `ralph emit work.failed --policy-check` before the real emit."
       fix.done:
         prompt:
           - "Step 1: run `ralph preset materialize-artifacts ce-executor-pipeline --plan-key <plan_name>`; from the materialized templates directory read `fail-confidence-rubric.template.md` and `settlement-evidence.template.md`. Use ONLY that rubric as the audit standard for this review."
@@ -116,6 +120,10 @@ event_loop:
           retry_budget: 3
           on_exhausted: "plan.blocked(reason=precheck_failed)"
           reason: "fix_evidence_insufficient"
+        recovery_guidance:
+          common:
+            - "If `fix_status` is applied, open `settlement_evidence_file` and prove each `completed_fix_units` entry has a deliverable commit and an honest `post_verification_status`."
+            - "If `fix_status` is partial or blocked, repair settlement evidence against the rubric; do not only change `fix_status`. After repair, rerun `ralph emit fix.done --policy-check` before the real emit."
       # plan 2026-07-30: symmetric SUCCESS-path evidence gate. Mirrors the
       # work.failed / fix.done fail-gates but audits the happy path so an
       # executor cannot declare half-finished work "done" without evidence.
@@ -142,6 +150,11 @@ event_loop:
           retry_budget: 3
           on_exhausted: "plan.blocked(reason=precheck_failed)"
           reason: "work_done_evidence_insufficient"
+        recovery_guidance:
+          common:
+            - "Every Unit in `completed_units` must have a deliverable commit in `resolved_baseline_sha..executor_head_sha`; move Units without commits out of `completed_units`."
+            - "Keep `post_verification_status` honest against `post_verification_file` / `verification_delta_file`; do not mark green while `new_business_regressions_count` > 0."
+            - "Do not relabel never-attempted Units as partial to dodge `work.failed`. After repair, rerun `ralph emit work.done --policy-check` before the real emit."
       stabilization.done:
         prompt:
           - "Step 1: read the current `stabilization.done` payload fields `tested_from_sha`, `head_sha`, `stabilization_audit_file`, `correction_ids`, `worktree_status`, `tests_run`, and `tests_passed`. The runtime independently verifies the actual HEAD, worktree status, and activation dirty fingerprint before forwarding this event."
@@ -152,6 +165,10 @@ event_loop:
           retry_budget: 3
           on_exhausted: "plan.blocked(reason=precheck_failed)"
           reason: "stabilization_handoff_inconsistent"
+        recovery_guidance:
+          common:
+            - "Open `stabilization_audit_file` and record a verification result for every id in `correction_ids`; missing or empty evidence fails the next gate."
+            - "Do not report `worktree_status: clean` while non-`.ralph/` changes remain. After repair, rerun `ralph emit stabilization.done --policy-check` before the real emit."
   event_policy:
     enabled: true
     mode: enforce
@@ -208,6 +225,13 @@ event_loop:
               - {field: planned_fix_units, non_empty: true}
               - {field: fix_status, eq: applied}
           message: "fix_status=applied contradicts review_verdict=blocked with zero fixes applied and a non-empty planned_fix_units; set fix_status to partial or blocked and add failure_reason, or apply the planned fixes"
+          recovery_guidance:
+            common:
+              - "Do not make the contradiction disappear by rewriting only the colliding fields."
+              - "Either land the planned fixes or settle honestly. After repair, rerun `ralph emit fix.done --policy-check` before the real emit."
+            by_check:
+              fix-done-blocked-zero-fixes-applied:
+                - "review_verdict=blocked with zero landed fixes cannot be `fix_status=applied`. Apply the planned fixes, or set `fix_status` to partial/blocked and add `failure_reason`."
         - id: fix-done-green-with-regressions
           topic: fix.done
           when:
@@ -215,6 +239,13 @@ event_loop:
               - {field: new_business_regressions_count, gt: 0}
               - {field: post_verification_status, eq: green}
           message: "post_verification_status=green contradicts new_business_regressions_count>0; set post_verification_status to red or resolve the introduced regressions"
+          recovery_guidance:
+            common:
+              - "Do not make the contradiction disappear by rewriting only the colliding fields."
+              - "Either land the planned fixes or settle honestly. After repair, rerun `ralph emit fix.done --policy-check` before the real emit."
+            by_check:
+              fix-done-green-with-regressions:
+                - "Open `post_verification_file` and `verification_delta_file`. Clear the introduced regressions, or set `post_verification_status` to red. Do not zero the count or flip green without evidence."
         - id: work-done-green-with-regressions
           topic: work.done
           when:
@@ -222,6 +253,13 @@ event_loop:
               - {field: new_business_regressions_count, gt: 0}
               - {field: post_verification_status, eq: green}
           message: "post_verification_status=green contradicts new_business_regressions_count>0; set post_verification_status to red or resolve the introduced regressions"
+          recovery_guidance:
+            common:
+              - "Do not make the contradiction disappear by rewriting only the colliding fields."
+              - "Either change the real work and evidence, or settle honestly. After repair, rerun `ralph emit work.done --policy-check` before the real emit."
+            by_check:
+              work-done-green-with-regressions:
+                - "Open `post_verification_file` and `verification_delta_file`. Clear the introduced regressions, or set `post_verification_status` to red. Do not zero the count or flip green without evidence."
         # plan 2026-07-29-001 U1: fail-gate shape rules — harden the existing
         # soft instructions ("never emit work.failed with completed units")
         # into deterministic gates. Both rules predicate on the CURRENT
@@ -239,6 +277,13 @@ event_loop:
             all:
               - {field: completed_units, non_empty: true}
           message: "work.failed contradicts completed_units being non-empty; emit work.done with execution_status=partial instead and route the failed Units through failed_units/blocked_units there"
+          recovery_guidance:
+            common:
+              - "Do not make the contradiction disappear by rewriting only the colliding fields."
+              - "After repair, rerun `ralph emit work.failed --policy-check` before the real emit — or emit `work.done` if completed Units truly exist."
+            by_check:
+              work-failed-with-completed-units:
+                - "If completed Units exist, emit `work.done` with `execution_status=partial` and keep failed/blocked Units in those lists. Do not delete completed Units from the bill to force `work.failed` through."
         - id: fix-done-blocked-with-completed-fix-units
           topic: fix.done
           when:
@@ -246,6 +291,13 @@ event_loop:
               - {field: fix_status, eq: blocked}
               - {field: completed_fix_units, non_empty: true}
           message: "fix_status=blocked contradicts completed_fix_units being non-empty; set fix_status to partial and list the landed fix Units under completed_fix_units"
+          recovery_guidance:
+            common:
+              - "Do not make the contradiction disappear by rewriting only the colliding fields."
+              - "Either land the planned fixes or settle honestly. After repair, rerun `ralph emit fix.done --policy-check` before the real emit."
+            by_check:
+              fix-done-blocked-with-completed-fix-units:
+                - "Landed fix Units cannot sit under `fix_status=blocked`. Set `fix_status` to partial and keep those Units in `completed_fix_units`."
         # plan 2026-07-30: symmetric SUCCESS-path structural gates — the
         # deterministic first line of defense (emit-time, zero LLM cost) that
         # rejects self-contradictory work.done / fix.done payloads BEFORE the
@@ -262,6 +314,13 @@ event_loop:
               - {field: execution_status, eq: complete}
               - {field: failed_units, non_empty: true}
           message: "execution_status=complete contradicts failed_units being non-empty; set execution_status to partial and route the failed Units through failed_units"
+          recovery_guidance:
+            common:
+              - "Do not make the contradiction disappear by rewriting only the colliding fields."
+              - "Either change the real work and evidence, or settle honestly. After repair, rerun `ralph emit work.done --policy-check` before the real emit."
+            by_check:
+              work-done-complete-with-failed-units:
+                - "Failed Units remain in `failed_units`. Set `execution_status` to partial. Do not empty `failed_units` just to keep complete."
         - id: work-done-complete-with-blocked-units
           topic: work.done
           when:
@@ -269,6 +328,13 @@ event_loop:
               - {field: execution_status, eq: complete}
               - {field: blocked_units, non_empty: true}
           message: "execution_status=complete contradicts blocked_units being non-empty; set execution_status to partial and list the blocked Units under blocked_units"
+          recovery_guidance:
+            common:
+              - "Do not make the contradiction disappear by rewriting only the colliding fields."
+              - "Either change the real work and evidence, or settle honestly. After repair, rerun `ralph emit work.done --policy-check` before the real emit."
+            by_check:
+              work-done-complete-with-blocked-units:
+                - "Blocked Units remain in `blocked_units`. Set `execution_status` to partial. Do not empty `blocked_units` just to keep complete."
         - id: work-done-completed-units-zero-commits
           topic: work.done
           when:
@@ -276,6 +342,13 @@ event_loop:
               - {field: completed_units, non_empty: true}
               - {field: commit_count, eq: 0}
           message: "completed_units non-empty contradicts commit_count=0; a completed Unit must have a deliverable commit — report the real commit_count or move that Unit out of completed_units"
+          recovery_guidance:
+            common:
+              - "Do not make the contradiction disappear by rewriting only the colliding fields."
+              - "Either change the real work and evidence, or settle honestly. After repair, rerun `ralph emit work.done --policy-check` before the real emit."
+            by_check:
+              work-done-completed-units-zero-commits:
+                - "Inspect git history. If commits exist, report the real `commit_count`. If not, move those Units out of `completed_units`. Do not invent a count."
         - id: fix-done-applied-zero-fixes
           topic: fix.done
           when:
@@ -284,6 +357,13 @@ event_loop:
               - {field: fixes_applied, eq: 0}
               - {field: planned_fix_units, non_empty: true}
           message: "fix_status=applied contradicts fixes_applied=0 with a non-empty planned_fix_units; set fix_status to partial or blocked and add failure_reason, or apply the planned fixes"
+          recovery_guidance:
+            common:
+              - "Do not make the contradiction disappear by rewriting only the colliding fields."
+              - "Either land the planned fixes or settle honestly. After repair, rerun `ralph emit fix.done --policy-check` before the real emit."
+            by_check:
+              fix-done-applied-zero-fixes:
+                - "`fix_status=applied` requires landed fixes. Apply the planned Units, or set `fix_status` to partial/blocked and add `failure_reason`."
         - id: fix-done-applied-with-failed-fix-units
           topic: fix.done
           when:
@@ -291,6 +371,13 @@ event_loop:
               - {field: fix_status, eq: applied}
               - {field: failed_fix_units, non_empty: true}
           message: "fix_status=applied contradicts failed_fix_units being non-empty; set fix_status to partial and keep the failed fix Units under failed_fix_units"
+          recovery_guidance:
+            common:
+              - "Do not make the contradiction disappear by rewriting only the colliding fields."
+              - "Either land the planned fixes or settle honestly. After repair, rerun `ralph emit fix.done --policy-check` before the real emit."
+            by_check:
+              fix-done-applied-with-failed-fix-units:
+                - "Failed fix Units remain in `failed_fix_units`. Set `fix_status` to partial. Do not empty `failed_fix_units` just to keep applied."
     # Topic-deny rules: every business topic has exactly one owner hat.
     # Every other hat is denied the topic. This is the runtime's second
     # line of defense after `publishes` declarations on each hat — if

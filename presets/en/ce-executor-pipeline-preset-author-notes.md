@@ -1,5 +1,39 @@
 # ce-executor-pipeline preset author notes
 
+## Preset Intent Confirmation（2026-08-17 recovery_guidance 增量）
+
+- **目标：** 在现有 `event_loop.precheck` 与 `event_policy.payload_consistency` 上补充作者 `recovery_guidance`，让被拒的 executor / fixer / test-stabilizer 下一轮看到「修证据、不要只改字段」的纸条。不改判定、不改 resume/retry/exhaustion。
+- **操作者与启动路径：** 沿用 `ralph run -H builtin:ce-executor-pipeline --plan …`。
+- **输入与事实源：** 现有 gate `message` / `reason` / `failed_checks`；guidance 是提示不是事实。
+- **成功条件：** strict lint 通过；consistency 命中时 correction/CLI 同源显示 common + 对应 rule id 的 by_check；precheck 拒绝（含 synthetic）显示 common。
+- **阻塞条件：** guidance 形状不合法（空 item / 错误 key / 不安全字符）→ strict lint 拒绝启动。
+- **允许的修改范围：** 仅 `presets/en/ce-executor-pipeline.yml` 的 precheck/consistency 块 + 本 notes。schema 无新 event 字段。
+- **必须独立执行的评审：** 不新增评审 hat；guidance 不替代独立 precheck LLM 或 consistency 谓词。
+- **重要 artifact：** 无新业务 artifact；guidance 不落盘。
+- **execution_model：** single-chain
+  **why：** 无拓扑/并行变更，沿用既有单链。
+- **非目标：** 不改 `when`/checklist；precheck 不加 `by_check`（命名 `failed_checks` 与 1-based key 不对齐）；不动 `ce-executor-pipeline-loop`；不新增 `suggested_command`。
+- **Author 推导与假设：** 用户已确认「consistency = common+by_check；precheck = 仅 common」。0e 不新选 guard，只给已有 both/precheck 位置加文案。
+- **用户确认：** 已确认（对话内要求 `/ralph-preset-author` 按该方案修改）
+
+## Key-stage event gate（本增量；0e 字段，非 0d mode）
+
+既有 YAML 已挂 guard；本增量不改 `guard_selection` / budget，只加 `recovery_guidance`。`confirmation_status=confirmed`。
+
+| key_stage | guard_selection | precheck_guard | precheck_retry_budget | payload_consistency_guard | payload_consistency_retry_budget | reason | confirmation_status |
+|---|---|---|---|---|---|---|---|
+| `work.done` executor 成功账单 | both | true | 3 | true | 3 | 结构矛盾用 consistency；证据诚实用 precheck。precheck 仅 common：gate 报命名 failed_checks，by_check 要 1-based index | confirmed |
+| `work.failed` executor 死胡同账单 | both | true | 3 | true | 3 | 同上；consistency 仅 `work-failed-with-completed-units` | confirmed |
+| `fix.done` fixer 结算 | both | true | 3 | true | 3 | 同上 | confirmed |
+| `stabilization.done` test-stabilizer 交接 | precheck | true | 3 | false | null | 该 topic 无 payload_consistency 规则；本增量不新增谓词 | confirmed |
+
+## Recovery guidance contract（本增量）
+
+- precheck 四条：`work.failed` / `work.done` / `fix.done` / `stabilization.done` 仅 `recovery_guidance.common`。
+- consistency 十条：每条 `common` + `by_check[<rule.id>]`。
+- semantic prose only：无 suggested payload / suggested command。
+- 模板文件机制：未采用（guidance 是短 bullet，不进 hat instructions）。
+
 ## Change: executor / fixer anti-abdication settlement
 
 目标：不改变 topic 拓扑，只收紧 `executor` 与 `fixer` 的单链执行契约。计划规模、Unit 数量、文件数量、预计上下文压力和预计耗时均不能代替真实执行证据。主 hat 只 dispatch、验收、提交和结账；每个 Unit 的 RED/GREEN/REFACTOR 由唯一 subagent 完成。
@@ -80,7 +114,16 @@
 - At most one test-worker, never in parallel with build/test; the worker is limited to test edits and focused-test output. The main hat must accept a stable pre-fix failure before any production correction; bounded exceptions with substitute evidence are allowed only when safe automation is impossible.
 - The audit must preserve scout returns, worker pre/post-fix test results, rejected overreach/weak-evidence entries, and residual risk. These additions do not extend the `stabilization.*` payload.
 
-## Builtin Sync Checklist (post 2026-07-16-001 U3)
+## Builtin Sync Checklist（2026-08-17 recovery_guidance 增量）
+
+1. runtime: 无 topic/completion 变更；guidance 走现有 correction 通道。
+2. preset_lint: 必须 `ralph preset check -H presets/en/ce-executor-pipeline.yml --strict` 通过（含 recovery_guidance findings）。
+3. BDD: 不新增 scenario；判定面未改。回归 `ce_executor_pipeline_fail_gate_*` 与 CLI payload_consistency 结构化测试。
+4. config: 仅可选 `recovery_guidance` 字段，serde default。
+5. CLI presets: 未增删 preset 名。
+6. manifest/index: 不变。
+7. docs/zsh: 不改 builtin 列表；hat instructions 未改，无需 inspect prompt。
+
 
 1. runtime: no change to topic/completion semantics; the `stabilization.done` / `stabilization.blocked` business events are added, with the linear preset supplying the `event_policy.schemas` block. The loop preset already injects schema via `presets/schemas/ce-executor-pipeline-loop.yml`.
 2. preset_lint: the linear preset passes strict lint after adding `event_policy.schemas.stabilization.*`; the loop preset already passes.
