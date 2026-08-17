@@ -1257,7 +1257,7 @@ impl EventLoop {
     /// | `completion_artifact_field_missing` | required field absent from payload |
     /// | `completion_artifact_field_not_string` | field present but not a string |
     /// | `completion_artifact_payload_invalid` | payload is not a JSON object |
-    /// | `report_path` / `artifact_path` | completion artifact fields checked by this gate |
+    /// | explicit schema fields | completion artifact fields checked by this gate |
     pub(super) fn verify_completion_artifact_paths(
         config: &RalphConfig,
         payload: Option<&str>,
@@ -1266,25 +1266,43 @@ impl EventLoop {
         // without an enabled `event_policy` or without a registered
         // schema for the completion topic passthrough.
         let completion_topic = config.event_loop.completion_promise.as_str();
-        let required_fields: &[String] = config
+        let schema = config
             .event_loop
             .event_policy
             .as_ref()
             .filter(|p| p.enabled)
             .and_then(|p| p.schemas.get(completion_topic))
-            .map(|s| s.required_fields.as_slice())
-            .unwrap_or(&[]);
+            .cloned();
 
-        // Only the two completion artifact fields defined by the plan
-        // participate in runtime admission. Other path-like fields in a
-        // completion schema keep their existing required-field semantics.
-        // Order follows `required_fields` so multi-field schemas surface
-        // the first invalid artifact deterministically.
-        let artifact_fields: Vec<&str> = required_fields
-            .iter()
-            .map(String::as_str)
-            .filter(|f| *f == "report_path" || *f == "artifact_path")
-            .collect();
+        let Some(schema) = schema else {
+            return Ok(());
+        };
+
+        // Explicit declarations are authoritative. The legacy fallback keeps
+        // existing report/artifact schemas safe while allowing custom schemas
+        // to opt in to additional artifact fields without a naming convention.
+        let artifact_fields: Vec<(&str, crate::config::CompletionArtifactFieldMode)> =
+            if schema.completion_artifact_fields.is_empty() {
+                schema
+                    .required_fields
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|f| *f == "report_path" || *f == "artifact_path")
+                    .map(|field| (field, crate::config::CompletionArtifactFieldMode::Required))
+                    .collect()
+            } else {
+                schema
+                    .required_fields
+                    .iter()
+                    .filter_map(|field| {
+                        schema
+                            .completion_artifact_fields
+                            .get(field)
+                            .copied()
+                            .map(|mode| (field.as_str(), mode))
+                    })
+                    .collect()
+            };
 
         if artifact_fields.is_empty() {
             return Ok(());
@@ -1306,10 +1324,15 @@ impl EventLoop {
             .canonicalize()
             .map_err(|_| "completion_artifact_unreadable")?;
 
-        for field in artifact_fields {
+        for (field, mode) in artifact_fields {
             let value = payload_obj.get(field);
             let path_str = match value {
                 Some(serde_json::Value::String(s)) if !s.is_empty() => s.as_str(),
+                Some(serde_json::Value::String(_))
+                    if mode == crate::config::CompletionArtifactFieldMode::AllowEmpty =>
+                {
+                    continue;
+                }
                 Some(_) => return Err("completion_artifact_field_not_string"),
                 None => return Err("completion_artifact_field_missing"),
             };

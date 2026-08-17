@@ -352,6 +352,9 @@ schemas:
       - overall_confidence
       - critical_unknown_count
       - proceed
+    completion_artifact_fields:
+      report_path: required
+      scope_manifest_path: required
     payload: json_object
     allowed_values:
       scope_status:

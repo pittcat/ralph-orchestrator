@@ -496,6 +496,10 @@ schemas:
       - report_path
       - plan_path
       - questions_path
+    completion_artifact_fields:
+      report_path: required
+      plan_path: allow_empty
+      questions_path: allow_empty
     payload: json_object
     field_docs:
       success:

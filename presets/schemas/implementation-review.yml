@@ -539,6 +539,8 @@ schemas:
     - result
     - artifact_path
     - scope_digest
+    completion_artifact_fields:
+      artifact_path: required
     field_docs:
       plan_name:
         meaning: basename of the plan without extension

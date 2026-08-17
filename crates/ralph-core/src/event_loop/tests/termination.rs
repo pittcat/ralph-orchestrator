@@ -1660,8 +1660,8 @@ fn completion_artifact_rejection_injects_correction() {
     );
 }
 
-/// U1 compatibility: custom path-like fields are not completion artifact
-/// admission fields. Only `report_path` and `artifact_path` are checked.
+/// Compatibility: custom path-like fields remain metadata unless explicitly
+/// declared in `completion_artifact_fields`.
 #[test]
 fn completion_artifact_ignores_custom_path_field() {
     use tempfile::TempDir;
@@ -1671,8 +1671,8 @@ fn completion_artifact_ignores_custom_path_field() {
     std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
     std::fs::write(&manifest_path, "# Manifest\n").unwrap();
 
-    // Build a config with a completion schema that requires a custom
-    // `_path`-suffixed field instead of the hardcoded allowlist fields.
+    // Build a config with a completion schema that requires a custom path
+    // field without an explicit artifact declaration.
     let mut config = RalphConfig::default();
     config.core.workspace_root = temp_dir.path().to_path_buf();
     let mut schemas = std::collections::HashMap::new();
@@ -1712,6 +1712,125 @@ fn completion_artifact_ignores_custom_path_field() {
         event_loop.state().completion_honored,
         "completion_honored must be set for valid custom artifact field"
     );
+}
+
+/// Completion artifact admission must also cover explicitly declared
+/// terminal artifact fields beyond `report_path` / `artifact_path`.
+#[test]
+fn completion_artifact_rejects_explicit_plan_path_escape() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let report_path = temp_dir.path().join("docs/report.md");
+    std::fs::create_dir_all(report_path.parent().unwrap()).unwrap();
+    std::fs::write(&report_path, "# Report\n").unwrap();
+
+    let mut config = RalphConfig::default();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+    let mut schemas = std::collections::HashMap::new();
+    schemas.insert(
+        config.event_loop.completion_promise.clone(),
+        crate::config::EventSchema {
+            required_fields: vec![
+                "success".to_string(),
+                "report_path".to_string(),
+                "plan_path".to_string(),
+            ],
+            completion_artifact_fields: std::collections::HashMap::from([(
+                "plan_path".to_string(),
+                crate::config::CompletionArtifactFieldMode::Required,
+            )]),
+            ..Default::default()
+        },
+    );
+    config.event_loop.event_policy = Some(crate::config::EventPolicyConfig {
+        enabled: true,
+        mode: crate::config::EventPolicyMode::Enforce,
+        schemas,
+        ..Default::default()
+    });
+
+    let events_path = temp_dir.path().join("events.jsonl");
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"success":true,"report_path":"docs/report.md","plan_path":"/etc/passwd"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+
+    assert_eq!(
+        event_loop.check_completion_event(),
+        None,
+        "explicit terminal artifact path outside workspace must reject completion"
+    );
+    assert!(!event_loop.state().completion_honored);
+}
+
+#[test]
+fn completion_artifact_allows_declared_empty_failure_paths() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let report_path = temp_dir.path().join("report.md");
+    std::fs::write(&report_path, "# Report\n").unwrap();
+
+    let mut config = RalphConfig::default();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+    let mut schemas = std::collections::HashMap::new();
+    schemas.insert(
+        config.event_loop.completion_promise.clone(),
+        crate::config::EventSchema {
+            required_fields: vec![
+                "success".to_string(),
+                "report_path".to_string(),
+                "plan_path".to_string(),
+                "questions_path".to_string(),
+            ],
+            completion_artifact_fields: std::collections::HashMap::from([
+                (
+                    "report_path".to_string(),
+                    crate::config::CompletionArtifactFieldMode::Required,
+                ),
+                (
+                    "plan_path".to_string(),
+                    crate::config::CompletionArtifactFieldMode::AllowEmpty,
+                ),
+                (
+                    "questions_path".to_string(),
+                    crate::config::CompletionArtifactFieldMode::AllowEmpty,
+                ),
+            ]),
+            ..Default::default()
+        },
+    );
+    config.event_loop.event_policy = Some(crate::config::EventPolicyConfig {
+        enabled: true,
+        mode: crate::config::EventPolicyMode::Enforce,
+        schemas,
+        ..Default::default()
+    });
+
+    let events_path = temp_dir.path().join("events.jsonl");
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"success":false,"report_path":"report.md","plan_path":"","questions_path":""}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+
+    assert_eq!(
+        event_loop.check_completion_event(),
+        Some(TerminationReason::CompletionPromise)
+    );
+    assert!(event_loop.state().completion_honored);
 }
 
 /// U1 compatibility: a missing custom path-like field is not checked by

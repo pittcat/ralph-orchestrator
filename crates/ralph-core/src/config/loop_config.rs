@@ -46,6 +46,16 @@ pub struct EventFieldDoc {
     pub fill_rule: String,
 }
 
+/// Runtime validation mode for a completion payload artifact field.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionArtifactFieldMode {
+    /// The field must contain a workspace-relative, readable regular file.
+    Required,
+    /// An empty string is allowed; a non-empty value must still be a valid file.
+    AllowEmpty,
+}
+
 /// Schema for validating events of a specific topic.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EventSchema {
@@ -55,6 +65,12 @@ pub struct EventSchema {
     /// Required fields in the JSON object payload.
     #[serde(default)]
     pub required_fields: Vec<String>,
+    /// Explicit completion payload fields whose non-empty values must point
+    /// to readable regular files inside the workspace. This is intentionally
+    /// opt-in so arbitrary path-like metadata does not become an artifact
+    /// contract by naming convention alone.
+    #[serde(default)]
+    pub completion_artifact_fields: HashMap<String, CompletionArtifactFieldMode>,
     /// Allowed values for specific fields (dot-notation path -> allowed values).
     /// These apply regardless of which hat emits the event.
     #[serde(default)]
