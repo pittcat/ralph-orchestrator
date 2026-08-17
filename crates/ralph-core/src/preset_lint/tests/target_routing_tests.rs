@@ -3,7 +3,7 @@
 //! Validates `EventSchema.required_target_hat` contract declarations:
 //! - `terminal_target_not_registered` — topic declares contract but no hat subscribes
 //! - `terminal_target_consumer_mismatch` — declared hat doesn't match registered consumer
-//! - `terminal_target_contract_empty_string` — defensive `required_target_hat = ""` fallback
+//! - `terminal_target_contract_empty_string` — defensive `required_target_hat = ""` fallback (Error, PMI-001)
 
 use std::collections::HashMap;
 
@@ -82,8 +82,9 @@ fn target_routing_empty_string_contracts() {
         .unwrap();
     assert_eq!(
         finding.severity,
-        LintSeverity::Warn,
-        "empty-string finding must be Warn"
+        LintSeverity::Error,
+        "empty-string finding must be Error (PMI-001 / plan 2026-08-16-1015 Unit 4: \
+         preset-load must fail-closed so the multi-layer silent fail-open is closed)"
     );
     assert!(finding.message.contains("report.done"));
     assert!(finding.message.contains("required_target_hat"));

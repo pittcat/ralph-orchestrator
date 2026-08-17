@@ -4,7 +4,10 @@
 //! at preset-load time:
 //!
 //! - [`FINDING_TERMINAL_TARGET_CONTRACT_EMPTY_STRING`] — `required_target_hat = ""`
-//!   defensive fallback is a no-op that bypasses the guard; Warn.
+//!   defensive fallback is a no-op that bypasses the guard; Error
+//!   (PMI-001 / plan 2026-08-16-1015 Unit 4: empty-string defensive
+//!   fallback must fail-closed at lint time so preset authors cannot
+//!   silently opt out of the contract).
 //! - [`FINDING_TERMINAL_TARGET_NOT_REGISTERED`] — topic declares
 //!   `required_target_hat` but no hat subscribes; the contract can never
 //!   be enforced; Error.
@@ -41,10 +44,16 @@ pub fn check_target_routing(config: &RalphConfig) -> Vec<LintFinding> {
         };
 
         // Rule 1: empty-string is a no-op defensive fallback.
+        // PMI-001 / plan 2026-08-16-1015 Unit 4: escalate to Error so
+        // preset-load fail-closes. Today (pre-fix) the empty string
+        // silently drops the contract at wiring/guard/CLI; only the
+        // lint surfaces a signal and it is non-blocking — that is
+        // exactly the multi-layer silent fail-open the Unit 4 P0
+        // protection was added to prevent.
         if required.is_empty() {
             findings.push(LintFinding {
                 id: FINDING_TERMINAL_TARGET_CONTRACT_EMPTY_STRING,
-                severity: LintSeverity::Warn,
+                severity: LintSeverity::Error,
                 message: format!(
                     "event_policy.schemas[\"{topic}\"] declares required_target_hat = \"\"; \
                      an empty string is a no-op that bypasses the terminal target guard entirely"

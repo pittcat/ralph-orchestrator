@@ -646,10 +646,46 @@ pub fn build_task_resume_payload_with_terminal_contract(
     original_trigger_payload: Option<&str>,
     wave_context: Option<&WaveContextForResume>,
 ) -> String {
+    // INV-TERM-1 (Plan §Unit 2): `primary_terminal_topic` must be a
+    // member of `terminal_topics`.
+    // INV-TERM-2 (Plan §Unit 2): `terminal_required_fields` must
+    // contain an entry for `primary_terminal_topic` (the entry may be
+    // an empty `Vec` but the key must exist).
+    //
+    // The upstream recovery helper
+    // `inject_missing_terminal_emit_recovery`
+    // (event_processing.rs:593-596) falls back to a hard-coded
+    // `"terminal_event"` literal when `terminal_topics` is empty,
+    // silently bypassing membership. Coerce here so the produced
+    // payload satisfies both invariants at the wire boundary; the
+    // `tracing::warn!` surfaces the upstream drift so operators see
+    // the contract violation instead of a spinning bounded-retry.
+    let mut coerced_terminal_topics: Vec<String> = terminal_topics.to_vec();
+    if !coerced_terminal_topics
+        .iter()
+        .any(|t| t == primary_terminal_topic)
+    {
+        tracing::warn!(
+            primary_terminal_topic = %primary_terminal_topic,
+            given_terminal_topics = ?terminal_topics,
+            "INV-TERM-1 violated: coercing terminal_topics to contain primary_terminal_topic"
+        );
+        coerced_terminal_topics.push(primary_terminal_topic.to_string());
+    }
+    let mut coerced_required_fields: BTreeMap<String, Vec<String>> =
+        terminal_required_fields.clone();
+    if !coerced_required_fields.contains_key(primary_terminal_topic) {
+        tracing::warn!(
+            primary_terminal_topic = %primary_terminal_topic,
+            "INV-TERM-2 violated: synthesising empty required-fields entry for primary_terminal_topic"
+        );
+        coerced_required_fields.insert(primary_terminal_topic.to_string(), Vec::new());
+    }
+
     // Build a synthetic primary-required-fields slice that mirrors
     // the legacy `required_fields` contract (primary topic's real
     // fields, NOT topic names). Sort for stable wire shape.
-    let mut primary_fields: Vec<String> = terminal_required_fields
+    let mut primary_fields: Vec<String> = coerced_required_fields
         .get(primary_terminal_topic)
         .cloned()
         .unwrap_or_default();
@@ -662,12 +698,79 @@ pub fn build_task_resume_payload_with_terminal_contract(
         original_trigger_payload,
         wave_context,
     );
-    let mut value = match serde_json::from_str::<serde_json::Value>(&payload_str) {
+    // PMI-004 (post-merge-converge / TS-04): the reparse-and-merge
+    // step now lives in `merge_terminal_contract`, which fails open
+    // with a `tracing::warn!` and a `degraded_payload: true` marker
+    // when the inner helper's payload cannot be parsed (top-level
+    // non-object) or even parsed as `Value` (malformed JSON). The
+    // previous inline `Err(_) => return payload_str` silently
+    // dropped every additive terminal-contract field, leaving Unit 2
+    // inactive on the first wire drift with no telemetry.
+    merge_terminal_contract(
+        &payload_str,
+        &coerced_terminal_topics,
+        primary_terminal_topic,
+        &coerced_required_fields,
+    )
+}
+
+/// Merge the additive terminal-contract fields
+/// (`terminal_topics` / `primary_terminal_topic` /
+/// `terminal_required_fields`) into the inner helper's payload by
+/// reparsing it as `serde_json::Value` and mutating the top-level
+/// object.
+///
+/// PMI-004 (post-merge-converge / TS-04): the reparse branch is
+/// fail-open. When the inner helper's payload cannot be reparsed
+/// (malformed JSON) or is a JSON value whose top level is not an
+/// object (e.g. a top-level array), the helper emits a degraded
+/// envelope carrying `degraded_payload: true` plus the coerced
+/// terminal contract fields instead of silently returning the
+/// unparseable payload. Downstream consumers (`resume_routing`) can
+/// inspect the marker and fail-closed; operators see the
+/// `tracing::warn!` in the loop log.
+///
+/// The function is private (not `pub`) because its only valid caller
+/// is the public `build_task_resume_payload_with_terminal_contract`.
+/// Tests in this module access it directly via the `super` path so
+/// they can drive the dormant failure branch without refactoring the
+/// inner `build_task_resume_payload` helper.
+pub(super) fn merge_terminal_contract(
+    payload_str: &str,
+    terminal_topics: &[String],
+    primary_terminal_topic: &str,
+    terminal_required_fields: &BTreeMap<String, Vec<String>>,
+) -> String {
+    let payload_preview: String = payload_str.chars().take(120).collect();
+    let mut value = match serde_json::from_str::<serde_json::Value>(payload_str) {
         Ok(v) => v,
-        Err(_) => return payload_str,
+        Err(parse_err) => {
+            tracing::warn!(
+                error = %parse_err,
+                payload_preview = %payload_preview,
+                primary_terminal_topic = %primary_terminal_topic,
+                "PMI-004: terminal-contract payload reparse failed; \
+                 emitting degraded envelope (inner payload dropped, marker appended)"
+            );
+            return degraded_terminal_contract_envelope(
+                terminal_topics,
+                primary_terminal_topic,
+                terminal_required_fields,
+            );
+        }
     };
     let Some(object) = value.as_object_mut() else {
-        return payload_str;
+        tracing::warn!(
+            payload_preview = %payload_preview,
+            primary_terminal_topic = %primary_terminal_topic,
+            "PMI-004: terminal-contract payload is not a JSON object; \
+             emitting degraded envelope (inner payload dropped, marker appended)"
+        );
+        return degraded_terminal_contract_envelope(
+            terminal_topics,
+            primary_terminal_topic,
+            terminal_required_fields,
+        );
     };
     object.insert(
         "terminal_topics".into(),
@@ -697,6 +800,46 @@ pub fn build_task_resume_payload_with_terminal_contract(
         serde_json::Value::Object(map),
     );
     value.to_string()
+}
+
+/// Fail-open degraded envelope emitted when `merge_terminal_contract`
+/// cannot parse the inner helper's payload (malformed JSON) or the
+/// payload is a JSON value whose top level is not an object (e.g. a
+/// top-level array). The envelope drops the unparseable inner payload
+/// and carries only:
+///
+/// - `degraded_payload: true` — marker downstream consumers
+///   (`resume_routing`) can inspect to fail-closed.
+/// - `terminal_topics` — coerced list (INV-TERM-1 satisfied).
+/// - `primary_terminal_topic` — the primary topic (INV-TERM-1
+///   satisfied).
+/// - `terminal_required_fields` — coerced map (INV-TERM-2 satisfied
+///   at the field-map level).
+///
+/// This makes the contract surface observable even when the inner
+/// wire shape drifts, instead of silently going inactive (PMI-004
+/// pre-fix behaviour).
+fn degraded_terminal_contract_envelope(
+    terminal_topics: &[String],
+    primary_terminal_topic: &str,
+    terminal_required_fields: &BTreeMap<String, Vec<String>>,
+) -> String {
+    let mut map = serde_json::Map::new();
+    for (topic, fields) in terminal_required_fields {
+        let mut sorted: Vec<String> = fields.clone();
+        sorted.sort();
+        map.insert(
+            topic.clone(),
+            serde_json::Value::Array(sorted.into_iter().map(serde_json::Value::String).collect()),
+        );
+    }
+    serde_json::json!({
+        "degraded_payload": true,
+        "terminal_topics": terminal_topics,
+        "primary_terminal_topic": primary_terminal_topic,
+        "terminal_required_fields": map,
+    })
+    .to_string()
 }
 
 /// Minimal wave metadata carried into a `task.resume` payload by the
@@ -2097,6 +2240,231 @@ mod tests {
         assert_eq!(legacy[0], "alpha");
         assert_eq!(legacy[1], "mu");
         assert_eq!(legacy[2], "zeta");
+    }
+
+    // PMI-004 (post-merge-converge / TS-04):
+    // `build_task_resume_payload_with_terminal_contract` (rejection.rs:639-700)
+    // silently drops the additive terminal-contract fields when the inner
+    // `build_task_resume_payload` output cannot be re-parsed as a JSON
+    // Value. Plan 2026-08-16-1015 Unit 2 requires the additive fields to
+    // survive the reparse, OR the helper must fail-closed (return `Err`),
+    // OR fail-open with a `degraded_payload: true` marker and a
+    // `tracing::warn!`. Today the helper returns `payload_str` directly
+    // with no marker and no telemetry.
+    //
+    // The failure path is dormant in current code because the inner helper
+    // always produces a JSON object via
+    // `serde_json::Value::Object(payload).to_string()` (rejection.rs:617).
+    // This test cannot exercise the failure path directly because the
+    // helper builds its own `payload_str` internally and provides no
+    // injection point for a malformed payload — the test fixture would
+    // require a refactor to expose a `payload_str` parameter on the
+    // public helper. Today's repro is therefore LOW_CONFIDENCE: the
+    // success-path invariant is asserted here as a regression guard; the
+    // dormant failure path is documented in PMI-004 with a clear
+    // reproduction recipe (newline trailer, BOM, top-level array) and
+    // left to the fixer to seal with a fail-closed / fail-open-with-marker
+    // contract.
+
+    /// Stable (passing) regression guard for PMI-004 (TS-04): assert the
+    /// additive terminal-contract fields survive the payload construction
+    /// on the success path. The dormant failure path (reparse error on
+    /// inner helper) is documented in PMI-004 but cannot be exercised in
+    /// the current code — see the comment block above.
+    #[test]
+    fn pmi004_terminal_contract_fields_survive_payload_construction() {
+        use std::collections::BTreeMap;
+        let r = Rejection::from_topic_format(
+            Some("executor".into()),
+            "work.done".into(),
+            &["work.done".into()],
+        );
+        let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        map.insert("work.done".into(), vec!["plan_path".into()]);
+        let payload_str = build_task_resume_payload_with_terminal_contract(
+            &r,
+            &["work.done".into()],
+            &["work.done".into()],
+            "work.done",
+            &map,
+            Some("plan.ready"),
+            Some("{\"plan_name\":\"p\"}"),
+            None,
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload_str).unwrap();
+        assert!(
+            v["terminal_topics"].is_array(),
+            "terminal_topics must be present after reparse"
+        );
+        assert_eq!(
+            v["primary_terminal_topic"], "work.done",
+            "primary_terminal_topic must be present after reparse"
+        );
+        assert!(
+            v["terminal_required_fields"].is_object(),
+            "terminal_required_fields must be present after reparse"
+        );
+        assert_eq!(v["terminal_required_fields"]["work.done"][0], "plan_path");
+    }
+
+    /// Failing automation for PMI-004 (TS-04): when the inner helper's
+    /// payload cannot be re-merged (top-level non-object or malformed
+    /// JSON), the helper must fail-open with a `tracing::warn!` AND a
+    /// `degraded_payload: true` marker — silently returning the
+    /// unparseable inner payload strips every additive terminal-contract
+    /// field with no telemetry (the entire Unit-2 contract goes
+    /// inactive on the first wire drift). The test exercises the
+    /// dormant branch by feeding a top-level JSON array (parses
+    /// successfully but `as_object_mut` returns `None`) into the
+    /// internal `merge_terminal_contract` helper, which is the only
+    /// seam that lets a test observe the dormant branch without a
+    /// refactor of the inner helper.
+    ///
+    /// Pre-fix behaviour: helper returns the malformed payload_str
+    /// unchanged (no `degraded_payload` marker, no `terminal_topics`,
+    /// no `terminal_required_fields`).
+    /// Post-fix behaviour: helper emits a degraded envelope with
+    /// `degraded_payload: true` plus the coerced terminal contract
+    /// fields so downstream consumers can fail-close on the marker
+    /// while still seeing the contract surface.
+    #[test]
+    fn pmi004_terminal_contract_payload_non_object_emits_degraded_envelope() {
+        use std::collections::BTreeMap;
+        // Top-level JSON array — `from_str::<Value>` succeeds but
+        // `as_object_mut()` returns None, exercising the dormant
+        // branch the public helper cannot reach today.
+        let malformed_payload = "[\"not\",\"an\",\"object\"]";
+        let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        map.insert("work.done".into(), vec!["plan_path".into()]);
+        let result = merge_terminal_contract(
+            malformed_payload,
+            &["work.done".into()],
+            "work.done",
+            &map,
+        );
+        let v: serde_json::Value = serde_json::from_str(&result).expect(
+            "degraded envelope must itself be valid JSON so downstream consumers can introspect it",
+        );
+        assert_eq!(
+            v["degraded_payload"],
+            serde_json::Value::Bool(true),
+            "degraded envelope must carry the degraded_payload marker; \
+             today the helper silently returns the malformed payload unchanged"
+        );
+        assert!(
+            v["terminal_topics"].is_array(),
+            "degraded envelope must preserve terminal_topics"
+        );
+        assert_eq!(v["primary_terminal_topic"], "work.done");
+        assert!(
+            v["terminal_required_fields"].is_object(),
+            "degraded envelope must preserve terminal_required_fields"
+        );
+        assert_eq!(v["terminal_required_fields"]["work.done"][0], "plan_path");
+    }
+
+    /// Failing automation for PMI-004 (TS-04): malformed JSON (cannot
+    /// even parse as `Value`) must also emit the degraded envelope
+    /// with the marker — not silently return the raw bytes. Exercises
+    /// the `serde_json::from_str::<Value>` error branch.
+    #[test]
+    fn pmi004_terminal_contract_payload_malformed_json_emits_degraded_envelope() {
+        use std::collections::BTreeMap;
+        // Garbage that `serde_json::from_str::<Value>` cannot parse at
+        // all (unterminated string).
+        let malformed_payload = "{\"retry_key\": \"x\"";
+        let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        map.insert("work.done".into(), vec!["plan_path".into()]);
+        let result = merge_terminal_contract(
+            malformed_payload,
+            &["work.done".into()],
+            "work.done",
+            &map,
+        );
+        let v: serde_json::Value = serde_json::from_str(&result).expect(
+            "degraded envelope must itself be valid JSON so downstream consumers can introspect it",
+        );
+        assert_eq!(v["degraded_payload"], serde_json::Value::Bool(true));
+        assert_eq!(v["terminal_topics"][0], "work.done");
+        assert_eq!(v["primary_terminal_topic"], "work.done");
+        assert_eq!(v["terminal_required_fields"]["work.done"][0], "plan_path");
+    }
+
+    // PMI-003 (post-merge-converge / TS-03): the recovery helper
+    // `inject_missing_terminal_emit_recovery` (event_processing.rs:593-596)
+    // falls back to a hard-coded `"terminal_event"` literal when
+    // `terminal_topics.first()` is `None`. Plan §Unit 2 requires
+    // `primary_terminal_topic ∈ terminal_topics`; today the literal is
+    // neither validated as a member nor looked up in
+    // `terminal_required_fields`. The downstream
+    // `build_task_resume_payload_with_terminal_contract` accepts the
+    // fallback result without re-validating membership, so the resumed
+    // hat sees `primary_terminal_topic = "terminal_event"` with no
+    // required fields to satisfy and the bounded-retry budget spins.
+    // Post-fix at least one layer must reject the inconsistency.
+
+    /// Stable failing automation for PMI-003 (TS-03). Simulates the
+    /// upstream `unwrap_or("terminal_event")` fallback by passing
+    /// `terminal_topics = []` and `primary_terminal_topic =
+    /// "terminal_event"` — exactly what `inject_missing_terminal_emit_recovery`
+    /// would write today once the early-return guard is bypassed (hand-edited
+    /// preset, schema-less first entry, future drift). Asserts the two
+    /// invariants the fix must guarantee.
+    #[test]
+    fn pmi003_primary_terminal_topic_must_be_member_of_terminal_topics() {
+        use std::collections::BTreeMap;
+        let r = Rejection::from_topic_format(
+            Some("executor".into()),
+            "terminal_event".into(),
+            &[],
+        );
+        let empty_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let payload_str = build_task_resume_payload_with_terminal_contract(
+            &r,
+            &[],            // allowed_topics
+            &[],            // terminal_topics (empty — fallback fires)
+            "terminal_event", // primary_terminal_topic (the hard-coded literal)
+            &empty_map,     // terminal_required_fields (no schema for the literal)
+            None,
+            None,
+            None,
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload_str).unwrap();
+        let primary = v["primary_terminal_topic"]
+            .as_str()
+            .expect("primary_terminal_topic must serialise as a string");
+        let terminals: Vec<&str> = v["terminal_topics"]
+            .as_array()
+            .expect("terminal_topics must serialise as an array")
+            .iter()
+            .map(|t| t.as_str().expect("terminal topic must be a string"))
+            .collect();
+        // INV-TERM-1 (Plan §Unit 2): primary_terminal_topic ∈ terminal_topics.
+        assert!(
+            terminals.contains(&primary),
+            "INV-TERM-1 violated: primary_terminal_topic={} is not a member of \
+             terminal_topics={:?}. The recovery helper falls back to the \
+             literal \"terminal_event\" outside the membership contract; the \
+             downstream payload constructor accepts it without validation. \
+             Post-fix the helper must reject this inconsistency or coerce the \
+             literals back into membership.",
+            primary,
+            terminals,
+        );
+        // Secondary invariant (TS-03 §Expected result): the primary topic's
+        // required-field set must exist, otherwise the resumed hat cannot
+        // satisfy any required field and the bounded-retry budget spins
+        // without convergence.
+        let req = v["terminal_required_fields"]
+            .as_object()
+            .expect("terminal_required_fields must serialise as an object");
+        assert!(
+            req.contains_key(primary),
+            "INV-TERM-2 violated: terminal_required_fields has no entry for \
+             primary_terminal_topic={}. Resumed hat cannot satisfy any required \
+             field; bounded-retry budget spins without convergence.",
+            primary,
+        );
     }
 
     // U4 (plan 2026-06-23-004, anti-pattern 4): coordinator dispatcher 测试。

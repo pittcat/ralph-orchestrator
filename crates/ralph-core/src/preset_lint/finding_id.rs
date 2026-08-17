@@ -718,7 +718,11 @@ pub const FINDING_STRICT_READONLY_INVALID_WRITE_PATH: &str =
 
 /// 2026-08-16-1015 plan U3: `required_target_hat = ""` defensive
 /// fallback. The empty string bypasses the terminal target guard
-/// entirely; Warn.
+/// entirely. PMI-001 / Unit 4 escalated this from Warn to Error so
+/// preset-load fail-closes — the empty-string defensive fallback is
+/// a multi-layer silent fail-open (wiring drops the entry, guard
+/// short-circuits to Ok(()), CLI filters silently) and the lint is
+/// the only signal channel.
 pub const FINDING_TERMINAL_TARGET_CONTRACT_EMPTY_STRING: &str =
     "preset.terminal_target_contract_empty_string";
 

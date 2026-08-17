@@ -22,7 +22,7 @@ pub mod publish_loop_stalled;
 pub mod retry_cap;
 
 /// Lightweight snapshot of a recovery envelope relevant to the detectors.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct EnvelopeSnapshot {
     pub retry_key: String,
     pub source: String,
@@ -32,7 +32,7 @@ pub struct EnvelopeSnapshot {
 }
 
 /// Lightweight snapshot of a business event relevant to the detectors.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct EventSnapshot {
     pub topic: String,
     pub payload: String,
@@ -40,7 +40,7 @@ pub struct EventSnapshot {
 }
 
 /// Per-retry-key state tracked by the recovery responder.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct RetryKeyState {
     pub retry_key: String,
     pub last_outcome: String,
@@ -94,25 +94,60 @@ impl Default for RuntimeContext {
     }
 }
 
-/// U7: serde `Deserialize` only for `handoff_retry_cap`; all other fields fall
-/// back to `Default::default()`. This avoids propagating serde onto the snapshot
-/// types (`EnvelopeSnapshot`, `EventSnapshot`, `RetryKeyState`), keeping the
-/// surface area minimal.
+/// U7 (extended for PMI-006 round-trip safety): `Deserialize` parses ALL
+/// fields via a Helper struct with `#[serde(default)]`, so missing fields
+/// fall back to their Default values. The snapshot types
+/// (`EnvelopeSnapshot`, `EventSnapshot`, `RetryKeyState`) gain `Deserialize`
+/// derives — they're plain data, so the original surface-area concern that
+/// motivated the partial impl no longer applies. This guarantees round-trip
+/// safety: a serialized populated `RuntimeContext` deserializes back to a
+/// `RuntimeContext` with every field intact, including `retry_key_states`
+/// (feeds `finalize_recovery_outcome::handoff_timeout_pending`) and
+/// `executor_hat_ids` (feeds `block_executor_resend_storm`).
 impl<'de> Deserialize<'de> for RuntimeContext {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        // Start from Default so all unparsed fields get safe values.
-        let mut ctx = Self::default();
         #[derive(serde::Deserialize)]
+        #[serde(default)]
         struct Helper {
-            #[serde(default = "default_handoff_retry_cap")]
+            current_iteration: u32,
+            recovery_envelopes: Vec<EnvelopeSnapshot>,
+            events: Vec<EventSnapshot>,
+            retry_key_states: Vec<RetryKeyState>,
+            current_retry_key: Option<String>,
+            current_hat: Option<String>,
+            executor_hat_ids: Vec<String>,
             handoff_retry_cap: u32,
         }
+
+        impl Default for Helper {
+            fn default() -> Self {
+                Self {
+                    current_iteration: 0,
+                    recovery_envelopes: Vec::new(),
+                    events: Vec::new(),
+                    retry_key_states: Vec::new(),
+                    current_retry_key: None,
+                    current_hat: None,
+                    executor_hat_ids: Vec::new(),
+                    handoff_retry_cap: default_handoff_retry_cap(),
+                }
+            }
+        }
+
         let helper = Helper::deserialize(deserializer)?;
-        ctx.handoff_retry_cap = helper.handoff_retry_cap;
-        Ok(ctx)
+        Ok(Self {
+            current_iteration: helper.current_iteration,
+            recovery_envelopes: helper.recovery_envelopes,
+            events: helper.events,
+            retry_key_states: helper.retry_key_states,
+            current_retry_key: helper.current_retry_key,
+            current_hat: helper.current_hat,
+            executor_hat_ids: helper.executor_hat_ids,
+            handoff_retry_cap: helper.handoff_retry_cap,
+        })
     }
 }
 
@@ -216,6 +251,87 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, RecoveryAction::DedupeEnvelope { .. })),
             "dedupe action should be present"
+        );
+    }
+
+    /// PMI-006: `RuntimeContext::deserialize` only parses `handoff_retry_cap`;
+    /// every other field silently falls back to `Default::default()`. The
+    /// `Deserialize` trait impl implies round-trip safety while the custom
+    /// implementation strips every detector signal. This test feeds JSON that
+    /// contains populated `retry_key_states` and `executor_hat_ids` and
+    /// asserts those fields survive the deserialization.
+    ///
+    /// Repro: any consumer that serializes a populated `RuntimeContext`
+    /// (or any future tooling that adopts the trait impl as a wire
+    /// contract) loses the bounded-retry budget
+    /// (`retry_key_states`) and the executor hat registry
+    /// (`executor_hat_ids`) — both of which feed detectors that protect
+    /// against unbounded handoff retries and executor resend storms.
+    #[test]
+    fn pmi006_deserialize_preserves_retry_key_states_and_executor_hat_ids() {
+        // Hypothetical wire shape: a populated RuntimeContext serialized by a
+        // future Serialize impl (or hand-constructed by debug tooling). Today
+        // there is no Serialize impl, but the Deserialize contract is supposed
+        // to handle this shape — otherwise the trait impl implies more than
+        // it delivers.
+        let json = r#"{
+            "current_iteration": 7,
+            "recovery_envelopes": [],
+            "events": [],
+            "retry_key_states": [
+                {
+                    "retry_key": "stall_recovery:executor:work_done:handoff_dispatch_timeout:*",
+                    "last_outcome": "Pending",
+                    "outcome_history": ["Pending", "Pending"],
+                    "attempt_count": 2
+                }
+            ],
+            "current_retry_key": "stall_recovery:executor:work_done:handoff_dispatch_timeout:*",
+            "current_hat": "executor",
+            "executor_hat_ids": ["executor", "executor-fix"],
+            "handoff_retry_cap": 3
+        }"#;
+        let ctx: RuntimeContext = serde_json::from_str(json)
+            .expect("Deserialize must accept the wire shape implied by the trait impl");
+
+        // Critical detector signals MUST survive the round-trip. Both
+        // `retry_key_states` and `executor_hat_ids` are inputs to
+        // detectors that prevent unbounded retry / resend storms; losing
+        // them silently neutralizes those detectors on any consumer that
+        // adopts the Deserialize impl as a wire contract.
+        assert_eq!(
+            ctx.retry_key_states.len(),
+            1,
+            "retry_key_states must survive Deserialize; the bounded-retry \
+             budget is read by finalize_recovery_outcome (finalize_recovery_outcome.rs:102-120)"
+        );
+        assert_eq!(
+            ctx.retry_key_states[0].retry_key,
+            "stall_recovery:executor:work_done:handoff_dispatch_timeout:*",
+            "retry_key_states[0].retry_key must survive Deserialize"
+        );
+        assert_eq!(
+            ctx.executor_hat_ids,
+            vec!["executor".to_string(), "executor-fix".to_string()],
+            "executor_hat_ids must survive Deserialize; feeds \
+             block_executor_resend_storm (mod.rs:141)"
+        );
+        // current_iteration and current_hat are also dropped today;
+        // assert them too to make the contract violation explicit.
+        assert_eq!(
+            ctx.current_iteration, 7,
+            "current_iteration must survive Deserialize"
+        );
+        assert_eq!(
+            ctx.current_hat.as_deref(),
+            Some("executor"),
+            "current_hat must survive Deserialize"
+        );
+        // The one field the impl does parse — regression guard so the
+        // contract doesn't regress in the other direction.
+        assert_eq!(
+            ctx.handoff_retry_cap, 3,
+            "handoff_retry_cap must survive Deserialize"
         );
     }
 }

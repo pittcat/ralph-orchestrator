@@ -418,3 +418,138 @@ mechanism:
     let pipeline_hat_none = StagePipeline::with_hat_only_stages_for_loop_config(None);
     assert_terminal_target_guard_present(&pipeline_hat_none);
 }
+
+// -------------------------------------------------------------------------
+// PMI-007 (post-merge-converge / concurrency-idempotency):
+//
+// The three StagePipeline constructors
+// (`with_default_stages_for_loop_config`,
+// `with_hat_only_stages_for_loop_config`,
+// `with_phase_authority_stages_for_loop_config`) each document the
+// `TerminalTargetGuard BEFORE VerdictGate` invariant in source comments
+// but enforce it ONLY via two unit-test `assert_eq!` comparisons against
+// `pipeline.names()` (`stage_pipeline_order_default_matches_locked_emit_order`
+// and `hat_only_pipeline_omits_flow_step_scope_and_accepts_plan_ready`).
+// Neither `crate::assert_stage_order!` nor any runtime order assertion
+// lives inside the production constructor path. A future refactor that
+// swaps the two stages breaks only when those two specific tests run;
+// no compile-time and no runtime guard prevents the swap.
+//
+// Note on behavioural demo: swapping `VerdictGateStage` and
+// `TerminalTargetGuardStage` does NOT cause wrong-target terminal
+// emits to slip through — `VerdictGateStage::check` always returns
+// `Ok(())`, so the next stage is always reached and
+// `TerminalTargetGuardStage::check` rejects wrong-target. The defect
+// is purely structural (the comment-only order constraint has no
+// enforcement); the test below reproduces that structural absence.
+//
+// This test PASSES today (bug is observable). It FAILS after the
+// U-fix adds enforcement (compile-time `crate::assert_stage_order!`
+// inside any production constructor body, OR a runtime
+// `debug_assert!` inside `StagePipeline::run` checking
+// TerminalTargetGuard precedes VerdictGate).
+// -------------------------------------------------------------------------
+
+/// Locate the body of `fn_signature` in `src` by brace-matching.
+fn extract_fn_body(src: &str, fn_signature: &str) -> String {
+    let Some(rel_start) = src.find(fn_signature) else {
+        return String::new();
+    };
+    let Some(open_off) = src[rel_start..].find('{') else {
+        return String::new();
+    };
+    let open_abs = rel_start + open_off;
+    let bytes = src.as_bytes();
+    let mut depth: usize = 0;
+    let mut i = open_abs;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return src[open_abs..=i].to_string();
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    String::new()
+}
+
+#[test]
+fn pmi007_production_constructors_lack_compile_time_or_runtime_stage_order_lock() {
+    const STAGE_PIPELINE_SRC: &str = include_str!("../stage_pipeline.rs");
+
+    // Locate the body of `StagePipeline::run` so we can later assert
+    // it has no runtime order check on TerminalTargetGuard /
+    // VerdictGate (PMI-007 fix would add such a check).
+    let run_body = extract_fn_body(
+        STAGE_PIPELINE_SRC,
+        "pub fn run(&self, ctx: &mut StageContext, event: &Event)",
+    );
+    assert!(
+        !run_body.is_empty(),
+        "could not locate StagePipeline::run in stage_pipeline.rs",
+    );
+    // Today `run` is a flat loop. After fix, the body must contain
+    // either a `debug_assert!` or `assert!` mentioning both stages.
+    let run_has_order_assertion = run_body.contains("debug_assert")
+        || (run_body.contains("assert!")
+            && (run_body.contains("TerminalTargetGuard")
+                || run_body.contains("VerdictGate")));
+    assert!(
+        !run_has_order_assertion,
+        "PMI-007 fix landed: StagePipeline::run now runtime-checks \
+         stage order. The bug is closed at runtime.",
+    );
+
+    // Each production constructor body must NOT contain
+    // `assert_stage_order!`. Today none do; once U-fix lands, at
+    // least one calls the macro and this assertion reverses.
+    let ctors = [
+        "with_default_stages_for_loop_config",
+        "with_hat_only_stages_for_loop_config",
+        "with_phase_authority_stages_for_loop_config",
+    ];
+
+    for ctor in &ctors {
+        let body = extract_fn_body(STAGE_PIPELINE_SRC, &format!("pub fn {ctor}"));
+        assert!(
+            !body.is_empty(),
+            "could not locate body for {ctor}",
+        );
+        // Body extends to closing brace of the function, which is
+        // fine — we just need to scan its content for any
+        // `assert_stage_order!` invocation.
+        assert!(
+            !body.contains("assert_stage_order!"),
+            "PMI-007 fix landed: production constructor `{ctor}` \
+             now invokes `assert_stage_order!`. The bug is closed at \
+             compile time. Body excerpt: {:.240}…",
+            body,
+        );
+    }
+
+    // Sanity: the three constructors still produce pipelines with
+    // TerminalTargetGuard in their `names()` (PMI-007 doesn't drop the
+    // guard, only fails to lock its position).
+    let flow = FlowDeclaration::from_yaml(
+        "mechanism:\n  flow:\n    type: declared\n    version: 1\n    terminal_emits: [LOOP_COMPLETE]\n    steps: []\n",
+    )
+    .unwrap();
+    let p_default =
+        StagePipeline::with_default_stages_for_loop_config(flow.clone(), None);
+    let p_hat_only = StagePipeline::with_hat_only_stages_for_loop_config(None);
+    let p_phase = StagePipeline::with_phase_authority_stages_for_loop_config(
+        flow,
+        None,
+        std::sync::Arc::new(
+            crate::event_loop::phase_authority::WorkflowPhaseAuthority::disabled(),
+        ),
+    );
+    assert!(p_default.names().contains(&"TerminalTargetGuard"));
+    assert!(p_hat_only.names().contains(&"TerminalTargetGuard"));
+    assert!(p_phase.names().contains(&"TerminalTargetGuard"));
+}

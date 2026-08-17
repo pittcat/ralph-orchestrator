@@ -231,4 +231,106 @@ mod tests {
         let err = s.check(&mut c, &e).unwrap_err();
         assert_eq!(err.reason_code, "terminal_target_missing");
     }
+
+    // --- PMI-001 (post-merge-converge / TS-01): empty-string
+    //     `required_target_hat` is a silent fail-open across three
+    //     layers (wiring, guard, CLI). Only the lint surfaces a signal,
+    //     and it is Warn (non-blocking). Post-fix at least one layer
+    //     must fail-closed. Today all three runtime layers pass the
+    //     empty string silently — this test is the reproducer's stable
+    //     failing automation for PMI-001.
+
+    /// Build a minimal config with `required_target_hat = ""` for
+    /// `report.done`, mirroring `target_routing_tests::minimal_config`
+    /// so the lint layer can resolve a valid handoff consumer.
+    fn pmi001_empty_target_hat_config() -> crate::config::RalphConfig {
+        use crate::config::{
+            EventLoopConfig, EventPolicyConfig, EventSchema, HatConfig, HatExecutionMode,
+            RalphConfig,
+        };
+        let mut hats = std::collections::HashMap::new();
+        hats.insert(
+            "executor".to_string(),
+            HatConfig {
+                name: "Executor".to_string(),
+                triggers: vec!["work.start".to_string()],
+                publishes: vec!["report.done".to_string()],
+                ..Default::default()
+            },
+        );
+        hats.insert(
+            "reporter".to_string(),
+            HatConfig {
+                name: "Reporter".to_string(),
+                triggers: vec!["report.done".to_string()],
+                publishes: vec![],
+                ..Default::default()
+            },
+        );
+        // Coordinator mode forces HandoffIndex consumer lookups to None,
+        // breaking the routing check. Set Isolated so the lint can
+        // derive a consumer (matches `target_routing_tests::minimal_config`).
+        let mut event_loop = EventLoopConfig::default();
+        event_loop.execution_mode = HatExecutionMode::Isolated;
+        let mut policy = EventPolicyConfig::default();
+        let mut schema = EventSchema::default();
+        schema.required_target_hat = Some(String::new()); // the literal empty string
+        policy.schemas.insert("report.done".to_string(), schema);
+        event_loop.event_policy = Some(policy);
+        RalphConfig {
+            hats,
+            event_loop,
+            ..Default::default()
+        }
+    }
+
+    /// PMI-001 repro (TS-01): empty-string `required_target_hat` must
+    /// fail-closed at SOME layer (parse-time, wiring, guard, or lint).
+    /// Today all three probeable layers pass the empty string silently:
+    /// wiring drops the entry, the guard sees no contract and short-circuits
+    /// to `Ok(())`, and the lint surfaces only a Warn finding. The fix may
+    /// route through any of the four paths — this test validates the
+    /// system-level invariant regardless of which layer is hardened.
+    #[test]
+    fn pmi001_empty_string_required_target_hat_fails_closed_at_some_layer() {
+        use crate::event_loop::flow_wiring::build_terminal_target_contracts_from_loop_config;
+        use crate::preset_lint::target_routing::check_target_routing;
+
+        let config = pmi001_empty_target_hat_config();
+
+        // Layer 2 (wiring): post-fix must NOT silently drop empty-string.
+        let contracts = build_terminal_target_contracts_from_loop_config(&config.event_loop);
+        let wiring_fail_closed = contracts.contains_key("report.done");
+
+        // Layer 3 (guard): post-fix must reject wrong-target terminal emit.
+        let guard = TerminalTargetGuardStage::new(contracts);
+        let mut repair = RepairStateMachine::default();
+        let mut c = StageContext::for_test_machine(
+            FlowStep::new("unit_loop"),
+            "loop-1",
+            1,
+            &mut repair,
+        );
+        let event = Event::new("report.done", r#"{"target_hat":"executor"}"#);
+        let guard_fail_closed = guard.check(&mut c, &event).is_err();
+
+        // Layer 4 (lint): post-fix must escalate to Error severity.
+        let findings = check_target_routing(&config);
+        let lint_fail_closed = findings.iter().any(|f| {
+            f.id == crate::preset_lint::finding_id::FINDING_TERMINAL_TARGET_CONTRACT_EMPTY_STRING
+                && f.severity == crate::preset_lint::LintSeverity::Error
+        });
+
+        // POST-FIX: at least one of the three runtime probeable layers
+        // must fail-closed. Today all three are silent — this assertion
+        // FAILS, demonstrating that the bug is present and reproducible.
+        assert!(
+            wiring_fail_closed || guard_fail_closed || lint_fail_closed,
+            "PMI-001 silent fail-open: empty-string `required_target_hat` \
+             must fail-closed at SOME layer (wiring, guard, or lint). \
+             Observed all three layers silent: wiring_fail_closed={}, \
+             guard_fail_closed={}, lint_fail_closed={}",
+            wiring_fail_closed, guard_fail_closed, lint_fail_closed,
+        );
+    }
 }
