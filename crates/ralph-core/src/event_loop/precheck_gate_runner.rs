@@ -778,4 +778,28 @@ mod tests {
         let evidence = build_precheck_evidence("work.done", json, None).unwrap();
         assert!(evidence.failed_check_keys.is_none());
     }
+
+    /// U2 / T4 / R6: a payload carrying multiple `failed_checks`
+    /// (e.g. `[1, 3]`) threads each key into
+    /// `failed_check_keys` so the renderer can filter `by_check`
+    /// to the exactly-failed keys. Pins the multi-key behaviour
+    /// the U2 cap test in `correction/mod.rs` relies on.
+    #[test]
+    fn u2_build_precheck_evidence_threads_multiple_failed_checks() {
+        let json = r#"{"failed_checks":[1,3],"reason":"two checks failed","synthetic":false}"#;
+        let mut by_check = std::collections::BTreeMap::new();
+        by_check.insert("1".to_string(), vec!["fix 1".to_string()]);
+        by_check.insert("2".to_string(), vec!["fix 2".to_string()]);
+        by_check.insert("3".to_string(), vec!["fix 3".to_string()]);
+        let rule = rule_with_prompt(
+            vec!["a", "b", "c"],
+            Some(crate::config::RecoveryGuidance {
+                common: vec!["common hint".into()],
+                by_check,
+            }),
+        );
+        let evidence = build_precheck_evidence("work.done", json, Some(&rule)).unwrap();
+        let keys = evidence.failed_check_keys.as_ref().expect("keys present");
+        assert_eq!(keys, &vec!["1".to_string(), "3".to_string()]);
+    }
 }

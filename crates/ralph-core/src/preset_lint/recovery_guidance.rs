@@ -41,7 +41,13 @@ use crate::preset_lint::{LintFinding, LintSeverity, LintStrictness};
 /// by_check entry). Mirrors the soft ceiling the renderer uses so a
 /// preset author can't accidentally bloat the target hat prompt with
 /// thousands of bullet lines. Strict-mode error past this bound.
-const MAX_ITEMS_PER_LIST: usize = 32;
+///
+/// `pub` (plan 2026-08-17-1841 U2 / T3 / C2 / R7): the correction
+/// renderer in `crate::correction::render_guidance_section` imports
+/// this constant to apply the same cap at render time, so a preset
+/// that bypasses strict lint (e.g. hand-edited YAML without `--strict`)
+/// still cannot flood the target hat prompt.
+pub const MAX_ITEMS_PER_LIST: usize = 32;
 
 /// Validate every `recovery_guidance` block attached to a precheck rule
 /// (per topic under `event_loop.precheck.rules`) or a payload
@@ -260,12 +266,32 @@ fn check_item_unsafe(item: &str) -> Option<&'static str> {
 }
 
 /// Predicate: is `key` a positive decimal string in `1..=max`?
+///
+/// Plan 2026-08-17-1841 U2 / C1 / R5: the prior implementation
+/// accepted `"01"` / `"001"` / `"0128"` because `key.parse::<usize>()`
+/// silently dropped the leading zeros. The runtime
+/// `serde_json::Value::Number(n).to_string()` always emits
+/// no-leading-zero form, so any preset author who wrote
+/// `by_check: { "01": [...] }` would see the runtime fail to match
+/// the key (silent never-fire). This predicate now performs a
+/// strict shape check before delegating to `parse`:
+///
+/// - rejects the empty string,
+/// - rejects a leading `+` sign (`"+1"`),
+/// - rejects any leading zero — `"0"`, `"01"`, `"001"`, `"0128"`,
+///   etc. (only `"0"` is itself rejected downstream by the `value == 0`
+///   check; `"00"` / `"01"` are caught here),
+/// - rejects whitespace and negative signs at parse time.
 fn is_precheck_key_in_range(key: &str, max: usize) -> bool {
     if key.is_empty() {
         return false;
     }
-    if key.starts_with('+') {
-        return false;
+    let mut bytes = key.bytes();
+    match bytes.next() {
+        Some(b'0') => return false,
+        Some(b'+') => return false,
+        Some(c) if !c.is_ascii_digit() => return false,
+        _ => {}
     }
     let Ok(value) = key.parse::<usize>() else {
         return false;
@@ -725,5 +751,85 @@ mod tests {
                 .any(|f| f.id == FINDING_RECOVERY_GUIDANCE_UNSAFE_ITEM),
             "got {findings:?}"
         );
+    }
+
+    // ── U2 (plan 2026-08-17-1841) — leading-zero strict reject
+    //
+    // C1 / R5: `is_precheck_key_in_range` previously accepted
+    // `"01"` / `"001"` / `"0128"` because `parse::<usize>()` dropped
+    // the leading zeros. Runtime always emits no-leading-zero form,
+    // so a preset author who wrote `by_check: { "01": [...] }` would
+    // see the runtime silently fail to match the key. The predicate
+    // now strict-rejects any leading-zero form.
+
+    // 19. Leading-zero key `"01"` (single digit zero prefix) ⇒ finding.
+    #[test]
+    fn leading_zero_precheck_key_is_flagged() {
+        let mut by_check = BTreeMap::new();
+        by_check.insert("01", vec!["item"]);
+        let cfg = precheck_config("review.complete", 3, Some(guidance_with(vec![], by_check)));
+        let findings = check_recovery_guidance(&cfg, LintStrictness::Strict);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_RECOVERY_GUIDANCE_UNKNOWN_CHECK),
+            "got {findings:?}"
+        );
+    }
+
+    // 20. Leading-zero keys `"001"` (multi-digit prefix) and
+    //     `"0128"` (looks in-range but rejected as shape) ⇒ finding.
+    #[test]
+    fn multi_digit_leading_zero_precheck_keys_are_flagged() {
+        for key in ["001", "0128"] {
+            let mut by_check = BTreeMap::new();
+            by_check.insert(key, vec!["item"]);
+            let cfg = precheck_config("review.complete", 3, Some(guidance_with(vec![], by_check)));
+            let findings = check_recovery_guidance(&cfg, LintStrictness::Strict);
+            assert!(
+                findings
+                    .iter()
+                    .any(|f| f.id == FINDING_RECOVERY_GUIDANCE_UNKNOWN_CHECK),
+                "key {key:?}: got {findings:?}"
+            );
+        }
+    }
+
+    // 21. Malformed shape variants — `+1` / `-1` / `""` / ` 1` /
+    //     `1 ` (whitespace, leading +, ASCII sign) ⇒ finding. The
+    //     prior implementation also rejected these but only after
+    //     the parse step; the new predicate catches them at the
+    //     shape check, locking the behaviour.
+    #[test]
+    fn malformed_shape_precheck_keys_are_flagged() {
+        for key in ["+1", "-1", "", " 1", "1 "] {
+            let mut by_check = BTreeMap::new();
+            by_check.insert(key, vec!["item"]);
+            let cfg = precheck_config("review.complete", 3, Some(guidance_with(vec![], by_check)));
+            let findings = check_recovery_guidance(&cfg, LintStrictness::Strict);
+            assert!(
+                findings
+                    .iter()
+                    .any(|f| f.id == FINDING_RECOVERY_GUIDANCE_UNKNOWN_CHECK),
+                "key {key:?}: got {findings:?}"
+            );
+        }
+    }
+
+    // 22. Happy path — `"1"` / `"7"` / `"128"` (positive decimal in
+    //     range) ⇒ no leading-zero finding. Confirms the strict
+    //     predicate did not over-reject well-formed keys.
+    #[test]
+    fn well_formed_positive_precheck_keys_pass() {
+        for key in ["1", "7", "128"] {
+            let mut by_check = BTreeMap::new();
+            by_check.insert(key, vec!["item"]);
+            let cfg = precheck_config("review.complete", 130, Some(guidance_with(vec![], by_check)));
+            let findings = check_recovery_guidance(&cfg, LintStrictness::Strict);
+            assert!(
+                findings.is_empty(),
+                "key {key:?}: got {findings:?}"
+            );
+        }
     }
 }

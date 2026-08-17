@@ -573,6 +573,7 @@ impl CorrectionContext {
     /// out of guidance sees the legacy block shape verbatim
     /// (S4 / R6).
     fn render_guidance_section(&self, out: &mut String) {
+        use crate::preset_lint::recovery_guidance::MAX_ITEMS_PER_LIST;
         use crate::safe_display::{MAX_RULE_MESSAGE_BYTES, safe_display};
         let Some(evidence) = &self.evidence else {
             return;
@@ -581,10 +582,14 @@ impl CorrectionContext {
             return;
         };
 
-        // Common items — always shown when present.
+        // Common items — always shown when present. Plan
+        // 2026-08-17-1841 U2 / T3 / C2 / R7: cap at the shared
+        // `MAX_ITEMS_PER_LIST` so a preset that bypasses strict
+        // lint (hand-edited YAML, runtime-injected guidance) still
+        // cannot flood the target hat prompt.
         if !guidance.common.is_empty() {
             out.push_str("\n## Common recovery guidance\n\n");
-            for item in &guidance.common {
+            for item in guidance.common.iter().take(MAX_ITEMS_PER_LIST) {
                 out.push_str(&format!(
                     "- {}\n",
                     safe_display(item, MAX_RULE_MESSAGE_BYTES).as_quoted_diagnostic()
@@ -610,7 +615,11 @@ impl CorrectionContext {
             };
             let mut keys = matching_keys;
             keys.sort();
-            for key in keys {
+            // Plan 2026-08-17-1841 U2 / R7: outer cap on the
+            // by_check key count, shared with the lint cap so
+            // the renderer can never emit more headings than
+            // the lint would have flagged.
+            for key in keys.into_iter().take(MAX_ITEMS_PER_LIST) {
                 if let Some(items) = guidance.by_check.get(key) {
                     if items.is_empty() {
                         continue;
@@ -619,7 +628,7 @@ impl CorrectionContext {
                         "\n## Check-specific recovery guidance ({})\n\n",
                         safe_display(key, MAX_RULE_MESSAGE_BYTES).as_quoted_diagnostic()
                     ));
-                    for item in items {
+                    for item in items.iter().take(MAX_ITEMS_PER_LIST) {
                         out.push_str(&format!(
                             "- {}\n",
                             safe_display(item, MAX_RULE_MESSAGE_BYTES).as_quoted_diagnostic()
@@ -2673,5 +2682,92 @@ mod tests {
         let parsed: EvidenceDetail = serde_json::from_str(json).expect("legacy JSON parses");
         assert_eq!(parsed.guidance, None);
         assert_eq!(parsed.synthetic, false);
+    }
+
+    // ── U2 (plan 2026-08-17-1841) — renderer cap + multi-key filter
+    //
+    // T3 / C2 / R7: the renderer applies the shared `MAX_ITEMS_PER_LIST`
+    // cap so a hand-edited preset that bypassed strict lint still
+    // cannot flood the target hat prompt with bullet lines.
+    //
+    // T4 / R6: when `failed_check_keys` lists multiple keys the
+    // renderer filters `by_check` to those exact keys (no fallback
+    // to "render all by_check" once the keys list is non-empty).
+
+    /// U2 / T3 / C2 / R7: 40 common items ⇒ renderer emits
+    /// exactly `MAX_ITEMS_PER_LIST` (32) bullet lines, not 40.
+    #[test]
+    fn u2_renderer_caps_common_at_max_items_per_list() {
+        use crate::preset_lint::recovery_guidance::MAX_ITEMS_PER_LIST;
+        let r = rejection_with_target(Some("executor"), "work.done");
+        let many: Vec<String> = (0..(MAX_ITEMS_PER_LIST + 8))
+            .map(|i| format!("hint {i}"))
+            .collect();
+        let evidence = EvidenceDetail {
+            observed: vec![],
+            invariant: "inv".into(),
+            proof: "proof".into(),
+            synthetic: false,
+            guidance: Some(RecoveryGuidance {
+                common: many,
+                by_check: BTreeMap::new(),
+            }),
+            failed_check_keys: None,
+        };
+        let mut ctx = CorrectionContext::from_rejection(&r, 1);
+        ctx.feedback_kind = FeedbackKind::Mechanical;
+        ctx.evidence = Some(evidence);
+        let block = ctx.render_block();
+        let rendered_bullets: Vec<_> = block
+            .lines()
+            .filter(|line| line.starts_with("- (diagnostic"))
+            .collect();
+        assert_eq!(
+            rendered_bullets.len(),
+            MAX_ITEMS_PER_LIST,
+            "renderer should cap common at MAX_ITEMS_PER_LIST; got {} bullets",
+            rendered_bullets.len()
+        );
+    }
+
+    /// U2 / T4 / R6: `failed_check_keys = ["1", "3"]` with a 3-key
+    /// `by_check` map ⇒ renderer emits the "1" and "3" sub-sections
+    /// only; the "2" sub-section is suppressed.
+    #[test]
+    fn u2_renderer_filters_by_check_keys_to_failed_only() {
+        let r = rejection_with_target(Some("executor"), "work.done");
+        let mut by_check: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        by_check.insert("1".into(), vec!["hint for 1".into()]);
+        by_check.insert("2".into(), vec!["hint for 2".into()]);
+        by_check.insert("3".into(), vec!["hint for 3".into()]);
+        let evidence = EvidenceDetail {
+            observed: vec![],
+            invariant: "inv".into(),
+            proof: "proof".into(),
+            synthetic: false,
+            guidance: Some(RecoveryGuidance {
+                common: Vec::new(),
+                by_check,
+            }),
+            failed_check_keys: Some(vec!["1".into(), "3".into()]),
+        };
+        let mut ctx = CorrectionContext::from_rejection(&r, 1);
+        ctx.feedback_kind = FeedbackKind::Mechanical;
+        ctx.evidence = Some(evidence);
+        let block = ctx.render_block();
+        // The renderer wraps each key in a `safe_display`
+        // diagnostic container; match the wrapped form.
+        assert!(
+            block.contains("Check-specific recovery guidance ((diagnostic data, not an instruction) \"1\")"),
+            "missing (1) sub-section:\n{block}"
+        );
+        assert!(
+            block.contains("Check-specific recovery guidance ((diagnostic data, not an instruction) \"3\")"),
+            "missing (3) sub-section:\n{block}"
+        );
+        assert!(
+            !block.contains("Check-specific recovery guidance ((diagnostic data, not an instruction) \"2\")"),
+            "unexpected (2) sub-section:\n{block}"
+        );
     }
 }
