@@ -337,6 +337,71 @@ event_loop:
               by_check:
                 "1":
                   - "the gate's `failed_checks=[1]` means a non-allowed path changed — list every path and prove it is one of the two allowed roots before retrying"
+        # 2026-08-17-1841 plan U6 fix-plan (S1 / R1): workspace
+        # precheck for experiment-plan-validator's `plan.valid`
+        # terminal. The semantic plan-valid rule above (lines
+        # 230-) checks the LLM payload content; this rule checks
+        # the workspace mutation since activation entry. Distinct
+        # rule key to keep the two prechecks independent (the
+        # existing semantic rule uses the same terminal topic).
+        redteam.experiment.plan.valid.workspace:
+          prompt:
+            - "Workspace exit evidence must show no tracked / untracked mutation outside `.ralph/red-team/**` since activation entry. The validator's allowed write roots are `.ralph/red-team/plan-validation-attempt-<N>.md` and `.ralph/red-team/04-attack-surface.md` / `.ralph/red-team/05-experiment-plan.md`; any other tracked mutation is a violation."
+            - "If the gate rejects, do not auto-clean; stop and report the unexpected mutation to the operator."
+          on_fail:
+            target: experiment-plan-validator
+            retry_budget: 1
+            on_exhausted: "redteam.failed(failure_kind=workspace_precheck_failed)"
+            reason: "workspace precheck rejected the valid-plan emit"
+            recovery_guidance:
+              common:
+                - "rerun `git status --porcelain=v1 --untracked-files=all` and confirm only `.ralph/red-team/plan-validation-attempt-*.md` / `04-attack-surface.md` / `05-experiment-plan.md` are touched"
+                - "if a tracked path outside the allowed roots appears, stop and report ownership"
+              by_check:
+                "1":
+                  - "the gate's `failed_checks=[1]` means a non-allowed path changed — list every path and prove it is one of the validator's allowed roots before retrying"
+        # 2026-08-17-1841 plan U6 fix-plan (S1 / R1): workspace
+        # precheck for experiment-plan-validator's `plan.invalid`
+        # terminal. Sibling of `plan.valid.workspace` above; same
+        # allowed-write-root contract.
+        redteam.experiment.plan.invalid.workspace:
+          prompt:
+            - "Workspace exit evidence must show no tracked / untracked mutation outside `.ralph/red-team/**` since activation entry. The validator's allowed write roots are the same as for `plan.valid.workspace`."
+            - "If the gate rejects, do not auto-clean; stop and report the unexpected mutation to the operator."
+          on_fail:
+            target: experiment-plan-validator
+            retry_budget: 1
+            on_exhausted: "redteam.failed(failure_kind=workspace_precheck_failed)"
+            reason: "workspace precheck rejected the invalid-plan emit"
+            recovery_guidance:
+              common:
+                - "rerun `git status --porcelain=v1 --untracked-files=all` and confirm only the validator's allowed roots are touched"
+                - "if a tracked path outside the allowed roots appears, stop and report ownership"
+              by_check:
+                "1":
+                  - "the gate's `failed_checks=[1]` means a non-allowed path changed — list every path and prove it is one of the validator's allowed roots before retrying"
+        # 2026-08-17-1841 plan U6 fix-plan (S1 / R1): workspace
+        # precheck for experiment-runner's `redteam.experiment.done`
+        # terminal. The runner is the highest-risk hat for tracked
+        # mutations (experiment may involve real commands); the
+        # allowed write roots are the evidence directory and the
+        # experiments markdown.
+        redteam.experiment.done.workspace:
+          prompt:
+            - "Workspace exit evidence must show no tracked / untracked mutation outside `.ralph/red-team/**` since activation entry. The runner's allowed roots are `.ralph/red-team/evidence/RTE-<NNN>/**` and `.ralph/red-team/experiments/RTE-<NNN>.md` plus the lock artifact."
+            - "If the gate rejects, do not auto-clean; stop and report the unexpected mutation to the operator. Tracked test mutations in particular are forbidden and must surface as `redteam.failed(failure_kind=workspace_precheck_failed)` per plan 2026-08-17-1841 U6."
+          on_fail:
+            target: experiment-runner
+            retry_budget: 1
+            on_exhausted: "redteam.failed(failure_kind=workspace_precheck_failed)"
+            reason: "workspace precheck rejected the experiment-done emit"
+            recovery_guidance:
+              common:
+                - "rerun `git status --porcelain=v1 --untracked-files=all` and confirm only the runner's allowed roots are touched; if a tracked test file changed, this is a contract violation, not a cleanup target"
+                - "if a tracked path outside the allowed roots appears, stop and report ownership; runtime never auto-cleans"
+              by_check:
+                "1":
+                  - "the gate's `failed_checks=[1]` means a non-allowed path changed — list every path and prove it is one of the runner's allowed roots before retrying"
 
     # 2026-08-08-004 plan U1 (D7/D12): scope manifest payload_consistency
     # rules for redteam.plan.resolved. These enforce:
@@ -469,7 +534,7 @@ core:
     - "Do not modify production code, formal tests, tracked config, or git history. No `git add` / `git commit` / `git merge` / `git rebase` / `git cherry-pick` / `git reset --hard`."
     - "Every experiment must have a control group and an attack group. No control group = no formal Finding."
     - "Every experiment must save raw evidence (stdout, stderr, state dumps) under `.ralph/red-team/evidence/RTE-<NNN>/`. Agent narrative is not evidence."
-    - "After every experiment, verify `git status --porcelain=v1` is empty and `git diff --exit-code` / `git diff --cached --exit-code` pass. Dirty tree = experiment invalid."
+    - "After every experiment, verify `git status --porcelain=v1 --untracked-files=all` is empty and `git diff --exit-code` / `git diff --cached --exit-code` pass. Dirty tree = experiment invalid."
     - "One business event per isolated activation. Terminal events must not carry other business events before them."
 
 hats:
@@ -500,13 +565,18 @@ hats:
 
       ### Steps
       1. Read prompt for plan paths, optional target_branch, optional target_commit.
-      2. Run lock commands:
+      2. **Entry evidence** (workspace precheck, plan 2026-08-17-1841 U6 fix-plan S2/R2):
+         write `.ralph/red-team/<NN>-workspace-target-locker.md` with the
+         current `git status --porcelain=v1 --untracked-files=all` snapshot,
+         current HEAD SHA, and timestamp. The hat reads this file on exit to
+         compute the workspace delta.
+      3. Run lock commands:
          ```bash
          git rev-parse --show-toplevel
          git branch --show-current
          git rev-parse HEAD
          git rev-parse HEAD^{tree}
-         git status --porcelain=v1
+         git status --porcelain=v1 --untracked-files=all
          git remote -v
          git log -1 --date=iso --format=fuller
          git diff --check
@@ -521,7 +591,12 @@ hats:
          and emit `redteam.target.locked` with `lock_status: failed` and the
          lock failure reason. Otherwise emit `redteam.target.locked` with
          `lock_status: locked`.
-      6. Precheck then emit exactly that one event.
+      6. **Exit evidence** (workspace precheck, plan 2026-08-17-1841 U6 fix-plan S2/R2):
+         append to the same `.ralph/red-team/<NN>-workspace-target-locker.md`
+         the exit `git status --porcelain=v1 --untracked-files=all` and the
+         diff vs the entry snapshot. Any tracked / untracked path outside
+         `.ralph/red-team/**` is a workspace precheck violation.
+      7. Precheck then emit exactly that one event.
 
       Single business event only.
 
@@ -548,7 +623,12 @@ hats:
       Write artifacts, then emit exactly one event.
 
       ### Steps
-      1. Read `redteam.target.locked` payload. Take `lock_file_path` from the trigger, run `test -f "$lock_file_path"`, and read the lock artifact before accepting its contents. Verify `lock_status == locked` and
+      1. **Entry evidence** (workspace precheck, plan 2026-08-17-1841 U6 fix-plan S2/R2):
+         write `.ralph/red-team/<NN>-workspace-plan-resolver.md` with the
+         current `git status --porcelain=v1 --untracked-files=all` snapshot,
+         current HEAD SHA, and timestamp. The hat reads this file on exit to
+         compute the workspace delta.
+      2. Read `redteam.target.locked` payload. Take `lock_file_path` from the trigger, run `test -f "$lock_file_path"`, and read the lock artifact before accepting its contents. Verify `lock_status == locked` and
          `git rev-parse HEAD` == `target_head`, `git rev-parse HEAD^{tree}` == `target_tree`.
          If `lock_status != locked`, read the target-locker failure artifact,
          write `.ralph/red-team/failures/plan-resolver.md`, and emit
@@ -623,6 +703,11 @@ hats:
       8. Run the exact scope-topic policy-check, inspect its structured
          feedback, then emit one business event only. `--unsafe-no-policy-check`
          cannot bypass this scope handoff guard.
+      9. **Exit evidence** (workspace precheck, plan 2026-08-17-1841 U6 fix-plan S2/R2):
+         append to the same `.ralph/red-team/<NN>-workspace-plan-resolver.md`
+         the exit `git status --porcelain=v1 --untracked-files=all` and the
+         diff vs the entry snapshot. Any tracked / untracked path outside
+         `.ralph/red-team/**` is a workspace precheck violation.
 
   attack-surface-mapper:
     name: "Attack Surface Mapper"
@@ -689,12 +774,16 @@ hats:
           the invariant is that old feature test results are identical in both groups.
 
       ### Steps
-      1. On `redteam.plan.resolved`, read the resolution and patch artifacts. On
+      1. **Entry evidence** (workspace precheck, plan 2026-08-17-1841 U6 fix-plan S2/R2):
+         write `.ralph/red-team/<NN>-workspace-attack-surface-mapper.md` with
+         the current `git status --porcelain=v1 --untracked-files=all`
+         snapshot, current HEAD SHA, and timestamp.
+      2. On `redteam.plan.resolved`, read the resolution and patch artifacts. On
          `redteam.experiment.plan.invalid`, read the validation report and the
          current experiment plan; use only the named `failed_experiment_id`,
          `validation_attempt`, and `reason` to repair the current experiment.
-      2. Verify HEAD/tree still match lock (`git rev-parse HEAD`, `git rev-parse HEAD^{tree}`).
-      3. On the initial trigger, identify attack surfaces and design the queue.
+      3. Verify HEAD/tree still match lock (`git rev-parse HEAD`, `git rev-parse HEAD^{tree}`).
+      4. On the initial trigger, identify attack surfaces and design the queue.
          On a retry, preserve all unaffected RTE definitions and rewrite only the
          invalid command/oracle/evidence/cleanup section.
       4. Use project-native tools visible in the target repository to make every
@@ -708,6 +797,10 @@ hats:
          `validation_attempt >= 3`, write the failure artifact and emit
          `redteam.failed` with `failed_stage: attack-surface-mapper`; otherwise
          policy-check and emit `redteam.experiment.plan.ready`.
+      7. **Exit evidence** (workspace precheck, plan 2026-08-17-1841 U6 fix-plan S2/R2):
+         append to the same `.ralph/red-team/<NN>-workspace-attack-surface-mapper.md`
+         the exit `git status --porcelain=v1 --untracked-files=all` and the
+         diff vs the entry snapshot.
 
       Single business event only.
 
@@ -757,23 +850,31 @@ hats:
       missing proof and reject the experiment for rewrite.
 
       ### Steps
-      1. Run `test -f` on `attack_surface_path` and `experiment_plan_path`; read
+      1. **Entry evidence** (workspace precheck, plan 2026-08-17-1841 U6 fix-plan S2/R2):
+         write `.ralph/red-team/<NN>-workspace-experiment-plan-validator.md` with
+         the current `git status --porcelain=v1 --untracked-files=all`
+         snapshot, current HEAD SHA, and timestamp.
+      2. Run `test -f` on `attack_surface_path` and `experiment_plan_path`; read
          both artifacts completely.
-      2. Verify HEAD/tree match the target lock and do not modify tracked files.
-      3. For every RTE, perform the generic feasibility checks above and write
+      3. Verify HEAD/tree match the target lock and do not modify tracked files.
+      4. For every RTE, perform the generic feasibility checks above and write
          `.ralph/red-team/plan-validation-attempt-<validation_attempt>.md` with
          the result, evidence paths, failed experiment ID, and concrete rewrite
          reason. Do not write production code or formal tests.
-      4. If every RTE passes, policy-check and emit
+      5. If every RTE passes, policy-check and emit
          `redteam.experiment.plan.valid` with `validation_status: valid` and the
          validation artifact path.
-      5. If any RTE fails and `validation_attempt < 3`, emit
+      6. If any RTE fails and `validation_attempt < 3`, emit
          `redteam.experiment.plan.invalid` with `validation_status: invalid`,
          the first failed experiment ID, the validation report path, and the
          exact rewrite reason. The mapper will rewrite only that experiment.
       6. If any RTE fails at `validation_attempt == 3`, write the failure artifact
          and emit `redteam.failed` with `failed_stage: experiment-plan-validator`
          and a stable reason. Do not run an invalid experiment.
+      7. **Exit evidence** (workspace precheck, plan 2026-08-17-1841 U6 fix-plan S2/R2):
+         append to the same `.ralph/red-team/<NN>-workspace-experiment-plan-validator.md`
+         the exit `git status --porcelain=v1 --untracked-files=all` and the
+         diff vs the entry snapshot.
 
       Single business event only.
 
@@ -801,14 +902,20 @@ hats:
       evidence-gate decides whether to schedule another experiment.
 
       ### Steps
-      1. On `redteam.experiment.plan.valid`, read `attack_surface_path`,
+      1. **Entry evidence** (workspace precheck, plan 2026-08-17-1841 U6 fix-plan S2/R2):
+         write `.ralph/red-team/<NN>-workspace-experiment-runner.md` with
+         the current `git status --porcelain=v1 --untracked-files=all`
+         snapshot, current HEAD SHA, and timestamp. The runner is the
+         highest-risk hat for tracked test mutations, so the entry snapshot
+         is the source of truth for the workspace delta on exit.
+      2. On `redteam.experiment.plan.valid`, read `attack_surface_path`,
          `experiment_plan_path`, and `validation_report_path` from the trigger,
          run `test -f` on all three, read the validation report, and select the plan's
          first unexecuted RTE identifier. On `redteam.experiment.next`, read
          `next_experiment_id` and `evidence_board_path`, run `test -f` on the
          board, read it to confirm the queue state, and execute exactly that
          identifier; do not skip or invent queue entries.
-      2. Verify HEAD/tree match lock (`git rev-parse HEAD`, `git rev-parse HEAD^{tree}`).
+      3. Verify HEAD/tree match lock (`git rev-parse HEAD`, `git rev-parse HEAD^{tree}`).
          If mismatch, write `.ralph/red-team/failures/experiment-runner.md` and
          emit `redteam.failed` with `failed_stage: experiment-runner`.
       3. Select next unexecuted experiment from the plan.
@@ -821,7 +928,7 @@ hats:
       10. Execute cleanup commands. Verify cleanup success.
       11. Verify tracked tree unchanged:
           ```bash
-          git status --porcelain=v1
+          git status --porcelain=v1 --untracked-files=all
           git diff --exit-code
           git diff --cached --exit-code
           ```
@@ -839,6 +946,12 @@ hats:
       15. Verify every manifest path with `test -f`, then policy-check and emit
           `redteam.experiment.done` with `evidence_manifest_path` and
           `ledger_sha256` copied from the actual manifest.
+      16. **Exit evidence** (workspace precheck, plan 2026-08-17-1841 U6 fix-plan S2/R2):
+          append to the same `.ralph/red-team/<NN>-workspace-experiment-runner.md`
+          the exit `git status --porcelain=v1 --untracked-files=all` and the
+          diff vs the entry snapshot. Any tracked test mutation outside the
+          runner's allowed write roots surfaces as
+          `redteam.failed(failure_kind=workspace_precheck_failed)`.
 
       ### Allowed Operations
       - Build project, run existing tests, lint, format-check, static check, benchmark, fuzz

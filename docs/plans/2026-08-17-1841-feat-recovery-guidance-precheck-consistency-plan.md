@@ -1010,3 +1010,13 @@ U7 author/review skills + agent/human docs
 5. red-team workspace precheck 由高风险 hat 自己执行并写 .ralph/red-team/**；runtime 不采集、不 reset、不 stash、不 clean、不自动删除。
 6. precheck_guard 继续是 author notes 选择字段；面向用户的 runtime 能力名称统一写 precheck gate。
 7. 任何代码、测试、CLI 入口与本计划证据冲突时停止当前 Unit，不得为了保持计划完整而猜测。
+
+## Appendix：U6 mutation 真实触发限制 BLOCKED（plan 2026-08-17-1841 fix-plan §19 fallback）
+
+`presets/scenarios/*.yml` 为 Mock-based scenario，verification fixture 不写入 production tree mutation；workspace precheck 真实触发链路（tracked test mutation、untracked non-.ralph mutation、allowed .ralph artifact、unknown ownership stop）需 future plan 设计 red-team verifier mutation negative fixture（per G3）。当前 plan 已完成：
+
+- 5 hat 各自 `instructions:` 显式包含 entry/exit evidence 写入步骤（`.ralph/red-team/<NN>-workspace-<hat>.md` + `git status --porcelain=v1 --untracked-files=all` 快照）。
+- `recovery_guidance` 5 hat 各自 1 条 precheck rule（target-locker / plan-resolver / attack-surface-mapper / experiment-plan-validator（plan.valid + plan.invalid）/ experiment-runner），`on_exhausted: redteam.failed(failure_kind=workspace_precheck_failed)`。
+- 既有 `git status --porcelain=v1` 三处全部改为 `--porcelain=v1 --untracked-files=all`（per S3）。
+
+未来 plan 入口：mutation negative fixture 设计（建议 plan 标题前缀 `2026-MM-DD-NNN-feat-red-team-mutation-negative-fixture-plan`）。
