@@ -1874,7 +1874,18 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                         "Rebuild the payload from the artifact so {topic} satisfies the rule (run `ralph emit {topic} --policy-check` to re-validate before re-emitting)."
                     ),
                     synthetic: false,
-                    guidance: None,
+                    // U4 (plan 2026-08-17-1841, R1/R4/D1): thread
+                    // the rule's preset-supplied recovery guidance
+                    // into the evidence so the correction renderer
+                    // surfaces `common` and the `by_check[<rule
+                    // id>]` items at the target hat's prompt.
+                    // `failed_check_keys` stays `None` so the
+                    // renderer falls back to "render every
+                    // `by_check` key" (the consistency path never
+                    // reports a list of failed checks — only the
+                    // matched rule id, which is encoded by the
+                    // rule id the evaluator already selected).
+                    guidance: rule.recovery_guidance.clone(),
                     failed_check_keys: None,
                 };
                 findings.push(PolicyFinding {

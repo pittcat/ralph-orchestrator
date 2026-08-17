@@ -173,3 +173,103 @@ fn u2_hold_and_block_carry_structured_metadata() {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// 2026-08-17-1841 U4 — CLI `--policy-check` JSON projection
+// mirrors the U2 / U3 correction prompt renderer (R1 / R3 /
+// S6).  Same source (`evidence.guidance`), same shape
+// (`{ common: [...], by_check: {...} }`).
+// ─────────────────────────────────────────────────────────────────
+
+fn finding_with_recovery_guidance() -> PolicyFinding {
+    use ralph_core::config::RecoveryGuidance;
+    use ralph_core::correction::{EvidenceDetail, ObservationEntry, ObservationValue};
+    PolicyFinding {
+        topic: "fix.done".to_string(),
+        violation_type: ViolationType::SemanticGateViolation {
+            gate: "payload_consistency:rule-u4".to_string(),
+            context: "applied requires more than zero fixes".to_string(),
+            referenced_fields: vec!["fix_status".to_string()],
+        },
+        message: "payload_consistency:rule-u4 violated".to_string(),
+        evidence: Some(EvidenceDetail {
+            observed: vec![ObservationEntry {
+                field: "fix_status".to_string(),
+                value: ObservationValue::Value("\"applied\"".into()),
+            }],
+            invariant: "applied requires more than zero fixes".into(),
+            proof: "rebuild from artifact".into(),
+            synthetic: false,
+            guidance: Some(RecoveryGuidance {
+                common: vec!["rebuild from artifact".into()],
+                by_check: std::collections::BTreeMap::from([(
+                    "rule-u4".to_string(),
+                    vec!["specific hint".into()],
+                )]),
+            }),
+            failed_check_keys: None,
+        }),
+    }
+}
+
+/// U4 / R1 / R3 / S6: when the consistency finding carries
+/// `recovery_guidance`, the CLI `ValidationError` mirrors the
+/// `common` and `by_check` items so the agent sees the same
+/// data the prompt will see.
+#[test]
+fn u4_validation_error_carries_recovery_guidance() {
+    let finding = finding_with_recovery_guidance();
+    let decision = PolicyDecision::RejectWithResume(finding);
+    let err = finding_to_validation_error(&decision, "fix.done")
+        .expect("RejectWithResume must surface as ValidationError");
+    let g = err
+        .recovery_guidance
+        .as_ref()
+        .expect("recovery_guidance present");
+    assert_eq!(g.common, vec!["rebuild from artifact".to_string()]);
+    assert_eq!(
+        g.by_check.get("rule-u4").cloned(),
+        Some(vec!["specific hint".to_string()])
+    );
+}
+
+/// U4 / R3: when the consistency finding has no
+/// `recovery_guidance`, the CLI projection stays `None`
+/// (the JSON shape is unchanged for the no-op case).
+#[test]
+fn u4_validation_error_without_guidance_is_none() {
+    let finding = consistency_finding_with_fields("rule-x", &["fix_status"]);
+    let decision = PolicyDecision::RejectWithResume(finding);
+    let err = finding_to_validation_error(&decision, "fix.done")
+        .expect("RejectWithResume must surface as ValidationError");
+    assert!(err.recovery_guidance.is_none());
+}
+
+/// U4 / R3: the CLI JSON serialisation surfaces
+/// `recovery_guidance` (or omits it entirely when `None`,
+/// matching the existing `skip_serializing_if` pattern).
+#[test]
+fn u4_validation_error_json_serialises_recovery_guidance() {
+    let finding = finding_with_recovery_guidance();
+    let decision = PolicyDecision::RejectWithResume(finding);
+    let err = finding_to_validation_error(&decision, "fix.done").unwrap();
+    let json = serde_json::to_value(&err).expect("serialise");
+    let rg = json
+        .get("recovery_guidance")
+        .expect("recovery_guidance key present");
+    assert_eq!(rg["common"][0], "rebuild from artifact");
+    assert_eq!(rg["by_check"]["rule-u4"][0], "specific hint");
+}
+
+/// U4 / S6: the CLI JSON never carries `suggested_command`
+/// or `suggested_payload_shape` for semantic findings —
+/// matching the U4 "no replacement payload" contract.
+#[test]
+fn u4_validation_error_no_replacement_fields_for_semantic() {
+    let finding = finding_with_recovery_guidance();
+    let decision = PolicyDecision::RejectWithResume(finding);
+    let err = finding_to_validation_error(&decision, "fix.done").unwrap();
+    let json = serde_json::to_value(&err).expect("serialise");
+    assert!(json.get("suggested_command").is_none());
+    assert!(json.get("suggested_payload_shape").is_none());
+}

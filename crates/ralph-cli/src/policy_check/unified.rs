@@ -20,6 +20,8 @@ use anyhow::{Context, Result};
 #[allow(unused_imports)]
 use ralph_core::config::HatExecutionMode;
 #[allow(unused_imports)]
+use ralph_core::config::RecoveryGuidance;
+#[allow(unused_imports)]
 use ralph_core::config::{EventFieldDoc, EventSchema, PayloadType};
 #[allow(unused_imports)]
 use ralph_core::emit_schema_hint;
@@ -981,6 +983,19 @@ pub struct ValidationError {
     /// gate did not supply a proof (legacy fallback).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_proof: Option<String>,
+    /// 2026-08-17-1841 U4 (R1 / R3 / S6): preset-supplied
+    /// recovery guidance attached to the originating
+    /// payload-consistency rule. The CLI `--policy-check`
+    /// JSON projection mirrors the U2 / U3 correction prompt
+    /// renderer so both surfaces see the same `common` /
+    /// `by_check` items. `None` when the rule declares no
+    /// `recovery_guidance` block (the common case for builtin
+    /// presets that have not opted in yet). Serialised as
+    /// `{ common: [...], by_check: {...} }` so the agent
+    /// can locate the check-specific item without parsing
+    /// the `message` string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_guidance: Option<RecoveryGuidance>,
 }
 
 impl ValidationError {
@@ -1463,6 +1478,14 @@ pub(crate) fn finding_record(finding: &ralph_core::PolicyFinding) -> ValidationE
                 Some(ev.proof.clone())
             }
         }),
+        // 2026-08-17-1841 U4 (R1 / R3 / S6): the CLI
+        // projection mirrors the U2 correction prompt
+        // renderer so both surfaces see the same
+        // `common` / `by_check` items. Same source of
+        // truth (`evidence.guidance`), same JSON shape
+        // (`{ common: Vec<String>, by_check:
+        // BTreeMap<String, Vec<String>> }`).
+        recovery_guidance: finding.evidence.as_ref().and_then(|ev| ev.guidance.clone()),
         ..Default::default()
     }
 }

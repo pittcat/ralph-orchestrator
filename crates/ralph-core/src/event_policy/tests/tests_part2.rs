@@ -2,6 +2,9 @@
 // Plan 2026-08-07-002 §7 U2 §5: original 5,222-line tests block split into
 // helpers + two test files. Helpers shared via the tests/ module tree.
 
+use crate::config::{PayloadConsistencyConfig, PayloadConsistencyRule, ViolationAction};
+use serde_json::{Value, json};
+
     #[test]
     fn test_plan_name_equality_mismatch_rejected() {
         // work.ready with plan_name=A → work.done with plan_name=B → Reject
@@ -4193,4 +4196,170 @@ fn review_passed_allowlist_config() -> EventPolicyConfig {
 
 fn work_done_payload(plan: &str, step: &str, task: &str) -> String {
     format!(r#"{{"plan_name":"{plan}","step":"{step}","task_id":"{task}","task_key":"k"}}"#)
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 2026-08-17-1841 U4 — payload-consistency recovery guidance
+// threads into the same `EvidenceDetail` that powers the
+// correction prompt and the CLI `--policy-check` JSON
+// (R1 / R3 / D1 / S6).  The same-source guarantee means the
+// renderer and the CLI see the same `common` / `by_check`
+// items; the rule id is the key into `by_check`.
+// ─────────────────────────────────────────────────────────────────
+
+fn rule_with_guidance(
+    id: &str,
+    topic: &str,
+    when: Value,
+    message: &str,
+    guidance: Option<crate::config::RecoveryGuidance>,
+) -> PayloadConsistencyRule {
+    PayloadConsistencyRule {
+        id: id.to_string(),
+        topic: topic.to_string(),
+        when,
+        message: message.to_string(),
+        recovery_guidance: guidance,
+    }
+}
+
+fn guidance(common: &[&str], by_check: &[(&str, &[&str])]) -> crate::config::RecoveryGuidance {
+    crate::config::RecoveryGuidance {
+        common: common.iter().map(|s| s.to_string()).collect(),
+        by_check: by_check
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.to_string(),
+                    v.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn payload_consistency_config(
+    rules: Vec<PayloadConsistencyRule>,
+    topic_schemas: Vec<(&str, Vec<&str>)>,
+) -> EventPolicyConfig {
+    let mut schemas = std::collections::HashMap::new();
+    for (topic, required) in topic_schemas {
+        let mut schema = EventSchema::default();
+        schema.required_fields = required.into_iter().map(String::from).collect();
+        schemas.insert(topic.to_string(), schema);
+    }
+    let mut config = EventPolicyConfig {
+        enabled: true,
+        mode: EventPolicyMode::Enforce,
+        on_violation: ViolationAction::RejectWithResume,
+        schemas,
+        ..EventPolicyConfig::default()
+    };
+    config.payload_consistency = PayloadConsistencyConfig {
+        enabled: true,
+        rules,
+    };
+    config
+}
+
+/// U4 / R1: when a rule declares `recovery_guidance`, the
+/// matched finding's `evidence.guidance` mirrors the rule's
+/// `common` / `by_check` items exactly.
+#[test]
+fn u4_consistency_finding_carries_rule_guidance() {
+    let rule = rule_with_guidance(
+        "rule-u4",
+        "fix.done",
+        json!({"field": "fix_status", "eq": "applied"}),
+        "applied requires more than zero fixes",
+        Some(guidance(&["rebuild from artifact"], &[("rule-u4", &["specific hint"])])),
+    );
+    let config = payload_consistency_config(
+        vec![rule],
+        vec![("fix.done", vec!["fix_status", "fixes_applied"])],
+    );
+    let mut state = PolicyRuntimeState::default();
+    let decision = validate_event(
+        "fix.done",
+        Some(r#"{"fix_status":"applied","fixes_applied":0}"#),
+        &config,
+        &mut state,
+    );
+    let PolicyDecision::RejectWithResume(finding) = decision else {
+        panic!("expected RejectWithResume, got {decision:?}");
+    };
+    let ev = finding.evidence.expect("evidence present");
+    let g = ev.guidance.as_ref().expect("guidance present");
+    assert_eq!(g.common, vec!["rebuild from artifact".to_string()]);
+    assert_eq!(
+        g.by_check.get("rule-u4").cloned(),
+        Some(vec!["specific hint".to_string()])
+    );
+}
+
+/// U4 / R4: a rule with `recovery_guidance` produces a
+/// finding whose `evidence.failed_check_keys` is `None`
+/// (consistency never reports a failed-checks list — only
+/// the matched rule id). The renderer falls back to
+/// "render every `by_check` key" for consistency.
+#[test]
+fn u4_consistency_finding_failed_check_keys_stays_none() {
+    let rule = rule_with_guidance(
+        "rule-u4",
+        "fix.done",
+        json!({"field": "fix_status", "eq": "applied"}),
+        "applied requires more than zero fixes",
+        Some(guidance(&["common"], &[("rule-u4", &["specific"])])),
+    );
+    let config = payload_consistency_config(
+        vec![rule],
+        vec![("fix.done", vec!["fix_status", "fixes_applied"])],
+    );
+    let mut state = PolicyRuntimeState::default();
+    let decision = validate_event(
+        "fix.done",
+        Some(r#"{"fix_status":"applied","fixes_applied":0}"#),
+        &config,
+        &mut state,
+    );
+    let PolicyDecision::RejectWithResume(finding) = decision else {
+        panic!("expected RejectWithResume, got {decision:?}");
+    };
+    let evidence = finding.evidence.expect("evidence present");
+    assert!(evidence.failed_check_keys.is_none());
+    assert_eq!(
+        evidence.guidance.as_ref().unwrap().by_check.get("rule-u4").cloned(),
+        Some(vec!["specific".to_string()])
+    );
+}
+
+/// U4 / R3: a rule without `recovery_guidance` produces a
+/// finding whose `evidence.guidance` is `None`.  The CLI
+/// projection and the prompt renderer both skip the
+/// guidance section — matching the U2 / U4 no-op baseline.
+#[test]
+fn u4_consistency_finding_without_guidance_is_none() {
+    let rule = rule_with_guidance(
+        "rule-u4",
+        "fix.done",
+        json!({"field": "fix_status", "eq": "applied"}),
+        "applied requires more than zero fixes",
+        None,
+    );
+    let config = payload_consistency_config(
+        vec![rule],
+        vec![("fix.done", vec!["fix_status", "fixes_applied"])],
+    );
+    let mut state = PolicyRuntimeState::default();
+    let decision = validate_event(
+        "fix.done",
+        Some(r#"{"fix_status":"applied","fixes_applied":0}"#),
+        &config,
+        &mut state,
+    );
+    let PolicyDecision::RejectWithResume(finding) = decision else {
+        panic!("expected RejectWithResume, got {decision:?}");
+    };
+    let evidence = finding.evidence.expect("evidence present");
+    assert!(evidence.guidance.is_none());
 }
