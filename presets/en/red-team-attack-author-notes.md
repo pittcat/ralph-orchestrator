@@ -36,10 +36,10 @@
 | `redteam.experiment.plan.ready` → 计划校验 | payload_consistency | false | null | true | 3 | 计划路径、数量和重写次数先做确定性自洽检查，主观可行性检查由 validator 的 valid/invalid handoff 承担 | confirmed |
 | `redteam.experiment.plan.valid` → runner 释放 | both | true | 3 | true | 3 | 只有有项目发现证据的可执行计划才能进入 runner | confirmed |
 | `redteam.experiment.plan.invalid` → mapper 重写 | both | true | 3 | true | 3 | 失败实验、原因和重写次数必须可路由且不能超过预算 | confirmed |
-| `redteam.experiment.done` → 单实验证据 | both | true | 3 | true | 3 | 缺 manifest/hash 时不得进入评分 | confirmed |
+| `redteam.experiment.done` → 单实验证据 | precheck | true | 3 | false | null | 缺 manifest/hash 或 control/attack 证据不可读时不得进入评分；字段结构由 schema 负责 | confirmed |
 | `redteam.experiment.next` → 继续队列 | payload_consistency | false | null | true | 3 | 这是确定性计数和路由 handoff，无需第二次主观评分 | confirmed |
 | `redteam.evidence.gated` → 汇总交接 | both | true | 3 | true | 3 | 必须证明全部实验已结算且至少一个合格 | confirmed |
-| `redteam.failed` → 失败报告 | payload_consistency | false | null | true | 3 | 失败路径必须可收敛，不能被主观 gate 截断 | confirmed |
+| `redteam.failed` → 失败报告 | neither | false | null | false | null | 失败路径保持确定性直达 reporter；required fields 与路径可读性由 schema/producer 约束 | confirmed |
 | `redteam.complete` → 最终交付 | payload_consistency | false | null | true | 3 | 终态成功/计划路径关系由确定性规则保护 | confirmed |
 
 ## Topology

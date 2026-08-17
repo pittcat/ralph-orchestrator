@@ -153,3 +153,4 @@ LEAN-CTX.md
 .pi-subagents/
 .mcp.json
 execution.target
+logs/

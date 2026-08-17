@@ -1,0 +1,49 @@
+version: 1
+scenarios:
+  - name: terminal-success-contract
+    responses:
+      - hat: target-locker
+        output: |
+          <event topic="redteam.target.locked">{"target_head":"1111111111111111111111111111111111111111","target_tree":"2222222222222222222222222222222222222222","plan_count":1,"lock_file_path":".ralph/red-team/01-target-lock.md","lock_status":"locked"}</event>
+        success: true
+      - hat: plan-resolver
+        output: |
+          <event topic="redteam.plan.resolved">{"resolved_count":1,"unresolved_count":0,"resolution_file_path":".ralph/red-team/02-plan-resolution.md","scope_manifest_path":".ralph/red-team/scope-manifest.json","scope_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","scope_status":"resolved","proceed":true,"overall_confidence":100,"critical_unknown_count":0,"scope_base_sha":"3333333333333333333333333333333333333333","resolved_patch_path":".ralph/red-team/patches/PLAN-001.patch","patch_digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","coverage":100,"critical_traceability":100,"boundary_consistency":true,"boundary_conflict":false}</event>
+        success: true
+      - hat: attack-surface-mapper
+        output: |
+          <event topic="redteam.experiment.plan.ready">{"attack_surface_path":".ralph/red-team/04-attack-surface.md","experiment_plan_path":".ralph/red-team/05-experiment-plan.md","experiment_count":1,"validation_attempt":0}</event>
+        success: true
+      - hat: experiment-plan-validator
+        output: |
+          <event topic="redteam.experiment.plan.valid">{"attack_surface_path":".ralph/red-team/04-attack-surface.md","experiment_plan_path":".ralph/red-team/05-experiment-plan.md","validation_report_path":".ralph/red-team/plan-validation-attempt-0.md","experiment_count":1,"validation_attempt":0,"validation_status":"valid"}</event>
+        success: true
+      - hat: experiment-runner
+        output: |
+          <event topic="redteam.experiment.done">{"experiment_id":"RTE-001","control_passed":true,"attack_reproduced":true,"evidence_paths":[".ralph/red-team/evidence/RTE-001/raw.log"],"experiment_file_path":".ralph/red-team/experiments/RTE-001.md","evidence_manifest_path":".ralph/red-team/evidence/RTE-001/evidence-manifest.json","ledger_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}</event>
+        success: true
+      - hat: evidence-gate
+        output: |
+          <event topic="redteam.evidence.gated">{"qualified_experiment_ids":["RTE-001"],"qualified_experiment_count":1,"rejected_experiment_count":0,"total_experiment_count":1,"minimum_confidence":90,"minimum_evidence_coverage":90,"minimum_verifiability":90,"minimum_impact_certainty":90,"evidence_board_path":".ralph/red-team/07-evidence-board.md"}</event>
+        success: true
+      - hat: impact-boundary
+        output: |
+          <event topic="redteam.plan.ready">{"plan_file_path":".ralph/red-team/PLAN.md","finding_count":1,"impact_file_path":".ralph/red-team/08-impact-boundary.md"}</event>
+        success: true
+      - hat: independent-reviewer
+        output: |
+          <event topic="redteam.reviewed">{"verdict":"PLAN_READY","review_file_path":".ralph/red-team/10-independent-review.md","plan_file_path":".ralph/red-team/PLAN.md"}</event>
+        success: true
+      - hat: reporter
+        output: |
+          <event topic="redteam.complete">{"success":true,"report_path":".ralph/red-team/REPORT.md","plan_path":".ralph/red-team/PLAN.md","questions_path":".ralph/red-team/QUESTIONS.md"}</event>
+        success: true
+    expect:
+      start_event: redteam.start
+      accepted_events: [redteam.target.locked, redteam.plan.resolved, redteam.experiment.plan.ready, redteam.experiment.plan.valid, redteam.experiment.done, redteam.evidence.gated, redteam.plan.ready, redteam.reviewed, redteam.complete]
+      forbidden_events: []
+      terminal: success
+      terminal_topic: redteam.complete
+    limits:
+      max_steps: 9
+      no_progress_steps: 2

@@ -97,6 +97,7 @@ key_stages:
 
 ## 发布前检查
 
+- 动态 success 场景：`presets/scenarios/red-team-attack-success.yml`；运行 `ralph preset verify -H presets/en/red-team-attack.yml --scenario presets/scenarios/red-team-attack-success.yml --format json`，应接受 9 个业务事件并以 `redteam.complete` 收口。
 - [x] P0/P1 阈值、scope digest、自洽 `proceed` 和上游 handoff 约束已写入 prompt/schema/runtime policy。
 - [x] 每个跨 hat artifact path 都声明了来源、`.ralph/` 相对路径语义、结构化示例和 `test -f` 读取要求。
 - [x] `redteam.complete.plan_path` 明确区分成功路径真实路径与失败路径空字符串。
