@@ -4758,6 +4758,8 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         // red-team experiment queue fixture validates the explicit serial
         // continuation edge between evidence-gate and experiment-runner.
         "tests/scenarios/redteam_experiment_queue",
+        // Generic plan-feasibility validation and bounded mapper rewrite loop.
+        "tests/scenarios/redteam_plan_validation_",
         // 2026-08-08-004 plan U2: merge-batch boundary manifest routing
         // (abstract fixture with merge-batch hat chain; schema validation via unit/CLI tests)
         "tests/scenarios/merge_batch_boundary",
@@ -5031,6 +5033,15 @@ fn test_redteam_failed_reaches_reporter() {
 #[test]
 fn test_redteam_experiment_queue_continues_before_aggregate_gate() {
     let yaml = load_scenario("tests/scenarios/redteam_experiment_queue.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// The experiment plan must pass a project-agnostic feasibility validator
+/// before the runner activates; an invalid plan returns to the mapper for a
+/// bounded rewrite and is not executed in its invalid form.
+#[test]
+fn test_redteam_plan_validation_retries_before_runner() {
+    let yaml = load_scenario("tests/scenarios/redteam_plan_validation_retry.yml");
     run_workflow_guard_scenario(yaml);
 }
 

@@ -6,13 +6,13 @@
 - **操作者与启动路径：** 操作者准备 `.ralph/red-team.prompt.md`，运行 `ralph run -c ralph.red-team-attack.yml -H builtin:red-team-attack`，最终阅读 `.ralph/red-team/REPORT.md`、`PLAN.md` 和 `QUESTIONS.md`。
 - **输入与事实源：** prompt 文件、Git HEAD/tree、开发计划、`.ralph/red-team/04-attack-surface.md`、`05-experiment-plan.md`、各 RTE 实验 artifact、原始证据和 evidence board。
 - **成功条件：** 所有计划实验均已记录；至少一个实验通过二元证据门禁和四项阈值；impact-boundary 写出至少一个合格 Finding 和 `PLAN.md`；independent-reviewer 发出 `PLAN_READY`；reporter 发出 `redteam.complete(success=true)`。
-- **阻塞条件：** target/tree 改变、生产树变脏、artifact 不可读、实验队列 handoff 无法修复、precheck 连续 3 次失败、所有实验均未形成合格证据，或独立终审拒绝计划。
+- **阻塞条件：** target/tree 改变、生产树变脏、artifact 不可读、实验计划连续 3 次无法通过通用可执行性校验、实验队列 handoff 无法修复、所有实验均未形成合格证据，或独立终审拒绝计划。
 - **允许的修改范围：** 只允许写 `.ralph/red-team/` 业务 artifact、临时隔离环境和证据；禁止修改生产代码、正式测试、tracked 配置、Git 历史及运行时内部 ledger。
 - **必须独立执行的评审：** evidence-gate 只读原始证据；impact-boundary 重新执行影响边界验证；independent-reviewer 独立检查全部 artifact、Finding、阈值和修复范围。
 - **重要 artifact、生产方与消费者：** 见下方 Artifact Ownership 表；事件只传短状态、计数、路径和路由字段，完整结果留在 artifact。
 - **execution_model：** `single-chain`；**why：** 实验必须按证据结果串行推进，不需要 wave 或 supervisor。
 - **非目标：** 不自动重试被证据拒绝的实验，不生成没有正式 Finding 的 `PLAN.md`，不启动生产代码修复，不把通用 runtime 日志当作红队结论。
-- **Author 推导与假设：** `redteam.experiment.next` 是显式队列继续边；证据失败只计入 rejected 并继续独立实验；生产者协议失败仍立即走 `redteam.failed`。
+- **Author 推导与假设：** 实验计划先经过 `experiment-plan-validator`；计划无效时只回 mapper 重写当前实验，最多 3 次，耗尽后才走 `redteam.failed`；证据失败只计入 rejected 并继续独立实验；真正的生产者协议失败仍立即走 `redteam.failed`。
 - **用户确认：** 已确认；Gate Scope=`hard`；用户确认单链、继续剩余实验、最终只交付合格 Finding。
 
 ## Gate Scope
@@ -21,7 +21,8 @@
 
 | 能力位置 | Gate Scope | 事实依据 |
 |---|---|---|
-| 攻击面与实验队列声明 | hard | `redteam.attack.mapped` 携带实验计划路径和数量 |
+| 攻击面与实验计划声明 | hard | `redteam.experiment.plan.ready` 携带实验计划路径、数量和验证尝试 |
+| 实验计划可执行性校验 | hard | `experiment-plan-validator` 生成项目无关的可执行性报告并决定 valid/invalid |
 | 单实验原始证据交接 | hard | `redteam.experiment.done` 携带证据路径、manifest 和 ledger hash |
 | 实验证据汇总与队列继续 | hard | `redteam.experiment.next` / `redteam.evidence.gated` 携带计数与 evidence board |
 | 失败收敛和最终交付 | hard | `redteam.failed` / `redteam.complete` 携带可读 artifact 路径和成功语义 |
@@ -32,7 +33,9 @@
 
 | key_stage | guard_selection | precheck_guard | precheck_retry_budget | payload_consistency_guard | payload_consistency_retry_budget | reason | confirmation_status |
 |---|---|---:|---:|---:|---:|---|---|
-| `redteam.attack.mapped` → 队列初始化 | both | true | 3 | true | 3 | 队列缺实验或缺 control/attack 时不得启动 | confirmed |
+| `redteam.experiment.plan.ready` → 计划校验 | payload_consistency | false | null | true | 3 | 计划路径、数量和重写次数先做确定性自洽检查，主观可行性检查由 validator 的 valid/invalid handoff 承担 | confirmed |
+| `redteam.experiment.plan.valid` → runner 释放 | both | true | 3 | true | 3 | 只有有项目发现证据的可执行计划才能进入 runner | confirmed |
+| `redteam.experiment.plan.invalid` → mapper 重写 | both | true | 3 | true | 3 | 失败实验、原因和重写次数必须可路由且不能超过预算 | confirmed |
 | `redteam.experiment.done` → 单实验证据 | both | true | 3 | true | 3 | 缺 manifest/hash 时不得进入评分 | confirmed |
 | `redteam.experiment.next` → 继续队列 | payload_consistency | false | null | true | 3 | 这是确定性计数和路由 handoff，无需第二次主观评分 | confirmed |
 | `redteam.evidence.gated` → 汇总交接 | both | true | 3 | true | 3 | 必须证明全部实验已结算且至少一个合格 | confirmed |
@@ -43,17 +46,18 @@
 
 ```text
 redteam.start
-  → target.locked → plan.resolved → attack.mapped
-  → experiment.done → evidence-gate
+  → target.locked → plan.resolved → plan.ready
+  → plan.valid → experiment.done → evidence-gate
+       ├─ plan.invalid → mapper 重写当前 RTE（最多 3 次）
        ├─ rejected + remaining → experiment.next → experiment.done
        ├─ qualified + remaining → experiment.next → experiment.done
        ├─ queue exhausted + qualified → evidence.gated → plan.ready → reviewed → complete
        └─ queue exhausted + none qualified → failed → complete(success=false)
 
-producer protocol failure → failed → reporter → complete(success=false)
+计划校验耗尽 / producer protocol failure → failed → reporter → complete(success=false)
 ```
 
-`redteam.experiment.next` 只有 evidence-gate 发布，`redteam.experiment.done` 只有 experiment-runner 发布；普通 handoff 不使用 `--triggered`。
+`redteam.experiment.plan.ready` 只有 mapper 发布，`redteam.experiment.plan.valid` / `.invalid` 只有 validator 发布，`redteam.experiment.next` 只有 evidence-gate 发布；普通 handoff 不使用 `--triggered`。
 
 ## Hard questions — single-chain-first
 
@@ -72,6 +76,7 @@ Wave 与 supervisor hard questions：**N/A**，因为 `execution_model=single-ch
 | `01-target-lock.md` | target-locker | 所有后续 producer | 保留到 operator 归档 |
 | `scope-manifest.json`、plan-resolution、patches | plan-resolver | attack-surface-mapper、reviewer、reporter | 保留到 operator 归档 |
 | `04-attack-surface.md`、`05-experiment-plan.md` | attack-surface-mapper | experiment-runner、precheck gate、reviewer | 保留到 operator 归档 |
+| `plan-validation-attempt-<N>.md` | experiment-plan-validator | mapper、runner、reviewer、reporter | 保留到 operator 归档 |
 | `experiments/RTE-*.md` | experiment-runner | evidence-gate、impact-boundary、reviewer | 保留到 operator 归档 |
 | `evidence/RTE-*/**`、`evidence-manifest.json` | experiment-runner | evidence-gate、reviewer | 保留到 operator 归档 |
 | `07-evidence-board.md` | evidence-gate | experiment-runner、impact-boundary、reviewer、reporter | 保留到 operator 归档 |
@@ -133,22 +138,34 @@ Wave 与 supervisor hard questions：**N/A**，因为 `execution_model=single-ch
 
 - **Q1 使命：** 根据已 resolved scope 设计可执行攻击面和实验队列；完成标准是两个 artifact 完整且每个实验有 control/attack/oracle。
 - **Q2 输入：** 读取 resolved payload、resolution、patch 和 scope manifest；不读 runtime ledger。
-- **Q3 执行：** Observe scope/artifact → Precheck 实验模板字段和 manifest → Apply 写攻击面与实验计划 → Confirm policy-check 后发 `redteam.attack.mapped`。
-- **Q4 输出：** 只发一个 `redteam.attack.mapped`；payload 不携带实验正文，只传路径、数量和 predecessor。
-- **Q5 交接：** runner 从 `experiment_plan_path` 读取 RTE 队列；precheck 从路径读取计划，不依赖 payload 长文本。
+- **Q3 执行：** Observe scope/artifact 或 invalid 报告 → Precheck 计划修订 → Apply 写攻击面与实验计划 → Confirm policy-check 后发 `redteam.experiment.plan.ready`。
+- **Q4 输出：** 只发一个 `redteam.experiment.plan.ready`；payload 只传路径、数量和 `validation_attempt`。
+- **Q5 交接：** validator 从路径读取完整计划；runner 只从 `plan.valid` 取得已校验路径，不依赖 payload 长文本。
 
 | topic | field | value source / visibility | downstream use | schema / artifact |
 |---|---|---|---|---|
-| `redteam.attack.mapped` | `surface_count` | `04-attack-surface.md` 计数 | 记录攻击面规模 | `field_docs.surface_count`; 完整面表落盘 |
-| `redteam.attack.mapped` | `experiment_count` | `05-experiment-plan.md` 计数 | 初始化串行队列 | `field_docs.experiment_count`; 计划落盘 |
-| `redteam.attack.mapped` | `attack_surface_path` | 当前写入的攻击面文件 | runner/reviewer 读取 | `field_docs.attack_surface_path`; 必填 |
-| `redteam.attack.mapped` | `experiment_plan_path` | 当前写入的实验计划 | runner 读取 RTE 顺序 | `field_docs.experiment_plan_path`; 必填 |
-| `redteam.attack.mapped` | `predecessor_event` | 当前 trigger 事实，固定为 `redteam.plan.resolved` | scope handoff 绑定 | `field_docs.predecessor_event`; 短路由值不单独落盘 |
+| `redteam.experiment.plan.ready` | `attack_surface_path`, `experiment_plan_path` | mapper 当前写入的两个 artifact | validator 读取完整计划 | `field_docs.*`; 必填 |
+| `redteam.experiment.plan.ready` | `experiment_count`, `validation_attempt` | mapper 从计划与 trigger 计算 | validator 判断队列和预算 | `field_docs.*`; 短值可由 artifact 重算 |
+
+### experiment-plan-validator
+
+- **Q1 使命：** 在任何实验执行前，使用目标项目自己的 discovery/help/list 证据验证实验计划可执行；完成标准是写出 validation artifact 并发 valid、invalid 或失败。
+- **Q2 输入：** 从 `redteam.experiment.plan.ready` 取得攻击面路径、实验计划路径、数量和尝试次数；读取当前项目能观察到的工具与测试入口。
+- **Q3 执行：** 只做通用可执行性检查，不假设 Rust、Cargo 或任何语言；逐 RTE 验证命令、selector、oracle、证据和 cleanup。
+- **Q4 输出：** `redteam.experiment.plan.valid`、`redteam.experiment.plan.invalid` 或 `redteam.failed`，完整依据写入 validation artifact。
+- **Q5 交接：** valid 把 validation report path 交给 runner；invalid 把失败 RTE 和原因交给 mapper；第三次失败进入 reporter。
+
+| topic | field | value source / visibility | downstream use | schema / artifact |
+|---|---|---|---|---|
+| `redteam.experiment.plan.valid` | `validation_report_path` | validator 当前写入并 `test -f` 的报告 | runner/reviewer 读取验证依据 | `field_docs.validation_report_path`; 必填 |
+| `redteam.experiment.plan.valid` | `validation_status` | 全部 RTE 通用检查结果 | 释放 runner | `allowed_values: valid` |
+| `redteam.experiment.plan.invalid` | `failed_experiment_id`, `reason` | validation report 的首个失败项 | mapper 只重写当前 RTE | `field_docs.*`; 完整依据落盘 |
+| `redteam.experiment.plan.invalid` | `validation_attempt` | ready trigger 的尝试次数 | bounded retry 路由 | `payload_consistency`; 0–2 才能继续 |
 
 ### experiment-runner
 
 - **Q1 使命：** 每次 activation 只执行一个 RTE，完成 control/attack、原始证据、manifest 和 clean-tree 验证。
-- **Q2 输入：** 初次从 `redteam.attack.mapped` 读取实验计划；续跑从 `redteam.experiment.next.next_experiment_id` 取得精确 RTE ID，并读取 evidence board。
+- **Q2 输入：** 初次从 `redteam.experiment.plan.valid` 读取已校验实验计划与 validation report；续跑从 `redteam.experiment.next.next_experiment_id` 取得精确 RTE ID，并读取 evidence board。
 - **Q3 执行：** Observe queue/artifact → Precheck 环境和证据路径 → Apply 隔离执行、写 evidence/manifest/实验文件 → Confirm `test -f`、policy-check、emit。
 - **Q4 输出：** 只发 `redteam.experiment.done` 或 producer failure；manifest 先落盘，事件再传路径和 hash。
 - **Q5 交接：** evidence-gate 读取 `experiment_file_path`、`evidence_manifest_path` 和 `evidence_paths`；通过或拒绝后由 `experiment.next` 继续队列。
@@ -231,14 +248,16 @@ Wave 与 supervisor hard questions：**N/A**，因为 `execution_model=single-ch
 ## Payload Consistency 规则摘要
 
 - `redteam.plan.resolved` 保留现有 scope contradiction gates。
-- `redteam.attack.mapped` 拒绝错误 predecessor 和零实验队列。
+- `redteam.experiment.plan.ready` 拒绝超出 3 次的 validation_attempt。
+- `redteam.experiment.plan.valid` / `.invalid` 强制 validation_status 与路由方向一致。
+- `redteam.experiment.plan.invalid` 拒绝第三次重写后的继续事件。
 - `redteam.experiment.next` 拒绝 `remaining_count=0`，避免队列空转。
 - `redteam.evidence.gated` 拒绝零 qualified 或空总队列。
 - `redteam.complete` 拒绝 `success=true` 但无 PLAN，以及 `success=false` 却携带 PLAN。
 
 ## Prompt Visibility 证据
 
-已对 8 个 declared hats 执行：
+已对 9 个 declared hats 执行：
 
 ```bash
 ralph -c presets/en/red-team-attack.yml inspect prompt --hat <hat-id> --format json
@@ -249,7 +268,7 @@ ralph -c presets/en/red-team-attack.yml inspect prompt --hat <hat-id> --format j
 ## 交 review 前自检
 
 - [x] `execution_model=single-chain` 与 YAML 一致；无 wave/supervisor。
-- [x] 每个实验均有显式 queue continuation；失败实验不会阻塞独立实验。
+- [x] 每个实验均有显式 queue continuation；计划无效先回 mapper 重写，失败实验不会阻塞独立实验。
 - [x] `ledger_sha256` 从实验定义、模板、schema、runner instructions 到 evidence-gate 均一致。
 - [x] 每个完整结果先落盘；event 只传短状态、计数、路径和 hash。
 - [x] hard Gate Scope、Key-stage guard、独立 retry budget 均已记录。
@@ -258,4 +277,4 @@ ralph -c presets/en/red-team-attack.yml inspect prompt --hat <hat-id> --format j
 
 ## Builtin 同步清单
 
-本次只改变 builtin preset 的 YAML/schema/template/author notes，不改变 preset 名称、hat 集合或 manifest 入口，因此不需要修改 `presets/manifest.yml`、`presets/index.json`、`crates/ralph-cli/src/presets.rs`、zsh 补全或 builtin 列表文档。仍需执行 preset/schema 相关结构化测试和全量 nextest 验证。
+本次改变 builtin preset 的 hat 拓扑与 YAML/schema/author notes，但不改变 preset 名称或 manifest 入口；需确认 builtin manifest/index、CLI 嵌入和 zsh 补全的 preset 名称仍保持 parity，并执行 preset/schema 结构化测试和全量 nextest 验证。新增 hat 不应新增 Rust 专用命令或项目绑定。

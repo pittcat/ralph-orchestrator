@@ -6,7 +6,7 @@
 
 - 执行模型：`isolated`；所有 hat 只读代码树，实验原始证据和审计产物写入 `.ralph/`。
 - 终态：成功路径由 `redteam.complete(success=true)` 表示；失败路径由 `redteam.complete(success=false)` 表示。
-- 关键门禁：scope 阈值由 plan-resolver 明确计算，`proceed` 只在全部阈值满足时为 `true`；攻击面映射还必须绑定已接受的 `redteam.plan.resolved`。
+- 关键门禁：scope 阈值由 plan-resolver 明确计算，`proceed` 只在全部阈值满足时为 `true`；攻击面映射生成的计划必须先经过通用 `experiment-plan-validator`，最多重写 3 次。
 - 证据原则：控制组、攻击组、原始证据、文件可读性和干净工作树均为硬约束。
 
 ## 关键阶段与 guard 选择
@@ -29,13 +29,21 @@ key_stages:
     payload_consistency_retry_budget: 3
     reason: "scope_status、proceed、阈值和边界字段必须保持结构一致。"
     confirmation_status: confirmed
-  - key_stage: "attack-surface-mapper -> redteam.attack.mapped"
+  - key_stage: "attack-surface-mapper -> redteam.experiment.plan.ready"
+    guard_selection: payload_consistency
+    precheck_guard: false
+    precheck_retry_budget: null
+    payload_consistency_guard: true
+    payload_consistency_retry_budget: 3
+    reason: "必须通过 scope 阈值后进入通用计划可执行性校验。"
+    confirmation_status: confirmed
+  - key_stage: "experiment-plan-validator -> redteam.experiment.plan.valid|invalid"
     guard_selection: both
     precheck_guard: true
     precheck_retry_budget: 3
     payload_consistency_guard: true
     payload_consistency_retry_budget: 3
-    reason: "必须通过 scope 阈值与 predecessor_event 运行时约束后才能启动攻击设计。"
+    reason: "只有项目发现证据支持的计划才能执行；无效计划回 mapper，最多重写 3 次。"
     confirmation_status: confirmed
   - key_stage: "experiment-runner -> redteam.experiment.done"
     guard_selection: precheck
@@ -46,11 +54,11 @@ key_stages:
     reason: "实验完成依赖真实控制组、攻击组、原始证据和工作树完整性。"
     confirmation_status: confirmed
   - key_stage: "evidence-gate -> redteam.experiment.next"
-    guard_selection: neither
+    guard_selection: payload_consistency
     precheck_guard: false
     precheck_retry_budget: null
-    payload_consistency_guard: false
-    payload_consistency_retry_budget: null
+    payload_consistency_guard: true
+    payload_consistency_retry_budget: 3
     reason: "队列是否继续由 durable evidence board 与 remaining_count 结构化决定。"
     confirmation_status: confirmed
   - key_stage: "evidence-gate -> redteam.evidence.gated"
@@ -89,7 +97,7 @@ key_stages:
 
 ## 发布前检查
 
-- [x] P0/P1 阈值、scope digest、自洽 `proceed` 和 predecessor 约束已写入 prompt/schema/runtime policy。
+- [x] P0/P1 阈值、scope digest、自洽 `proceed` 和上游 handoff 约束已写入 prompt/schema/runtime policy。
 - [x] 每个跨 hat artifact path 都声明了来源、`.ralph/` 相对路径语义、结构化示例和 `test -f` 读取要求。
 - [x] `redteam.complete.plan_path` 明确区分成功路径真实路径与失败路径空字符串。
 - [x] `agent_skill_audit`：skipped（本次只评审并修复 preset YAML 与其 schema）。

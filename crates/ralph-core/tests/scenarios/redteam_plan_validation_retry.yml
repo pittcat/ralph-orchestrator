@@ -1,0 +1,144 @@
+# 通用 red-team 计划校验回路：计划无效时回 mapper 重写，校验通过后才释放 runner。
+
+version: 1
+name: redteam_plan_validation_retry
+description: invalid experiment plan returns to mapper once before validator releases runner
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 8
+  hats:
+    attack-surface-mapper:
+      subscribes_to:
+        - redteam.plan.resolved
+        - redteam.experiment.plan.invalid
+      publishes:
+        - redteam.experiment.plan.ready
+    experiment-plan-validator:
+      subscribes_to:
+        - redteam.experiment.plan.ready
+      publishes:
+        - redteam.experiment.plan.valid
+        - redteam.experiment.plan.invalid
+    experiment-runner:
+      subscribes_to:
+        - redteam.experiment.plan.valid
+      publishes:
+        - redteam.experiment.done
+    reporter:
+      subscribes_to:
+        - redteam.experiment.done
+      publishes:
+        - redteam.complete
+  event_loop:
+    execution_mode: isolated
+    starting_event: redteam.plan.resolved
+    completion_promise: redteam.complete
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        redteam.experiment.plan.ready:
+          required_fields:
+            - experiment_plan_path
+            - experiment_count
+            - validation_attempt
+        redteam.experiment.plan.valid:
+          required_fields:
+            - experiment_plan_path
+            - validation_report_path
+            - validation_attempt
+            - validation_status
+        redteam.experiment.plan.invalid:
+          required_fields:
+            - experiment_plan_path
+            - validation_report_path
+            - failed_experiment_id
+            - reason
+            - validation_attempt
+            - validation_status
+        redteam.experiment.done:
+          required_fields: [experiment_id]
+        redteam.complete:
+          required_fields: [success]
+      payload_consistency:
+        enabled: true
+        rules:
+          - id: plan-ready-attempt-bounded
+            topic: redteam.experiment.plan.ready
+            when:
+              field: validation_attempt
+              gt: 3
+            message: plan validation attempt must not exceed three rewrites
+          - id: plan-valid-status
+            topic: redteam.experiment.plan.valid
+            when:
+              field: validation_status
+              ne: valid
+            message: valid handoff requires validation_status=valid
+          - id: plan-invalid-status
+            topic: redteam.experiment.plan.invalid
+            when:
+              field: validation_status
+              ne: invalid
+            message: invalid handoff requires validation_status=invalid
+          - id: plan-invalid-attempt-bounded
+            topic: redteam.experiment.plan.invalid
+            when:
+              field: validation_attempt
+              gte: 3
+            message: invalid handoff cannot continue after the third rewrite
+
+mock_responses:
+  - hat: attack-surface-mapper
+    text: |
+      <event topic="redteam.experiment.plan.ready">
+      {"experiment_plan_path":".ralph/red-team/05-experiment-plan.md","experiment_count":1,"validation_attempt":0}
+      </event>
+  - hat: experiment-plan-validator
+    text: |
+      <event topic="redteam.experiment.plan.invalid">
+      {"experiment_plan_path":".ralph/red-team/05-experiment-plan.md","validation_report_path":".ralph/red-team/plan-validation-attempt-0.md","failed_experiment_id":"RTE-001","reason":"selector_not_discovered","validation_attempt":0,"validation_status":"invalid"}
+      </event>
+  - hat: attack-surface-mapper
+    text: |
+      <event topic="redteam.experiment.plan.ready">
+      {"experiment_plan_path":".ralph/red-team/05-experiment-plan.md","experiment_count":1,"validation_attempt":1}
+      </event>
+  - hat: experiment-plan-validator
+    text: |
+      <event topic="redteam.experiment.plan.valid">
+      {"experiment_plan_path":".ralph/red-team/05-experiment-plan.md","validation_report_path":".ralph/red-team/plan-validation-attempt-1.md","validation_attempt":1,"validation_status":"valid"}
+      </event>
+  - hat: experiment-runner
+    text: |
+      <event topic="redteam.experiment.done">
+      {"experiment_id":"RTE-001"}
+      </event>
+  - hat: reporter
+    text: |
+      <event topic="redteam.complete">
+      {"success":true}
+      </event>
+
+expected:
+  iterations: 6
+  events:
+    - topic: redteam.experiment.plan.ready
+    - topic: redteam.experiment.plan.invalid
+    - topic: redteam.experiment.plan.ready
+    - topic: redteam.experiment.plan.valid
+    - topic: redteam.experiment.done
+    - topic: redteam.complete
+  completion: true
+  payload_matches:
+    - topic: redteam.experiment.plan.invalid
+      fields:
+        failed_experiment_id: RTE-001
+        validation_attempt: 0
+        validation_status: invalid
+    - topic: redteam.experiment.plan.valid
+      fields:
+        validation_attempt: 1
+        validation_status: valid

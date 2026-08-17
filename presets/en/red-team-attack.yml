@@ -25,6 +25,7 @@
 #   .ralph/red-team/patches/**                   — plan-resolver writes
 #   .ralph/red-team/04-attack-surface.md         — attack-surface-mapper writes
 #   .ralph/red-team/05-experiment-plan.md        — attack-surface-mapper writes
+#   .ralph/red-team/plan-validation-attempt-<N>.md — experiment-plan-validator writes
 #   .ralph/red-team/experiments/RTE-*.md         — experiment-runner writes
 #   .ralph/red-team/evidence/RTE-*/**            — experiment-runner writes
 #   .ralph/red-team/evidence/RTE-*/evidence-manifest.json — experiment-runner writes
@@ -100,7 +101,9 @@ event_loop:
     business_topics:
       - "redteam.target.locked"
       - "redteam.plan.resolved"
-      - "redteam.attack.mapped"
+      - "redteam.experiment.plan.ready"
+      - "redteam.experiment.plan.valid"
+      - "redteam.experiment.plan.invalid"
       - "redteam.experiment.done"
       - "redteam.experiment.next"
       - "redteam.evidence.gated"
@@ -128,14 +131,35 @@ event_loop:
       - {hat_id: impact-boundary, topic: redteam.plan.resolved}
       - {hat_id: independent-reviewer, topic: redteam.plan.resolved}
       - {hat_id: reporter, topic: redteam.plan.resolved}
-      # attack-surface-mapper owns attack.mapped
-      - {hat_id: target-locker, topic: redteam.attack.mapped}
-      - {hat_id: plan-resolver, topic: redteam.attack.mapped}
-      - {hat_id: experiment-runner, topic: redteam.attack.mapped}
-      - {hat_id: evidence-gate, topic: redteam.attack.mapped}
-      - {hat_id: impact-boundary, topic: redteam.attack.mapped}
-      - {hat_id: independent-reviewer, topic: redteam.attack.mapped}
-      - {hat_id: reporter, topic: redteam.attack.mapped}
+      # attack-surface-mapper owns experiment.plan.ready
+      - {hat_id: target-locker, topic: redteam.experiment.plan.ready}
+      - {hat_id: plan-resolver, topic: redteam.experiment.plan.ready}
+      - {hat_id: experiment-plan-validator, topic: redteam.experiment.plan.ready}
+      - {hat_id: experiment-runner, topic: redteam.experiment.plan.ready}
+      - {hat_id: evidence-gate, topic: redteam.experiment.plan.ready}
+      - {hat_id: impact-boundary, topic: redteam.experiment.plan.ready}
+      - {hat_id: independent-reviewer, topic: redteam.experiment.plan.ready}
+      - {hat_id: reporter, topic: redteam.experiment.plan.ready}
+      - {hat_id: ralph, topic: redteam.experiment.plan.ready}
+      # experiment-plan-validator owns plan.valid and plan.invalid
+      - {hat_id: target-locker, topic: redteam.experiment.plan.valid}
+      - {hat_id: plan-resolver, topic: redteam.experiment.plan.valid}
+      - {hat_id: attack-surface-mapper, topic: redteam.experiment.plan.valid}
+      - {hat_id: experiment-runner, topic: redteam.experiment.plan.valid}
+      - {hat_id: evidence-gate, topic: redteam.experiment.plan.valid}
+      - {hat_id: impact-boundary, topic: redteam.experiment.plan.valid}
+      - {hat_id: independent-reviewer, topic: redteam.experiment.plan.valid}
+      - {hat_id: reporter, topic: redteam.experiment.plan.valid}
+      - {hat_id: ralph, topic: redteam.experiment.plan.valid}
+      - {hat_id: target-locker, topic: redteam.experiment.plan.invalid}
+      - {hat_id: plan-resolver, topic: redteam.experiment.plan.invalid}
+      - {hat_id: attack-surface-mapper, topic: redteam.experiment.plan.invalid}
+      - {hat_id: experiment-runner, topic: redteam.experiment.plan.invalid}
+      - {hat_id: evidence-gate, topic: redteam.experiment.plan.invalid}
+      - {hat_id: impact-boundary, topic: redteam.experiment.plan.invalid}
+      - {hat_id: independent-reviewer, topic: redteam.experiment.plan.invalid}
+      - {hat_id: reporter, topic: redteam.experiment.plan.invalid}
+      - {hat_id: ralph, topic: redteam.experiment.plan.invalid}
       # experiment-runner owns experiment.done
       - {hat_id: target-locker, topic: redteam.experiment.done}
       - {hat_id: plan-resolver, topic: redteam.experiment.done}
@@ -191,28 +215,36 @@ event_loop:
       # ralph locked out
       - {hat_id: ralph, topic: redteam.target.locked}
       - {hat_id: ralph, topic: redteam.plan.resolved}
-      - {hat_id: ralph, topic: redteam.attack.mapped}
       - {hat_id: ralph, topic: redteam.experiment.done}
       - {hat_id: ralph, topic: redteam.evidence.gated}
       - {hat_id: ralph, topic: redteam.plan.ready}
       - {hat_id: ralph, topic: redteam.reviewed}
       - {hat_id: ralph, topic: redteam.complete}
-    # Key-stage subjective gates. These are intentionally limited to the
+    # Key-stage subjective gates. These cover the experiment-plan validation,
     # experiment queue, per-experiment evidence handoff, and final aggregate
     # evidence handoff. Terminal failure/completion stay deterministic so an
     # exhausted LLM gate cannot strand an already-written operator report.
     precheck:
       enabled: true
       rules:
-        redteam.attack.mapped:
+        redteam.experiment.plan.valid:
           prompt:
-            - "Read the declared attack-surface and experiment-plan artifacts. Confirm every planned experiment has a falsifiable hypothesis, a control group, an attack group, a machine-checkable failure oracle, and a concrete mandatory-evidence list. Reject placeholders or an empty experiment queue."
-            - "Confirm the experiment plan is internally consistent with experiment_count and that each experiment has a unique RTE identifier. Do not infer missing experiments from prose."
+            - "Read experiment_plan_path, attack_surface_path, and validation_report_path. Confirm the validation report records a generic, project-native feasibility check for every planned experiment: referenced artifacts exist, control and attack commands are concrete, the oracle is machine-checkable, required evidence and cleanup are declared, and the plan does not assume a language-specific tool that the project has not shown it can run."
+            - "Confirm validation_attempt is within the declared bounded retry range and the validation report is readable. Do not approve a plan merely because its prose sounds plausible; require command or project-native discovery evidence recorded in the artifact."
           on_fail:
-            target: attack-surface-mapper
+            target: experiment-plan-validator
             retry_budget: 3
-            on_exhausted: "plan.blocked(reason=redteam_attack_map_precheck_failed)"
-            reason: "attack plan evidence was not independently sufficient"
+            on_exhausted: "plan.blocked(reason=redteam_experiment_plan_validation_precheck_failed)"
+            reason: "validated experiment plan or feasibility evidence failed independent review"
+        redteam.experiment.plan.invalid:
+          prompt:
+            - "Read validation_report_path and experiment_plan_path. Confirm the report identifies a real failed_experiment_id, records the project-native feasibility evidence that is missing or contradictory, and gives a concrete rewrite reason."
+            - "Confirm validation_attempt is below 3 and that the proposed invalid handoff will return only the named experiment to the mapper; do not allow a malformed failure payload to consume a rewrite budget."
+          on_fail:
+            target: experiment-plan-validator
+            retry_budget: 3
+            on_exhausted: "plan.blocked(reason=redteam_experiment_plan_invalid_precheck_failed)"
+            reason: "invalid experiment-plan handoff lacked bounded rewrite evidence"
         redteam.experiment.done:
           prompt:
             - "Read evidence_manifest_path and experiment_file_path from the proposed payload. Confirm both files exist, are non-empty, and the manifest lists every mandatory evidence item for this RTE experiment."
@@ -291,27 +323,30 @@ event_loop:
               - {field: scope_status, ne: "resolved"}
               - {field: proceed, eq: true}
           message: "scope_status=ambiguous|blocked must not set proceed=true; emit redteam.failed instead."
-        # 2026-08-08-004 review (fix-plan U1, A3) + 2026-08-10-002 plan
-        # U3 (D5): runtime enforcement of the attack-surface-mapper
-        # HARD GATE. The schema declares `predecessor_event` as a
-        # required field with literal `redteam.plan.resolved`; this rule
-        # is the negative contradiction — reject when the literal is
-        # wrong (correct literal: rule Misses; missing field: rejected
-        # by schema required_fields). The previous `exists:true AND eq`
-        # form was inverted: it Hit on the legal value and Missed on
-        # the missing/wrong case.
-        - id: redteam-attack-mapped-predecessor-must-be-resolved
-          topic: redteam.attack.mapped
+        - id: redteam-plan-ready-attempt-range
+          topic: redteam.experiment.plan.ready
           when:
-            field: predecessor_event
-            ne: "redteam.plan.resolved"
-          message: "redteam.attack.mapped requires predecessor_event == 'redteam.plan.resolved'; runtime gate rejects attack.mapped emits whose predecessor is missing or has a different value."
-        - id: redteam-attack-mapped-requires-experiments
-          topic: redteam.attack.mapped
+            field: validation_attempt
+            gt: 3
+          message: "experiment.plan.ready validation_attempt must be between 0 and 3; a plan cannot be rewritten beyond the bounded retry budget."
+        - id: redteam-plan-valid-status-required
+          topic: redteam.experiment.plan.valid
           when:
-            field: experiment_count
-            eq: 0
-          message: "redteam.attack.mapped requires at least one planned experiment; zero experiments cannot produce a red-team result."
+            field: validation_status
+            ne: "valid"
+          message: "experiment.plan.valid requires validation_status=valid; invalid plans must return to the mapper."
+        - id: redteam-plan-invalid-status-required
+          topic: redteam.experiment.plan.invalid
+          when:
+            field: validation_status
+            ne: "invalid"
+          message: "experiment.plan.invalid requires validation_status=invalid; valid plans must enter the runner."
+        - id: redteam-plan-invalid-retry-range
+          topic: redteam.experiment.plan.invalid
+          when:
+            field: validation_attempt
+            gte: 3
+          message: "experiment.plan.invalid cannot be emitted after the third rewrite; emit redteam.failed when the bounded retry budget is exhausted."
         - id: redteam-experiment-next-requires-remaining
           topic: redteam.experiment.next
           when:
@@ -520,13 +555,13 @@ hats:
   attack-surface-mapper:
     name: "Attack Surface Mapper"
     description: "Identifies attack surfaces from plans, commits, patches, and current code tree; designs concrete experiments."
-    triggers: ["redteam.plan.resolved"]
-    publishes: ["redteam.attack.mapped", "redteam.failed"]
-    exempt_topics: ["redteam.attack.mapped", "redteam.failed"]
-    terminal_events: ["redteam.attack.mapped", "redteam.failed"]
+    triggers: ["redteam.plan.resolved", "redteam.experiment.plan.invalid"]
+    publishes: ["redteam.experiment.plan.ready", "redteam.failed"]
+    exempt_topics: ["redteam.experiment.plan.ready", "redteam.failed"]
+    terminal_events: ["redteam.experiment.plan.ready", "redteam.failed"]
     event_filter:
       enabled: true
-      events: ["redteam.plan.resolved"]
+      events: ["redteam.plan.resolved", "redteam.experiment.plan.invalid"]
     instructions: |
       ## ATTACK SURFACE MAPPER MODE
 
@@ -540,38 +575,27 @@ hats:
       ```
       Copy `experiment.template.yml` from `.ralph/red-team/<plan-key>/templates/` for each experiment.
 
-      ### Mission (on `redteam.plan.resolved`)
-      Identify attack surfaces and design concrete experiments.
-      Write `.ralph/red-team/04-attack-surface.md` and `.ralph/red-team/05-experiment-plan.md`.
-      Emit `redteam.attack.mapped` with `predecessor_event: "redteam.plan.resolved"` (the
-      schema-required field that anchors this emit to the prior plan-resolved event — see
-      runtime gate below).
+      ### Mission
+      Identify attack surfaces and design concrete experiments. On the initial
+      `redteam.plan.resolved` trigger, write the attack-surface and experiment-plan
+      artifacts. On `redteam.experiment.plan.invalid`, rewrite only the named
+      experiment and preserve the rest of the queue. Emit
+      `redteam.experiment.plan.ready`; the plan-validator must approve it before
+      the experiment-runner can start.
 
       ### HARD GATE — attack-surface-mapper MUST NOT activate when scope is unresolved
       Before doing any work, verify ALL of the following:
-      - `scope_status == "resolved"` — if not, stop immediately and do NOT emit attack.mapped.
+      - `scope_status == "resolved"` — if not, stop immediately and do NOT emit plan.ready.
         The failure path is handled by the reporter through `redteam.failed`.
-      - `critical_unknown_count == 0` — if > 0, stop immediately and do NOT emit attack.mapped.
-      - `overall_confidence >= 90` — if < 90, stop immediately and do NOT emit attack.mapped.
-      - `coverage >= 90` — if < 90, stop immediately and do NOT emit attack.mapped.
-      - `boundary_conflict == false` — if true, stop immediately and do NOT emit attack.mapped.
-      - `proceed == true` — if false or missing, stop immediately and do NOT emit attack.mapped.
-      - `boundary_consistency == true` — if false, stop immediately and do NOT emit attack.mapped.
-      - `critical_traceability >= 90` — if lower, stop immediately and do NOT emit attack.mapped.
+      - `critical_unknown_count == 0` — if > 0, stop immediately and do NOT emit plan.ready.
+      - `overall_confidence >= 90` — if < 90, stop immediately and do NOT emit plan.ready.
+      - `coverage >= 90` — if < 90, stop immediately and do NOT emit plan.ready.
+      - `boundary_conflict == false` — if true, stop immediately and do NOT emit plan.ready.
+      - `proceed == true` — if false or missing, stop immediately and do NOT emit plan.ready.
+      - `boundary_consistency == true` — if false, stop immediately and do NOT emit plan.ready.
+      - `critical_traceability >= 90` — if lower, stop immediately and do NOT emit plan.ready.
       When any gate fires, write `.ralph/red-team/failures/attack-surface-mapper.md`
-      and emit `redteam.failed`; do not emit `redteam.attack.mapped`.
-
-      ### Runtime anchor (mandatory)
-      This prompt-text gate is also enforced at runtime by
-      `payload_consistency` rule `redteam-attack-mapped-predecessor-must-be-resolved`
-      and the schema-required `predecessor_event` field on
-      `redteam.attack.mapped`. The rule requires
-      `predecessor_event` to exist AND equal the literal
-      `redteam.plan.resolved` topic. A direct emit, a prompt-injection
-      bypass, or a model-error that drops the prompt's gate will all
-      be caught at the EventLoop gate — `experiment-runner` will not
-      activate, no experiment is dispatched. The prompt layer and
-      runtime gate are both required; the runtime gate is the contract.
+      and emit `redteam.failed`; do not emit `redteam.experiment.plan.ready`.
 
       ### Attack Dimensions (mandatory coverage)
       - Contract attack: callers using old semantics, new errors swallowed, new fields ignored, enum/state drift, false success
@@ -592,26 +616,105 @@ hats:
           attack group runs the same old feature test suite with the new feature enabled;
           the invariant is that old feature test results are identical in both groups.
 
-      ### Steps (on plan.resolved)
-      1. Read `redteam.plan.resolved` payload. Read plan-resolution and patch-reconstruction artifacts.
+      ### Steps
+      1. On `redteam.plan.resolved`, read the resolution and patch artifacts. On
+         `redteam.experiment.plan.invalid`, read the validation report and the
+         current experiment plan; use only the named `failed_experiment_id`,
+         `validation_attempt`, and `reason` to repair the current experiment.
       2. Verify HEAD/tree still match lock (`git rev-parse HEAD`, `git rev-parse HEAD^{tree}`).
-      3. For each resolved plan, identify attack surfaces using the dimensions above.
-      4. For each surface, design one or more concrete experiments using the template.
-      5. Write `.ralph/red-team/04-attack-surface.md` and `.ralph/red-team/05-experiment-plan.md`.
-      6. Precheck then emit `redteam.attack.mapped`.
+      3. On the initial trigger, identify attack surfaces and design the queue.
+         On a retry, preserve all unaffected RTE definitions and rewrite only the
+         invalid command/oracle/evidence/cleanup section.
+      4. Use project-native tools visible in the target repository to make every
+         control/attack command concrete. Do not assume a language, package
+         manager, test runner, environment variable, or CLI flag exists; record
+         the discovery command and result in the plan artifact.
+      5. Write `.ralph/red-team/04-attack-surface.md` and
+         `.ralph/red-team/05-experiment-plan.md`.
+      6. Set `validation_attempt` to 0 for the initial plan and increment it for
+         each rewrite. If the incoming invalid trigger has
+         `validation_attempt >= 3`, write the failure artifact and emit
+         `redteam.failed` with `failed_stage: attack-surface-mapper`; otherwise
+         policy-check and emit `redteam.experiment.plan.ready`.
+
+      Single business event only.
+
+  experiment-plan-validator:
+    name: "Experiment Plan Validator"
+    description: "Performs project-agnostic feasibility checks before any red-team experiment is executed."
+    triggers: ["redteam.experiment.plan.ready"]
+    publishes: ["redteam.experiment.plan.valid", "redteam.experiment.plan.invalid", "redteam.failed"]
+    exempt_topics: ["redteam.experiment.plan.valid", "redteam.experiment.plan.invalid", "redteam.failed"]
+    terminal_events: ["redteam.experiment.plan.valid", "redteam.experiment.plan.invalid", "redteam.failed"]
+    event_filter:
+      enabled: true
+      events: ["redteam.experiment.plan.ready"]
+    instructions: |
+      ## EXPERIMENT PLAN VALIDATOR MODE
+
+      Validate the experiment plan before any experiment is executed. This hat
+      is project-agnostic: never require Rust, Cargo, Python, Node, Go, Java, or
+      any particular test framework.
+
+      OPAC: `ralph-tools-opac`. Before constructing any payload, run
+      `ralph tools skill load ralph-tools-emit` and follow Policy-Check feedback
+      and `ralph-tools-emit` §5. Write the validation artifact before emitting.
+
+      ### Mission
+      Read `attack_surface_path` and `experiment_plan_path` from the trigger,
+      then validate every planned experiment using evidence from the target
+      project itself. The validation artifact must record the command or project
+      discovery evidence used for each decision.
+
+      ### Generic feasibility contract
+      For every experiment, confirm:
+      - referenced files, directories, fixtures, scripts, and services are real;
+      - control and attack commands are concrete and differ only in the declared
+        attack condition;
+      - each command uses tools and flags shown to be available in this project;
+      - test selectors, scenario names, endpoints, or feature toggles are
+        verified through the project's own help/list/discovery path;
+      - the invariant and failure oracle are machine-checkable;
+      - required evidence, repeat policy, isolation boundary, and cleanup are
+        explicit and executable;
+      - no command targets production, real user data, or forbidden external
+        systems.
+
+      Do not mark a plan valid from prose alone. Do not invent a substitute
+      command. If a project-native discovery command is unavailable, record the
+      missing proof and reject the experiment for rewrite.
+
+      ### Steps
+      1. Run `test -f` on `attack_surface_path` and `experiment_plan_path`; read
+         both artifacts completely.
+      2. Verify HEAD/tree match the target lock and do not modify tracked files.
+      3. For every RTE, perform the generic feasibility checks above and write
+         `.ralph/red-team/plan-validation-attempt-<validation_attempt>.md` with
+         the result, evidence paths, failed experiment ID, and concrete rewrite
+         reason. Do not write production code or formal tests.
+      4. If every RTE passes, policy-check and emit
+         `redteam.experiment.plan.valid` with `validation_status: valid` and the
+         validation artifact path.
+      5. If any RTE fails and `validation_attempt < 3`, emit
+         `redteam.experiment.plan.invalid` with `validation_status: invalid`,
+         the first failed experiment ID, the validation report path, and the
+         exact rewrite reason. The mapper will rewrite only that experiment.
+      6. If any RTE fails at `validation_attempt == 3`, write the failure artifact
+         and emit `redteam.failed` with `failed_stage: experiment-plan-validator`
+         and a stable reason. Do not run an invalid experiment.
 
       Single business event only.
 
   experiment-runner:
     name: "Experiment Runner"
     description: "Executes one queued experiment per activation, saves hashed raw evidence, verifies tracked tree unchanged."
-    triggers: ["redteam.attack.mapped", "redteam.experiment.next"]
+    triggers: ["redteam.experiment.plan.valid", "redteam.experiment.next"]
     publishes: ["redteam.experiment.done", "redteam.failed"]
     exempt_topics: ["redteam.experiment.done", "redteam.failed"]
     terminal_events: ["redteam.experiment.done", "redteam.failed"]
     event_filter:
       enabled: true
-      events: ["redteam.attack.mapped", "redteam.experiment.next"]
+      events: ["redteam.experiment.plan.valid", "redteam.experiment.next"]
     instructions: |
       ## EXPERIMENT RUNNER MODE
 
@@ -626,7 +729,9 @@ hats:
       evidence-gate decides whether to schedule another experiment.
 
       ### Steps
-      1. On `redteam.attack.mapped`, read `attack_surface_path` and `experiment_plan_path` from the trigger, run `test -f` on both, read and validate both artifacts, then select the plan's
+      1. On `redteam.experiment.plan.valid`, read `attack_surface_path`,
+         `experiment_plan_path`, and `validation_report_path` from the trigger,
+         run `test -f` on all three, read the validation report, and select the plan's
          first unexecuted RTE identifier. On `redteam.experiment.next`, read
          `next_experiment_id` and `evidence_board_path`, run `test -f` on the
          board, read it to confirm the queue state, and execute exactly that

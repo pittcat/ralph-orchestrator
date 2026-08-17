@@ -5,10 +5,11 @@
 # at compile time. Edit ONLY this file when changing payload contract
 # requirements for any hat below.
 #
-# Topic coverage (8 declared hats plus the evidence queue handoff):
+# Topic coverage (9 declared hats plus the evidence queue handoff):
 #   target-locker       -> redteam.target.locked
 #   plan-resolver       -> redteam.plan.resolved
-#   attack-surface-mapper -> redteam.attack.mapped
+#   attack-surface-mapper -> redteam.experiment.plan.ready
+#   experiment-plan-validator -> redteam.experiment.plan.valid|invalid
 #   experiment-runner   -> redteam.experiment.done
 #   evidence-gate       -> redteam.evidence.gated
 #   impact-boundary     -> redteam.plan.ready
@@ -68,6 +69,7 @@ schemas:
     allowed_values:
       failed_stage:
         - plan-resolver
+        - experiment-plan-validator
         - attack-surface-mapper
         - experiment-runner
         - evidence-gate
@@ -194,50 +196,114 @@ schemas:
         source: Plan-resolver detects when independent base SHA differs from boundary base SHA.
         fill_rule: "Boolean; default false; true means cross_check=0 and attack-surface must refuse."
 
-  # attack-surface-mapper -> attack surfaces identified and experiments designed.
-  # experiment-runner reads the experiment plan artifact.
-  # 2026-08-08-004 review (fix-plan U1, A3) + 2026-08-10-002 plan U3
-  # (R6 / D5): the HARD GATE that attack-surface-mapper MUST NOT
-  # activate when scope is unresolved is now enforced at runtime via
-  # `predecessor_event` — the emit MUST reference a prior
-  # `redteam.plan.resolved` event by topic name. The corresponding
-  # `payload_consistency` rule is declared in
-  # `presets/en/red-team-attack.yml` (id
-  # `redteam-attack-mapped-predecessor-must-be-resolved`); this schema
-  # entry is the gate's typed surface. The rule uses `ne` to reject
-  # wrong literals; missing `predecessor_event` is rejected by
-  # `required_fields` here.
-  redteam.attack.mapped:
+  # attack-surface-mapper -> a plan artifact is ready for generic feasibility validation.
+  redteam.experiment.plan.ready:
     required_fields:
-      - surface_count
-      - experiment_count
       - attack_surface_path
       - experiment_plan_path
-      - predecessor_event
+      - experiment_count
+      - validation_attempt
     payload: json_object
     field_docs:
-      surface_count:
-        meaning: Number of attack surfaces identified.
-        source: Count from `.ralph/red-team/04-attack-surface.md`.
-        fill_rule: Integer >= 0.
-      experiment_count:
-        meaning: Number of experiments designed.
-        source: Count from `.ralph/red-team/05-experiment-plan.md`.
-        fill_rule: Integer >= 0.
       attack_surface_path:
         meaning: Path to the attack-surface artifact under `.ralph/`.
-        source: File actually written by attack-surface-mapper during this activation.
+        source: Attack-surface-mapper writes the artifact before emitting.
         fill_rule: Real readable `.ralph/` artifact path; run `test -f` before emit.
         examples: [".ralph/<plan>/<unit>/<attack-surface>.md"]
       experiment_plan_path:
-        meaning: Path to the experiment-plan artifact under `.ralph/`.
-        source: File actually written by attack-surface-mapper during this activation.
+        meaning: Path to the complete experiment plan awaiting validation.
+        source: Attack-surface-mapper writes the plan before emitting.
         fill_rule: Real readable `.ralph/` artifact path; run `test -f` before emit.
         examples: [".ralph/<plan>/<unit>/<experiment-plan>.md"]
-      predecessor_event:
-        meaning: Topic name of the prior scope-resolution event this emit binds to.
-        source: The current trigger context's source topic; the emitter fills the literal after verifying the accepted `redteam.plan.resolved` trigger.
-        fill_rule: Literal string `redteam.plan.resolved`. Missing field is rejected by `required_fields`; any value other than `redteam.plan.resolved` is rejected by the runtime payload_consistency rule `redteam-attack-mapped-predecessor-must-be-resolved`.
+      experiment_count:
+        meaning: Number of RTE entries declared in the experiment plan.
+        source: Count from the written experiment plan.
+        fill_rule: Positive integer matching the plan artifact.
+      validation_attempt:
+        meaning: Number of mapper rewrites already applied to this plan.
+        source: Zero on the initial plan; incremented only after a validator rejection.
+        fill_rule: Integer from 0 through 3; do not exceed the bounded rewrite budget.
+
+  # experiment-plan-validator -> plan passed generic feasibility checks.
+  redteam.experiment.plan.valid:
+    required_fields:
+      - attack_surface_path
+      - experiment_plan_path
+      - validation_report_path
+      - experiment_count
+      - validation_attempt
+      - validation_status
+    payload: json_object
+    allowed_values:
+      validation_status: [valid]
+    field_docs:
+      attack_surface_path:
+        meaning: Path to the validated attack-surface artifact.
+        source: Copied from the accepted plan.ready trigger after `test -f`.
+        fill_rule: Real readable `.ralph/` artifact path.
+        examples: [".ralph/<plan>/<unit>/<attack-surface>.md"]
+      experiment_plan_path:
+        meaning: Path to the experiment plan approved for execution.
+        source: Copied from the accepted plan.ready trigger after validation.
+        fill_rule: Real readable `.ralph/` artifact path.
+        examples: [".ralph/<plan>/<unit>/<experiment-plan>.md"]
+      validation_report_path:
+        meaning: Path to the validator's generic feasibility report.
+        source: Validator writes it before emit.
+        fill_rule: Real readable `.ralph/` artifact path; report must include discovery evidence for every RTE.
+        examples: [".ralph/<plan>/<unit>/plan-validation.md"]
+      experiment_count:
+        meaning: Number of experiments validated and released to the runner.
+        source: Validator counts the plan entries after reading the artifact.
+        fill_rule: Positive integer equal to the plan count.
+      validation_attempt:
+        meaning: Rewrite attempt associated with this validated plan.
+        source: Copied from the plan.ready trigger.
+        fill_rule: Integer from 0 through 3.
+      validation_status:
+        meaning: Validator's release decision.
+        source: Validator's per-experiment feasibility checks.
+        fill_rule: Literal `valid` only.
+
+  # experiment-plan-validator -> the named experiment needs mapper repair.
+  redteam.experiment.plan.invalid:
+    required_fields:
+      - experiment_plan_path
+      - validation_report_path
+      - failed_experiment_id
+      - reason
+      - validation_attempt
+      - validation_status
+    payload: json_object
+    allowed_values:
+      validation_status: [invalid]
+    field_docs:
+      experiment_plan_path:
+        meaning: Path to the plan containing the rejected experiment.
+        source: Copied from the plan.ready trigger.
+        fill_rule: Real readable `.ralph/` artifact path.
+        examples: [".ralph/<plan>/<unit>/<experiment-plan>.md"]
+      validation_report_path:
+        meaning: Path to the report containing concrete rewrite evidence.
+        source: Validator writes it before emit.
+        fill_rule: Real readable `.ralph/` artifact path.
+        examples: [".ralph/<plan>/<unit>/plan-validation.md"]
+      failed_experiment_id:
+        meaning: First RTE entry that failed generic feasibility validation.
+        source: Validator reads the experiment plan and report.
+        fill_rule: Existing `RTE-NNN` identifier; do not invent or skip entries.
+      reason:
+        meaning: Stable short reason identifying the missing feasibility proof.
+        source: Validator's report; full evidence stays in the validation artifact.
+        fill_rule: Non-empty stable token or bounded short summary; no fabricated project fact.
+      validation_attempt:
+        meaning: Rewrite attempt that produced this rejection.
+        source: Copied from the plan.ready trigger.
+        fill_rule: Integer 0 through 2; after attempt 3 emit redteam.failed instead.
+      validation_status:
+        meaning: Validator's release decision.
+        source: Validator's per-experiment feasibility checks.
+        fill_rule: Literal `invalid` only.
 
   # experiment-runner -> one experiment completed with raw evidence saved.
   # evidence-gate reads the experiment artifact and evidence files.
@@ -351,7 +417,7 @@ schemas:
         fill_rule: Non-negative integer; rejected candidates remain in the report.
       total_experiment_count:
         meaning: Number of experiments in the declared experiment plan.
-        source: attack.mapped experiment_count and the completed evidence board.
+        source: experiment.plan.valid experiment_count and the completed evidence board.
         fill_rule: Positive integer; must equal qualified plus rejected counts at finalization.
       minimum_confidence:
         meaning: Lowest confidence score among qualified experiments.
