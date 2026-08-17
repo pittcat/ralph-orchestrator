@@ -4,3 +4,4 @@ executor checkpoint: U1 committed=<pending> unit_tests=cargo nextest run -p ralp
 fixer checkpoint: U2 committed=49779db7 remaining=U1,U3,U4,U5
 fixer checkpoint: U3 committed=e0d1cc93 remaining=U1,U4,U5
 fixer checkpoint: U4 committed=9710dbf3 remaining=U1,U5
+fixer checkpoint: U1+U5 committed=95c2d31f remaining=(final verification)

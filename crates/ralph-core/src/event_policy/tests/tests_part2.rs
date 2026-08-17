@@ -4298,12 +4298,14 @@ fn u4_consistency_finding_carries_rule_guidance() {
 }
 
 /// U4 / R4: a rule with `recovery_guidance` produces a
-/// finding whose `evidence.failed_check_keys` is `None`
-/// (consistency never reports a failed-checks list — only
-/// the matched rule id). The renderer falls back to
-/// "render every `by_check` key" for consistency.
+/// finding whose `evidence.failed_check_keys` is `Some(vec![rule.id])`
+/// — the consistency path seeds the matched rule id explicitly so the
+/// renderer's filter surface (no fallback to "render every by_check
+/// key") applies. U6 fix-plan (2026-08-17-1841) A1 changed the
+/// consistency side from the original "render every by_check" fallback
+/// to explicit seeding; this test reflects the new contract.
 #[test]
-fn u4_consistency_finding_failed_check_keys_stays_none() {
+fn u4_consistency_finding_seeds_failed_check_keys_with_rule_id() {
     let rule = rule_with_guidance(
         "rule-u4",
         "fix.done",
@@ -4326,7 +4328,11 @@ fn u4_consistency_finding_failed_check_keys_stays_none() {
         panic!("expected RejectWithResume, got {decision:?}");
     };
     let evidence = finding.evidence.expect("evidence present");
-    assert!(evidence.failed_check_keys.is_none());
+    let keys = evidence
+        .failed_check_keys
+        .as_ref()
+        .expect("U6 fix-plan A1: consistency path seeds the matched rule id");
+    assert_eq!(keys, &vec!["rule-u4".to_string()]);
     assert_eq!(
         evidence.guidance.as_ref().unwrap().by_check.get("rule-u4").cloned(),
         Some(vec!["specific".to_string()])
