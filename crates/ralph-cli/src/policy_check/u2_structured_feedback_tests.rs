@@ -41,6 +41,7 @@ fn finding_with_evidence_unavailable() -> PolicyFinding {
             proof: String::new(),
             synthetic: false,
             guidance: None,
+            failed_check_keys: None,
         }),
     }
 }

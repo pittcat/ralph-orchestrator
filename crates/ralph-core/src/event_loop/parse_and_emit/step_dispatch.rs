@@ -313,8 +313,23 @@ impl EventLoop {
                 // rejections get per-check `unchecked`
                 // observations so the hat cannot mistake them
                 // for a clean "the check failed" verification.
+                // U3 (plan 2026-08-17-1841, R2/R3/D2/D3): thread
+                // the precheck rule's optional `recovery_guidance`
+                // into the evidence so the U2 correction renderer
+                // surfaces the preset-supplied common / by_check
+                // items at the target hat's prompt.  When no rule
+                // is registered (e.g. legacy / desugared presets)
+                // the function returns the same evidence shape
+                // with `guidance = None` and `failed_check_keys`
+                // still populated.
+                let rule_ref = self
+                    .config
+                    .event_loop
+                    .precheck
+                    .as_ref()
+                    .and_then(|pc| pc.rules.get(guarded));
                 if let Some(evidence) =
-                    runner::build_precheck_evidence(guarded, rejected_payload_json)
+                    runner::build_precheck_evidence(guarded, rejected_payload_json, rule_ref)
                 {
                     ctx = ctx.with_feedback_kind(crate::correction::FeedbackKind::Semantic);
                     ctx = ctx.with_evidence(evidence);

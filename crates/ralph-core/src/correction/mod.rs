@@ -235,6 +235,14 @@ pub struct EvidenceDetail {
     /// failed check and never for synthetic rejections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guidance: Option<RecoveryGuidance>,
+    /// 2026-08-17-1841 U3: failed-check keys produced by the
+    /// gate (1-based precheck checklist indices).  The renderer
+    /// uses this list to filter `guidance.by_check` so only the
+    /// actually-failed checks render.  `None` (consistency and
+    /// legacy callers) renders every `by_check` key, matching
+    /// the U2 baseline.  Ignored when `synthetic == true` (D3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_check_keys: Option<Vec<String>>,
 }
 
 /// One field observation: the field name (declared in the
@@ -552,9 +560,11 @@ impl CorrectionContext {
     ///
     /// - `Common recovery guidance` — every `common` item,
     ///   rendered in insertion order.
-    /// - `Check-specific recovery guidance` — every
-    ///   `by_check[<key>]` item whose `key` is in
-    ///   `failed_check_keys`.  Synthetic rejections suppress
+    /// - `Check-specific recovery guidance` — items from
+    ///   `by_check[<key>]` whose `key` is in
+    ///   `evidence.failed_check_keys`.  When that list is
+    ///   absent (consistency / legacy callers) every
+    ///   `by_check` key renders.  Synthetic rejections suppress
     ///   this sub-section (D3: do not fabricate a failed
     ///   check).
     ///
@@ -586,11 +596,19 @@ impl CorrectionContext {
         // (D3: no fabricated failed check) AND when the rule
         // did not declare any `by_check` map.
         if !evidence.synthetic && !guidance.by_check.is_empty() {
-            // Caller passes the matched failed-check keys
-            // (precheck 1-based indices or consistency rule id).
-            // Render each in declared iteration order, dedup
-            // is the caller's responsibility.
-            let mut keys: Vec<&String> = guidance.by_check.keys().collect();
+            // Filter by `failed_check_keys` when present (U3
+            // precheck path); fall back to "render all keys"
+            // when absent (U4 consistency path / legacy
+            // callers).
+            let matching_keys: Vec<&String> = match &evidence.failed_check_keys {
+                Some(keys) => guidance
+                    .by_check
+                    .keys()
+                    .filter(|k| keys.iter().any(|m| m == *k))
+                    .collect(),
+                None => guidance.by_check.keys().collect(),
+            };
+            let mut keys = matching_keys;
             keys.sort();
             for key in keys {
                 if let Some(items) = guidance.by_check.get(key) {
@@ -2121,6 +2139,7 @@ mod tests {
             proof: "rerun ralph emit --policy-check after fixing the artifact".into(),
             synthetic: false,
             guidance: None,
+            failed_check_keys: None,
         };
         let ctx = CorrectionContext::from_rejection(&r, 1)
             .with_feedback_kind(FeedbackKind::Semantic)
@@ -2148,6 +2167,7 @@ mod tests {
             proof: String::new(),
             synthetic: true,
             guidance: None,
+            failed_check_keys: None,
         };
         let ctx = CorrectionContext::from_rejection(&r, 1)
             .with_feedback_kind(FeedbackKind::Semantic)
@@ -2286,6 +2306,7 @@ mod tests {
             proof: "rebuild from artifact and rerun ralph emit --policy-check".into(),
             synthetic: false,
             guidance: None,
+            failed_check_keys: None,
         };
         let ctx = CorrectionContext::from_rejection(&r, 1)
             .with_feedback_kind(FeedbackKind::Semantic)
@@ -2423,6 +2444,7 @@ mod tests {
             proof: String::new(),
             synthetic: true,
             guidance: None,
+            failed_check_keys: None,
         };
         let ctx = CorrectionContext::from_rejection(&r, 1)
             .with_feedback_kind(FeedbackKind::Semantic)
@@ -2478,6 +2500,7 @@ mod tests {
                 proof: "test".into(),
                 synthetic: false,
                 guidance: None,
+                failed_check_keys: None,
             });
         let block = ctx.render_block();
         assert!(
@@ -2503,6 +2526,7 @@ mod tests {
                 proof: "test".into(),
                 synthetic: false,
                 guidance: Some(guidance(&["rebuild payload", "rerun policy-check"], &[])),
+                failed_check_keys: None,
             });
         let block = ctx.render_block();
         assert!(block.contains("## Common recovery guidance"));
@@ -2526,6 +2550,7 @@ mod tests {
                     &["common hint"],
                     &[("rule-a", &["specific hint"])],
                 )),
+                failed_check_keys: None,
             });
         let block = ctx.render_block();
         assert!(block.contains("## Common recovery guidance"));
@@ -2552,6 +2577,7 @@ mod tests {
                     &["common hint"],
                     &[("rule-a", &["specific hint"])],
                 )),
+                failed_check_keys: None,
             });
         let block = ctx.render_block();
         assert!(block.contains("## Common recovery guidance"));
@@ -2581,6 +2607,7 @@ mod tests {
                     &["hint"],
                     &[("rule-a", &["use this payload to satisfy the gate"])],
                 )),
+                failed_check_keys: None,
             });
         let block = ctx.render_block();
         assert!(!block.contains("Suggested payload"));
@@ -2603,6 +2630,7 @@ mod tests {
                 proof: "test".into(),
                 synthetic: false,
                 guidance: Some(guidance(&["fix \x1b[31mred\x1b[0m"], &[])),
+                failed_check_keys: None,
             });
         let block = ctx.render_block();
         // ANSI escapes are stripped, but the visible text remains.
@@ -2624,6 +2652,7 @@ mod tests {
             proof: "test".into(),
             synthetic: false,
             guidance: Some(guidance(&["common"], &[("rule-a", &["specific"])])),
+            failed_check_keys: None,
         };
         let json = serde_json::to_string(&evidence).expect("serialise");
         let parsed: EvidenceDetail = serde_json::from_str(&json).expect("deserialise");

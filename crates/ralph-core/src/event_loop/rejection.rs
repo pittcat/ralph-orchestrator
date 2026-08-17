@@ -2336,12 +2336,8 @@ mod tests {
         let malformed_payload = "[\"not\",\"an\",\"object\"]";
         let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
         map.insert("work.done".into(), vec!["plan_path".into()]);
-        let result = merge_terminal_contract(
-            malformed_payload,
-            &["work.done".into()],
-            "work.done",
-            &map,
-        );
+        let result =
+            merge_terminal_contract(malformed_payload, &["work.done".into()], "work.done", &map);
         let v: serde_json::Value = serde_json::from_str(&result).expect(
             "degraded envelope must itself be valid JSON so downstream consumers can introspect it",
         );
@@ -2375,12 +2371,8 @@ mod tests {
         let malformed_payload = "{\"retry_key\": \"x\"";
         let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
         map.insert("work.done".into(), vec!["plan_path".into()]);
-        let result = merge_terminal_contract(
-            malformed_payload,
-            &["work.done".into()],
-            "work.done",
-            &map,
-        );
+        let result =
+            merge_terminal_contract(malformed_payload, &["work.done".into()], "work.done", &map);
         let v: serde_json::Value = serde_json::from_str(&result).expect(
             "degraded envelope must itself be valid JSON so downstream consumers can introspect it",
         );
@@ -2413,18 +2405,14 @@ mod tests {
     #[test]
     fn pmi003_primary_terminal_topic_must_be_member_of_terminal_topics() {
         use std::collections::BTreeMap;
-        let r = Rejection::from_topic_format(
-            Some("executor".into()),
-            "terminal_event".into(),
-            &[],
-        );
+        let r = Rejection::from_topic_format(Some("executor".into()), "terminal_event".into(), &[]);
         let empty_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let payload_str = build_task_resume_payload_with_terminal_contract(
             &r,
-            &[],            // allowed_topics
-            &[],            // terminal_topics (empty — fallback fires)
+            &[],              // allowed_topics
+            &[],              // terminal_topics (empty — fallback fires)
             "terminal_event", // primary_terminal_topic (the hard-coded literal)
-            &empty_map,     // terminal_required_fields (no schema for the literal)
+            &empty_map,       // terminal_required_fields (no schema for the literal)
             None,
             None,
             None,

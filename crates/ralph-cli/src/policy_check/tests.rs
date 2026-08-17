@@ -898,6 +898,7 @@ fn u4_semantic_finding_carries_observed_invariant_required_proof() {
             proof: "rebuild from artifact and rerun ralph emit --policy-check".into(),
             synthetic: false,
             guidance: None,
+            failed_check_keys: None,
         }),
     };
     let error = finding_record(&finding);

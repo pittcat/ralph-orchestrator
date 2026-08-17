@@ -305,12 +305,8 @@ mod tests {
         // Layer 3 (guard): post-fix must reject wrong-target terminal emit.
         let guard = TerminalTargetGuardStage::new(contracts);
         let mut repair = RepairStateMachine::default();
-        let mut c = StageContext::for_test_machine(
-            FlowStep::new("unit_loop"),
-            "loop-1",
-            1,
-            &mut repair,
-        );
+        let mut c =
+            StageContext::for_test_machine(FlowStep::new("unit_loop"), "loop-1", 1, &mut repair);
         let event = Event::new("report.done", r#"{"target_hat":"executor"}"#);
         let guard_fail_closed = guard.check(&mut c, &event).is_err();
 
@@ -330,7 +326,9 @@ mod tests {
              must fail-closed at SOME layer (wiring, guard, or lint). \
              Observed all three layers silent: wiring_fail_closed={}, \
              guard_fail_closed={}, lint_fail_closed={}",
-            wiring_fail_closed, guard_fail_closed, lint_fail_closed,
+            wiring_fail_closed,
+            guard_fail_closed,
+            lint_fail_closed,
         );
     }
 }

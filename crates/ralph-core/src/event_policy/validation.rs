@@ -1875,6 +1875,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                     ),
                     synthetic: false,
                     guidance: None,
+                    failed_check_keys: None,
                 };
                 findings.push(PolicyFinding {
                     topic: topic.to_string(),

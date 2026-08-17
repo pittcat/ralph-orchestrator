@@ -497,8 +497,7 @@ fn pmi007_production_constructors_lack_compile_time_or_runtime_stage_order_lock(
     // either a `debug_assert!` or `assert!` mentioning both stages.
     let run_has_order_assertion = run_body.contains("debug_assert")
         || (run_body.contains("assert!")
-            && (run_body.contains("TerminalTargetGuard")
-                || run_body.contains("VerdictGate")));
+            && (run_body.contains("TerminalTargetGuard") || run_body.contains("VerdictGate")));
     assert!(
         !run_has_order_assertion,
         "PMI-007 fix landed: StagePipeline::run now runtime-checks \
@@ -516,10 +515,7 @@ fn pmi007_production_constructors_lack_compile_time_or_runtime_stage_order_lock(
 
     for ctor in &ctors {
         let body = extract_fn_body(STAGE_PIPELINE_SRC, &format!("pub fn {ctor}"));
-        assert!(
-            !body.is_empty(),
-            "could not locate body for {ctor}",
-        );
+        assert!(!body.is_empty(), "could not locate body for {ctor}",);
         // Body extends to closing brace of the function, which is
         // fine — we just need to scan its content for any
         // `assert_stage_order!` invocation.
@@ -539,15 +535,12 @@ fn pmi007_production_constructors_lack_compile_time_or_runtime_stage_order_lock(
         "mechanism:\n  flow:\n    type: declared\n    version: 1\n    terminal_emits: [LOOP_COMPLETE]\n    steps: []\n",
     )
     .unwrap();
-    let p_default =
-        StagePipeline::with_default_stages_for_loop_config(flow.clone(), None);
+    let p_default = StagePipeline::with_default_stages_for_loop_config(flow.clone(), None);
     let p_hat_only = StagePipeline::with_hat_only_stages_for_loop_config(None);
     let p_phase = StagePipeline::with_phase_authority_stages_for_loop_config(
         flow,
         None,
-        std::sync::Arc::new(
-            crate::event_loop::phase_authority::WorkflowPhaseAuthority::disabled(),
-        ),
+        std::sync::Arc::new(crate::event_loop::phase_authority::WorkflowPhaseAuthority::disabled()),
     );
     assert!(p_default.names().contains(&"TerminalTargetGuard"));
     assert!(p_hat_only.names().contains(&"TerminalTargetGuard"));

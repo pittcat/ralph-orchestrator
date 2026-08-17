@@ -299,9 +299,20 @@ pub fn build_exhausted_payload(topic: &str, reason: &str) -> String {
 /// Returns `None` when the payload is malformed JSON so the
 /// caller can fall back to a generic "rejected payload
 /// malformed" diagnostic without inventing evidence.
+///
+/// U3 (plan 2026-08-17-1841, R2 / R3 / D2 / D3): when
+/// `rule.recovery_guidance` is present, the function threads
+/// the preset-supplied common / by_check items into the
+/// `EvidenceDetail` so the U2 correction renderer surfaces
+/// them at the target hat's prompt.  The function also records
+/// `failed_check_keys` (the failed-checks string list) so the
+/// renderer can filter `by_check` to only the actually-failed
+/// checks.  Synthetic rejections carry the guidance block too,
+/// but the renderer suppresses the specific sub-section (D3).
 pub fn build_precheck_evidence(
     guarded_topic: &str,
     rejected_payload_json: &str,
+    rule: Option<&crate::config::PrecheckRule>,
 ) -> Option<crate::correction::EvidenceDetail> {
     use crate::correction::{EvidenceDetail, ObservationEntry, ObservationValue};
     let parsed: serde_json::Value = match serde_json::from_str(rejected_payload_json) {
@@ -364,12 +375,26 @@ pub fn build_precheck_evidence(
         "Reinvestigate the artifact / test for `{guarded_topic}` against the gate's checklist; do not change only the failed_check indices. After fixing the underlying artifact, re-run `ralph emit --policy-check` and re-emit the original `{guarded_topic}` event."
     );
 
+    // U3: thread the preset-supplied recovery guidance (when
+    // present) into the evidence so the U2 correction renderer
+    // can surface the common / by_check items at the target
+    // hat's prompt.  Also record `failed_check_keys` so the
+    // renderer can filter `by_check` to the actually-failed
+    // checks (mirrors the gate's reported failed_checks).
+    let guidance = rule.and_then(|r| r.recovery_guidance.clone());
+    let failed_check_keys = if failed_checks.is_empty() {
+        None
+    } else {
+        Some(failed_checks.clone())
+    };
+
     Some(EvidenceDetail {
         observed,
         invariant,
         proof,
         synthetic,
-        guidance: None,
+        guidance,
+        failed_check_keys,
     })
 }
 
@@ -603,7 +628,7 @@ mod tests {
     fn u2_build_precheck_evidence_marks_synthetic() {
         let json =
             r#"{"failed_checks":[1,2,3],"reason":"gate_silent_or_ambiguous","synthetic":true}"#;
-        let evidence = build_precheck_evidence("work.done", json).unwrap();
+        let evidence = build_precheck_evidence("work.done", json, None).unwrap();
         assert!(evidence.synthetic);
         assert!(
             evidence.observed.is_empty(),
@@ -619,7 +644,7 @@ mod tests {
     fn u2_build_precheck_evidence_marks_llm_checks_unchecked() {
         use crate::correction::ObservationValue;
         let json = r#"{"failed_checks":[2],"reason":"missing test report","synthetic":false}"#;
-        let evidence = build_precheck_evidence("work.done", json).unwrap();
+        let evidence = build_precheck_evidence("work.done", json, None).unwrap();
         assert!(!evidence.synthetic);
         assert_eq!(evidence.observed.len(), 1);
         assert_eq!(evidence.observed[0].field, "check_2");
@@ -634,7 +659,7 @@ mod tests {
     fn u2_build_precheck_evidence_preserves_string_check_identity() {
         use crate::correction::ObservationValue;
         let json = r#"{"failed_checks":["confidence_inflated"],"reason":"missing evidence","synthetic":false}"#;
-        let evidence = build_precheck_evidence("work.done", json).unwrap();
+        let evidence = build_precheck_evidence("work.done", json, None).unwrap();
         assert_eq!(evidence.observed.len(), 1);
         assert_eq!(evidence.observed[0].field, "check_confidence_inflated");
         assert!(matches!(
@@ -646,7 +671,111 @@ mod tests {
 
     #[test]
     fn u2_build_precheck_evidence_returns_none_for_malformed() {
-        let evidence = build_precheck_evidence("work.done", "not json");
+        let evidence = build_precheck_evidence("work.done", "not json", None);
         assert!(evidence.is_none());
+    }
+
+    // ── U3 (plan 2026-08-17-1841) — guidance selection ──
+
+    use crate::config::{PrecheckOnFail, PrecheckRule};
+
+    fn rule_with_prompt(
+        prompt: Vec<&str>,
+        guidance: Option<crate::config::RecoveryGuidance>,
+    ) -> PrecheckRule {
+        PrecheckRule {
+            prompt: prompt.into_iter().map(String::from).collect(),
+            on_fail: PrecheckOnFail {
+                target: "executor".into(),
+                retry_budget: 3,
+                on_exhausted: String::new(),
+                reason: String::new(),
+            },
+            recovery_guidance: guidance,
+        }
+    }
+
+    fn guidance(common: &[&str], by_check: &[(&str, &[&str])]) -> crate::config::RecoveryGuidance {
+        crate::config::RecoveryGuidance {
+            common: common.iter().map(|s| s.to_string()).collect(),
+            by_check: by_check
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.to_string(),
+                        v.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// U3 / R2: when the rule declares `recovery_guidance` and
+    /// the gate reports `failed_checks = [2]`, the evidence
+    /// carries the preset-supplied guidance + the failed check
+    /// keys so the renderer can filter by_check.
+    #[test]
+    fn u3_build_precheck_evidence_threads_guidance_and_failed_keys() {
+        let json = r#"{"failed_checks":[2],"reason":"missing report","synthetic":false}"#;
+        let rule = rule_with_prompt(
+            vec!["a", "b", "c"],
+            Some(guidance(
+                &["common hint"],
+                &[("2", &["fill required report"])],
+            )),
+        );
+        let evidence = build_precheck_evidence("work.done", json, Some(&rule)).unwrap();
+        let g = evidence.guidance.as_ref().expect("guidance populated");
+        assert_eq!(g.common, vec!["common hint".to_string()]);
+        assert_eq!(
+            g.by_check.get("2").map(|v| v.clone()),
+            Some(vec!["fill required report".to_string()])
+        );
+        let keys = evidence.failed_check_keys.as_ref().expect("failed keys");
+        assert_eq!(keys, &vec!["2".to_string()]);
+    }
+
+    /// U3 / D3: synthetic rejection carries the guidance but
+    /// `synthetic = true` — the renderer must suppress the
+    /// specific sub-section.
+    #[test]
+    fn u3_synthetic_carries_guidance_but_renderer_suppresses() {
+        let json = r#"{"failed_checks":[1,2,3],"reason":"silent","synthetic":true}"#;
+        let rule = rule_with_prompt(
+            vec!["a", "b", "c"],
+            Some(guidance(&["common"], &[("1", &["specific-1"])])),
+        );
+        let evidence = build_precheck_evidence("work.done", json, Some(&rule)).unwrap();
+        assert!(evidence.synthetic);
+        assert!(
+            evidence.guidance.is_some(),
+            "guidance must be threaded for synthetic too"
+        );
+        assert!(evidence.failed_check_keys.is_some());
+    }
+
+    /// U3 / R2: when no rule is supplied the function still
+    /// populates `failed_check_keys` (the gate reported them),
+    /// and `guidance` stays `None` (legacy callers).
+    #[test]
+    fn u3_no_rule_still_records_failed_keys() {
+        let json = r#"{"failed_checks":["confidence_inflated"],"reason":"x","synthetic":false}"#;
+        let evidence = build_precheck_evidence("work.done", json, None).unwrap();
+        assert!(evidence.guidance.is_none());
+        let keys = evidence.failed_check_keys.as_ref().expect("keys present");
+        assert_eq!(keys, &vec!["confidence_inflated".to_string()]);
+    }
+
+    /// U3 / R2 / D3: empty `failed_checks` leaves the
+    /// `failed_check_keys` field as `None`.  The renderer
+    /// falls back to "render all by_check keys" only when
+    /// the field is absent; here we want to preserve the
+    /// rule's intent even when the gate reported no
+    /// specific check.
+    #[test]
+    fn u3_empty_failed_checks_leaves_failed_keys_none() {
+        let json = r#"{"reason":"x","synthetic":false}"#;
+        let evidence = build_precheck_evidence("work.done", json, None).unwrap();
+        assert!(evidence.failed_check_keys.is_none());
     }
 }

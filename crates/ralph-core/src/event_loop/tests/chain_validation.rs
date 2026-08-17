@@ -624,6 +624,7 @@ fn u1_semantic_evidence_block_renders_in_correction_prompt() {
         proof: "rebuild payload from the artifact and rerun ralph emit --policy-check".into(),
         synthetic: false,
         guidance: None,
+        failed_check_keys: None,
     };
     pc.push_correction(
         CorrectionContext::from_rejection(&target, 1)
