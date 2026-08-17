@@ -32,8 +32,8 @@
 
 use crate::config::{PayloadConsistencyRule, PrecheckRule, RalphConfig, RecoveryGuidance};
 use crate::preset_lint::finding_id::{
-    FINDING_RECOVERY_GUIDANCE_EMPTY_ITEM, FINDING_RECOVERY_GUIDANCE_UNKNOWN_CHECK,
-    FINDING_RECOVERY_GUIDANCE_UNSAFE_ITEM,
+    FINDING_DUPLICATE_RULE_ID, FINDING_RECOVERY_GUIDANCE_EMPTY_ITEM,
+    FINDING_RECOVERY_GUIDANCE_UNKNOWN_CHECK, FINDING_RECOVERY_GUIDANCE_UNSAFE_ITEM,
 };
 use crate::preset_lint::{LintFinding, LintSeverity, LintStrictness};
 
@@ -74,14 +74,52 @@ pub fn check_recovery_guidance(
     }
 
     if let Some(policy) = config.event_loop.event_policy.as_ref() {
+        // U4 / A3 (plan 2026-08-17-1841): track rule ids that have
+        // a `recovery_guidance` block so duplicate ids surface a
+        // `FINDING_DUPLICATE_RULE_ID` finding. The runtime
+        // `validation.rs` short-circuits on the first matching
+        // rule id, so the second rule's guidance is silently
+        // dropped — the lint catches the drift at preset-load time.
+        let mut seen_with_guidance: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for rule in &policy.payload_consistency.rules {
             if let Some(guidance) = &rule.recovery_guidance {
                 findings.extend(check_consistency_rule_guidance(rule, guidance, severity));
+                if !seen_with_guidance.insert(rule.id.clone()) {
+                    findings.push(duplicate_rule_id_finding(severity, &rule.id));
+                }
             }
         }
     }
 
     findings
+}
+
+/// U4 / A3 finding constructor. Fires when two
+/// `payload_consistency.rules[]` entries share an `id` AND both
+/// declare a `recovery_guidance` block. Runtime `validation.rs`
+/// `break`s on the first match, so the second rule's guidance
+/// is silently dropped — the lint surfaces this at preset-load
+/// time.
+fn duplicate_rule_id_finding(severity: LintSeverity, rule_id: &str) -> LintFinding {
+    LintFinding {
+        id: FINDING_DUPLICATE_RULE_ID,
+        severity,
+        message: format!(
+            "two `event_policy.payload_consistency.rules[]` entries share id \"{rule_id}\" \
+             and both declare a `recovery_guidance` block; the runtime evaluator in \
+             `event_policy/validation.rs` short-circuits on the first matching rule, so \
+             the second rule's recovery_guidance is silently dropped at runtime"
+        ),
+        topic: None,
+        hat: None,
+        owner: None,
+        action_hint: Some(format!(
+            "rename one of the rules with id \"{rule_id}\" so the rule ids are unique; \
+             duplicate ids without recovery_guidance are caught by \
+             FINDING_PAYLOAD_CONSISTENCY_DUPLICATE_ID separately"
+        )),
+    }
 }
 
 /// Plan 2026-08-17-1841 U3 / M2 / R9: shared core loop for both
@@ -783,5 +821,109 @@ mod tests {
                 "key {key:?}: got {findings:?}"
             );
         }
+    }
+
+    // ── U4 / A3 (plan 2026-08-17-1841) — duplicate rule id
+    // detection. Two `payload_consistency.rules[]` entries that
+    // share an `id` AND both declare `recovery_guidance` ⇒ emit
+    // `FINDING_DUPLICATE_RULE_ID`. Runtime `validation.rs` `break`s
+    // on the first matching rule, so the second rule's guidance
+    // is silently dropped — the lint catches the drift at
+    // preset-load time.
+
+    /// U4 / A3 happy path: two rules with distinct ids (both
+    /// with recovery_guidance) ⇒ no `DUPLICATE_RULE_ID` finding.
+    #[test]
+    fn duplicate_rule_id_happy_path_passes() {
+        let cfg = consistency_config("rule-a", "fix.done", Some(guidance_with(vec![], BTreeMap::new())));
+        let findings = check_recovery_guidance(&cfg, LintStrictness::Strict);
+        assert!(
+            !findings.iter().any(|f| f.id == FINDING_DUPLICATE_RULE_ID),
+            "got {findings:?}"
+        );
+    }
+
+    /// U4 / A3 negative: two rules share id `"X"` and both
+    /// declare `recovery_guidance` ⇒ emit `FINDING_DUPLICATE_RULE_ID`.
+    #[test]
+    fn duplicate_rule_id_with_recovery_guidance_is_flagged() {
+        use crate::config::{
+            EventPolicyConfig, PayloadConsistencyConfig, PayloadConsistencyRule,
+        };
+        let rule_a = PayloadConsistencyRule {
+            id: "shared-id".into(),
+            topic: "fix.done".into(),
+            when: serde_json::json!({"field": "x", "eq": 1}),
+            message: "first".into(),
+            recovery_guidance: Some(guidance_with(
+                vec!["first common"],
+                BTreeMap::from([("shared-id".into(), vec!["first".into()])]),
+            )),
+        };
+        let rule_b = PayloadConsistencyRule {
+            id: "shared-id".into(),
+            topic: "fix.done".into(),
+            when: serde_json::json!({"field": "y", "eq": 2}),
+            message: "second".into(),
+            recovery_guidance: Some(guidance_with(
+                vec!["second common"],
+                BTreeMap::from([("shared-id".into(), vec!["second".into()])]),
+            )),
+        };
+        let mut cfg = RalphConfig::default();
+        cfg.event_loop.event_policy = Some(EventPolicyConfig {
+            enabled: true,
+            mode: Default::default(),
+            payload_consistency: PayloadConsistencyConfig {
+                enabled: true,
+                rules: vec![rule_a, rule_b],
+            },
+            ..EventPolicyConfig::default()
+        });
+        let findings = check_recovery_guidance(&cfg, LintStrictness::Strict);
+        assert!(
+            findings.iter().any(|f| f.id == FINDING_DUPLICATE_RULE_ID),
+            "expected DUPLICATE_RULE_ID finding; got {findings:?}"
+        );
+    }
+
+    /// U4 / A3 control: duplicate ids where only ONE rule has
+    /// recovery_guidance ⇒ no `DUPLICATE_RULE_ID` finding. The
+    /// lint is narrow on purpose — the runtime drop only matters
+    /// when both rules' guidance would have been used.
+    #[test]
+    fn duplicate_rule_id_without_recovery_guidance_pair_is_not_flagged() {
+        use crate::config::{
+            EventPolicyConfig, PayloadConsistencyConfig, PayloadConsistencyRule,
+        };
+        let rule_a = PayloadConsistencyRule {
+            id: "shared-id".into(),
+            topic: "fix.done".into(),
+            when: serde_json::json!({"field": "x", "eq": 1}),
+            message: "first".into(),
+            recovery_guidance: Some(guidance_with(vec![], BTreeMap::new())),
+        };
+        let rule_b = PayloadConsistencyRule {
+            id: "shared-id".into(),
+            topic: "fix.done".into(),
+            when: serde_json::json!({"field": "y", "eq": 2}),
+            message: "second".into(),
+            recovery_guidance: None,
+        };
+        let mut cfg = RalphConfig::default();
+        cfg.event_loop.event_policy = Some(EventPolicyConfig {
+            enabled: true,
+            mode: Default::default(),
+            payload_consistency: PayloadConsistencyConfig {
+                enabled: true,
+                rules: vec![rule_a, rule_b],
+            },
+            ..EventPolicyConfig::default()
+        });
+        let findings = check_recovery_guidance(&cfg, LintStrictness::Strict);
+        assert!(
+            !findings.iter().any(|f| f.id == FINDING_DUPLICATE_RULE_ID),
+            "only one rule carries recovery_guidance; got {findings:?}"
+        );
     }
 }

@@ -428,17 +428,56 @@ fn build_observed_invariant_proof(
 /// the common / by_check items at the target hat's prompt, and
 /// record `failed_check_keys` so the renderer can filter
 /// `by_check` to the actually-failed checks.
+///
+/// U4 / A1 (plan 2026-08-17-1841): when the gate reported no
+/// `failed_checks` but the rule declares a non-empty `by_check`
+/// map, the prior implementation set `failed_check_keys = None`
+/// and let the renderer fall back to "render every `by_check`
+/// key" — a false-failure-misdirection. The function now
+/// suppresses the entire guidance block in that case (the rule
+/// author wrote a rule that fires on a non-specific failure
+/// shape, and the renderer should not fabricate specificity).
+///
+/// U4 / A2: `synthetic = true` requires `failed_checks` to be
+/// empty. A synthetic gate that names specific failed checks is a
+/// contract contradiction — synthetic means "the gate was silent
+/// or ambiguous", which is incompatible with a structured list of
+/// failed checks. Same fail-loud suppression applies.
 fn inject_recovery_guidance_into_proof(
     mut evidence: crate::correction::EvidenceDetail,
     rule: Option<&crate::config::PrecheckRule>,
     failed_checks: &[String],
 ) -> Option<crate::correction::EvidenceDetail> {
-    evidence.guidance = rule.and_then(|r| r.recovery_guidance.clone());
-    evidence.failed_check_keys = if failed_checks.is_empty() {
-        None
+    let rule_guidance = rule.and_then(|r| r.recovery_guidance.clone());
+    let rule_has_specific_guidance = rule_guidance
+        .as_ref()
+        .map(|g| !g.by_check.is_empty())
+        .unwrap_or(false);
+    let synthetic_with_failed_checks =
+        evidence.synthetic && !failed_checks.is_empty();
+
+    // U4 / A1: fail-loud when the rule promised specific guidance
+    // but the gate produced no failed_checks to filter by. Synthetic
+    // rejections are exempt — the renderer suppresses the
+    // specific sub-section anyway (D3), so the empty-failed-check
+    // shape is canonical for synthetic.
+    let suppress_for_a1 = !evidence.synthetic
+        && rule_has_specific_guidance
+        && failed_checks.is_empty();
+    // U4 / A2: fail-loud on synthetic + non-empty failed_checks.
+    let suppress_for_a2 = synthetic_with_failed_checks;
+
+    if suppress_for_a1 || suppress_for_a2 {
+        evidence.guidance = None;
+        evidence.failed_check_keys = None;
     } else {
-        Some(failed_checks.to_vec())
-    };
+        evidence.guidance = rule_guidance;
+        evidence.failed_check_keys = if failed_checks.is_empty() {
+            None
+        } else {
+            Some(failed_checks.to_vec())
+        };
+    }
     Some(evidence)
 }
 
@@ -784,7 +823,15 @@ mod tests {
     /// specific sub-section.
     #[test]
     fn u3_synthetic_carries_guidance_but_renderer_suppresses() {
-        let json = r#"{"failed_checks":[1,2,3],"reason":"silent","synthetic":true}"#;
+        // U4 / A2 (plan 2026-08-17-1841) updated this fixture:
+        // `synthetic = true` requires `failed_checks` to be empty
+        // (synthetic means "the gate was silent or ambiguous",
+        // which is incompatible with a structured list of failed
+        // checks). The prior version of this test used
+        // `failed_checks:[1,2,3]` together with `synthetic:true`
+        // — A2 fail-loud now suppresses the guidance block in
+        // that case.
+        let json = r#"{"failed_checks":[],"reason":"silent","synthetic":true}"#;
         let rule = rule_with_prompt(
             vec!["a", "b", "c"],
             Some(guidance(&["common"], &[("1", &["specific-1"])])),
@@ -795,7 +842,7 @@ mod tests {
             evidence.guidance.is_some(),
             "guidance must be threaded for synthetic too"
         );
-        assert!(evidence.failed_check_keys.is_some());
+        assert!(evidence.failed_check_keys.is_none());
     }
 
     /// U3 / R2: when no rule is supplied the function still
@@ -845,5 +892,101 @@ mod tests {
         let evidence = build_precheck_evidence("work.done", json, Some(&rule)).unwrap();
         let keys = evidence.failed_check_keys.as_ref().expect("keys present");
         assert_eq!(keys, &vec!["1".to_string(), "3".to_string()]);
+    }
+
+    /// U4 / A1 (plan 2026-08-17-1841): when the gate reported an
+    /// empty `failed_checks` list but the rule declared a
+    /// non-empty `by_check` map, the prior implementation set
+    /// `failed_check_keys = None` and let the renderer fall back
+    /// to "render every by_check key" — a false-failure
+    /// misdirection. The fail-loud path suppresses the entire
+    /// guidance block; the rule's intent (specific guidance) is
+    /// not silently degraded to "render everything".
+    #[test]
+    fn u4_a1_empty_failed_checks_with_by_check_suppresses_guidance() {
+        let json = r#"{"reason":"silent gate","synthetic":false}"#;
+        let mut by_check = std::collections::BTreeMap::new();
+        by_check.insert("1".to_string(), vec!["fix 1".to_string()]);
+        let rule = rule_with_prompt(
+            vec!["a", "b", "c"],
+            Some(crate::config::RecoveryGuidance {
+                common: vec![],
+                by_check,
+            }),
+        );
+        let evidence = build_precheck_evidence("work.done", json, Some(&rule)).unwrap();
+        assert!(
+            evidence.guidance.is_none(),
+            "A1 fail-loud: by_check present + failed_checks empty ⇒ guidance must be None; got {:?}",
+            evidence.guidance
+        );
+        assert!(evidence.failed_check_keys.is_none());
+    }
+
+    /// U4 / A2: `synthetic = true` requires `failed_checks` to
+    /// be empty. Synthetic means "the gate was silent or
+    /// ambiguous", which is incompatible with a structured list
+    /// of failed checks. The fail-loud path suppresses the
+    /// guidance block (the rule author wrote a rule that cannot
+    /// fire on synthetic rejections).
+    #[test]
+    fn u4_a2_synthetic_with_failed_checks_suppresses_guidance() {
+        let json = r#"{"failed_checks":[1,2],"reason":"silent","synthetic":true}"#;
+        let mut by_check = std::collections::BTreeMap::new();
+        by_check.insert("1".to_string(), vec!["fix 1".to_string()]);
+        let rule = rule_with_prompt(
+            vec!["a", "b", "c"],
+            Some(crate::config::RecoveryGuidance {
+                common: vec!["common".into()],
+                by_check,
+            }),
+        );
+        let evidence = build_precheck_evidence("work.done", json, Some(&rule)).unwrap();
+        assert!(
+            evidence.guidance.is_none(),
+            "A2 fail-loud: synthetic + non-empty failed_checks ⇒ guidance must be None; got {:?}",
+            evidence.guidance
+        );
+    }
+
+    /// U4 / A2 happy path: `synthetic = true` with no
+    /// `failed_checks` is the canonical synthetic shape and
+    /// guidance threads through (renderer will suppress the
+    /// specific sub-section per D3).
+    #[test]
+    fn u4_a2_synthetic_with_no_failed_checks_keeps_guidance() {
+        let json = r#"{"reason":"silent","synthetic":true}"#;
+        let mut by_check = std::collections::BTreeMap::new();
+        by_check.insert("1".to_string(), vec!["fix 1".to_string()]);
+        let rule = rule_with_prompt(
+            vec!["a", "b", "c"],
+            Some(crate::config::RecoveryGuidance {
+                common: vec!["common".into()],
+                by_check,
+            }),
+        );
+        let evidence = build_precheck_evidence("work.done", json, Some(&rule)).unwrap();
+        assert!(evidence.guidance.is_some());
+    }
+
+    /// U4 / A1 control: empty `failed_checks` AND no
+    /// `by_check` (common-only guidance) is allowed — the
+    /// rule author did not promise specific guidance, so
+    /// the fail-loud path does not fire.
+    #[test]
+    fn u4_a1_empty_failed_checks_without_by_check_keeps_common_guidance() {
+        let json = r#"{"reason":"silent gate","synthetic":false}"#;
+        let rule = rule_with_prompt(
+            vec!["a", "b", "c"],
+            Some(crate::config::RecoveryGuidance {
+                common: vec!["common hint".into()],
+                by_check: std::collections::BTreeMap::new(),
+            }),
+        );
+        let evidence = build_precheck_evidence("work.done", json, Some(&rule)).unwrap();
+        assert!(
+            evidence.guidance.is_some(),
+            "common-only guidance must pass through; got None"
+        );
     }
 }

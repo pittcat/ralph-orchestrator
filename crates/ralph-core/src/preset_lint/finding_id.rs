@@ -768,6 +768,24 @@ pub const FINDING_RECOVERY_GUIDANCE_EMPTY_ITEM: &str = "preset.recovery_guidance
 /// and guidance items consistently. Always `Error` in strict.
 pub const FINDING_RECOVERY_GUIDANCE_UNSAFE_ITEM: &str = "preset.recovery_guidance_unsafe_item";
 
+/// Plan 2026-08-17-1841 U4 / A3 / R13: two
+/// `event_policy.payload_consistency.rules[]` entries share the
+/// same `id` AND both declare a `recovery_guidance` block. The
+/// runtime `validation.rs:1840-1901` short-circuits on the FIRST
+/// matching rule (`break` after `Hit`), so the second rule's
+/// `recovery_guidance` is silently dropped — the renderer never
+/// sees the guidance the rule author wrote. The lint catches the
+/// duplicate id at preset-load time so the author can rename
+/// one of the rules before runtime misroutes its guidance.
+///
+/// Note: this is distinct from
+/// [`FINDING_PAYLOAD_CONSISTENCY_DUPLICATE_ID`], which fires for
+/// ANY duplicate id regardless of recovery_guidance presence.
+/// `DUPLICATE_RULE_ID` is the narrower "the dropped guidance
+/// would actually have been used" finding. `Warn` in default
+/// mode, `Error` in strict.
+pub const FINDING_DUPLICATE_RULE_ID: &str = "preset.duplicate_rule_id";
+
 /// Inventory of every finding id in this module. Use this in tests
 /// that assert the lint surface does not silently re-introduce a
 /// serial-only or coordinator-loop finding. Plan 2026-07-07-006
@@ -848,4 +866,5 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_RECOVERY_GUIDANCE_UNKNOWN_CHECK,
     FINDING_RECOVERY_GUIDANCE_EMPTY_ITEM,
     FINDING_RECOVERY_GUIDANCE_UNSAFE_ITEM,
+    FINDING_DUPLICATE_RULE_ID,
 ];

@@ -1874,19 +1874,29 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                         "Rebuild the payload from the artifact so {topic} satisfies the rule (run `ralph emit {topic} --policy-check` to re-validate before re-emitting)."
                     ),
                     synthetic: false,
-                    // U4 (plan 2026-08-17-1841, R1/R4/D1): thread
+                    // U4 (plan 2026-08-17-1841, R1/R4/D1, A1): thread
                     // the rule's preset-supplied recovery guidance
                     // into the evidence so the correction renderer
                     // surfaces `common` and the `by_check[<rule
                     // id>]` items at the target hat's prompt.
-                    // `failed_check_keys` stays `None` so the
-                    // renderer falls back to "render every
-                    // `by_check` key" (the consistency path never
-                    // reports a list of failed checks — only the
-                    // matched rule id, which is encoded by the
-                    // rule id the evaluator already selected).
+                    //
+                    // A1 (consistency side): the consistency path
+                    // used to leave `failed_check_keys = None` so
+                    // the renderer fell back to "render every
+                    // `by_check` key". With the new fail-loud
+                    // contract (`None` is reserved for "no
+                    // specific guidance to render"), the
+                    // consistency path now explicitly seeds
+                    // `failed_check_keys` with the rule's own
+                    // `by_check` keys — the matched rule id is
+                    // encoded by the evaluator's selection
+                    // (`rule.id`), so the renderer's filter
+                    // surface stays `by_check[rule.id]` only.
                     guidance: rule.recovery_guidance.clone(),
-                    failed_check_keys: None,
+                    failed_check_keys: rule
+                        .recovery_guidance
+                        .as_ref()
+                        .map(|g| g.by_check.keys().cloned().collect()),
                 };
                 findings.push(PolicyFinding {
                     topic: topic.to_string(),
