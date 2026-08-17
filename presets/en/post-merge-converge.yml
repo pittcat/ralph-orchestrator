@@ -228,6 +228,44 @@ event_loop:
                   - {field: scope_status, eq: "ambiguous"}
                   - {field: proceed, eq: true}
           message: "scope_status=blocked or ambiguous requires proceed: false; received proceed: true."
+        # Fix exit: a green board cannot report open P0/P1 or LOW_CONFIDENCE work.
+        - id: postmerge-fix-ready-passed-no-open-p0-p1
+          topic: postmerge.fix.ready
+          when:
+            all:
+              - {field: passed, eq: true}
+              - {field: open_p0_p1_count, gt: 0}
+          message: "passed=true requires open_p0_p1_count == 0."
+        - id: postmerge-fix-ready-passed-no-low-confidence
+          topic: postmerge.fix.ready
+          when:
+            all:
+              - {field: passed, eq: true}
+              - {field: low_confidence_open_count, gt: 0}
+          message: "passed=true requires low_confidence_open_count == 0."
+        # Independent review: a low-confidence verdict cannot claim PASS.
+        - id: postmerge-reviewed-pass-not-low-confidence
+          topic: postmerge.reviewed
+          when:
+            all:
+              - {field: verdict, eq: "PASS"}
+              - {field: verdict_confidence, eq: "low"}
+          message: "verdict=PASS requires verdict_confidence to be high or medium."
+        # Terminal closure: success must agree with the closer verdict.
+        - id: postmerge-complete-success-verdict-consistent
+          topic: postmerge.complete
+          when:
+            any:
+              - all:
+                  - {field: success, eq: true}
+                  - {field: verdict, eq: "FAIL"}
+              - all:
+                  - {field: success, eq: false}
+                  - {field: verdict, eq: "PASS"}
+              - all:
+                  - {field: success, eq: false}
+                  - {field: verdict, eq: "PASS_WITH_ACCEPTED_RISKS"}
+          message: "success must agree with verdict: true for PASS/PASS_WITH_ACCEPTED_RISKS, false for FAIL."
 
 cli:
   backend: "auto"
@@ -321,7 +359,8 @@ hats:
       OPAC: follow `ralph-tools-opac` and `ralph tools skill load ralph-tools-emit` §5; always `--policy-check` before real emit.
 
       ### Observe
-      - Read trigger `artifact_path` (the value in the payload — do not assume a fixed filename) via `cat`/`Read`. That file is the baseline artifact.
+      - Read trigger `artifact_path` (the value in the payload — do not assume a fixed filename) via `cat`/`Read`. Before reading, run `test -f "$artifact_path"`; if it is absent, stop and do not emit downstream.
+      - Confirm the baseline artifact is readable and contains the recorded HEAD, branch, worktree state, and verification result; if any required section is missing, write a blocker artifact and stop.
       - Also read trigger `baseline_valid`.
       - If `baseline_valid` is false: write a short `.ralph/post-merge/02-change-map.md` noting short-circuit, emit `proceed: false`, stop.
       - Read the post-merge prompt at the fixed path `.ralph/post-merge.prompt.md` (operator-written; may contain `scope_base` and `merge_boundary_path`).
@@ -406,11 +445,12 @@ hats:
 
       ### Emit
       Write artifact-first: `.ralph/post-merge/02-change-map.md` → `.ralph/post-merge/scope-manifest.json` → policy-check → emit `postmerge.changemap.ready` with:
+      - `proceed`, `artifact_path`, `high_risk_crossings_count`, and `plan_match_confidence` (all required fields; source each from the completed map and its tables)
       - `proceed: true` only when `scope_status == resolved` AND `overall_confidence >= 90` AND `critical_unknown_count == 0` AND no boundary conflict AND no drift
       - `scope_manifest_path`, `scope_digest` (SHA256 of manifest JSON), `scope_status`, `overall_confidence`, `critical_unknown_count`, `scope_base_sha`, `scope_source`
       - `interleaved_diff_path`, `override_diff_path`, `unknown_diff_path` (repo-relative paths to diff artifacts)
       - `interleaved_commits_count`, `override_commits_count`, `unknown_commits_count`
-      Write classification diffs to the declared paths under `.ralph/post-merge/diffs/`.
+      Write all three classification diffs to the declared paths under `.ralph/post-merge/diffs/`; when a class has no matching hunk, create a readable empty patch file and still emit its path.
 
       ### DON'T
       - Evaluate "good/bad code" beyond mapping risk crossings
@@ -438,10 +478,10 @@ hats:
       OPAC: follow `ralph-tools-opac` and `ralph tools skill load ralph-tools-emit` §5; always `--policy-check` before real emit.
 
       ### Observe
-      - Read trigger `artifact_path` with `cat`/`Read` — that is the change-map artifact (do not ignore the payload path).
-      - Read the baseline at the fixed convention path `.ralph/post-merge/01-baseline.md` (baseline path is not re-emitted on this trigger; convention path is authoritative).
+      - Read trigger `artifact_path` with `cat`/`Read` — that is the change-map artifact (do not ignore the payload path). Run `test -f` first; if it is absent, stop and do not emit.
+      - Read the baseline at the fixed convention path `.ralph/post-merge/01-baseline.md` (baseline path is not re-emitted on this trigger; convention path is authoritative). Run `test -f` first and confirm the required baseline sections are present.
       - Also read trigger `proceed` / `plan_match_confidence` / `high_risk_crossings_count`.
-      - Read trigger `scope_manifest_path` (if present) to access the scope manifest JSON artifact; use it to scope audit attention to `plan_owned` and `shared_by_multiple_plans` regions. Critical unknown regions that blocked the map are already excluded — do not audit them as if they were scoped changes.
+      - Read trigger `scope_manifest_path` (if present) to access the scope manifest JSON artifact; run `test -f` and confirm it is parseable and contains `scope_status`, `scope_base_sha`, `overall_confidence`, `critical_unknown_count`, `diff_paths`, and `hunk_classifications`. If required content is missing, stop and do not emit. Use it to scope audit attention to `plan_owned` and `shared_by_multiple_plans` regions. Critical unknown regions that blocked the map are already excluded — do not audit them as if they were scoped changes.
       - If upstream `proceed` is false: write stub notes under `.ralph/post-merge/03-contract-audit.md` … `08-concurrency-idempotency.md` explaining short-circuit, emit `proceed: false`, `audit_docs_complete: true`, `findings_created_count: 0`, `low_confidence_findings_count: 0`.
 
       ### Execute six audits in order (one activation, six artifacts)
@@ -505,14 +545,14 @@ hats:
 
       ### Observe
       Read trigger `proceed` / `findings_created_count` / `audit_docs_complete` / `low_confidence_findings_count`.
-      Then `cat`/`Read` each audit artifact at the fixed convention paths (audit.ready does not re-list them):
+      Before reading, run `test -f` for every required artifact below. Then `cat`/`Read` each audit artifact at the fixed convention paths (audit.ready does not re-list them). Confirm each file has its expected audit heading, evidence/findings section, and conclusion; if any file is absent, unreadable, or incomplete, stop and do not emit:
       - `.ralph/post-merge/03-contract-audit.md`
       - `.ralph/post-merge/04-state-ownership.md`
       - `.ralph/post-merge/05-lifecycle-audit.md`
       - `.ralph/post-merge/06-configuration-matrix.md`
       - `.ralph/post-merge/07-failure-recovery.md`
       - `.ralph/post-merge/08-concurrency-idempotency.md`
-      And all Finding files under `.ralph/post-merge/findings/PMI-*.md`.
+      And all Finding files under `.ralph/post-merge/findings/PMI-*.md`; each selected Finding must be readable and include severity, confidence, invariant, evidence, and status.
       If upstream `proceed` is false: write a short-circuit `.ralph/post-merge/09-test-gap-plan.md` and emit `proceed: false`.
 
       ### Work
@@ -557,9 +597,9 @@ hats:
       OPAC: follow `ralph-tools-opac` and `ralph tools skill load ralph-tools-emit` §5; always `--policy-check` before real emit.
 
       ### Observe
-      On `postmerge.testplan.ready`: read trigger `artifact_path` with `cat`/`Read` (the test-gap plan — do not invent or use a bare filename). Also read trigger `proceed` / `p0_p1_scenario_count`.
+      On `postmerge.testplan.ready`: run `test -f` on trigger `artifact_path`, then read it with `cat`/`Read` (the test-gap plan — do not invent or use a bare filename). Confirm it contains prioritized scenarios, execution order, invariants, and either coverage or an explicit deferral reason for every P0/P1 risk; if not, stop and do not emit. Also read trigger `proceed` / `p0_p1_scenario_count`.
       On `postmerge.reproduce.next`: read trigger `finding_id` / `remaining_count` / `repro_confidence` and continue the board.
-      Always list Finding files under `.ralph/post-merge/findings/PMI-*.md` and read the selected Finding body.
+      Always list Finding files under `.ralph/post-merge/findings/PMI-*.md`, run `test -f` on the selected file, and read its body. Confirm the Finding contains the current status, severity, evidence, invariant, and reproduction conditions before acting.
       If upstream `proceed` is false: emit `postmerge.reproduce.ready` with proceed false and zero counts.
 
       ### One Finding per activation
@@ -605,7 +645,7 @@ hats:
         Select the next Finding by listing `.ralph/post-merge/findings/PMI-*.md`, reading each status/severity, and picking the highest-priority actionable item
         (P0→P1; statuses needing root-cause/fix/regression — not VERIFIED/CLOSED/ACCEPTED_RISK/NOT_A_BUG/DUPLICATE; skip residual LOW_CONFIDENCE already parked unless you can raise confidence).
       On `postmerge.fix.next`: read trigger `finding_id` / `remaining_count` / `last_status` / `root_cause_confidence` and continue that Finding.
-      Always `cat`/`Read` the selected Finding file under `.ralph/post-merge/findings/` plus its failing test/script path recorded in the Finding.
+      Always run `test -f` and then `cat`/`Read` the selected Finding file under `.ralph/post-merge/findings/` plus its failing test/script path recorded in the Finding. Confirm the Finding contains the causal evidence and the test/script is readable and runnable before editing production code; otherwise stop and emit no downstream event.
       If upstream `proceed` is false: emit `postmerge.fix.ready` with `passed: false`, counts reflecting open board / short-circuit.
 
       ### Step 11 Root Cause (before any production edit)
@@ -662,7 +702,7 @@ hats:
       OPAC: follow `ralph-tools-opac` and `ralph tools skill load ralph-tools-emit` §5; always `--policy-check` before real emit.
 
       ### Observe
-      Read `postmerge.fix.ready` payload and all `.ralph/post-merge/**` artifacts + findings. Use trigger payload as the control-plane status; read files for full evidence. Do not rebuild history from runtime-private orchestration ledgers.
+      Read `postmerge.fix.ready` payload and all `.ralph/post-merge/**` artifacts + findings. Run `test -f` on every required artifact before reading; confirm 01–13 and the findings needed for the verdict are readable and contain their declared evidence/conclusion sections. If a required artifact is absent, unreadable, or incomplete, write a blocker in the final-review artifact and emit `FAIL`; do not silently continue. Use trigger payload as the control-plane status; read files for full evidence. Do not rebuild history from runtime-private orchestration ledgers.
 
       ### Step 14 Clean Environment
       Without relying on local caches/history:
@@ -708,14 +748,15 @@ hats:
       Your only job is to present results to the human operator.
       Do NOT re-run audits, do NOT fix code, do NOT change the closer verdict to a greener one.
 
-      OPAC: follow `ralph-tools-opac`. Always `--policy-check` before real emit;
+      OPAC: follow `ralph-tools-opac` and explicitly load `ralph-tools-emit` before constructing or sending any payload. Always `--policy-check` before real emit;
       Confirm emit with `--output json` (`ok`/`recorded`), not by reading event files.
+      If policy-check rejects the payload, use the feedback fields to locate the topic/field/path, repair the report or payload from visible artifacts, rerun `test -f`, then rerun policy-check. Stop without a real emit until it returns `ok`.
       Artifact-first: write the operator report, `test -f` it, put that path in
       `report_path`, then print `DELIVERABLE_PATH` in the visible reply.
       Schema only checks the field is non-empty — you must verify the file yourself.
 
       ### Observe
-      Read trigger `postmerge.reviewed` (`verdict`, `verdict_confidence`, `final_review_path`, `clean_validation_path`) with `cat`/`Read` on those two paths, then gather remaining paths under `.ralph/post-merge/` (01–15, findings, regression). Do not rebuild facts from runtime-private orchestration ledgers.
+      Read trigger `postmerge.reviewed` (`verdict`, `verdict_confidence`, `final_review_path`, `clean_validation_path`) with `test -f` followed by `cat`/`Read` on those two paths. Confirm each contains its declared conclusion, evidence, and validation result; if either is missing or incomplete, stop and do not emit. Then gather remaining paths under `.ralph/post-merge/` (01–15, findings, regression). Do not rebuild facts from runtime-private orchestration ledgers.
       Do not delete or empty `.ralph/post-merge/` — lifecycle cleanup is operator-owned.
 
       ### Write operator report (required)

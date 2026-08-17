@@ -51,6 +51,46 @@
 - **非目标：** 不重跑各计划、不重新 merge、不绑语言/CI。
 - **用户确认：** 6.1 已确认（2026-07-25）。
 
+## 关键阶段与 guard 选择
+
+以下是 reviewer 独立按真实拓扑重建后确认的四个关键事件位置。`payload_consistency` 使用独立 budget=3；本 preset 不启用会合成额外 gate hat 的 `event_loop.precheck`。每个阶段的选择都与 YAML 中的确定性规则对应，状态为 `confirmed`。
+
+```yaml
+key_stages:
+  - key_stage: "change-mapper -> postmerge.changemap.ready"
+    guard_selection: payload_consistency
+    precheck_guard: false
+    precheck_retry_budget: null
+    payload_consistency_guard: true
+    payload_consistency_retry_budget: 3
+    reason: "scope_status、proceed、阈值、manifest 和 classification paths 必须保持结构一致。"
+    confirmation_status: confirmed
+  - key_stage: "fixer -> postmerge.fix.ready"
+    guard_selection: payload_consistency
+    precheck_guard: false
+    precheck_retry_budget: null
+    payload_consistency_guard: true
+    payload_consistency_retry_budget: 3
+    reason: "passed=true 不得带 open P0/P1 或 LOW_CONFIDENCE Finding。"
+    confirmation_status: confirmed
+  - key_stage: "closer -> postmerge.reviewed"
+    guard_selection: payload_consistency
+    precheck_guard: false
+    precheck_retry_budget: null
+    payload_consistency_guard: true
+    payload_consistency_retry_budget: 3
+    reason: "低置信度终审不得宣称 PASS，保持独立终审结论一致。"
+    confirmation_status: confirmed
+  - key_stage: "reporter -> postmerge.complete"
+    guard_selection: payload_consistency
+    precheck_guard: false
+    precheck_retry_budget: null
+    payload_consistency_guard: true
+    payload_consistency_retry_budget: 3
+    reason: "success 必须与 PASS、accepted risks 或 FAIL verdict 一致。"
+    confirmation_status: confirmed
+```
+
 ## Fusion notes（15→8，保留步骤）
 
 | Hat | PDF steps | 融合注意 |
@@ -98,8 +138,9 @@ Hard questions — Artifact-First: ✓（`.ralph/post-merge/` 为业务 artifact
 | topic | 字段 | 类型 | 值源 | 可见性 | 身份检查 | 下游消费 | schema metadata | artifact 落盘 |
 |---|---|---|---|---|---|---|---|---|
 | postmerge.changemap.ready | proceed | bool | baseline_valid+地图完成（按 prompt / git chronology） | trigger+本 hat | 不涉及 | auditor 短路 | field_docs | 不落盘 + 短控制 |
-| postmerge.changemap.ready | artifact_path | path | 本 hat 写入 | 本 hat | 不涉及 | 读四表 | field_docs | 必填 · `02-change-map.md` |
+| postmerge.changemap.ready | artifact_path | path | 本 hat 写入 | 本 hat | 不涉及 | 读四表 | field_docs | 必填 · `.ralph/post-merge/02-change-map.md` |
 | postmerge.changemap.ready | high_risk_crossings_count | int | 高风险表行数 | artifact | 不涉及 | 审计优先级 | field_docs | 不落盘 + 可从 artifact 重算 |
+| postmerge.changemap.ready | plan_match_confidence | enum | prompt / git chronology 匹配质量 | artifact | 不涉及 | 审计置信度 | allowed_values+field_docs | 不落盘 + 可从 artifact 重算 |
 | postmerge.changemap.ready | scope_manifest_path | path | change-mapper writes scope-manifest.json | 本 hat | 不涉及 | 审计读取 resolved scope | field_docs | 必填 · `.ralph/post-merge/scope-manifest.json` |
 | postmerge.changemap.ready | scope_digest | string | SHA-256 of scope-manifest.json bytes | 本 hat | 禁手写 | 一致性核验 | field_docs | 不落盘 + 可重算 |
 | postmerge.changemap.ready | scope_status | enum | change-mapper 解析决策 | 本 hat | 不涉及 | resolved gate | allowed_values | 不落盘 + 控制门禁 |
@@ -107,6 +148,12 @@ Hard questions — Artifact-First: ✓（`.ralph/post-merge/` 为业务 artifact
 | postmerge.changemap.ready | critical_unknown_count | int | 未解关键归属数 | 本 hat | 不涉及 | resolved gate | field_docs | 不落盘 + resolved 须为 0 |
 | postmerge.changemap.ready | scope_base_sha | string | Git SHA of scope base | 本 hat | 须为 ancestor | 下游 diff 起点 | field_docs | 不落盘 + 40-char hex |
 | postmerge.changemap.ready | scope_source | enum | 如何推导 base | 本 hat | 不涉及 | 溯源 | allowed_values | 不落盘 + explicit/direct-target/branch-merge/inferred |
+| postmerge.changemap.ready | interleaved_diff_path | path | 本 hat 始终写入，空类也写空 patch | 本 hat | 不涉及 | auditor | field_docs | 必填 · `.ralph/post-merge/diffs/interleaved.patch` |
+| postmerge.changemap.ready | override_diff_path | path | 本 hat 始终写入，空类也写空 patch | 本 hat | 不涉及 | auditor | field_docs | 必填 · `.ralph/post-merge/diffs/override.patch` |
+| postmerge.changemap.ready | unknown_diff_path | path | 本 hat 始终写入，空类也写空 patch | 本 hat | 不涉及 | auditor | field_docs | 必填 · `.ralph/post-merge/diffs/unknown.patch` |
+| postmerge.changemap.ready | interleaved_commits_count | int | commit classification | artifact | 不涉及 | auditor | field_docs | 不落盘 + 可从 manifest 重算 |
+| postmerge.changemap.ready | override_commits_count | int | commit classification | artifact | 不涉及 | auditor | field_docs | 不落盘 + 可从 manifest 重算 |
+| postmerge.changemap.ready | unknown_commits_count | int | commit classification | artifact | 不涉及 | resolved gate | field_docs | 不落盘 + 可从 manifest 重算 |
 
 ## Hat: system-auditor
 
@@ -213,8 +260,8 @@ Hard questions — Artifact-First: ✓（`.ralph/post-merge/` 为业务 artifact
 ## 7-point sync checklist（builtin）
 
 1. runtime step-close：无旧终态依赖，新 topic 自洽 ✓  
-2. preset_lint：✓ 已跑（2026-07-28 评审 `builtin:post-merge-converge` 0 Error / 0 Warn；`cargo nextest -p ralph-core -- preset_lint` 267/267 PASS；`cargo nextest -p ralph-cli --bin ralph -- preset_lint` 11/11 PASS；`cargo nextest -p ralph-cli --bin ralph -- presets` 57/57 PASS）  
-3. BDD：本轮未加 scenario（merge-batch 式 workflow preset）— 可后续补  
+2. preset_lint：✓；scope payload consistency 覆盖 changemap、fix.ready、reviewed、complete 的关键出口一致性
+3. 动态 scenario：review fixture 覆盖 success、blocked、no-output、recovery self-loop
 4. config 字段：无新 event_loop 全局字段 ✓  
 5. CLI presets.rs + 计数测试 ✓  
 6. manifest + index.json ✓  
@@ -225,5 +272,8 @@ Hard questions — Artifact-First: ✓（`.ralph/post-merge/` 为业务 artifact
 - [x] 每 hat AAF + Payload Contract  
 - [x] hat 数 notes=YAML=8  
 - [x] single-chain / Artifact-First hard questions  
-- [x] emitter 引用 OPAC / policy-check  
-- [x] lint 实测（2026-07-28 评审通过；见 `.ralph/reviews/post-merge-converge-2026-07-28.md`）
+- [x] emitter 显式加载 `ralph-tools-emit`、引用 OPAC / policy-check feedback
+- [x] artifact path field_docs 含 `.ralph/` 落点、来源、fill_rule、examples
+- [x] consumer 在读盘前 `test -f`，并在内容缺失时停止或写 FAIL blocker
+- [x] key-stage guard 选择、独立 budget、理由和 confirmation_status 已确认
+- [x] lint 实测（修复后复跑；见 `.ralph/reviews/post-merge-converge-2026-08-17.md`）
