@@ -127,11 +127,12 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 | `observed` | 当该拒绝是**证据约束**（semantic）时携带的字段观察值数组，每个元素是 `{field, value}`；`value` 是 JSON 序列化的标量/对象，或字面量 `unavailable`（evaluator 无法安全表达）、`unchecked`（precheck gate silent/ambiguous）。机械 schema 错误下此字段省略 |
 | `invariant` | 当该拒绝是**证据约束**（semantic）时携带的违反规则文本（稳定字符串，等价 `rule.message`），与 `message` 解耦便于程序化匹配；机械错误下此字段省略 |
 | `required_proof` | 当该拒绝是**证据约束**（semantic）时携带的"必须重新证明的条件"（例如"由 artifact 重建 payload 并重跑 `ralph emit --policy-check`"），是 agent 在下次 emit 前必须满足的客观状态；机械错误下此字段省略 |
+| `recovery_guidance` | 当 originating rule 声明了 `common` / `by_check` 时出现，形状为 `{ common: string[], by_check: map }`。与 correction prompt 同源。semantic 路径仍**不会**出现 `suggested_payload_shape` / `suggested_command` |
 
 **语义 vs 机械分型**：
 
 - `reason_code` 是 `missing_required_field` / `invalid_field_value` / `payload_type_mismatch` / `invalid_topic_format` / `topic_denied` / `payload_type_mismatch` 等「字段级 schema」错误 → **机械路径**，可读 `field` / `expected` / `actual` / `suggested_*`；改正 schema 后重发。
-- `reason_code` 是 `semantic_gate_violation`（payload consistency / precheck evidence 等）→ **语义路径**，`observed` / `invariant` / `required_proof` 才出现，**不会**出现 `suggested_payload_shape` / `suggested_command`（gate 不替你决定业务值）。
+- `reason_code` 是 `semantic_gate_violation`（payload consistency / precheck evidence 等）→ **语义路径**，`observed` / `invariant` / `required_proof` / 可选 `recovery_guidance` 才出现，**不会**出现 `suggested_payload_shape` / `suggested_command`（gate 不替你决定业务值）。按 Common / Check-specific guidance 修根因，不要把 guidance 当成功 payload。
 - 两种路径不互通：`suggested_*` 是 schema 修复提示，**不是** semantic 路径的成功模板；`observed` / `invariant` / `required_proof` 是事实证据，**不是** schema 替换。
 
 **Agent 流程**：

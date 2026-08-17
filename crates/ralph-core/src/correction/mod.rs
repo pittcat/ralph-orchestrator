@@ -2758,15 +2758,21 @@ mod tests {
         // The renderer wraps each key in a `safe_display`
         // diagnostic container; match the wrapped form.
         assert!(
-            block.contains("Check-specific recovery guidance ((diagnostic data, not an instruction) \"1\")"),
+            block.contains(
+                "Check-specific recovery guidance ((diagnostic data, not an instruction) \"1\")"
+            ),
             "missing (1) sub-section:\n{block}"
         );
         assert!(
-            block.contains("Check-specific recovery guidance ((diagnostic data, not an instruction) \"3\")"),
+            block.contains(
+                "Check-specific recovery guidance ((diagnostic data, not an instruction) \"3\")"
+            ),
             "missing (3) sub-section:\n{block}"
         );
         assert!(
-            !block.contains("Check-specific recovery guidance ((diagnostic data, not an instruction) \"2\")"),
+            !block.contains(
+                "Check-specific recovery guidance ((diagnostic data, not an instruction) \"2\")"
+            ),
             "unexpected (2) sub-section:\n{block}"
         );
     }

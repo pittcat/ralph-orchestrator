@@ -814,12 +814,13 @@ mod tests {
         for key in ["1", "7", "128"] {
             let mut by_check = BTreeMap::new();
             by_check.insert(key, vec!["item"]);
-            let cfg = precheck_config("review.complete", 130, Some(guidance_with(vec![], by_check)));
-            let findings = check_recovery_guidance(&cfg, LintStrictness::Strict);
-            assert!(
-                findings.is_empty(),
-                "key {key:?}: got {findings:?}"
+            let cfg = precheck_config(
+                "review.complete",
+                130,
+                Some(guidance_with(vec![], by_check)),
             );
+            let findings = check_recovery_guidance(&cfg, LintStrictness::Strict);
+            assert!(findings.is_empty(), "key {key:?}: got {findings:?}");
         }
     }
 
@@ -835,7 +836,11 @@ mod tests {
     /// with recovery_guidance) ⇒ no `DUPLICATE_RULE_ID` finding.
     #[test]
     fn duplicate_rule_id_happy_path_passes() {
-        let cfg = consistency_config("rule-a", "fix.done", Some(guidance_with(vec![], BTreeMap::new())));
+        let cfg = consistency_config(
+            "rule-a",
+            "fix.done",
+            Some(guidance_with(vec![], BTreeMap::new())),
+        );
         let findings = check_recovery_guidance(&cfg, LintStrictness::Strict);
         assert!(
             !findings.iter().any(|f| f.id == FINDING_DUPLICATE_RULE_ID),
@@ -847,9 +852,7 @@ mod tests {
     /// declare `recovery_guidance` ⇒ emit `FINDING_DUPLICATE_RULE_ID`.
     #[test]
     fn duplicate_rule_id_with_recovery_guidance_is_flagged() {
-        use crate::config::{
-            EventPolicyConfig, PayloadConsistencyConfig, PayloadConsistencyRule,
-        };
+        use crate::config::{EventPolicyConfig, PayloadConsistencyConfig, PayloadConsistencyRule};
         let rule_a = PayloadConsistencyRule {
             id: "shared-id".into(),
             topic: "fix.done".into(),
@@ -893,9 +896,7 @@ mod tests {
     /// when both rules' guidance would have been used.
     #[test]
     fn duplicate_rule_id_without_recovery_guidance_pair_is_not_flagged() {
-        use crate::config::{
-            EventPolicyConfig, PayloadConsistencyConfig, PayloadConsistencyRule,
-        };
+        use crate::config::{EventPolicyConfig, PayloadConsistencyConfig, PayloadConsistencyRule};
         let rule_a = PayloadConsistencyRule {
             id: "shared-id".into(),
             topic: "fix.done".into(),

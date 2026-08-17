@@ -42,6 +42,14 @@ Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文
 - 修复后**必须**先 `ralph emit <topic> --policy-check -j '<payload>'` 通过，再正式 emit。
 - 同类 violation signature（同一 `gate` 前缀 + `field` + `task_key` + step）**第 3 次**同类 task.resume 后 runtime 会阻塞 loop（`plan.blocked(reason=correction_3_strike_exhausted:…)`）。payload_consistency 拒收**不**计入协议违规重试额度——它走 correction 通道独立计数。**`protocol_violation_repeated:*`** 是协议违规路径的阻塞标记，**不**用于 payload_consistency；不要把两者混用。
 
+**校正 prompt 中的 recovery guidance：**
+
+**触发条件：** prompt 出现 `## Common recovery guidance` 或 `## Check-specific recovery guidance`。
+
+**执行动作：** 把这些条目当作作者提供的修复步骤，与 Observed / Invariant / Must re-prove 分开读。按条目调查 artifact，再 `ralph emit <topic> --policy-check`。synthetic / gate 静默时只会看到 Common，不要把未出现的 Check-specific 当成已失败的检查。
+
+**失败停止条件：** 条目要求清理 workspace 但无法证明文件属于本 activation 时停止，不要 `git restore` / `git clean` / `git stash`。guidance 不是成功 payload 模板，也不替代 `--policy-check`。
+
 **禁止：** 在没有按 `gate` 命中的字段重新对齐 payload 的情况下，机械重发同一份 payload。
 
 ## RD-EXECUTOR-RESEND-LIMIT

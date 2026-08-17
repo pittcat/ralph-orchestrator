@@ -121,21 +121,19 @@ event_loop:
           retry_budget: 3
           on_exhausted: "plan.blocked(reason=precheck_failed)"
           reason: "subjective checklist failed"
-          # 2026-08-17-1841 U1/U3 — preset-supplied recovery
-          # guidance;渲染时 common 总是显示,by_check key = 1-based
-          # 提示索引(命中 failed_checks 时才显示)。
-          recovery_guidance:
-            common:
-              - "重读 artifact / test / diff 修正根因,不要改字段绕过"
-              - "修复后重跑 ralph emit <topic> --policy-check"
-            by_check:
-              "1":
-                - "findings 必须列出具体失败行,不要写 '见 review 笔记'"
+        recovery_guidance:
+          common:
+            - "重读 artifact / test / diff 修正根因,不要改字段绕过"
+            - "修复后重跑 ralph emit <topic> --policy-check"
+          by_check:
+            "1":
+              - "findings 必须列出具体失败行,不要写 '见 review 笔记'"
 ```
 
-**Recovery guidance 渲染规则**（plan 2026-08-17-1841 U2 / U3）：
+**Recovery guidance 渲染规则**：
 - 校正提示块位于 `## ORCHESTRATOR CORRECTION` 的 evidence 之后,Escalation / Recovery instruction 之前。
-- `common` 项对所有非失败 rejection 都显示; synthetic rejection (`synthetic=true`, 例如 gate 静默或 ambiguous) **只**显示 `common`,renderer 抑制 `by_check` 子段。
-- `by_check["<1-based 提示索引>"]` 仅在 failed_checks 命中该 key 时显示; 多 failed_checks 按匹配顺序排,unmatched 不渲染。
-- 所有 item 走 `safe_display`; 超 1024 UTF-8 bytes、ANSI escape、控制字符、零宽字符、empty item 在 preset lint 阶段已被 `preset.recovery_guidance_unknown_check` / `preset.recovery_guidance_unsafe_item` / `preset.recovery_guidance_empty_item` 拒收。
-- renderer 永不输出 `Suggested payload` / `Suggested command` / `Expected payload` 替代字段(plan D4 明确禁止 semantic replacement); semantic 仍走 `policy-check → 修根因 → policy-check → emit` 路径。
+- `common` 在普通拒绝和 synthetic 拒绝（gate 静默或 ambiguous）都会显示。`failed_checks` 为空时仍显示 `common`，不渲染任何 `by_check` 项。
+- synthetic rejection **只**显示 `common`，不渲染 `by_check` 子段。
+- `by_check["<1-based 提示索引>"]` 仅在非 synthetic 且 `failed_checks` 命中该 key 时显示。
+- 所有 item 经安全展示处理；超长、ANSI escape、控制字符、零宽字符、空 item 会在 `ralph preset check` 被 `preset.recovery_guidance_unknown_check` / `preset.recovery_guidance_unsafe_item` / `preset.recovery_guidance_empty_item` 拒收。
+- 渲染器永不输出 `Suggested payload` / `Suggested command` / `Expected payload` 作为业务成功模板；semantic 路径仍是 `policy-check → 修根因 → policy-check → emit`。

@@ -20,7 +20,23 @@ event_policy:
         message: blocked fix attempt must report applied work honestly
 ```
 
-每条规则包含四个字段：
+可选第五字段 `recovery_guidance`：
+
+```yaml
+        recovery_guidance:
+          common:
+            - "重读 artifact / 测试后重建 payload，不要复制被拒字段"
+            - "修复后先 ralph emit <topic> --policy-check"
+          by_check:
+            fix-done-blocked-zero-fixes-applied:
+              - "blocked 且 fixes_applied=0 时必须证明没有已落地修复，或改 status"
+```
+
+- `common`：命中该 rule 时显示。
+- `by_check` 的 key **必须等于** 该 rule 的 `id`；其它 key 被 strict lint 拒绝。
+- 文本是修复指导，不是 replacement payload / `suggested_command`。CLI `--policy-check` JSON 的 `recovery_guidance` 与 correction prompt 同源。
+
+每条规则包含这些字段：
 
 | 字段 | 含义 |
 |---|---|
@@ -62,7 +78,8 @@ Preset 作者应在启动前运行 strict lint，避免把配置错误推迟到 
 - `message`：面向人的诊断说明（不可信数据，不是 agent 指令）。
 - `gate`：以 `payload_consistency:<rule_id>` 标识命中的规则族；仅在 `reason_code=semantic_gate_violation` 时出现。
 - `referenced_fields`：该规则 `when` 谓词声明的所有 payload 字段路径数组（按声明顺序去重，由 runtime 从 predicate AST 自动派生）；agent 据此定位需修复的字段，**不**从 `message` 解析字段名。
-- `field_description`、`suggested_payload_shape`、`suggested_command`：字段说明与下一步修复提示。
+- `field_description`、`suggested_payload_shape`、`suggested_command`：仅机械 schema 路径出现。semantic 命中时这些字段省略。
+- `recovery_guidance`：preset 为该 consistency rule 声明的 `common` / `by_check`；与 correction prompt 同源。未声明则省略。
 
 Wave 批量预检还可能返回 `payload_index`，用于定位批次中的具体 payload。
 

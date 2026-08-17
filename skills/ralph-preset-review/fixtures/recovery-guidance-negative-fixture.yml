@@ -1,0 +1,61 @@
+# AAF + mechanical negative fixture — NOT a builtin preset.
+#
+# Anti-pattern axes:
+#   (a) precheck by_check key "01" (leading zero) is out of contract
+#       → preset.recovery_guidance_unknown_check
+#   (b) precheck YAML key `work.done.workspace` is not published by any hat
+#       → preset.workspace_precheck_fake_topic
+#   (c) worker instructions claim a read-only workspace gate but omit
+#       entry/exit evidence and ownership stop
+#       → preset.workspace_precheck_missing_entry_exit
+event_loop:
+  execution_mode: isolated
+  starting_event: work.start
+  completion_promise: work.done
+  max_iterations: 8
+  precheck:
+    enabled: true
+    rules:
+      work.done:
+        prompt:
+          - "artifact exists and is non-empty"
+        on_fail:
+          target: worker
+          retry_budget: 3
+          on_exhausted: "plan.blocked(reason=precheck_failed)"
+          reason: "checklist failed"
+        recovery_guidance:
+          common:
+            - "rebuild the artifact then rerun ralph emit work.done --policy-check"
+          by_check:
+            "01":
+              - "this key is invalid because of a leading zero"
+      work.done.workspace:
+        prompt:
+          - "workspace must be clean"
+        on_fail:
+          target: worker
+          retry_budget: 1
+          on_exhausted: "plan.blocked(reason=precheck_failed)"
+          reason: "workspace dirty"
+event_policy:
+  enabled: true
+  schemas:
+    work.start:
+      required_fields: []
+    work.done:
+      required_fields: [status]
+hats:
+  worker:
+    name: Worker
+    description: Emits work.done while claiming a workspace gate it does not perform.
+    triggers:
+      - work.start
+    publishes:
+      - work.done
+    instructions: |
+      ## WORKER MODE
+
+      You are read-only except for `.ralph/`. Emit `work.done` when finished.
+      Do not record entry or exit workspace evidence.
+      If the tree is dirty, guess which files to delete.

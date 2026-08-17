@@ -140,7 +140,9 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.payload_consistency_scope_positive_assertion` | P0 | 95 | Q4 | lint | scope topic（`merge.integrated` / `merge.stabilized` / `postmerge.changemap.ready` / `redteam.plan.resolved`）的 `payload_consistency.rules[]` 在受保护结构字段上写 `exists:true` / `non_empty:true`，或在 `overall_confidence` / `resolved_count` / `coverage` 上写会命中合法值的 `gt:`/`gte:`/`eq:`——runtime evaluator 把 Hit 当拒绝，这种规则会**静默拒绝所有合法 handoff**；`critical_unknown_count > 0` 属于非法状态检测，不在该 finding 范围内；plan 2026-08-10-002 U4 |
 | `preset.recovery_guidance_unknown_check` | P0 | 90 | Q4 | lint | `recovery_guidance.by_check` key 不在合法范围：precheck 必须 `1..=prompt.len()`；consistency 必须等于 rule `id`；lint 直接 fail-close，strict mode 启动拒绝；plan 2026-08-17-1841 U1 |
 | `preset.recovery_guidance_empty_item` | P0 | 85 | Q4 | lint | `recovery_guidance.common[]` / `by_check[*][]` 任一 item 为空字符串——渲染为空白 bullet，浪费 guidance 预算；plan 2026-08-17-1841 U1 |
-| `preset.recovery_guidance_unsafe_item` | P0 | 95 | Q4 | lint | `recovery_guidance` item 超过 `safe_display::MAX_RULE_MESSAGE_BYTES`（1024 UTF-8 bytes）或含 ANSI escape / C0/C1 控制字符 / 零宽字符；mirror `payload_consistency_unsafe_message`；plan 2026-08-17-1841 U1 |
+| `preset.recovery_guidance_unsafe_item` | P0 | 95 | Q4 | lint | `recovery_guidance` item 超过 `safe_display::MAX_RULE_MESSAGE_BYTES`（1024 UTF-8 bytes）或含 ANSI escape / C0/C1 控制字符 / 零宽字符；mirror `payload_consistency_unsafe_message` |
+| `preset.workspace_precheck_fake_topic` | P0 | 90 | Q4 | review | precheck YAML key 不是任何 hat 会 emit 的 topic（例如 `topic.workspace` 后缀）；gate 永远不触发 |
+| `preset.workspace_precheck_missing_entry_exit` | P1 | 80 | Q3 | review | 高风险 / readonly hat 声明 workspace 纪律但 instructions 缺少 entry/exit 证据步骤或 ownership 停止条件 |
 | `preset.instructions_task_mutation_authority_conflict` | P0 | 90 | Q5 | lint | hat `instructions` 在 projector-owned batch action 或非 coordinator 角色下仍要求 `ralph tools task add` / `task ensure`；单写者冲突由 lint 兜底 |
 
 ### Key-stage event gate finding_id（review-only，lint 不直接产出）

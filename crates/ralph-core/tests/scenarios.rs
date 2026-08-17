@@ -4192,14 +4192,10 @@ fn evaluate_correction_block_present(
     );
 }
 
-/// 2026-08-17-1841 U5 (S1/S3/R6): rendered correction block
-/// contains every listed substring.  Renders every visible
-/// (target_hat-visible) correction block at the iteration's
-/// snapshot and asserts each needle shows up in the joined
-/// text.  Used to pin that the preset-supplied recovery
-/// guidance (U1/U2 contract) surfaces in the prompt — `common`
-/// items always, `by_check[<key>]` items for the matched
-/// failed check (U3 precheck / U4 consistency paths).
+/// Rendered correction block contains every listed substring.
+/// Asserts against the **latest** queued correction block so a
+/// later synthetic rejection cannot inherit `common` / specific
+/// text from an earlier non-synthetic block in the same queue.
 fn evaluate_correction_block_contains(
     scenario_name: &str,
     assertion_idx: usize,
@@ -4207,7 +4203,7 @@ fn evaluate_correction_block_contains(
     needles: &[String],
     snap: &LoopStateSnapshot,
 ) {
-    let rendered = render_visible_correction_blocks(&snap.correction_blocks);
+    let rendered = render_latest_correction_block(&snap.correction_blocks);
     assert!(
         !rendered.trim().is_empty(),
         "{}: assert_state[{}] correction_block_contains at_iteration={} \
@@ -4230,13 +4226,9 @@ fn evaluate_correction_block_contains(
     }
 }
 
-/// 2026-08-17-1841 U5 (D3/S6): rendered correction block
-/// does NOT contain any listed substring.  Renders every
-/// visible correction block and asserts each needle is
-/// absent.  Used to pin that synthetic rejections suppress
-/// the specific sub-section (D3) and that semantic
-/// rejection never renders replacement payload / suggested
-/// command (C1).
+/// Rendered correction block does NOT contain any listed
+/// substring. Asserts against the latest queued block so
+/// earlier rejections cannot mask a missing/extra heading.
 fn evaluate_correction_block_absent(
     scenario_name: &str,
     assertion_idx: usize,
@@ -4244,7 +4236,7 @@ fn evaluate_correction_block_absent(
     needles: &[String],
     snap: &LoopStateSnapshot,
 ) {
-    let rendered = render_visible_correction_blocks(&snap.correction_blocks);
+    let rendered = render_latest_correction_block(&snap.correction_blocks);
     assert!(
         !rendered.trim().is_empty(),
         "{}: assert_state[{}] correction_block_absent at_iteration={} \
@@ -4267,20 +4259,11 @@ fn evaluate_correction_block_absent(
     }
 }
 
-/// 2026-08-17-1841 U5: render every correction block's
-/// `render_block()` output and concatenate them.  Used by
-/// the `correction_block_contains` / `correction_block_absent`
-/// predicates so the YAML assertions exercise the same
-/// renderer that the prompt builder consumes.
-fn render_visible_correction_blocks(
-    blocks: &[ralph_core::correction::CorrectionContext],
-) -> String {
-    let mut out = String::new();
-    for block in blocks {
-        out.push_str(&block.render_block());
-        out.push('\n');
-    }
-    out
+fn render_latest_correction_block(blocks: &[ralph_core::correction::CorrectionContext]) -> String {
+    blocks
+        .last()
+        .map(ralph_core::correction::CorrectionContext::render_block)
+        .unwrap_or_default()
 }
 
 // 2026-06-21-002 plan U9: `rejection_log_contains_reason_code`

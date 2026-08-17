@@ -82,3 +82,5 @@ Scope 解析（`merge.integrated` / `merge.stabilized` / `postmerge.changemap.re
 - `scope_base_sha` / `scope_digest` / `scope_manifest_path` 等字段在 `instructions` 中必须说明来源（从 Git / artifact / 工作目录取得），不得写「上游会处理」。
 - `--unsafe-no-policy-check` 不能绕过 scope handoff guard，这一约束必须在涉及 scope topic 的 hat `instructions` 中明确说明。
 <!-- anchor: evidence-bound -->
+
+Recovery guidance 出现在 target hat 的 `## ORCHESTRATOR CORRECTION` 中，位于 Observed / Invariant / Must re-prove 之后。agent 只能看到 runtime 注入的 Common / Check-specific 段，看不到 `.ralph/events.jsonl` 或 preset lint 内部函数。guidance 不是成功 payload。readonly hat 的 workspace 证据应写在 `.ralph/**`，不要让 hat 去读 runtime ledger。

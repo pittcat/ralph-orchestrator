@@ -102,6 +102,8 @@ review 必须先确认 source mode：`builtin:*` 可使用仓库源码、BDD 或
      - 两 budget 不共享总预算 / 计数器 / exhaustion state；合并为一个 `retry_budget` 或共享 → `preset.key_stage_event_gate_shared_budget`。
      - `confirmation_status` 必须为 `confirmed`；`pending` / `rejected` 但 author 已继续生成依赖 YAML / schema → `preset.key_stage_event_gate_pending_status`。
      - notes 记录的 guard 选择与 YAML 实际 `event_loop.precheck.rules` / `event_policy.payload_consistency.rules` / `event_policy.schemas.<topic>.field_docs` 实际声明是否一致；不一致 → `preset.key_stage_event_gate_notes_preset_diverge`。
+     - `event_loop.precheck.rules` 的 YAML key 必须是 hat 会真实 emit 的 topic；`topic.workspace` 后缀另挂一条、且无人 `publishes` 该 topic → `preset.workspace_precheck_fake_topic`。readonly / 高风险 hat 声明了 workspace 纪律却缺少 entry/exit 证据步骤 → `preset.workspace_precheck_missing_entry_exit`。
+     - 可选 `recovery_guidance`：precheck `by_check` key 必须是 `1..=prompt.len()` 十进制字符串；consistency key 必须等于 rule `id`；禁止在 guidance 里写 `suggested_command` / replacement payload。lint ID 见 `preset.recovery_guidance_*`。
      - author 是否用单个 preset 全局开关替代 per-position 询问 → `preset.key_stage_event_gate_single_combined_choice`。
      - author 是否借 0e 段落新增 runtime 配置 / 计数器 / 恢复路径 / 绕过 guard 替代行为 → `preset.key_stage_event_gate_unsupported_runtime_rule`。
    - **Capability-triggered invariant**: 同 0d 的 hard rule，禁止按 preset-name / hat-name prefix 识别关键位置；equal capability signals yield equal rules.

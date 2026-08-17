@@ -240,6 +240,19 @@ work.done / fix.done
 
 四条 finding 均 review-only，不进 `ralph preset check` JSON；触发条件是 `correction` payload 形状 + 语义，不是 preset 名称。fixture 顶部注释与 `skills/ralph-preset-review/fixtures/README.md` §8 标注 anti-pattern 轴、expected finding id 与本表对照命中。
 
+## Recovery guidance pattern
+
+适用于声明 `event_loop.precheck.rules.<topic>.recovery_guidance` 或 `event_policy.payload_consistency.rules[].recovery_guidance` 的 preset。
+
+- `recovery_guidance.common` / `by_check` 可选；省略等于旧行为。
+- precheck `by_check` key 必须是 `1..=prompt.len()` 的十进制字符串（禁止 `"01"`）。
+- consistency `by_check` key 必须等于该 rule 的 `id`。
+- YAML key 必须是真实 emit topic：不要用 `topic.workspace` 再挂第二条永远不触发的 rule。同一 topic 的语义检查与 workspace 检查应写在同一 `prompt` 列表。
+- semantic guidance 是 prose，禁止 `suggested_command` / replacement payload。
+- synthetic / 空 `failed_checks` 只渲染 `common`。
+
+Runtime lint：`preset.recovery_guidance_unknown_check` / `preset.recovery_guidance_empty_item` / `preset.recovery_guidance_unsafe_item`。Review-only：`preset.workspace_precheck_fake_topic` / `preset.workspace_precheck_missing_entry_exit`。
+
 
 ## Scope handoff guard pattern（merge-batch / post-merge-converge / red-team-attack）
 

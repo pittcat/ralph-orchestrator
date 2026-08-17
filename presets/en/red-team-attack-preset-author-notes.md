@@ -107,7 +107,9 @@ key_stages:
 
 - 适用范围：五个高风险 hat（target-locker、plan-resolver、attack-surface-mapper、experiment-plan-validator、experiment-runner）在 entry/exit 自检 workspace 状态：entry 写 `.ralph/red-team/<NN>-workspace-<hat>.md` 记录 `git status --porcelain=v1 --untracked-files=all` 快照；exit 写同样路径并比较；超出 `.ralph/red-team/**` 的 tracked/untracked 修改一律视为越界，由现有 precheck gate 拒绝并 retry。
 - 不实现 runtime 通用 workspace collector、自动 reset / stash / clean / delete（plan D6 / R11 明确禁止）。
-- 每个 hat 的 exit precheck rule 都附带 `recovery_guidance.common` 与 `recovery_guidance.by_check["1"]`：common 列出"重跑 git status / 报告 ownership / 禁止 auto-clean"的通用提示；by_check 列出该 hat 唯一允许的写根（target-locker 写 `.ralph/red-team/01-target-lock.md`、plan-resolver 写 `.ralph/red-team/patches/**` 与 `.ralph/red-team/{02-plan-resolution,03-patch-reconstruction,scope-manifest,commits/PLAN-*.md}`、attack-surface-mapper 写 `04-attack-surface.md` 与 `05-experiment-plan.md`、experiment-plan-validator 写 `plan-validation-attempt-<N>.md`、experiment-runner 写 `experiments/RTE-*.md` + `evidence/RTE-*/**` + `repros/RTE-*/**`）。
+- 每个 hat 的 **真实终态 topic** 上的 precheck rule 附带 `recovery_guidance`：`target.locked` / `plan.resolved` / `experiment.plan.ready` 为独立 workspace rule；`plan.valid` / `plan.invalid` / `experiment.done` 把 workspace checklist **追加到已有语义 rule 的 prompt**（同一 topic 只能有一条 precheck rule；禁止 `topic.workspace` 幽灵 key）。
+- `by_check` key 与追加后的 1-based checklist 索引对齐（validator 为 `"3"`/`"4"`，runner 为 `"4"`/`"5"`）。
+- Mock `presets/scenarios/*.yml` **不能**写入生产树 mutation，因此 tracked/untracked/ownership 真触发路径仍 BLOCKED；不得把 instructions 里的 `git status` 当成该路径已验收。
 - ownership 不明时停止而非 broad cleanup（plan R11；agent-facing common 项强调禁止 `git restore` / `git checkout` / `git clean` / `git stash`）。
 - 失败路径走既有 `redteam.failed` 主题（每个 hat 已 declared on publishes），on_exhausted 携带 `failure_kind=workspace_precheck_failed`，由现有 target → bounded retry 链处理；runtime 不自动重置 / 自动删除文件。
 - 仍属 preset-only 改动：未新增 builtin preset，未修改 manifest / index / zsh builtin 名称。

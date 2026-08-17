@@ -62,26 +62,26 @@ event_loop:
           retry_budget: 3
           on_exhausted: "plan.blocked(reason=precheck_failed)"
           reason: "work.done failed subjective checklist"
-          # 2026-08-17-1841 U1/U3 — 可选; common 总是显示,
-          # by_check key 必须是 1-based 提示索引(字符串形式)
-          recovery_guidance:
-            common:
-              - "重读 artifact 修根因,不要复制失败 payload"
-              - "修复后重跑 ralph emit <topic> --policy-check"
-            by_check:
-              "1":
-                - "实现必须能对照 plan 目标逐项验证"
+        recovery_guidance:
+          common:
+            - "重读 artifact 修根因,不要复制失败 payload"
+            - "修复后重跑 ralph emit <topic> --policy-check"
+          by_check:
+            "1":
+              - "实现必须能对照 plan 目标逐项验证"
 ```
 
-## 2026-08-17-1841 计划新增：可配置 recovery guidance
+## 可配置 recovery guidance
 
-precheck rule 与 payload-consistency rule 现在都接受可选 `recovery_guidance` 块（详见「2026-08-17-1841 计划」节）。两类 rule 的字段语义不同：
+precheck rule 与 payload-consistency rule 都接受可选 `recovery_guidance` 块。两类 rule 的字段语义不同：
 
 | 字段 | precheck | payload_consistency |
 |---|---|---|
-| `common` | 总是显示（含 synthetic rejection） | 总是显示（含 synthetic 不存在的假设） |
-| `by_check` key | `1..=prompt.len()` 的 1-based 索引（字符串） | rule 的稳定 `id`（必等于 rule `id`） |
-| 选择语义 | 按 gate 上报的 `failed_checks` 筛选（unmatched 不渲染） | 命中当前 rule 时显示整张 `by_check`（first-hit order） |
+| `common` | 普通拒绝与 synthetic 拒绝都显示；`failed_checks` 为空时仍显示 | 命中该 rule 时显示 |
+| `by_check` key | `1..=prompt.len()` 的 1-based 索引（字符串，禁止前导零） | 必须等于该 rule 的稳定 `id` |
+| 选择语义 | 按 gate 上报的 `failed_checks` 筛选；synthetic 或空 `failed_checks` 不渲染 specific | 只渲染 `by_check[<命中 rule 的 id>]` |
+
+一条 precheck rule 的 YAML key **必须是真实会被 emit 的 topic**。不要用 `topic.workspace` 这类后缀再挂第二条 rule：runtime 按 key 脱糖，没有 producer 发布该 topic 时 gate 永远不会触发。同一终态既要语义检查又要 workspace 检查时，把 checklist 项追加到同一 `rules.<topic>.prompt`。
 
 lint 严格门禁（preset_lint `recovery_guidance` 模块）：
 
