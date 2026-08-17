@@ -29,7 +29,7 @@ environment:
   required_services: []
   required_devices: []
   required_credentials: []
-  isolation_method: ""   # e.g. "docker container", "temp dir", "mock server"
+  isolation_method: ""   # e.g. "git worktree .worktrees/redteam-<RTE-id>/", "docker container"
 
 ## Setup
 setup_commands: []
@@ -76,7 +76,8 @@ results:
   control_runs: []
   attack_runs: []
   cleanup_verified: false
-  tracked_tree_clean: false
+  host_tree_clean: false
+  experiment_worktree_path: ""
   evidence_paths: []
   evidence_manifest_path: ""
   ledger_sha256: ""

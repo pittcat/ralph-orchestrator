@@ -6,8 +6,8 @@
 - **操作者与启动路径：** 操作者准备 `.ralph/red-team.prompt.md`，运行 `ralph run -c ralph.red-team-attack.yml -H builtin:red-team-attack`，最终阅读 `.ralph/red-team/REPORT.md`、`PLAN.md` 和 `QUESTIONS.md`。
 - **输入与事实源：** prompt 文件、Git HEAD/tree、开发计划、`.ralph/red-team/04-attack-surface.md`、`05-experiment-plan.md`、各 RTE 实验 artifact、原始证据和 evidence board。
 - **成功条件：** 所有计划实验均已记录；至少一个实验通过二元证据门禁和四项阈值；impact-boundary 写出至少一个合格 Finding 和 `PLAN.md`；independent-reviewer 发出 `PLAN_READY`；reporter 发出 `redteam.complete(success=true)`。
-- **阻塞条件：** target/tree 改变、生产树变脏、artifact 不可读、实验计划连续 3 次无法通过通用可执行性校验、实验队列 handoff 无法修复、所有实验均未形成合格证据，或独立终审拒绝计划。
-- **允许的修改范围：** 只允许写 `.ralph/red-team/` 业务 artifact、临时隔离环境和证据；禁止修改生产代码、正式测试、tracked 配置、Git 历史及运行时内部 ledger。
+- **阻塞条件：** 宿主 HEAD/tree 改变、宿主生产树变脏、artifact 不可读、实验计划连续 3 次无法通过通用可执行性校验、实验队列 handoff 无法修复、所有实验均未形成合格证据，实验 worktree 未按白名单创建，或独立终审拒绝计划。
+- **允许的修改范围：** 宿主只允许写 `.ralph/red-team/`；每个 RTE 的代码 mutation 只允许在 `.worktrees/redteam-<RTE-id>/`。禁止改宿主生产代码/正式测试/tracked 配置/Git 历史/运行时内部 ledger。禁止把实验树当作 Ralph loop `--worktree`。
 - **必须独立执行的评审：** evidence-gate 只读原始证据；impact-boundary 重新执行影响边界验证；independent-reviewer 独立检查全部 artifact、Finding、阈值和修复范围。
 - **重要 artifact、生产方与消费者：** 见下方 Artifact Ownership 表；事件只传短状态、计数、路径和路由字段，完整结果留在 artifact。
 - **execution_model：** `single-chain`；**why：** 实验必须按证据结果串行推进，不需要 wave 或 supervisor。
@@ -164,7 +164,7 @@ Wave 与 supervisor hard questions：**N/A**，因为 `execution_model=single-ch
 
 ### experiment-runner
 
-- **Q1 使命：** 每次 activation 只执行一个 RTE，完成 control/attack、原始证据、manifest 和 clean-tree 验证。
+- **Q1 使命：** 每次 activation 只执行一个 RTE：在 `.worktrees/redteam-<id>/` 做 control/attack（可改代码），把原始证据/manifest 写到宿主 `.ralph/red-team/`，并验证宿主树干净。
 - **Q2 输入：** 初次从 `redteam.experiment.plan.valid` 读取已校验实验计划与 validation report；续跑从 `redteam.experiment.next.next_experiment_id` 取得精确 RTE ID，并读取 evidence board。
 - **Q3 执行：** Observe queue/artifact → Precheck 环境和证据路径 → Apply 隔离执行、写 evidence/manifest/实验文件 → Confirm `test -f`、policy-check、emit。
 - **Q4 输出：** 只发 `redteam.experiment.done` 或 producer failure；manifest 先落盘，事件再传路径和 hash。
@@ -179,6 +179,7 @@ Wave 与 supervisor hard questions：**N/A**，因为 `execution_model=single-ch
 | `redteam.experiment.done` | `experiment_file_path` | 当前写入的 RTE 文件 | gate 读取实验定义与结果 | `field_docs.experiment_file_path`; 必填 |
 | `redteam.experiment.done` | `evidence_manifest_path` | 当前写入的 manifest | gate 验证每项 hash 和 ledger | `field_docs.evidence_manifest_path`; 必填 JSON |
 | `redteam.experiment.done` | `ledger_sha256` | manifest 中对真实 ledger/state 文件计算的 hash | gate 复算并拒绝缺证据 | `field_docs.ledger_sha256`; 64 hex 短值，原始命令和目标路径在 manifest |
+| `redteam.experiment.done` | `experiment_worktree_path` | runner 创建的 `.worktrees/redteam-<id>/` | 身份/路由；gate 确认非宿主 toplevel | 不落盘（路径短、恢复价值在 `git worktree list`；证据仍在 `.ralph/red-team/`） |
 
 ### evidence-gate
 

@@ -20,7 +20,7 @@ scenarios:
         success: true
       - hat: experiment-runner
         output: |
-          <event topic="redteam.experiment.done">{"experiment_id":"RTE-001","control_passed":true,"attack_reproduced":true,"evidence_paths":[".ralph/red-team/evidence/RTE-001/raw.log"],"experiment_file_path":".ralph/red-team/experiments/RTE-001.md","evidence_manifest_path":".ralph/red-team/evidence/RTE-001/evidence-manifest.json","ledger_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}</event>
+          <event topic="redteam.experiment.done">{"experiment_id":"RTE-001","control_passed":true,"attack_reproduced":true,"evidence_paths":[".ralph/red-team/evidence/RTE-001/raw.log"],"experiment_file_path":".ralph/red-team/experiments/RTE-001.md","evidence_manifest_path":".ralph/red-team/evidence/RTE-001/evidence-manifest.json","ledger_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","experiment_worktree_path":".worktrees/redteam-RTE-001/"}</event>
         success: true
       - hat: evidence-gate
         output: |
@@ -46,4 +46,28 @@ scenarios:
       terminal_topic: redteam.complete
     limits:
       max_steps: 9
+      no_progress_steps: 2
+
+  - name: producer-failure-to-complete-false
+    responses:
+      - hat: target-locker
+        output: |
+          <event topic="redteam.target.locked">{"target_head":"1111111111111111111111111111111111111111","target_tree":"2222222222222222222222222222222222222222","plan_count":1,"lock_file_path":".ralph/red-team/01-target-lock.md","lock_status":"locked"}</event>
+        success: true
+      - hat: plan-resolver
+        output: |
+          <event topic="redteam.failed">{"failed_stage":"plan-resolver","reason":"SCOPE_UNRESOLVED","failure_artifact_path":".ralph/red-team/failures/plan-resolver.md"}</event>
+        success: true
+      - hat: reporter
+        output: |
+          <event topic="redteam.complete">{"success":false,"report_path":".ralph/red-team/REPORT.md","plan_path":"","questions_path":".ralph/red-team/QUESTIONS.md"}</event>
+        success: true
+    expect:
+      start_event: redteam.start
+      accepted_events: [redteam.target.locked, redteam.failed, redteam.complete]
+      forbidden_events: [redteam.experiment.done]
+      terminal: failure
+      terminal_topic: redteam.complete
+    limits:
+      max_steps: 4
       no_progress_steps: 2

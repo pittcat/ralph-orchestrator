@@ -1,0 +1,15 @@
+version: 1
+scenarios:
+  - name: locker-no-output-no-progress
+    responses:
+      - hat: target-locker
+        output: ""
+        success: true
+    expect:
+      start_event: redteam.start
+      accepted_events: []
+      forbidden_events: [redteam.complete]
+      terminal: none
+    limits:
+      max_steps: 3
+      no_progress_steps: 1

@@ -316,6 +316,7 @@ schemas:
       - experiment_file_path
       - evidence_manifest_path
       - ledger_sha256
+      - experiment_worktree_path
     payload: json_object
     field_docs:
       experiment_id:
@@ -349,6 +350,11 @@ schemas:
         meaning: SHA-256 of the ledger/state artifact required by this experiment.
         source: Runner reads the hash from the evidence manifest after computing it from the actual target file.
         fill_rule: Exactly 64 lowercase hexadecimal characters; never infer it from a narrative, event log, or transition ID.
+      experiment_worktree_path:
+        meaning: Repo-relative path of the git worktree used for this RTE's mutating experiment. Not a host `.ralph/` evidence artifact; identity/routing field so later hats know where the scratch tree lived.
+        source: Path created or reused by experiment-runner via `git worktree add --detach .worktrees/redteam-<experiment_id> <locked-head>`.
+        fill_rule: Must be `.worktrees/redteam-<experiment_id>/`; must appear in `git worktree list`; must not equal host `git rev-parse --show-toplevel`. Do not invent a path without creating the worktree.
+        examples: [".worktrees/redteam-<RTE-id>/"]
 
   # evidence-gate -> request the next independent experiment. This explicit
   # serial queue edge was missing from the previous preset.

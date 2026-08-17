@@ -101,7 +101,7 @@ _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
   # testing / maintainability / project-standards / adversarial,
   # followed by synthesis + fix-plan + finalizer.
   "Post-implementation six-dimension review: freeze scope, single SharedReadonly wave across 6 dimensions, synthesize findings, emit fix-plan.md or block artifact as terminal LOOP_COMPLETE"
-  "Red Team attack: reverse-locate plan commits, reconstruct patches, execute real attack experiments with control groups, hard-threshold evidence gating, zero-regression repair plan awaiting human confirmation"
+  "Red Team attack: reverse-locate plan commits, reconstruct patches, run experiments in a dedicated git worktree while keeping the loop host checkout read-only, hard-threshold evidence gating, zero-regression repair plan awaiting human confirmation"
 )
 
 # =============================================================================

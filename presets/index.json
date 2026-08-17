@@ -41,7 +41,7 @@
   },
   {
     "name": "red-team-attack",
-    "description": "Experiment-driven Red Team analysis: reverse-locate plan commits from Git history, reconstruct patches, execute real attack experiments with control groups, apply hard-threshold evidence gating, and produce a zero-regression repair plan awaiting human confirmation",
+    "description": "Experiment-driven Red Team analysis: reverse-locate plan commits, reconstruct patches, run control/attack experiments in a dedicated git worktree while keeping the loop host checkout read-only, apply hard-threshold evidence gating, and produce a zero-regression repair plan awaiting human confirmation",
     "category": "workflow"
   }
 ]
