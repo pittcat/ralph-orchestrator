@@ -63,6 +63,19 @@ config:
             retry_budget: 3
             on_exhausted: "plan.blocked(reason=precheck_failed)"
             reason: "dead_end_evidence_insufficient"
+          # 2026-08-17-1841 U5 (S1/S2/R6): preset-supplied recovery
+          # guidance. The precheck rule carries `common` items
+          # plus a `by_check["confidence_inflated"]` entry that the
+          # correction prompt renderer surfaces only for the
+          # actually-failed check (D2/D3).
+          recovery_guidance:
+            common:
+              - "rebuild the artifact referenced by dead_end_evidence_file"
+              - "rerun ralph emit <topic> --policy-check before re-emitting"
+            by_check:
+              "confidence_inflated":
+                - "drop dead_end_confidence to ≤ 80 unless the artifact supports it"
+                - "include both coverage and confidence numbers in the dead-end evidence file"
     event_policy:
       enabled: true
       mode: enforce
@@ -193,3 +206,26 @@ expected:
     # gate_silent_or_ambiguous marker. The correction block
     # feedback_kind is semantic and the evidence shows
     # the gate was silent/unchecked (not a real LLM check result).
+    # 2026-08-17-1841 U5 (S1/S2): the correction block rendered
+    # to the executor carries both the preset-supplied `common`
+    # guidance and the `by_check["confidence_inflated"]` items
+    # that the LLM-reported failed check triggered (D2/D3).
+    - at_iteration: 2
+      correction_block_contains:
+        - "Common recovery guidance"
+        - "rebuild the artifact referenced by dead_end_evidence_file"
+        - "rerun ralph emit <topic> --policy-check before re-emitting"
+        - "Check-specific recovery guidance"
+        - "confidence_inflated"
+        - "drop dead_end_confidence to ≤ 80 unless the artifact supports it"
+        - "include both coverage and confidence numbers in the dead-end evidence file"
+    # 2026-08-17-1841 U5 (S2/D3): synthetic rejection carries
+    # the same preset-supplied guidance, but the
+    # check-specific sub-section is suppressed by the renderer.
+    - at_iteration: 4
+      correction_block_contains:
+        - "Common recovery guidance"
+        - "rebuild the artifact referenced by dead_end_evidence_file"
+      correction_block_absent:
+        - "Check-specific recovery guidance"
+        - "drop dead_end_confidence to ≤ 80 unless the artifact supports it"

@@ -74,6 +74,19 @@ config:
                 - field: fix_status
                   eq: applied
             message: "fix_status=applied is inconsistent with review_verdict=blocked and zero fixes"
+            # 2026-08-17-1841 U5 (S3 / R1): preset-supplied recovery
+            # guidance attached to the consistency rule. The
+            # `by_check` key MUST equal the rule's stable `id`
+            # (the lint enforces this; the renderer uses it as
+            # the matched key when the consistency evaluator
+            # produces a finding).
+            recovery_guidance:
+              common:
+                - "do not flip a single field to satisfy the gate — re-investigate the artifact"
+                - "rerun ralph emit <topic> --policy-check before re-emitting"
+              by_check:
+                "fix-done-no-fixes":
+                  - "either re-run the fix step (fixes_applied > 0) or correct the review_verdict before claiming fix_status=applied"
 
 mock_responses:
   # iter 1: self-contradictory fix.done — gate rejects and
@@ -135,3 +148,23 @@ expected:
           - fix_status
         evidence_invariant_contains: "inconsistent"
         feedback_kind: "semantic"
+    # 2026-08-17-1841 U5 (S3 / R3 / R4): the consistency rejection's
+    # correction block carries both the preset-supplied `common`
+    # guidance and the `by_check["fix-done-no-fixes"]` items
+    # (the rule id is the only key the consistency renderer
+    # selects; S4 — wrong keys are not linted into existence).
+    - at_iteration: 2
+      correction_block_contains:
+        - "Common recovery guidance"
+        - "do not flip a single field to satisfy the gate"
+        - "rerun ralph emit <topic> --policy-check before re-emitting"
+        - "Check-specific recovery guidance"
+        - "fix-done-no-fixes"
+        - "either re-run the fix step"
+      # 2026-08-17-1841 U5 (S6 / C1): guidance never implies a
+      # replacement payload / suggested command — even when the
+      # underlying rule is fully populated.
+      correction_block_absent:
+        - "Suggested payload"
+        - "Suggested command"
+        - "Expected payload"

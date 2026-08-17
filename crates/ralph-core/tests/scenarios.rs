@@ -390,6 +390,21 @@ struct AssertionYaml {
     // scenarios.
     #[serde(default)]
     correction_block_present: Option<CorrectionBlockPresentYaml>,
+    // 2026-08-17-1841 U5 (S1/S3/R6): assert the rendered
+    // correction block for the current iteration contains
+    // every listed substring.  Used to pin that the
+    // preset-supplied recovery guidance (U1/U2 contract)
+    // surfaces in the prompt — `common` items always, the
+    // `by_check[<key>]` items for the matched failed check.
+    #[serde(default)]
+    correction_block_contains: Option<Vec<String>>,
+    // 2026-08-17-1841 U5 (D3/S6): assert the rendered correction
+    // block does NOT contain any listed substring. Used to pin
+    // that synthetic rejections suppress the specific
+    // sub-section, and that semantic rejection never renders
+    // replacement payload / suggested command (C1).
+    #[serde(default)]
+    correction_block_absent: Option<Vec<String>>,
     // 2026-06-21-002 plan U9: assert a rejection record exists
     // in the workspace-level `.ralph/recovery.jsonl` with a
     // matching `reason_code` prefix. Used by
@@ -541,6 +556,17 @@ struct LoopStateSnapshot {
     /// `ralph_core::correction::CorrectionContext`'s full shape.
     #[allow(dead_code)]
     correction_block_summaries: Vec<CorrectionBlockSummary>,
+    /// 2026-08-17-1841 U5 (S1/S3/R6/D3/S6): clone of the full
+    /// `CorrectionContext` list so the
+    /// `correction_block_contains` /
+    /// `correction_block_absent` predicates can call the same
+    /// `render_block()` the prompt builder consumes and assert
+    /// against the rendered text. Cloning is intentional — the
+    /// predicates mirror what the agent sees; using a summary
+    /// would silently drop the U2 / U3 guidance sections that
+    /// the renderer only emits when the evidence carries
+    /// `guidance: Some(...)`.
+    correction_blocks: Vec<ralph_core::correction::CorrectionContext>,
     /// 2026-06-21-002 plan U9: snapshot of
     /// `state.prompt_context.resume_blocks`. Future U9 scenarios
     /// that pin the `--continue` path use this via the
@@ -3975,6 +4001,13 @@ fn capture_state_snapshot(
         lint_circuit_breaker_tripped: state.lint_circuit_breaker_tripped,
         consecutive_engine_gate_rejections: state.consecutive_engine_gate_rejections,
         correction_block_summaries,
+        // 2026-08-17-1841 U5 (S1/S3/R6): clone the full
+        // `CorrectionContext` list so the new
+        // `correction_block_contains` / `correction_block_absent`
+        // predicates can call `render_block()` and assert
+        // against the rendered text — same source the prompt
+        // builder consumes.
+        correction_blocks: state.prompt_context.correction_blocks.clone(),
         resume_block_summaries,
         workspace_recovery_log,
     }
@@ -4046,12 +4079,23 @@ fn evaluate_assert_state(
             // one record with the matching `reason_code`
             // prefix.
             evaluate_rejection_log_contains_reason_code(scenario_name, idx, at, rl, state_snap);
+        } else if let Some(ref items) = assertion.correction_block_contains {
+            // 2026-08-17-1841 U5 (S1/S3/R6): rendered correction
+            // block contains every listed substring. Renders
+            // every visible correction block and asserts each
+            // needle shows up.
+            evaluate_correction_block_contains(scenario_name, idx, at, items, state_snap);
+        } else if let Some(ref items) = assertion.correction_block_absent {
+            // 2026-08-17-1841 U5 (D3/S6): rendered correction
+            // block does NOT contain any listed substring.
+            evaluate_correction_block_absent(scenario_name, idx, at, items, state_snap);
         } else {
             panic!(
                 "{}: assert_state[{}] at_iteration={} has no predicate set \
                  (expected one of pending_lint_resume, pending_lint_resume_cleared, \
                  rejection_digest_contains, prompt_injects, lint_circuit_breaker, \
-                 correction_block_present, rejection_log_contains_reason_code)",
+                 correction_block_present, correction_block_contains, \
+                 correction_block_absent, rejection_log_contains_reason_code)",
                 scenario_name, idx, at
             );
         }
@@ -4146,6 +4190,97 @@ fn evaluate_correction_block_present(
         expected.feedback_kind,
         entries
     );
+}
+
+/// 2026-08-17-1841 U5 (S1/S3/R6): rendered correction block
+/// contains every listed substring.  Renders every visible
+/// (target_hat-visible) correction block at the iteration's
+/// snapshot and asserts each needle shows up in the joined
+/// text.  Used to pin that the preset-supplied recovery
+/// guidance (U1/U2 contract) surfaces in the prompt — `common`
+/// items always, `by_check[<key>]` items for the matched
+/// failed check (U3 precheck / U4 consistency paths).
+fn evaluate_correction_block_contains(
+    scenario_name: &str,
+    assertion_idx: usize,
+    at: usize,
+    needles: &[String],
+    snap: &LoopStateSnapshot,
+) {
+    let rendered = render_visible_correction_blocks(&snap.correction_blocks);
+    assert!(
+        !rendered.trim().is_empty(),
+        "{}: assert_state[{}] correction_block_contains at_iteration={} \
+         no visible correction block to assert against",
+        scenario_name,
+        assertion_idx,
+        at
+    );
+    for needle in needles {
+        assert!(
+            rendered.contains(needle.as_str()),
+            "{}: assert_state[{}] correction_block_contains at_iteration={} \
+             rendered correction block does not contain expected substring {:?}\n--- rendered ---\n{}\n--- end ---",
+            scenario_name,
+            assertion_idx,
+            at,
+            needle,
+            rendered
+        );
+    }
+}
+
+/// 2026-08-17-1841 U5 (D3/S6): rendered correction block
+/// does NOT contain any listed substring.  Renders every
+/// visible correction block and asserts each needle is
+/// absent.  Used to pin that synthetic rejections suppress
+/// the specific sub-section (D3) and that semantic
+/// rejection never renders replacement payload / suggested
+/// command (C1).
+fn evaluate_correction_block_absent(
+    scenario_name: &str,
+    assertion_idx: usize,
+    at: usize,
+    needles: &[String],
+    snap: &LoopStateSnapshot,
+) {
+    let rendered = render_visible_correction_blocks(&snap.correction_blocks);
+    assert!(
+        !rendered.trim().is_empty(),
+        "{}: assert_state[{}] correction_block_absent at_iteration={} \
+         no visible correction block to assert against",
+        scenario_name,
+        assertion_idx,
+        at
+    );
+    for needle in needles {
+        assert!(
+            !rendered.contains(needle.as_str()),
+            "{}: assert_state[{}] correction_block_absent at_iteration={} \
+             rendered correction block unexpectedly contains forbidden substring {:?}\n--- rendered ---\n{}\n--- end ---",
+            scenario_name,
+            assertion_idx,
+            at,
+            needle,
+            rendered
+        );
+    }
+}
+
+/// 2026-08-17-1841 U5: render every correction block's
+/// `render_block()` output and concatenate them.  Used by
+/// the `correction_block_contains` / `correction_block_absent`
+/// predicates so the YAML assertions exercise the same
+/// renderer that the prompt builder consumes.
+fn render_visible_correction_blocks(
+    blocks: &[ralph_core::correction::CorrectionContext],
+) -> String {
+    let mut out = String::new();
+    for block in blocks {
+        out.push_str(&block.render_block());
+        out.push('\n');
+    }
+    out
 }
 
 // 2026-06-21-002 plan U9: `rejection_log_contains_reason_code`
