@@ -17,14 +17,14 @@
 ralph preset check -H <path|builtin:name> --strict
 ralph preset check -H <path|builtin:name> --strict --format json
 
-# Dynamic workflow verification.
-# review REQUIRES actual verify report evidence; static-pass-only is not
-# sufficient. Success, failure/block, and no-output/abnormal-output
-# scenarios are required; add recovery/terminal-closure cases when
-# applicable. Failure to run verify, missing scenario file, or any
-# non-pass scenario blocks review (see `references/finding-rubric.md`).
+# Dynamic workflow verification:
+# runs version 1 scenario YAML through real EventLoop in a temp
+# workspace; reports ordered events / terminal closure / failure_kind.
+# author MUST run this for success, failure/block, and no-output/
+# abnormal-output scenarios before declaring the preset ready; add
+# recovery/terminal-closure scenarios when the workflow exposes them.
+# reviewer MUST require this evidence in the report.
 ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format json
-ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format human
 
 # Workspace preset_lint 子集
 cargo nextest run -p ralph-cli --bin ralph -- preset_lint
@@ -56,7 +56,7 @@ ralph tools task verify-emit-bridge ...
 `--triggered` 是事件的目标 hat，不是来源 hat。普通业务 handoff 必须省略它，让 isolated runtime / CLI 按 topic 的唯一消费者自动推导；但若 schema 声明 `EventSchema.required_target_hat`，必须显式指定该字段声明的目标（包括允许终态 reporter 的合法 self-target）。目标必须与 schema 和 `policy-check` 一致。只有确需跨 hat 直达、且 author notes 记录目标、原因和拓扑证据时才允许使用；其它 self-target 仍禁止。详见 `crates/ralph-core/data/ralph-tools-emit.md`「Envelope 校验」段。
 `verify-emit-bridge` 的完整参数见 `crates/ralph-core/data/ralph-tools-tasks.md` 的 OPAC Precheck 段；本 reference 只保留入口名，避免复制 runtime command table。
 
-**policy-check feedback 审核点**：JSON 输出中的 error item 可能包含 `field`、`reason_code`、`expected`、`actual`、`field_description`、`suggested_payload_shape`、`suggested_command`、`payload_index`、`gate`、`referenced_fields`。这些字段只说明 runtime 如何拒收和建议 agent 怎么修 shape；review 仍要检查 `field_description` 是否来自正确的 `field_docs`，`suggested_payload_shape` 是否没有伪造业务事实，batch 错误是否保留 `payload_index`。当 `reason_code` 是 `semantic_gate_violation` 时，`gate` 携带触发的 gate 标识（如 `payload_consistency:<rule_id>`），`referenced_fields` 列出该规则 `when` 谓词声明的所有 payload 字段路径——review 须确认 `field` 没有被用来承载 gate ID、agent 能只靠结构化字段完成定位。
+**policy-check feedback 审核点**：JSON 输出中的 error item 可能包含 `field`、`reason_code`、`expected`、`actual`、`field_description`、`suggested_payload_shape`、`suggested_command`、`payload_index`、`gate`、`referenced_fields`、`recovery_guidance`。这些字段只说明 runtime 如何拒收和建议 agent 怎么修 shape；review 仍要检查 `field_description` 是否来自正确的 `field_docs`，`suggested_payload_shape` 是否没有伪造业务事实，batch 错误是否保留 `payload_index`。当 `reason_code` 是 `semantic_gate_violation` 时，`gate` 携带触发的 gate 标识（如 `payload_consistency:<rule_id>`），`referenced_fields` 列出该规则 `when` 谓词声明的所有 payload 字段路径——review 须确认 `field` 没有被用来承载 gate ID、agent 能只靠结构化字段完成定位。**`recovery_guidance` 是 plan 2026-08-17-1841 U1/U4 新增**：preset-supplied `common` / `by_check` items 与同一份 evidence 共用，CLI JSON 与 correction prompt renderer 同源；author 不应新增 `suggested_command` / `suggested_payload_shape` 替代字段（plan D4 明确禁止 semantic replacement）。
 
 **review 含义**：上面四条命令只能排除 shape / 拓扑 ownership 类问题，并观察 policy-check 的 agent-facing 修复面。**字段可见性 / 值源 / 身份 / 语义 / 下游消费 必须由 review 从 activated-hat 视角独立审**。详见 `references/agent-native-model.md`「Payload 审计模型」段。
 
@@ -216,4 +216,4 @@ ralph emit --schema <scope-topic> -H <path|builtin:name>
 
 **Threshold gate**：`overall_confidence >= 90` 且 `critical_unknown_count == 0` 且 `proceed == true` 时 scope 才能标记为 resolved。
 
-**边界**：reviewer 在审涉及 scope topic 的 hat 时，必须验证 `instructions` 中明确要求 agent 先写 manifest、再 policy-check、再真实 emit。
+**边界**：author 在起草涉及 scope topic 的 hat 时，必须在 `instructions` 中明确要求 agent 先写 manifest、再 policy-check、再真实 emit。

@@ -62,7 +62,34 @@ event_loop:
           retry_budget: 3
           on_exhausted: "plan.blocked(reason=precheck_failed)"
           reason: "work.done failed subjective checklist"
+          # 2026-08-17-1841 U1/U3 — 可选; common 总是显示,
+          # by_check key 必须是 1-based 提示索引(字符串形式)
+          recovery_guidance:
+            common:
+              - "重读 artifact 修根因,不要复制失败 payload"
+              - "修复后重跑 ralph emit <topic> --policy-check"
+            by_check:
+              "1":
+                - "实现必须能对照 plan 目标逐项验证"
 ```
+
+## 2026-08-17-1841 计划新增：可配置 recovery guidance
+
+precheck rule 与 payload-consistency rule 现在都接受可选 `recovery_guidance` 块（详见「2026-08-17-1841 计划」节）。两类 rule 的字段语义不同：
+
+| 字段 | precheck | payload_consistency |
+|---|---|---|
+| `common` | 总是显示（含 synthetic rejection） | 总是显示（含 synthetic 不存在的假设） |
+| `by_check` key | `1..=prompt.len()` 的 1-based 索引（字符串） | rule 的稳定 `id`（必等于 rule `id`） |
+| 选择语义 | 按 gate 上报的 `failed_checks` 筛选（unmatched 不渲染） | 命中当前 rule 时显示整张 `by_check`（first-hit order） |
+
+lint 严格门禁（preset_lint `recovery_guidance` 模块）：
+
+- `preset.recovery_guidance_unknown_check` — precheck key 非 1-based 正整数 / 越界；consistency key ≠ rule id（致命：lint 直接 fail-close，strict mode 启动拒绝）
+- `preset.recovery_guidance_empty_item` — `common[]` 或 `by_check[*][]` 任一 item 为空字符串
+- `preset.recovery_guidance_unsafe_item` — item 超 1024 UTF-8 bytes / 含 ANSI escape / C0/C1 控制字符 / 零宽字符（mirrors `payload_consistency_unsafe_message`）
+
+renderer 与 CLI JSON 同源：semantic guidance 永远只是 prose，不替代 payload；`Suggested payload` / `Suggested command` / `Expected payload` 字段不新增（plan D4 明确禁止）；agent 必须先 `ralph emit <topic> --policy-check` 通过，再正式 emit。
 
 字段说明：
 

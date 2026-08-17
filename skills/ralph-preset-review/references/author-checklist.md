@@ -18,7 +18,7 @@
   - [ ] YAML 能力信号（`event_loop.supervisor.enabled` / hat instructions 含 `ralph wave emit`）与 Intent.execution_model 一致；不一致按 `finding-rubric.md`「Wave / Supervisor capability audit」 段 `preset.execution_model_intent_mismatch` 入 review 主表
 - [ ] 新 preset 或实质行为变更已通过最终菜单获得明确确认：「确认并开始设计 / 返回修改 / 暂停」
 - [ ] 用户未确认或仍有重大歧义时已 STOP，未起草 YAML/schema
-- [ ] **Key-stage event gate 0e 必备字段（review 复核，按关键位置每行）**：
+- [ ] **Key-stage event gate 0e 必备字段（按关键位置每行）**：
   - [ ] `key_stage` 注明 hat 与 handoff / 阶段分支的人类可读标识
   - [ ] `guard_selection` ∈ {`precheck`, `payload_consistency`, `both`, `neither`}
   - [ ] `precheck_guard` 布尔 `true` ⇔ `guard_selection ∈ {precheck, both}`
@@ -27,8 +27,14 @@
   - [ ] `payload_consistency_retry_budget` 整数 3 / 2 / 1，`payload_consistency_guard=false` 时填 `null`
   - [ ] `reason` ≤80 字；选择 `neither` 或 budget 低于 3 必须有恢复 / 审计 / 下游依赖类理由
   - [ ] `confirmation_status` ∈ {`confirmed`, `pending`, `rejected`}；非 `confirmed` 即视为未确认
-- [ ] **Key-stage event gate 与 Gate Scope 字段隔离**（review 端独立复核）：0d 的 `hard/record/off` 与 0e 的 `guard_selection` / `precheck_guard` / `payload_consistency_guard` / `precheck_retry_budget` / `payload_consistency_retry_budget` 字段语义不混；不得把 Gate Scope `off` 字段当 0e 的关键位置选择。违规 → `preset.key_stage_event_gate_field_reuse` finding（参见 `finding-rubric.md`「Key-stage event gate」段，review-only）。
+- [ ] **Key-stage event gate 与 Gate Scope 字段隔离**：0d 的 `hard/record/off` 与 0e 的 `guard_selection` / `precheck_guard` / `payload_consistency_guard` / `precheck_retry_budget` / `payload_consistency_retry_budget` 字段语义不混；不得把 Gate Scope `off` 字段当 0e 的关键位置选择。违规 → `preset.key_stage_event_gate_field_reuse` finding（参见 `finding-rubric.md`「Key-stage event gate」段，review-only）。
 - [ ] **Key-stage event gate 两 budget 不共享**：不得把 `precheck_retry_budget` 与 `payload_consistency_retry_budget` 合并为一个 `retry_budget` 或共享 exhaustion state。
+- [ ] **Task brief 前置输入对账**（仅当调用方提供 `task_brief_path` 时；书面规程见 `skills/ralph-task-discovery/references/author-handoff.md`，确定性参考实现 `author_handoff.py`）：
+  - [ ] brief 路径与 validator 结论（`valid` / `author_ready` / `next_action`）已记录到 `preset-author-notes.md`
+  - [ ] 复核顺序完整：文件存在 → YAML → `schema_version` → `project_root` 与当前目标项目根一致 → `brief_validator.validate_brief_text` → `status` / `author_ready`；任一失败输出 `task_brief_invalid` + validator code/path，停在 Discovery gate，不生成任何 preset YAML
+  - [ ] brief 的 Goal、成功条件（acceptance）、阻塞条件（failure boundaries）、scope、Evidence refs 已引用进 Preset Intent Confirmation
+  - [ ] selected candidate 仅取自 validator `candidate_gates` 结论为 `selected` 的候选；被 rejected 的候选不得被当作 selected 消费
+  - [ ] 既有 Discovery / Intent Confirmation / AAF / Payload Contract / prompt visibility / pre-review gate / review handoff 门禁未因 brief 跳过或削弱
 
 ### 提问菜单示例（按真实缺口选用，不得照抄为固定问卷）
 
@@ -77,8 +83,10 @@
 - [ ] **Artifact-First topic 判别**：每条 emit topic 的字段都先判断是否属于「完整结果 / 长内容 / 跨 hat 摘要 / 关键决策依据 / 验证证据 / 高成本重建」；若是，完整内容必须由实际执行的 hat 或其 sub-agent 写入当前 `.ralph/` 下的业务 artifact，event payload 不得直接搬运，只保留路径、短状态或摘要、必要身份与路由字段（event 是控制面，文件是数据面）。
 - [ ] **`event_loop.precheck`（若启用）producer 端契约**：`event_loop.precheck.enabled: true` 且当前 hat 已发布 `<X>.proposed` 时，`ralph emit <X>` 会被 CLI 透明改写为 `<X>.proposed`（U3 wiring）；写盘前的缺字段检查会按 guarded `<X>` schema 的 `required_fields` 跑（U4 wiring）。**作者**：`presets/en/*.yml` 的 `event_loop.precheck.rules` 必须与 `event_policy.schemas.<X>.required_fields` 对齐（否则 U4 不会拦截）；不要在 hat instructions 里写「手 emit `<X>.proposed` 必被拒」之类过时陈述；详见 `docs/guide/precheck-gates.md` 的「Producer 视角」段。
 - [ ] **Artifact 产出责任**：每条写入型 hat（executor / fixer / sub-agent 拥有方）必须显式声明本 activation 会写入的 artifact 路径集合；sub-agent 的完整结果、证据与未解决问题必须先落盘，再只返回短状态、摘要和路径；不得把 preset 描述为文件创建者。
+- [ ] **Recovery guidance contract**（plan 2026-08-17-1841 U1/U2）：`event_loop.precheck.rules.<X>.recovery_guidance.common` 与 `.by_check` 可选；`event_policy.payload_consistency.rules[].recovery_guidance` 同样可选。**预检 key 合法性**：precheck 必须 `1..=prompt.len()`（字符串形式），consistency 必须等于 rule `id`（lint 直接 fail-close，strict mode 启动拒绝）。**作者禁止**：在 `recovery_guidance` 中写入 `suggested_payload_template` / `suggested_command` 等"修复模板"——semantic guidance 是 prose，不替代 agent 调查；渲染器经过 `safe_display` 走字面文本；空 item、ANSI escape、控制字符、零宽字符、超 1024 UTF-8 字节均被 lint 拒收。**render 行为**：synthetic precheck rejection 只显示 `common`；非 synthetic 按 `failed_checks`（precheck 1-based 索引）或 rule `id`（consistency）选择 `by_check`。
 - [ ] **Artifact 消费与生命周期**：每条消费型 hat 必须显式声明从哪个可见路径读取 artifact，不得依赖 prompt 中的长文本；每份重要 artifact 还要指定消费方以及最终保留、归档或清理责任。
 - [ ] 每个 agent-authored emit topic 的 `event_policy.schemas.<topic>` 已检查：required handoff / identity / verdict / count / path / reason 字段有 `field_docs`，高风险 topic 有不会伪造业务事实的 `examples`
+- [ ] **Instructions ↔ schema required-fields SSOT 对账**：每个 `ralph emit <topic>` 示例的 payload 字段集合与对应 `event_policy.schemas.<topic>.required_fields` 完全一致；每个字段的占位值都能从当前 trigger、注入上下文或本 hat 产物取得，并在 `preset-author-notes.md` 记录 schema 行 + instructions 行证据
 - [ ] 若 hat `publishes` 含 `review.dimensions.complete`，`state_projection.actions_chain` 须有对应投影 action（否则下游 Q2 看不到 review 汇总）
 - [ ] **Triggered 路由硬规则**：`--triggered` 是事件目标 hat，不是来源 hat；普通业务 handoff 一律省略，让 isolated runtime / CLI 自动推导。显式使用必须证明是不同 hat 的必要直达例外，并在 author notes 记录目标、原因和拓扑证据；self-target 直接判为 P0。
 - [ ] loop preset 中 `fix.done.next_review_plan` 必须是非空 object 合同；schema、example、fixer instructions 都不能允许 `null`
@@ -185,6 +193,7 @@
 - `examples` 填了业务结论占位（例如固定 `0` / `pass`），而不是安全示例
 - event payload 直接携带完整结果正文（尤其是超过 200 字符，或任意长度但具有恢复、审计、下游依赖价值的内容）；字符数仅是提示，不是主判据
 - emitter hat instructions 未要求「先写业务 artifact，再 emit 携带路径的 event」
+- emitter instructions 的 emit 示例少于 schema `required_fields`、字段名漂移、引用错误上游 topic 或字段值无可见来源
 - consumer hat instructions 未要求从当前可见路径读取完整内容，仍依赖 prompt 或 trigger payload 中的长文本
 - artifact 路径未指定消费方、消费动作或最终保留 / 归档 / 清理责任
 - event payload 把 `.ralph/events.jsonl`、`.ralph/loops.json`、`.ralph/supervisor.db` 等 runtime internal ledger 路径当作业务 artifact
@@ -278,18 +287,17 @@
 
 预演 finding 时按 `references/finding-rubric.md`「Artifact-First Handoff finding_id」表入主表（review-only，不进 `ralph preset check` JSON）：`preset.artifact_path_not_in_visible_context` / `preset.artifact_no_consumer_declared` / `preset.artifact_no_lifecycle_owner` / `preset.artifact_uses_internal_ledger` / `preset.payload_carries_full_content` / `preset.artifact_first_field_docs_missing` / `preset.artifact_first_exemption_unjustified` / `preset.artifact_first_passed_on_path_presence` / `preset.subagent_result_returned_only_in_message` / `preset.artifact_described_as_preset_owned` / `preset.artifact_content_insufficient_for_decision`。完整默认 severity / confidence / aaf_question 见该表。
 
-## Hard questions — Key-stage event gate (0e, review 复核)
+## Hard questions — Key-stage event gate (0e)
 
-review 端按关键位置逐条复核；任一项不满足即按 `finding-rubric.md`「Key-stage event gate」段入主表（review-only）：
+任何 preset 交 review 前必须按关键位置逐条回答；任一项不满足即按 `finding-rubric.md`「Key-stage event gate」段入主表（review-only）：
 
-1. **每个被 reviewer 独立识别的关键位置是否在 author notes 中有 4 选 1 guard 选择？** ✓ / ✗ + 列出位置 + 证据
+1. **每个被 Gate Scope 列入的关键 hat 是否已逐位置识别关键 handoff / 阶段分支，并按位置询问 4 选 1 guard 选择？** ✓ / ✗ + 列出位置 + 询问 menu 证据
 2. **每个被选中的 guard 类型是否独立确认 retry budget（3 / 2 / 1，默认 3）？** ✓ / ✗ + 列每位置 budget 数值
 3. **`precheck_retry_budget` 与 `payload_consistency_retry_budget` 是否分别记录、不共享总预算 / 计数器 / exhaustion state？** ✓ / ✗ + 证据
 4. **选择 `neither` 或低于默认 budget（3）的位置是否都有 ≤80 字 `reason`（恢复 / 审计 / 下游依赖类）？** ✓ / ✗ + 证据
 5. **每行 `confirmation_status` 是否为 `confirmed`？非 `confirmed` 是否阻断后续 YAML / schema 设计？** ✓ / ✗ + 证据
 6. **0e 字段是否复用 0d 的 `hard/record/off` 字段？** 此项必须为 ✗（否）；✓ 表示字段被错误复用 → `preset.key_stage_event_gate_field_reuse`
 7. **0e 字段是否引入新的 runtime 规则、计数器、恢复路径？** 此项必须为 ✗；✓ 表示 author 越权定义 runtime → `preset.key_stage_event_gate_unsupported_runtime_rule`
-8. **notes 记录的 guard 选择与 YAML 实际 `event_loop.precheck.rules` / `event_policy.payload_consistency.rules` 是否一致？** ✓ / ✗ + 字段路径证据；不一致 → `preset.key_stage_event_gate_notes_preset_diverge`
 
 完整 finding 默认 severity / confidence / aaf_question 见 `finding-rubric.md`「Key-stage event gate」段。
 
