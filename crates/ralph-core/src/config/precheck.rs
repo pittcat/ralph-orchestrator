@@ -1,3 +1,4 @@
+use crate::config::RecoveryGuidance;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -33,6 +34,15 @@ pub struct PrecheckRule {
     /// allowed before escalating.
     #[serde(default)]
     pub on_fail: PrecheckOnFail,
+
+    /// Optional recovery guidance attached to this rule. When the gate
+    /// rejects a producer emit, `common` items render into the target
+    /// hat's correction prompt unconditionally and the
+    /// `by_check["<1-based checklist index>"]` item renders only for
+    /// the actually-failed check (plan 2026-08-17-1841 R1/D2/D3).
+    /// Omitted → no custom guidance, matching the pre-plan baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_guidance: Option<RecoveryGuidance>,
 }
 
 /// Failure handling for a precheck rule.
@@ -308,6 +318,7 @@ mod resolve_precheck_emit_topic_tests {
                 on_exhausted: String::new(),
                 reason: String::new(),
             },
+            recovery_guidance: None,
         }
     }
 

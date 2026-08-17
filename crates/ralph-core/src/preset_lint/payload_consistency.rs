@@ -733,6 +733,7 @@ mod tests {
             topic: topic.to_string(),
             when,
             message: "test rule".to_string(),
+            recovery_guidance: None,
         }
     }
 
@@ -969,6 +970,7 @@ mod tests {
             topic: "fix.done".to_string(),
             when: json!({"field": "fix_status", "eq": "applied"}),
             message: message.to_string(),
+            recovery_guidance: None,
         }
     }
 
@@ -1160,6 +1162,7 @@ mod tests {
             topic: topic.to_string(),
             when,
             message: "test rule".to_string(),
+            recovery_guidance: None,
         }
     }
 

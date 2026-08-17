@@ -1,11 +1,41 @@
 //! Event policy configuration for typed payload validation and lifecycle enforcement.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
 use super::default_true;
 use super::loop_config::EventSchema;
+
+/// Opt-in recovery guidance attached to a precheck or payload-consistency
+/// rule (plan 2026-08-17-1841 R1/D2/D5). When the rule rejects an emit, the
+/// preset-supplied `common` strings are rendered into the target hat's
+/// correction prompt unconditionally, and the `by_check` strings for the
+/// specific failed check (1-based precheck checklist index, or the
+/// consistency rule's stable `id`) are rendered alongside.
+///
+/// Omitting the block is a no-op (matches the legacy "no custom
+/// guidance" baseline). Both fields use `serde(default)` so old
+/// presets keep parsing without modification.
+///
+/// Safety: the runtime renderer still applies `safe_display` to each
+/// item at prompt-build time. The preset lint in
+/// `crate::preset_lint::recovery_guidance` is the first line of defence
+/// and rejects empty items, unsafe characters, oversized items, and
+/// out-of-range keys.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct RecoveryGuidance {
+    /// Items shown in the target hat's correction prompt regardless of
+    /// which check failed. Render order matches insertion order.
+    #[serde(default)]
+    pub common: Vec<String>,
+    /// Per-check items. For a precheck rule the key is the 1-based
+    /// checklist index as a decimal string ("1", "2", ...). For a
+    /// payload-consistency rule the key MUST equal the rule's stable
+    /// `id`. Out-of-range / unknown keys are surfaced by the lint.
+    #[serde(default)]
+    pub by_check: BTreeMap<String, Vec<String>>,
+}
 
 /// A rule that denies a specific hat from publishing a specific topic.
 ///
@@ -42,6 +72,13 @@ pub struct PayloadConsistencyRule {
     pub when: serde_json::Value,
     /// Human-readable validation failure message.
     pub message: String,
+    /// Optional recovery guidance attached to this rule. When the
+    /// evaluator hits this rule, `common` is shown unconditionally and
+    /// `by_check["<this rule id>"]` is shown as the check-specific
+    /// item (plan 2026-08-17-1841 R1/D2/D3). The lint rejects any
+    /// `by_check` key that does not equal this rule's `id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_guidance: Option<RecoveryGuidance>,
 }
 
 /// Opt-in event policy for typed payload validation and lifecycle enforcement.

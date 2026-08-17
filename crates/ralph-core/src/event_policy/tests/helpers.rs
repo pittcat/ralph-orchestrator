@@ -202,6 +202,7 @@ pub fn consistency_rule(
         topic: topic.to_string(),
         when,
         message: message.to_string(),
+        recovery_guidance: None,
     }
 }
 

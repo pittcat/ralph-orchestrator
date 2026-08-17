@@ -753,6 +753,7 @@ hats:
                     on_exhausted: "plan.blocked".to_string(),
                     reason: "precheck failed".to_string(),
                 },
+                recovery_guidance: None,
             },
         );
         changed.event_loop.precheck = Some(precheck);

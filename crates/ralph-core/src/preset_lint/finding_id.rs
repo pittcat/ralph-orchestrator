@@ -737,6 +737,37 @@ pub const FINDING_TERMINAL_TARGET_NOT_REGISTERED: &str = "preset.terminal_target
 pub const FINDING_TERMINAL_TARGET_CONSUMER_MISMATCH: &str =
     "preset.terminal_target_consumer_mismatch";
 
+// ──────────────────────────────────────────────────────────────────────────
+// plan 2026-08-17-1841: `recovery_guidance` rule lint finding IDs (U1).
+// Both `event_loop.precheck.rules.<X>` and
+// `event_policy.payload_consistency.rules[]` accept an optional
+// `recovery_guidance: { common: [...], by_check: {...} }` block. The
+// lint family below rejects malformed shapes at preset-load time so
+// the runtime renderer never sees unsafe / out-of-range / wrong-key
+// guidance. Strict-by-default fail-close (matches
+// `payload_consistency_*` / `trigger_context_*` pattern).
+// ──────────────────────────────────────────────────────────────────────────
+
+/// `recovery_guidance.by_check` carries a key that is not a positive
+/// decimal string in `1..=prompt.len()` (precheck) and is not equal
+/// to the rule's own `id` (consistency). Out-of-range / unknown keys
+/// silently render zero guidance at runtime. Always `Error` in
+/// strict; warn-by-default follows the family pattern.
+pub const FINDING_RECOVERY_GUIDANCE_UNKNOWN_CHECK: &str = "preset.recovery_guidance_unknown_check";
+
+/// A `recovery_guidance.common[]` or `by_check[<key>][]` item is empty.
+/// Empty items render as blank bullet lines in the target hat prompt
+/// and silently swallow guidance budget. Always `Error` in strict.
+pub const FINDING_RECOVERY_GUIDANCE_EMPTY_ITEM: &str = "preset.recovery_guidance_empty_item";
+
+/// A `recovery_guidance` item exceeds
+/// `safe_display::MAX_RULE_MESSAGE_BYTES` (1024 UTF-8 bytes) or
+/// contains ANSI escapes, C0/C1 control characters, or zero-width
+/// characters. Mirrors `FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE`
+/// so the same renderer (`safe_display`) handles both message bodies
+/// and guidance items consistently. Always `Error` in strict.
+pub const FINDING_RECOVERY_GUIDANCE_UNSAFE_ITEM: &str = "preset.recovery_guidance_unsafe_item";
+
 /// Inventory of every finding id in this module. Use this in tests
 /// that assert the lint surface does not silently re-introduce a
 /// serial-only or coordinator-loop finding. Plan 2026-07-07-006
@@ -814,4 +845,7 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_TERMINAL_TARGET_CONTRACT_EMPTY_STRING,
     FINDING_TERMINAL_TARGET_NOT_REGISTERED,
     FINDING_TERMINAL_TARGET_CONSUMER_MISMATCH,
+    FINDING_RECOVERY_GUIDANCE_UNKNOWN_CHECK,
+    FINDING_RECOVERY_GUIDANCE_EMPTY_ITEM,
+    FINDING_RECOVERY_GUIDANCE_UNSAFE_ITEM,
 ];

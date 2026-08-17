@@ -44,7 +44,7 @@ pub use error::ConfigError;
 pub use event_filter::{EventFilterConfig, EventFilterMode};
 pub use event_policy::{
     CompletionAfterTerminalAction, EventPolicyConfig, EventPolicyMode, PayloadConsistencyConfig,
-    PayloadConsistencyRule, TopicDenyRule, ViolationAction,
+    PayloadConsistencyRule, RecoveryGuidance, TopicDenyRule, ViolationAction,
 };
 pub use event_projection::{EventProjectionConfig, ProjectionMode, ProjectionRule};
 pub use execution_contracts::ExecutionContractRule;

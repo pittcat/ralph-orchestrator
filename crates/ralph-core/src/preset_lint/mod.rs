@@ -68,6 +68,12 @@ pub mod strict_readonly_hat;
 pub mod supervisor;
 pub mod target_routing;
 pub mod topic_format;
+// plan 2026-08-17-1841 U1: recovery_guidance rule lint. Validates
+// every `event_loop.precheck.rules.<X>.recovery_guidance` and every
+// `event_policy.payload_consistency.rules[].recovery_guidance` block
+// (common + by_check safety, key scope, oversized items). Wired into
+// `run_preset_lint` below.
+pub mod recovery_guidance;
 /// 2026-07-09-003 plan (U4): schema-backed trigger context
 /// static lint. Catches unknown `summary_fields` / condition
 /// field references, unsupported predicate ops, value-shape
@@ -138,6 +144,14 @@ pub use strict_readonly_hat::{
     check_strict_readonly_hat,
 };
 pub use target_routing::check_target_routing;
+// 2026-08-17-1841 U1: re-export the recovery_guidance entry point
+// and finding IDs so callers (`ralph preset check`, BDD scenarios,
+// author/review skills) can refer to both via the public surface.
+pub use finding_id::{
+    FINDING_RECOVERY_GUIDANCE_EMPTY_ITEM, FINDING_RECOVERY_GUIDANCE_UNKNOWN_CHECK,
+    FINDING_RECOVERY_GUIDANCE_UNSAFE_ITEM,
+};
+pub use recovery_guidance::check_recovery_guidance;
 // 2026-07-03-001 plan U9: export the supervisor lint entry
 // point so `ralph preset check` / `run_preset_lint` callers
 // can wire it (next line: into the unified orchestrator).
@@ -632,6 +646,19 @@ pub fn run_preset_lint_with_preset_name(
     // Severity graded by strictness (Warn default, Error strict).
     findings.extend(lint_findings_to_contract_findings(
         &check_payload_consistency(config, strictness),
+    ));
+
+    // plan 2026-08-17-1841 U1: recovery_guidance rule lint. Validates
+    // both `event_loop.precheck.rules.<X>.recovery_guidance` and
+    // `event_policy.payload_consistency.rules[].recovery_guidance`
+    // blocks (common / by_check safety, key scope, oversized items).
+    // The runtime renderer (U2/U3/U4) trusts this verdict, so the
+    // lint must reject every shape that would otherwise render empty
+    // / wrong / unsafe guidance at the target hat prompt. Severity
+    // graded by strictness (Warn default, Error strict), matching
+    // the payload_consistency_* family.
+    findings.extend(lint_findings_to_contract_findings(
+        &check_recovery_guidance(config, strictness),
     ));
 
     // 2026-08-16-1015 plan U3: terminal target routing lint.
