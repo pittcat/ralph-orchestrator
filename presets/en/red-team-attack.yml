@@ -266,6 +266,78 @@ event_loop:
             on_exhausted: "plan.blocked(reason=redteam_evidence_aggregate_precheck_failed)"
             reason: "aggregate evidence handoff failed independent review"
 
+        # 2026-08-17-1841 plan U6 (R8 / R11 / D6 / D8): the five
+        # red-team hats whose contract allows them to read the
+        # tracked tree at runtime (target-locker, plan-resolver,
+        # attack-surface-mapper, experiment-plan-validator,
+        # experiment-runner) are now gated on a workspace
+        # precheck. The hat writes an entry workspace evidence
+        # artifact at activation start (git status --porcelain
+        # snapshot) and an exit artifact on terminal emit
+        # (diff against the entry snapshot). The gate rejects
+        # any terminal whose exit workspace shows a non-`.ralph/`
+        # tracked / untracked / modified / deleted mutation that
+        # is NOT attributable to the hat's own allowed write
+        # root. The hat's failure path is `redteam.failed`
+        # (already declared on each hat's `publishes`), so the
+        # existing precheck → target → bounded-retry chain
+        # handles the workspace violation without runtime
+        # auto-repair (R11: no reset / stash / clean / delete).
+        # Plan 2026-08-17-1841 U6 deliberately keeps the
+        # prompt short — the actual workspace snapshot /
+        # diff is a hat instruction, not a gate prompt,
+        # because the gate runs as the same isolated hat
+        # whose activation produced the exit state.
+        redteam.target.locked:
+          prompt:
+            - "Workspace exit evidence must show the workspace was not mutated outside `.ralph/red-team/**` between activation entry and emit. Tracked or untracked changes under `.ralph/` are allowed; tracked changes outside `.ralph/` are not."
+            - "When ownership of an unexpected workspace mutation is unclear, emit `redteam.failed` with `failure_kind: workspace_ownership_unknown` and stop; do not auto-clean tracked files you did not author."
+          on_fail:
+            target: target-locker
+            retry_budget: 1
+            on_exhausted: "redteam.failed(failure_kind=workspace_precheck_failed)"
+            reason: "workspace precheck rejected the locked-target emit"
+            recovery_guidance:
+              common:
+                - "rerun `git status --porcelain=v1 --untracked-files=all` and confirm only `.ralph/red-team/**` paths appear before re-emitting"
+                - "if a tracked path is unexpectedly modified, stop and report ownership; do not run `git restore` / `git checkout` / `git clean` / `git stash`"
+              by_check:
+                "1":
+                  - "verify `.ralph/red-team/01-target-lock.md` is the only file in the snapshot diff besides the lock evidence file itself"
+                  - "the gate's `failed_checks=[1]` means the gate observed a non-`.ralph/` mutation — list every path the gate flagged and decide ownership before retrying"
+        redteam.plan.resolved:
+          prompt:
+            - "Workspace exit evidence must show no tracked / untracked mutation outside `.ralph/red-team/**` since activation entry. Plan reconstruction patches live under `.ralph/red-team/patches/**`; any other tracked mutation is a violation."
+            - "If a tracked source file appears in the exit diff, the gate rejects. Do not `git restore` it; report ownership to the operator."
+          on_fail:
+            target: plan-resolver
+            retry_budget: 1
+            on_exhausted: "redteam.failed(failure_kind=workspace_precheck_failed)"
+            reason: "workspace precheck rejected the resolved-plan emit"
+            recovery_guidance:
+              common:
+                - "rerun `git diff --name-only <entry_sha>..HEAD` and confirm every changed path is under `.ralph/red-team/`"
+                - "if a tracked path leaked, stop and report ownership; runtime never auto-cleans"
+              by_check:
+                "1":
+                  - "the gate's `failed_checks=[1]` means a tracked path outside `.ralph/red-team/` changed — list every path and prove each one belongs to this activation's allowed write roots"
+        redteam.experiment.plan.ready:
+          prompt:
+            - "Workspace exit evidence must show no mutation outside `.ralph/red-team/**`. The mapper's allowed roots are `.ralph/red-team/04-attack-surface.md` and `.ralph/red-team/05-experiment-plan.md`; no other path may change."
+            - "If the gate rejects, do not auto-clean; stop and report the unexpected mutation to the operator."
+          on_fail:
+            target: attack-surface-mapper
+            retry_budget: 1
+            on_exhausted: "redteam.failed(failure_kind=workspace_precheck_failed)"
+            reason: "workspace precheck rejected the attack-surface-map emit"
+            recovery_guidance:
+              common:
+                - "rerun `git status --porcelain=v1 --untracked-files=all` and confirm only `.ralph/red-team/04-attack-surface.md` and `.ralph/red-team/05-experiment-plan.md` are touched"
+                - "if a tracked path outside the allowed roots appears, stop and report ownership"
+              by_check:
+                "1":
+                  - "the gate's `failed_checks=[1]` means a non-allowed path changed — list every path and prove it is one of the two allowed roots before retrying"
+
     # 2026-08-08-004 plan U1 (D7/D12): scope manifest payload_consistency
     # rules for redteam.plan.resolved. These enforce:
     # - resolved requires overall_confidence >= 90 AND critical_unknown_count == 0 AND resolved_count >= 1
