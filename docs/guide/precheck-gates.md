@@ -62,20 +62,20 @@ event_loop:
           retry_budget: 3
           on_exhausted: "plan.blocked(reason=precheck_failed)"
           reason: "work.done failed subjective checklist"
-          # 2026-08-17-1841 U1/U3 — 可选; common 总是显示,
-          # by_check key 必须是 1-based 提示索引(字符串形式)
-          recovery_guidance:
-            common:
-              - "重读 artifact 修根因,不要复制失败 payload"
-              - "修复后重跑 ralph emit <topic> --policy-check"
-            by_check:
-              "1":
-                - "实现必须能对照 plan 目标逐项验证"
+        recovery_guidance:
+          common:
+            - "重读 artifact 修根因,不要复制失败 payload"
+            - "修复后重跑 ralph emit <topic> --policy-check"
+          by_check:
+            "1":
+              - "实现必须能对照 plan 目标逐项验证"
 ```
 
-## 2026-08-17-1841 计划新增：可配置 recovery guidance
+`recovery_guidance` 必须与 `on_fail` **同级**，写在 `on_fail` 内部会被拒收。`rules.<X>` 的 key 必须等于某个 hat 实际 `publishes` 的 topic。
 
-precheck rule 与 payload-consistency rule 现在都接受可选 `recovery_guidance` 块（详见「2026-08-17-1841 计划」节）。两类 rule 的字段语义不同：
+## 可配置 recovery guidance
+
+precheck rule 与 payload-consistency rule 都接受可选 `recovery_guidance` 块。两类 rule 的字段语义不同：
 
 | 字段 | precheck | payload_consistency |
 |---|---|---|
@@ -102,6 +102,7 @@ renderer 与 CLI JSON 同源：semantic guidance 永远只是 prose，不替代 
 | `on_fail.retry_budget` | 否 | 默认 `3`；连续拒绝此次数后升级终态 |
 | `on_fail.on_exhausted` | 否 | 默认空；典型值 `plan.blocked(reason=precheck_failed)` |
 | `on_fail.reason` | 否 | 写在 `X.rejected` 与打回 prompt 里的短原因 |
+| `recovery_guidance` | 否 | 与 `on_fail` 同级；`common` + `by_check`（precheck key 为 `"1"`..`prompt.len()`） |
 
 ### Schema SSOT 作者（`presets/schemas/*.yml`）
 

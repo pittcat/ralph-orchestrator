@@ -63,17 +63,14 @@ config:
             retry_budget: 3
             on_exhausted: "plan.blocked(reason=precheck_failed)"
             reason: "dead_end_evidence_insufficient"
-          # 2026-08-17-1841 U5 (S1/S2/R6): preset-supplied recovery
-          # guidance. The precheck rule carries `common` items
-          # plus a `by_check["confidence_inflated"]` entry that the
-          # correction prompt renderer surfaces only for the
-          # actually-failed check (D2/D3).
+          # The precheck rule carries `common` items plus a
+          # `by_check["1"]` entry (1-based checklist index).
           recovery_guidance:
             common:
               - "rebuild the artifact referenced by dead_end_evidence_file"
               - "rerun ralph emit <topic> --policy-check before re-emitting"
             by_check:
-              "confidence_inflated":
+              "1":
                 - "drop dead_end_confidence to ≤ 80 unless the artifact supports it"
                 - "include both coverage and confidence numbers in the dead-end evidence file"
     event_policy:
@@ -102,7 +99,7 @@ mock_responses:
   - hat: precheck-work.failed
     text: |
       <event topic="work.failed.rejected">
-      {"failed_checks":["confidence_inflated"],"reason":"dead_end_evidence_insufficient","synthetic":false}
+      {"failed_checks":["1"],"reason":"dead_end_evidence_insufficient","synthetic":false}
       </event>
   # iter 2: executor re-proposes after reading the correction block.
   - hat: executor
@@ -113,7 +110,7 @@ mock_responses:
   - hat: precheck-work.failed
     text: |
       <event topic="work.failed.rejected">
-      {"failed_checks":["confidence_inflated"],"reason":"dead_end_evidence_insufficient","synthetic":false}
+      {"failed_checks":["1"],"reason":"dead_end_evidence_insufficient","synthetic":false}
       </event>
   # iter 3: executor lands a passing payload — gate forwards.
   - hat: executor
@@ -208,15 +205,14 @@ expected:
     # the gate was silent/unchecked (not a real LLM check result).
     # 2026-08-17-1841 U5 (S1/S2): the correction block rendered
     # to the executor carries both the preset-supplied `common`
-    # guidance and the `by_check["confidence_inflated"]` items
-    # that the LLM-reported failed check triggered (D2/D3).
+    # guidance and the `by_check["1"]` items that the
+    # LLM-reported failed check triggered.
     - at_iteration: 2
       correction_block_contains:
         - "Common recovery guidance"
         - "rebuild the artifact referenced by dead_end_evidence_file"
         - "rerun ralph emit <topic> --policy-check before re-emitting"
         - "Check-specific recovery guidance"
-        - "confidence_inflated"
         - "drop dead_end_confidence to ≤ 80 unless the artifact supports it"
         - "include both coverage and confidence numbers in the dead-end evidence file"
     # 2026-08-17-1841 U5 (S2/D3): synthetic rejection carries

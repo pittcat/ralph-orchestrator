@@ -39,6 +39,7 @@ metadata:
 | **`retry_budget`** | producer 被 `<X>.rejected` 打回后，runtime 允许再试的次数上限（默认 `3`） |
 | **`on_exhausted`** | `retry_budget` 用尽后 runtime 发出的终态动作（默认 `plan.blocked(reason=precheck_failed)`） |
 | **`on_fail.target`** | `<X>.rejected` 后 `task.resume` 打回的目标 hat / 步骤 |
+| **`synthetic`** | 纠正块标明这次没有可核对的检查结果（gate 静默或 ambiguous）。此时只遵循 Common recovery guidance，不要假设任何检查已通过 |
 
 ---
 
@@ -66,10 +67,18 @@ metadata:
 
 ## Producer 行为
 
-- 仍按原 topic 名 emit（例如 `ralph emit review.complete ...`）。脱糖后实际写入的是 `review.complete.proposed`。
+- 仍按原 topic 名 emit（例如 `ralph emit <X> ...`）。脱糖后实际写入的是 `<X>.proposed`。
 - 收到 `task.resume`（precheck 打回）后：读 payload 里的 `failed_checks` / `reason`，针对检查点修改产物，**再 emit 同一业务 topic**；不要手 emit `*.proposed`。
 
-**证据优先恢复**：precheck 打回时 runtime 注入的纠正上下文是「证据约束的纠错反馈」，**不是**成功模板。读 `## ORCHESTRATOR CORRECTION` 块里语义条目（`feedback_kind: semantic`）的 `- Observed:` / `- Invariant:` / `- Must re-prove:` / `- Target hat:`；synthetic 标记（`gate_silent_or_ambiguous`）说明 gate 没产出 fact-checked 结果，**不要假设**任何检查项被验证过。禁动作：只改 `failed_checks` 列出的项；复制上次 payload 重发；伪造测试 / 报告 / 提交 / 计数器；绕过 `ralph emit --policy-check`；把拒收当成功证据。恢复路径：开 artifact → 修根因 → 重跑 gate 涉及的所有验证 → 由新证据重建 payload → 先 `ralph emit <topic> --policy-check` 通过 → 再正式 emit。
+**证据优先恢复**
+
+**触发条件：** `task.resume` 打回，且 prompt 含 `## ORCHESTRATOR CORRECTION` 或 `## CORRECTION CONTEXT`。
+
+**读什么：** `- Observed:` / `- Invariant:` / `- Must re-prove:` 是这次拒绝的证据与必须再证明的条件。若同一块还有 `## Common recovery guidance` / `## Check-specific recovery guidance`（或 `--policy-check` JSON 的 `recovery_guidance`），那是可选修复提示，**不是**成功模板，也**不是** Observed 同级事实。提示与 Observed / Invariant 冲突时，以 Observed / Invariant 为准。见术语表 `synthetic`。
+
+**执行动作：** 打开 artifact / 测试 / diff 修根因 → 重跑本轮验证 → 用新证据重建 payload → `ralph emit <topic> --policy-check` 通过后再正式 emit。
+
+**停止条件：** `--policy-check` 未通过不得正式 emit。禁止只改 `failed_checks` 列出的项、复制上次 payload、伪造测试 / 报告 / 提交 / 计数器、把拒收当成功证据。
 
 - `retry_budget`（再试上限）默认 3：连续被拒会打回 producer；耗尽后 loop 发 `plan.blocked(reason=precheck_failed)`，**不要**自己重开 loop 或绕过 gate。
 
@@ -104,38 +113,3 @@ RALPH_PRECHECK_MODE=off ralph run ...
 - ❌ 同类 protocol violation 无限自由 retry — 第二次同类违规 runtime 阻塞 loop（见 `ralph-tools-recovery-directives` Correction 优先级）
 - ❌ 只改 `failed_checks` 中列出的字段、复制上次 payload、伪造 checklist 通过的产物 — precheck 打回是**证据约束**而非 schema 修复；只改 payload 字段不能通过下一轮，必须重做底层工作
 
----
-
-## 配置形状（仅供识别，作者请读 guide）
-
-```yaml
-event_loop:
-  precheck:
-    enabled: true
-    rules:
-      review.complete:
-        prompt:
-          - "findings 有实质内容，不是 placeholder"
-        on_fail:
-          target: review-synthesizer
-          retry_budget: 3
-          on_exhausted: "plan.blocked(reason=precheck_failed)"
-          reason: "subjective checklist failed"
-          # 2026-08-17-1841 U1/U3 — preset-supplied recovery
-          # guidance;渲染时 common 总是显示,by_check key = 1-based
-          # 提示索引(命中 failed_checks 时才显示)。
-          recovery_guidance:
-            common:
-              - "重读 artifact / test / diff 修正根因,不要改字段绕过"
-              - "修复后重跑 ralph emit <topic> --policy-check"
-            by_check:
-              "1":
-                - "findings 必须列出具体失败行,不要写 '见 review 笔记'"
-```
-
-**Recovery guidance 渲染规则**（plan 2026-08-17-1841 U2 / U3）：
-- 校正提示块位于 `## ORCHESTRATOR CORRECTION` 的 evidence 之后,Escalation / Recovery instruction 之前。
-- `common` 项对所有非失败 rejection 都显示; synthetic rejection (`synthetic=true`, 例如 gate 静默或 ambiguous) **只**显示 `common`,renderer 抑制 `by_check` 子段。
-- `by_check["<1-based 提示索引>"]` 仅在 failed_checks 命中该 key 时显示; 多 failed_checks 按匹配顺序排,unmatched 不渲染。
-- 所有 item 走 `safe_display`; 超 1024 UTF-8 bytes、ANSI escape、控制字符、零宽字符、empty item 在 preset lint 阶段已被 `preset.recovery_guidance_unknown_check` / `preset.recovery_guidance_unsafe_item` / `preset.recovery_guidance_empty_item` 拒收。
-- renderer 永不输出 `Suggested payload` / `Suggested command` / `Expected payload` 替代字段(plan D4 明确禁止 semantic replacement); semantic 仍走 `policy-check → 修根因 → policy-check → emit` 路径。

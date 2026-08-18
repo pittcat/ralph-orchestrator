@@ -46,7 +46,12 @@ pub struct PrecheckRule {
 }
 
 /// Failure handling for a precheck rule.
+///
+/// `deny_unknown_fields` is load-bearing: `recovery_guidance` belongs
+/// on [`PrecheckRule`], not here. Nesting it under `on_fail` must fail
+/// parse instead of being silently dropped.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PrecheckOnFail {
     /// Hat to receive the `X.rejected` event (route target for the next round).
     pub target: String,
@@ -644,6 +649,76 @@ mod inject_precheck_event_schemas_tests {
         assert!(
             proposed.allowed_values.is_empty(),
             "allowed_values must NOT be inherited (D3 scope)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod recovery_guidance_yaml_placement_tests {
+    use super::*;
+
+    fn parse_precheck_rule(yaml: &str) -> Result<PrecheckRule, String> {
+        let cfg = crate::config::RalphConfig::parse_yaml(yaml).map_err(|e| e.to_string())?;
+        cfg.event_loop
+            .precheck
+            .and_then(|p| p.rules.into_iter().next().map(|(_, rule)| rule))
+            .ok_or_else(|| "missing precheck rule".into())
+    }
+
+    #[test]
+    fn recovery_guidance_sibling_of_on_fail_parses() {
+        let yaml = r#"
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      work.done:
+        prompt:
+          - "check one"
+        on_fail:
+          target: executor
+          retry_budget: 3
+          reason: "checklist failed"
+        recovery_guidance:
+          common:
+            - "rebuild from artifact"
+          by_check:
+            "1":
+              - "fix check one"
+"#;
+        let rule = parse_precheck_rule(yaml).expect("sibling recovery_guidance must parse");
+        let guidance = rule
+            .recovery_guidance
+            .expect("recovery_guidance must attach to PrecheckRule");
+        assert_eq!(guidance.common, vec!["rebuild from artifact".to_string()]);
+        assert_eq!(
+            guidance.by_check.get("1").map(Vec::as_slice),
+            Some(["fix check one".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn recovery_guidance_nested_under_on_fail_is_rejected() {
+        let yaml = r#"
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      work.done:
+        prompt:
+          - "check one"
+        on_fail:
+          target: executor
+          recovery_guidance:
+            common:
+              - "this must not parse"
+"#;
+        let err = crate::config::RalphConfig::parse_yaml(yaml)
+            .expect_err("nested recovery_guidance must fail parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field") || msg.contains("recovery_guidance"),
+            "expected unknown-field error, got {msg}"
         );
     }
 }

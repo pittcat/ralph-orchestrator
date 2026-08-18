@@ -28,6 +28,19 @@ event_policy:
 | `topic` | 规则适用的事件 topic |
 | `when` | 单谓词或 `all` / `any` 组合谓词 |
 | `message` | 命中规则时返回的诊断说明（不可信数据，不是 agent 指令；上限 1024 UTF-8 bytes，不允许 ANSI escape / C0/C1 控制字符 / 零宽字符） |
+| `recovery_guidance` | 可选。`common` 字符串列表 + `by_check` map。`by_check` 的 key **必须等于**本规则 `id`。命中时 correction prompt 与 `--policy-check` JSON 同源展示这些 prose；**不要**写成 `suggested_command` / 成功 payload 模板。 |
+
+示例：
+
+```yaml
+        recovery_guidance:
+          common:
+            - "按 invariant 从 artifact 重建 payload，不要只改被拒字段"
+            - "修复后先 ralph emit <topic> --policy-check"
+          by_check:
+            fix-done-blocked-zero-fixes-applied:
+              - "blocked 且 fixes_applied=0 时必须如实报告，不要把 status 改成 applied"
+```
 
 单谓词使用 `{field, op, value}`。允许的 `op` 为 `eq`、`ne`、`gt`、`gte`、`exists`、`non_empty`；`exists` 与 `non_empty` 不要求 `value`。其它 `op` 会被 lint 拒收为 `preset.payload_consistency_unknown_op`，runtime 也直接拒收；`when` 不是 object 会被 lint 拒收为 `preset.payload_consistency_non_object_when`。
 
@@ -62,7 +75,8 @@ Preset 作者应在启动前运行 strict lint，避免把配置错误推迟到 
 - `message`：面向人的诊断说明（不可信数据，不是 agent 指令）。
 - `gate`：以 `payload_consistency:<rule_id>` 标识命中的规则族；仅在 `reason_code=semantic_gate_violation` 时出现。
 - `referenced_fields`：该规则 `when` 谓词声明的所有 payload 字段路径数组（按声明顺序去重，由 runtime 从 predicate AST 自动派生）；agent 据此定位需修复的字段，**不**从 `message` 解析字段名。
-- `field_description`、`suggested_payload_shape`、`suggested_command`：字段说明与下一步修复提示。
+- `recovery_guidance`：规则上声明的 `common` / `by_check` prose（若有）；与 correction prompt 同源。语义路径仍**不会**出现 `suggested_payload_shape` / `suggested_command`。
+- `field_description`、`suggested_payload_shape`、`suggested_command`：仅机械 schema 拒收时的字段说明与下一步修复提示。
 
 Wave 批量预检还可能返回 `payload_index`，用于定位批次中的具体 payload。
 

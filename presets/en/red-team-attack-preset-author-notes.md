@@ -14,28 +14,28 @@
 ```yaml
 key_stages:
   - key_stage: "target-locker -> redteam.target.locked"
-    guard_selection: neither
-    precheck_guard: false
-    precheck_retry_budget: null
+    guard_selection: precheck
+    precheck_guard: true
+    precheck_retry_budget: 1
     payload_consistency_guard: false
     payload_consistency_retry_budget: null
-    reason: "锁定结果由结构化字段与 HEAD/tree 校验决定，不增加主观阶段门。"
+    reason: "workspace precheck 拦截非 `.ralph/red-team/**` 变更。"
     confirmation_status: confirmed
   - key_stage: "plan-resolver -> redteam.plan.resolved"
-    guard_selection: payload_consistency
-    precheck_guard: false
-    precheck_retry_budget: null
+    guard_selection: both
+    precheck_guard: true
+    precheck_retry_budget: 1
     payload_consistency_guard: true
     payload_consistency_retry_budget: 3
-    reason: "scope_status、proceed、阈值和边界字段必须保持结构一致。"
+    reason: "scope 结构一致性 + workspace precheck。"
     confirmation_status: confirmed
   - key_stage: "attack-surface-mapper -> redteam.experiment.plan.ready"
-    guard_selection: payload_consistency
-    precheck_guard: false
-    precheck_retry_budget: null
+    guard_selection: both
+    precheck_guard: true
+    precheck_retry_budget: 1
     payload_consistency_guard: true
     payload_consistency_retry_budget: 3
-    reason: "必须通过 scope 阈值后进入通用计划可执行性校验。"
+    reason: "scope 阈值后进入计划校验，并拦截 workspace 越界变更。"
     confirmation_status: confirmed
   - key_stage: "experiment-plan-validator -> redteam.experiment.plan.valid|invalid"
     guard_selection: both
@@ -105,9 +105,9 @@ key_stages:
 
 ## 2026-08-17-1841 plan U6 — workspace precheck 与 recovery guidance
 
-- 适用范围：五个高风险 hat（target-locker、plan-resolver、attack-surface-mapper、experiment-plan-validator、experiment-runner）在 entry/exit 自检 workspace 状态：entry 写 `.ralph/red-team/<NN>-workspace-<hat>.md` 记录 `git status --porcelain=v1 --untracked-files=all` 快照；exit 写同样路径并比较；超出 `.ralph/red-team/**` 的 tracked/untracked 修改一律视为越界，由现有 precheck gate 拒绝并 retry。
-- 不实现 runtime 通用 workspace collector、自动 reset / stash / clean / delete（plan D6 / R11 明确禁止）。
-- 每个 hat 的 exit precheck rule 都附带 `recovery_guidance.common` 与 `recovery_guidance.by_check["1"]`：common 列出"重跑 git status / 报告 ownership / 禁止 auto-clean"的通用提示；by_check 列出该 hat 唯一允许的写根（target-locker 写 `.ralph/red-team/01-target-lock.md`、plan-resolver 写 `.ralph/red-team/patches/**` 与 `.ralph/red-team/{02-plan-resolution,03-patch-reconstruction,scope-manifest,commits/PLAN-*.md}`、attack-surface-mapper 写 `04-attack-surface.md` 与 `05-experiment-plan.md`、experiment-plan-validator 写 `plan-validation-attempt-<N>.md`、experiment-runner 写 `experiments/RTE-*.md` + `evidence/RTE-*/**` + `repros/RTE-*/**`）。
-- ownership 不明时停止而非 broad cleanup（plan R11；agent-facing common 项强调禁止 `git restore` / `git checkout` / `git clean` / `git stash`）。
-- 失败路径走既有 `redteam.failed` 主题（每个 hat 已 declared on publishes），on_exhausted 携带 `failure_kind=workspace_precheck_failed`，由现有 target → bounded retry 链处理；runtime 不自动重置 / 自动删除文件。
-- 仍属 preset-only 改动：未新增 builtin preset，未修改 manifest / index / zsh builtin 名称。
+- 适用范围：五个高风险 hat 在 entry/exit 自检 workspace。precheck **rule key 必须等于** hat 真实 `publishes` topic（`redteam.target.locked` / `redteam.plan.resolved` / `redteam.experiment.plan.ready` / `redteam.experiment.plan.valid` / `redteam.experiment.plan.invalid` / `redteam.experiment.done`）。禁止发明 `.workspace` 后缀 topic——desugar 不会改写真实 producer。
+- `recovery_guidance` 写在 `on_fail` **同级**，不能嵌在 `on_fail` 里。
+- validator / runner 的 workspace checklist **追加**到既有语义 precheck 的 `prompt` 末尾（valid/invalid 的 workspace 项为 3/4；experiment.done 的 workspace 项为 4/5），`by_check` key 使用对应 1-based 索引。
+- 不实现 runtime 通用 workspace collector、自动 reset / stash / clean / delete。
+- ownership 不明时停止而非 broad cleanup。
+- target-locker / plan-resolver / mapper 的 workspace-only 规则 `on_exhausted` 仍为 `redteam.failed(failure_kind=workspace_precheck_failed)`；validator / runner 合并规则保留原语义 `on_exhausted`（`plan.blocked(reason=redteam_experiment_* )`）。

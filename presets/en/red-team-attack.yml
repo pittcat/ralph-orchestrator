@@ -231,30 +231,57 @@ event_loop:
           prompt:
             - "Read experiment_plan_path, attack_surface_path, and validation_report_path. Confirm the validation report records a generic, project-native feasibility check for every planned experiment: referenced artifacts exist, control and attack commands are concrete, the oracle is machine-checkable, required evidence and cleanup are declared, and the plan does not assume a language-specific tool that the project has not shown it can run."
             - "Confirm validation_attempt is within the declared bounded retry range and the validation report is readable. Do not approve a plan merely because its prose sounds plausible; require command or project-native discovery evidence recorded in the artifact."
+            - "Workspace exit evidence must show no tracked / untracked mutation outside `.ralph/red-team/**` since activation entry. The validator's allowed write roots are `.ralph/red-team/plan-validation-attempt-<N>.md` and `.ralph/red-team/04-attack-surface.md` / `.ralph/red-team/05-experiment-plan.md`; any other tracked mutation is a violation."
+            - "If a tracked path outside the allowed roots appears, stop and report ownership; do not auto-clean."
           on_fail:
             target: experiment-plan-validator
             retry_budget: 3
             on_exhausted: "plan.blocked(reason=redteam_experiment_plan_validation_precheck_failed)"
             reason: "validated experiment plan or feasibility evidence failed independent review"
+          recovery_guidance:
+            common:
+              - "rerun `git status --porcelain=v1 --untracked-files=all` and confirm only `.ralph/red-team/plan-validation-attempt-*.md` / `04-attack-surface.md` / `05-experiment-plan.md` are touched"
+              - "if a tracked path outside the allowed roots appears, stop and report ownership; do not run `git restore` / `git checkout` / `git clean` / `git stash`"
+            by_check:
+              "3":
+                - "failed_checks containing 3 means a non-allowed path changed — list every path and prove it is one of the validator's allowed roots before retrying"
         redteam.experiment.plan.invalid:
           prompt:
             - "Read validation_report_path and experiment_plan_path. Confirm the report identifies a real failed_experiment_id, records the project-native feasibility evidence that is missing or contradictory, and gives a concrete rewrite reason."
             - "Confirm validation_attempt is below 3 and that the proposed invalid handoff will return only the named experiment to the mapper; do not allow a malformed failure payload to consume a rewrite budget."
+            - "Workspace exit evidence must show no tracked / untracked mutation outside `.ralph/red-team/**` since activation entry. The validator's allowed write roots are the same as for `redteam.experiment.plan.valid`."
+            - "If the gate rejects for workspace mutation, do not auto-clean; stop and report the unexpected mutation to the operator."
           on_fail:
             target: experiment-plan-validator
             retry_budget: 3
             on_exhausted: "plan.blocked(reason=redteam_experiment_plan_invalid_precheck_failed)"
             reason: "invalid experiment-plan handoff lacked bounded rewrite evidence"
+          recovery_guidance:
+            common:
+              - "rerun `git status --porcelain=v1 --untracked-files=all` and confirm only the validator's allowed roots are touched"
+              - "if a tracked path outside the allowed roots appears, stop and report ownership"
+            by_check:
+              "3":
+                - "failed_checks containing 3 means a non-allowed path changed — list every path and prove it is one of the validator's allowed roots before retrying"
         redteam.experiment.done:
           prompt:
             - "Read evidence_manifest_path and experiment_file_path from the proposed payload. Confirm both files exist, are non-empty, and the manifest lists every mandatory evidence item for this RTE experiment."
             - "Confirm the manifest contains a real ledger_sha256 entry with the target path, hash command, and run identifier; never accept a hash inferred from narrative text."
             - "Confirm control and attack execution results are distinguishable and the raw evidence supports the proposed control_passed and attack_reproduced values."
+            - "Workspace exit evidence must show no tracked / untracked mutation outside `.ralph/red-team/**` since activation entry. The runner's allowed roots are `.ralph/red-team/evidence/RTE-<NNN>/**` and `.ralph/red-team/experiments/RTE-<NNN>.md` plus the lock artifact."
+            - "If a tracked test file changed, this is a contract violation, not a cleanup target. Stop and report ownership; do not auto-clean."
           on_fail:
             target: experiment-runner
             retry_budget: 3
             on_exhausted: "plan.blocked(reason=redteam_experiment_evidence_precheck_failed)"
             reason: "experiment evidence manifest or result claim failed review"
+          recovery_guidance:
+            common:
+              - "rerun `git status --porcelain=v1 --untracked-files=all` and confirm only the runner's allowed roots are touched; if a tracked test file changed, this is a contract violation, not a cleanup target"
+              - "if a tracked path outside the allowed roots appears, stop and report ownership; runtime never auto-cleans"
+            by_check:
+              "4":
+                - "failed_checks containing 4 means a non-allowed path changed — list every path and prove it is one of the runner's allowed roots before retrying"
         redteam.evidence.gated:
           prompt:
             - "Read the aggregate evidence board and every experiment result listed in it. Confirm all planned experiments are accounted for, including rejected experiments and their reasons."
@@ -266,28 +293,11 @@ event_loop:
             on_exhausted: "plan.blocked(reason=redteam_evidence_aggregate_precheck_failed)"
             reason: "aggregate evidence handoff failed independent review"
 
-        # 2026-08-17-1841 plan U6 (R8 / R11 / D6 / D8): the five
-        # red-team hats whose contract allows them to read the
-        # tracked tree at runtime (target-locker, plan-resolver,
-        # attack-surface-mapper, experiment-plan-validator,
-        # experiment-runner) are now gated on a workspace
-        # precheck. The hat writes an entry workspace evidence
-        # artifact at activation start (git status --porcelain
-        # snapshot) and an exit artifact on terminal emit
-        # (diff against the entry snapshot). The gate rejects
-        # any terminal whose exit workspace shows a non-`.ralph/`
-        # tracked / untracked / modified / deleted mutation that
-        # is NOT attributable to the hat's own allowed write
-        # root. The hat's failure path is `redteam.failed`
-        # (already declared on each hat's `publishes`), so the
-        # existing precheck → target → bounded-retry chain
-        # handles the workspace violation without runtime
-        # auto-repair (R11: no reset / stash / clean / delete).
-        # Plan 2026-08-17-1841 U6 deliberately keeps the
-        # prompt short — the actual workspace snapshot /
-        # diff is a hat instruction, not a gate prompt,
-        # because the gate runs as the same isolated hat
-        # whose activation produced the exit state.
+        # Workspace precheck on real published topics only. Rule keys
+        # MUST equal a hat `publishes` / `terminal_events` topic so
+        # desugar rewrites the producer to `<topic>.proposed`.
+        # `recovery_guidance` is a sibling of `on_fail`, never nested
+        # under it.
         redteam.target.locked:
           prompt:
             - "Workspace exit evidence must show the workspace was not mutated outside `.ralph/red-team/**` between activation entry and emit. Tracked or untracked changes under `.ralph/` are allowed; tracked changes outside `.ralph/` are not."
@@ -297,14 +307,14 @@ event_loop:
             retry_budget: 1
             on_exhausted: "redteam.failed(failure_kind=workspace_precheck_failed)"
             reason: "workspace precheck rejected the locked-target emit"
-            recovery_guidance:
-              common:
-                - "rerun `git status --porcelain=v1 --untracked-files=all` and confirm only `.ralph/red-team/**` paths appear before re-emitting"
-                - "if a tracked path is unexpectedly modified, stop and report ownership; do not run `git restore` / `git checkout` / `git clean` / `git stash`"
-              by_check:
-                "1":
-                  - "verify `.ralph/red-team/01-target-lock.md` is the only file in the snapshot diff besides the lock evidence file itself"
-                  - "the gate's `failed_checks=[1]` means the gate observed a non-`.ralph/` mutation — list every path the gate flagged and decide ownership before retrying"
+          recovery_guidance:
+            common:
+              - "rerun `git status --porcelain=v1 --untracked-files=all` and confirm only `.ralph/red-team/**` paths appear before re-emitting"
+              - "if a tracked path is unexpectedly modified, stop and report ownership; do not run `git restore` / `git checkout` / `git clean` / `git stash`"
+            by_check:
+              "1":
+                - "verify `.ralph/red-team/01-target-lock.md` is the only file in the snapshot diff besides the lock evidence file itself"
+                - "failed_checks containing 1 means the gate observed a non-`.ralph/` mutation — list every flagged path and decide ownership before retrying"
         redteam.plan.resolved:
           prompt:
             - "Workspace exit evidence must show no tracked / untracked mutation outside `.ralph/red-team/**` since activation entry. Plan reconstruction patches live under `.ralph/red-team/patches/**`; any other tracked mutation is a violation."
@@ -314,13 +324,13 @@ event_loop:
             retry_budget: 1
             on_exhausted: "redteam.failed(failure_kind=workspace_precheck_failed)"
             reason: "workspace precheck rejected the resolved-plan emit"
-            recovery_guidance:
-              common:
-                - "rerun `git diff --name-only <entry_sha>..HEAD` and confirm every changed path is under `.ralph/red-team/`"
-                - "if a tracked path leaked, stop and report ownership; runtime never auto-cleans"
-              by_check:
-                "1":
-                  - "the gate's `failed_checks=[1]` means a tracked path outside `.ralph/red-team/` changed — list every path and prove each one belongs to this activation's allowed write roots"
+          recovery_guidance:
+            common:
+              - "rerun `git diff --name-only <entry_sha>..HEAD` and confirm every changed path is under `.ralph/red-team/`"
+              - "if a tracked path leaked, stop and report ownership; runtime never auto-cleans"
+            by_check:
+              "1":
+                - "failed_checks containing 1 means a tracked path outside `.ralph/red-team/` changed — list every path and prove each one belongs to this activation's allowed write roots"
         redteam.experiment.plan.ready:
           prompt:
             - "Workspace exit evidence must show no mutation outside `.ralph/red-team/**`. The mapper's allowed roots are `.ralph/red-team/04-attack-surface.md` and `.ralph/red-team/05-experiment-plan.md`; no other path may change."
@@ -330,78 +340,13 @@ event_loop:
             retry_budget: 1
             on_exhausted: "redteam.failed(failure_kind=workspace_precheck_failed)"
             reason: "workspace precheck rejected the attack-surface-map emit"
-            recovery_guidance:
-              common:
-                - "rerun `git status --porcelain=v1 --untracked-files=all` and confirm only `.ralph/red-team/04-attack-surface.md` and `.ralph/red-team/05-experiment-plan.md` are touched"
-                - "if a tracked path outside the allowed roots appears, stop and report ownership"
-              by_check:
-                "1":
-                  - "the gate's `failed_checks=[1]` means a non-allowed path changed — list every path and prove it is one of the two allowed roots before retrying"
-        # 2026-08-17-1841 plan U6 fix-plan (S1 / R1): workspace
-        # precheck for experiment-plan-validator's `plan.valid`
-        # terminal. The semantic plan-valid rule above (lines
-        # 230-) checks the LLM payload content; this rule checks
-        # the workspace mutation since activation entry. Distinct
-        # rule key to keep the two prechecks independent (the
-        # existing semantic rule uses the same terminal topic).
-        redteam.experiment.plan.valid.workspace:
-          prompt:
-            - "Workspace exit evidence must show no tracked / untracked mutation outside `.ralph/red-team/**` since activation entry. The validator's allowed write roots are `.ralph/red-team/plan-validation-attempt-<N>.md` and `.ralph/red-team/04-attack-surface.md` / `.ralph/red-team/05-experiment-plan.md`; any other tracked mutation is a violation."
-            - "If the gate rejects, do not auto-clean; stop and report the unexpected mutation to the operator."
-          on_fail:
-            target: experiment-plan-validator
-            retry_budget: 1
-            on_exhausted: "redteam.failed(failure_kind=workspace_precheck_failed)"
-            reason: "workspace precheck rejected the valid-plan emit"
-            recovery_guidance:
-              common:
-                - "rerun `git status --porcelain=v1 --untracked-files=all` and confirm only `.ralph/red-team/plan-validation-attempt-*.md` / `04-attack-surface.md` / `05-experiment-plan.md` are touched"
-                - "if a tracked path outside the allowed roots appears, stop and report ownership"
-              by_check:
-                "1":
-                  - "the gate's `failed_checks=[1]` means a non-allowed path changed — list every path and prove it is one of the validator's allowed roots before retrying"
-        # 2026-08-17-1841 plan U6 fix-plan (S1 / R1): workspace
-        # precheck for experiment-plan-validator's `plan.invalid`
-        # terminal. Sibling of `plan.valid.workspace` above; same
-        # allowed-write-root contract.
-        redteam.experiment.plan.invalid.workspace:
-          prompt:
-            - "Workspace exit evidence must show no tracked / untracked mutation outside `.ralph/red-team/**` since activation entry. The validator's allowed write roots are the same as for `plan.valid.workspace`."
-            - "If the gate rejects, do not auto-clean; stop and report the unexpected mutation to the operator."
-          on_fail:
-            target: experiment-plan-validator
-            retry_budget: 1
-            on_exhausted: "redteam.failed(failure_kind=workspace_precheck_failed)"
-            reason: "workspace precheck rejected the invalid-plan emit"
-            recovery_guidance:
-              common:
-                - "rerun `git status --porcelain=v1 --untracked-files=all` and confirm only the validator's allowed roots are touched"
-                - "if a tracked path outside the allowed roots appears, stop and report ownership"
-              by_check:
-                "1":
-                  - "the gate's `failed_checks=[1]` means a non-allowed path changed — list every path and prove it is one of the validator's allowed roots before retrying"
-        # 2026-08-17-1841 plan U6 fix-plan (S1 / R1): workspace
-        # precheck for experiment-runner's `redteam.experiment.done`
-        # terminal. The runner is the highest-risk hat for tracked
-        # mutations (experiment may involve real commands); the
-        # allowed write roots are the evidence directory and the
-        # experiments markdown.
-        redteam.experiment.done.workspace:
-          prompt:
-            - "Workspace exit evidence must show no tracked / untracked mutation outside `.ralph/red-team/**` since activation entry. The runner's allowed roots are `.ralph/red-team/evidence/RTE-<NNN>/**` and `.ralph/red-team/experiments/RTE-<NNN>.md` plus the lock artifact."
-            - "If the gate rejects, do not auto-clean; stop and report the unexpected mutation to the operator. Tracked test mutations in particular are forbidden and must surface as `redteam.failed(failure_kind=workspace_precheck_failed)` per plan 2026-08-17-1841 U6."
-          on_fail:
-            target: experiment-runner
-            retry_budget: 1
-            on_exhausted: "redteam.failed(failure_kind=workspace_precheck_failed)"
-            reason: "workspace precheck rejected the experiment-done emit"
-            recovery_guidance:
-              common:
-                - "rerun `git status --porcelain=v1 --untracked-files=all` and confirm only the runner's allowed roots are touched; if a tracked test file changed, this is a contract violation, not a cleanup target"
-                - "if a tracked path outside the allowed roots appears, stop and report ownership; runtime never auto-cleans"
-              by_check:
-                "1":
-                  - "the gate's `failed_checks=[1]` means a non-allowed path changed — list every path and prove it is one of the runner's allowed roots before retrying"
+          recovery_guidance:
+            common:
+              - "rerun `git status --porcelain=v1 --untracked-files=all` and confirm only `.ralph/red-team/04-attack-surface.md` and `.ralph/red-team/05-experiment-plan.md` are touched"
+              - "if a tracked path outside the allowed roots appears, stop and report ownership"
+            by_check:
+              "1":
+                - "failed_checks containing 1 means a non-allowed path changed — list every path and prove it is one of the two allowed roots before retrying"
 
     # 2026-08-08-004 plan U1 (D7/D12): scope manifest payload_consistency
     # rules for redteam.plan.resolved. These enforce:
