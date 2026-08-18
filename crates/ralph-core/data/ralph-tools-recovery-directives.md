@@ -33,9 +33,21 @@ metadata:
 
 Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文件只写通用 recovery 语义。
 
+## RD-RECOVERY-GUIDANCE
+
+**Trigger:** prompt 里的 `## ORCHESTRATOR CORRECTION` 或 `## CORRECTION CONTEXT` 含 `## Common recovery guidance` 和/或 `## Check-specific recovery guidance`。
+
+**执行动作：**
+- 把这些条目当成修根因的步骤，不要复制成成功 payload，也不要当成 `suggested_command`。
+- 先读同一纠正块里的 `Observed` / `Invariant` / `Must re-prove`；提示与它们冲突时，以证据字段为准。
+- 若纠正块标明 gate 静默或 ambiguous（`synthetic` = 这次没有核实过的检查结果），只遵循 Common；不要发明 Check-specific 项，也不要假设任何检查已通过。
+- 修完后仍须 `ralph emit --policy-check --output json` 通过，再正式 emit，并确认 `ok=true`、`recorded=true`。
+
+**失败停止条件：** `--policy-check` 未通过不得正式 emit；缺证据时停止并报告阻塞，不要伪造产物或原样重发被拒 payload。
+
 ## RD-PAYLOAD-CONSISTENCY-GATE
 
-**Trigger:** `task.resume` with `target_hat=<被恢复的 hat>` and a payload-level `violation` whose `gate` 字段前缀为 `payload_consistency:`。该 gate 与现有 `event_policy:semantic_gate_violation` 走同一 recovery 通道（`task.resume` → CorrectionContext）。
+**Trigger:** `task.resume` with `target_hat=<被恢复的 hat>` and a payload-level `violation` whose `gate` 字段前缀为 `payload_consistency:`。该 gate 与 `reason_code=semantic_gate_violation` 走同一 `task.resume` 恢复通道。
 
 **行为规范：**
 - 把 `task.resume` payload 视作结构化 correction：读 `field` / `reason_code` / `message` / `gate`（与 `validation_errors[]` 字段含义一致），按命中的字段修复 payload。

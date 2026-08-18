@@ -85,15 +85,14 @@ ANCHORS: tuple[tuple[str, str], ...] = (
     ("crates/ralph-core/data/ralph-tools.md", "Activation exit protocol"),
     ("crates/ralph-core/data/ralph-tools-emit.md", "recorded=true"),
     ("crates/ralph-core/data/ralph-tools-emit.md", "required_fields"),
+    ("crates/ralph-core/data/ralph-tools-recovery-directives.md", "dynamic terminal contract"),
     ("skills/ralph-preset-author/references/finding-rubric.md", "preset.recovery_guidance_unknown_check"),
     ("skills/ralph-preset-review/references/finding-rubric.md", "preset.recovery_guidance_unknown_check"),
-    ("skills/ralph-preset-author/references/finding-rubric.md", "preset.workspace_precheck_fake_topic"),
-    ("skills/ralph-preset-review/references/finding-rubric.md", "preset.workspace_precheck_fake_topic"),
-    ("skills/ralph-preset-author/references/patterns.md", "Recovery guidance pattern"),
-    ("skills/ralph-preset-review/references/patterns.md", "Recovery guidance pattern"),
-    ("crates/ralph-core/data/ralph-tools-precheck.md", "Recovery guidance 渲染规则"),
-    ("crates/ralph-core/data/ralph-tools-recovery-directives.md", "Common recovery guidance"),
+    ("skills/ralph-preset-author/references/author-checklist.md", "must not nest recovery_guidance under on_fail"),
+    ("skills/ralph-preset-review/references/author-checklist.md", "must not nest recovery_guidance under on_fail"),
+    ("crates/ralph-core/data/ralph-tools-precheck.md", "recovery_guidance"),
     ("crates/ralph-core/data/ralph-tools-emit.md", "recovery_guidance"),
+    ("crates/ralph-core/data/ralph-tools-recovery-directives.md", "Common recovery guidance"),
 )
 
 # Capability-triggered fixtures from plan 2026-08-02-001 U3.
@@ -181,10 +180,6 @@ CAPABILITY_FIXTURES: tuple[tuple[str, str], ...] = (
     (
         "runtime-verify-negative-fixture.yml",
         "verify.dynamic_evidence_missing",
-    ),
-    (
-        "recovery-guidance-negative-fixture.yml",
-        "preset.recovery_guidance_unknown_check",
     ),
 )
 

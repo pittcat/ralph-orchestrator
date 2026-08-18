@@ -409,8 +409,8 @@ AAF 模型 + Payload Audit 模型详见 [`skills/ralph-preset-author/references/
 ## 相关文档
 
 - [Hat Collections](./presets.md) — builtin preset 和 hat collection 概览
-- [Precheck Gates](./precheck-gates.md) — 可选的事件发射 LLM 关卡（`event_loop.precheck`）；`recovery_guidance.common` / `by_check` 可选，precheck key 必须是真实 emit topic 的 1-based checklist 索引
-- [Payload Consistency Gates](./payload-consistency.md) — 同 payload 字段不变式；consistency `by_check` key 必须等于 rule `id`
+- [Precheck Gates](./precheck-gates.md) — 可选的事件发射 LLM 关卡（`event_loop.precheck`）；`recovery_guidance` 与 `on_fail` 同级，rule key 必须是真实 published topic
+- [Payload Consistency Gates](./payload-consistency.md) — 同 payload 字段不变式；规则可带 `recovery_guidance`
 - [CLI Reference](./cli-reference.md) — 完整命令行参考
 - [Runtime Contracts](./runtime-contracts.md) — preset 检查的详细行为矩阵
 - [Payload Contracts](./payload-contracts.md) — Schema metadata（`field_docs` / `examples` / `known_fields` / `trigger_context`）与 `--policy-check` 拒收后 5 个 agent-facing 字段如何读，以及 `## TRIGGER CONTEXT` 区块如何解读

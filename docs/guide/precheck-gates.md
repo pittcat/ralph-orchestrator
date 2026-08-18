@@ -71,17 +71,17 @@ event_loop:
               - "实现必须能对照 plan 目标逐项验证"
 ```
 
+`recovery_guidance` 必须与 `on_fail` **同级**，写在 `on_fail` 内部会被拒收。`rules.<X>` 的 key 必须等于某个 hat 实际 `publishes` 的 topic。
+
 ## 可配置 recovery guidance
 
 precheck rule 与 payload-consistency rule 都接受可选 `recovery_guidance` 块。两类 rule 的字段语义不同：
 
 | 字段 | precheck | payload_consistency |
 |---|---|---|
-| `common` | 普通拒绝与 synthetic 拒绝都显示；`failed_checks` 为空时仍显示 | 命中该 rule 时显示 |
-| `by_check` key | `1..=prompt.len()` 的 1-based 索引（字符串，禁止前导零） | 必须等于该 rule 的稳定 `id` |
-| 选择语义 | 按 gate 上报的 `failed_checks` 筛选；synthetic 或空 `failed_checks` 不渲染 specific | 只渲染 `by_check[<命中 rule 的 id>]` |
-
-一条 precheck rule 的 YAML key **必须是真实会被 emit 的 topic**。不要用 `topic.workspace` 这类后缀再挂第二条 rule：runtime 按 key 脱糖，没有 producer 发布该 topic 时 gate 永远不会触发。同一终态既要语义检查又要 workspace 检查时，把 checklist 项追加到同一 `rules.<topic>.prompt`。
+| `common` | 总是显示（含 synthetic rejection） | 总是显示（含 synthetic 不存在的假设） |
+| `by_check` key | `1..=prompt.len()` 的 1-based 索引（字符串） | rule 的稳定 `id`（必等于 rule `id`） |
+| 选择语义 | 按 gate 上报的 `failed_checks` 筛选（unmatched 不渲染） | 命中当前 rule 时显示整张 `by_check`（first-hit order） |
 
 lint 严格门禁（preset_lint `recovery_guidance` 模块）：
 
@@ -102,6 +102,7 @@ renderer 与 CLI JSON 同源：semantic guidance 永远只是 prose，不替代 
 | `on_fail.retry_budget` | 否 | 默认 `3`；连续拒绝此次数后升级终态 |
 | `on_fail.on_exhausted` | 否 | 默认空；典型值 `plan.blocked(reason=precheck_failed)` |
 | `on_fail.reason` | 否 | 写在 `X.rejected` 与打回 prompt 里的短原因 |
+| `recovery_guidance` | 否 | 与 `on_fail` 同级；`common` + `by_check`（precheck key 为 `"1"`..`prompt.len()`） |
 
 ### Schema SSOT 作者（`presets/schemas/*.yml`）
 

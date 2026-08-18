@@ -235,12 +235,12 @@ pub struct EvidenceDetail {
     /// failed check and never for synthetic rejections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guidance: Option<RecoveryGuidance>,
-    /// 2026-08-17-1841 U3: failed-check keys produced by the
-    /// gate (1-based precheck checklist indices).  The renderer
-    /// uses this list to filter `guidance.by_check` so only the
-    /// actually-failed checks render.  `None` (consistency and
-    /// legacy callers) renders every `by_check` key, matching
-    /// the U2 baseline.  Ignored when `synthetic == true` (D3).
+    /// Failed-check keys produced by the gate (1-based precheck
+    /// checklist indices, or the consistency rule id). The
+    /// renderer filters `guidance.by_check` with this list.
+    /// `None` or empty means no check-specific section — never
+    /// "render every `by_check` key". Callers that want specific
+    /// items must seed this field. Ignored when `synthetic`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failed_check_keys: Option<Vec<String>>,
 }
@@ -562,11 +562,9 @@ impl CorrectionContext {
     ///   rendered in insertion order.
     /// - `Check-specific recovery guidance` — items from
     ///   `by_check[<key>]` whose `key` is in
-    ///   `evidence.failed_check_keys`.  When that list is
-    ///   absent (consistency / legacy callers) every
-    ///   `by_check` key renders.  Synthetic rejections suppress
-    ///   this sub-section (D3: do not fabricate a failed
-    ///   check).
+    ///   `evidence.failed_check_keys`. Absent or empty keys
+    ///   skip this sub-section. Synthetic rejections also
+    ///   suppress it.
     ///
     /// Both sub-sections are skipped when empty; the heading
     /// never renders with zero items, so a preset that opts
@@ -601,17 +599,13 @@ impl CorrectionContext {
         // (D3: no fabricated failed check) AND when the rule
         // did not declare any `by_check` map.
         if !evidence.synthetic && !guidance.by_check.is_empty() {
-            // Filter by `failed_check_keys` when present (U3
-            // precheck path); fall back to "render all keys"
-            // when absent (U4 consistency path / legacy
-            // callers).
             let matching_keys: Vec<&String> = match &evidence.failed_check_keys {
-                Some(keys) => guidance
+                Some(keys) if !keys.is_empty() => guidance
                     .by_check
                     .keys()
                     .filter(|k| keys.iter().any(|m| m == *k))
                     .collect(),
-                None => guidance.by_check.keys().collect(),
+                Some(_) | None => Vec::new(),
             };
             let mut keys = matching_keys;
             keys.sort();
@@ -2559,13 +2553,37 @@ mod tests {
                     &["common hint"],
                     &[("rule-a", &["specific hint"])],
                 )),
-                failed_check_keys: None,
+                failed_check_keys: Some(vec!["rule-a".into()]),
             });
         let block = ctx.render_block();
         assert!(block.contains("## Common recovery guidance"));
         assert!(block.contains("## Check-specific recovery guidance"));
         assert!(block.contains("specific hint"));
         assert!(block.contains("rule-a"));
+    }
+
+    /// `failed_check_keys = None` must not render every `by_check`
+    /// entry — that leaked un-failed checks.
+    #[test]
+    fn u2_none_failed_check_keys_omits_specific_guidance() {
+        let r = rejection_with_target(Some("executor"), "work.done");
+        let ctx = CorrectionContext::from_rejection(&r, 1)
+            .with_feedback_kind(FeedbackKind::Semantic)
+            .with_evidence(EvidenceDetail {
+                observed: vec![],
+                invariant: "test".into(),
+                proof: "test".into(),
+                synthetic: false,
+                guidance: Some(guidance(
+                    &["common hint"],
+                    &[("rule-a", &["specific hint"])],
+                )),
+                failed_check_keys: None,
+            });
+        let block = ctx.render_block();
+        assert!(block.contains("## Common recovery guidance"));
+        assert!(!block.contains("## Check-specific recovery guidance"));
+        assert!(!block.contains("specific hint"));
     }
 
     /// U2 / D3: a synthetic rejection (precheck gate silent /

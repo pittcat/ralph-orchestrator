@@ -418,35 +418,21 @@ fn build_observed_invariant_proof(
     (observed, invariant, proof)
 }
 
-/// U3 / M3 / R10: thread the preset-supplied recovery guidance
-/// into the evidence so the U2 correction renderer can surface
-/// the common / by_check items at the target hat's prompt, and
-/// record `failed_check_keys` so the renderer can filter
-/// `by_check` to the actually-failed checks.
+/// Attach preset `recovery_guidance` and the failed-check filter.
 ///
-/// When the gate reported no `failed_checks` but the rule declares
-/// a non-empty `by_check` map, pin `failed_check_keys` to an empty
-/// list so the renderer keeps `common` and does not fall back to
-/// "render every `by_check` key". Synthetic rejections always keep
-/// guidance: the renderer already suppresses the specific
-/// sub-section (D3) even if `failed_checks` is non-empty.
+/// Common items always attach when the rule declares them.
+/// Specific `by_check` items render only when `failed_checks` is
+/// non-empty and `synthetic` is false (the renderer also
+/// suppresses specific on synthetic). Empty `failed_checks`
+/// leaves `failed_check_keys` unset so no specific section
+/// appears — common still shows.
 fn inject_recovery_guidance_into_proof(
     mut evidence: crate::correction::EvidenceDetail,
     rule: Option<&crate::config::PrecheckRule>,
     failed_checks: &[String],
 ) -> Option<crate::correction::EvidenceDetail> {
-    let rule_guidance = rule.and_then(|r| r.recovery_guidance.clone());
-    let rule_has_specific_guidance = rule_guidance
-        .as_ref()
-        .map(|g| !g.by_check.is_empty())
-        .unwrap_or(false);
-
-    evidence.guidance = rule_guidance;
-    let pin_empty_specific_keys =
-        !evidence.synthetic && rule_has_specific_guidance && failed_checks.is_empty();
-    evidence.failed_check_keys = if pin_empty_specific_keys {
-        Some(Vec::new())
-    } else if failed_checks.is_empty() {
+    evidence.guidance = rule.and_then(|r| r.recovery_guidance.clone());
+    evidence.failed_check_keys = if evidence.synthetic || failed_checks.is_empty() {
         None
     } else {
         Some(failed_checks.to_vec())
@@ -867,15 +853,10 @@ mod tests {
         assert_eq!(keys, &vec!["1".to_string(), "3".to_string()]);
     }
 
-    /// U4 / A1 (plan 2026-08-17-1841): when the gate reported an
-    /// empty `failed_checks` list but the rule declared a
-    /// non-empty `by_check` map, the prior implementation set
-    /// `failed_check_keys = None` and let the renderer fall back
-    /// to "render every by_check key". Keep `common` and pin
-    /// `failed_check_keys` to an empty list so specific items
-    /// stay suppressed.
+    /// U4 / A1: empty `failed_checks` with a `by_check` map keeps
+    /// common guidance and does not seed specific keys.
     #[test]
-    fn u4_a1_empty_failed_checks_with_by_check_keeps_common_only() {
+    fn u4_a1_empty_failed_checks_with_by_check_keeps_common_guidance() {
         let json = r#"{"reason":"silent gate","synthetic":false}"#;
         let mut by_check = std::collections::BTreeMap::new();
         by_check.insert("1".to_string(), vec!["fix 1".to_string()]);
@@ -887,17 +868,13 @@ mod tests {
             }),
         );
         let evidence = build_precheck_evidence("work.done", json, Some(&rule)).unwrap();
-        let guidance = evidence.guidance.expect("common must remain");
+        let guidance = evidence.guidance.as_ref().expect("common guidance kept");
         assert_eq!(guidance.common, vec!["common hint".to_string()]);
-        assert_eq!(
-            evidence.failed_check_keys.as_deref(),
-            Some(&[][..]),
-            "empty failed_checks + by_check must pin keys to [] so specific items do not render"
-        );
+        assert!(evidence.failed_check_keys.is_none());
     }
 
-    /// Synthetic + non-empty `failed_checks` still keeps guidance.
-    /// The renderer suppresses the specific sub-section (D3).
+    /// U4 / A2: synthetic + non-empty `failed_checks` still keeps
+    /// common guidance; specific keys are not seeded (D3).
     #[test]
     fn u4_a2_synthetic_with_failed_checks_keeps_common_guidance() {
         let json = r#"{"failed_checks":[1,2],"reason":"silent","synthetic":true}"#;
@@ -911,9 +888,9 @@ mod tests {
             }),
         );
         let evidence = build_precheck_evidence("work.done", json, Some(&rule)).unwrap();
-        let guidance = evidence.guidance.expect("synthetic must keep common");
+        let guidance = evidence.guidance.as_ref().expect("common guidance kept");
         assert_eq!(guidance.common, vec!["common".to_string()]);
-        assert!(evidence.synthetic);
+        assert!(evidence.failed_check_keys.is_none());
     }
 
     /// U4 / A2 happy path: `synthetic = true` with no
