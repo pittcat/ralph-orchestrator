@@ -14,6 +14,12 @@
 4. **是否有 hat 把 tasks / progress / recovery 当业务事实？** ✓。tasks 关闭；状态来自 trigger、subagent 结果、git 与验证报告。
 5. **是否有 rescue hat 能改变业务链路？** ✓。未新增 rescue hat。
 
+## Recovery guidance（precheck common + 高频 consistency）
+
+- precheck 四条规则（`work.done` / `work.failed` / `fix.done` / `stabilization.done`）只声明 `recovery_guidance.common`，与 `on_fail` 同级。不写 `by_check`：gate 上报的是 rubric 名字，而 precheck `by_check` key 只能是 `"1"`/`"2"`…，对不上。
+- payload consistency 只给高频真矛盾加动作型 guidance（green+回归、complete+failed/blocked、completed+0 commit、`work.failed` 带 completed）。`message` 仍只诊断；guidance 写打开哪个证据文件、如何对账 git、再重建 payload。其余 consistency 规则继续只靠 `message` + Must re-prove。
+- 禁止把 `suggested_command` 或成功 payload 写进 guidance。retry target 仍是既有 `on_fail.target`（executor / fixer / test-stabilizer）。
+
 ## Hat: executor
 
 - **Q1 使命:** 逐个 dispatch 原始计划的所有独立 U-ID，验收、独立提交并发出完整执行账单。

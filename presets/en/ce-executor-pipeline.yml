@@ -105,6 +105,10 @@ event_loop:
           retry_budget: 3
           on_exhausted: "plan.blocked(reason=precheck_failed)"
           reason: "dead_end_evidence_insufficient"
+        recovery_guidance:
+          common:
+            - "open dead_end_evidence_file and the materialized fail-confidence rubric; do not only rewrite dead_end_confidence, coverage, or failed_units"
+            - "re-score from that file, then rebuild work.failed and rerun ralph emit work.failed --policy-check before a real emit"
       fix.done:
         prompt:
           - "Step 1: run `ralph preset materialize-artifacts ce-executor-pipeline --plan-key <plan_name>`; from the materialized templates directory read `fail-confidence-rubric.template.md` and `settlement-evidence.template.md`. Use ONLY that rubric as the audit standard for this review."
@@ -116,6 +120,10 @@ event_loop:
           retry_budget: 3
           on_exhausted: "plan.blocked(reason=precheck_failed)"
           reason: "fix_evidence_insufficient"
+        recovery_guidance:
+          common:
+            - "open settlement_evidence_file, post_verification_file, and verification_delta_file; do not only rewrite fix_status or completed_fix_units"
+            - "confirm deliverable commits for claimed completed_fix_units from git history, then rebuild fix.done and rerun ralph emit fix.done --policy-check before a real emit"
       # plan 2026-07-30: symmetric SUCCESS-path evidence gate. Mirrors the
       # work.failed / fix.done fail-gates but audits the happy path so an
       # executor cannot declare half-finished work "done" without evidence.
@@ -142,6 +150,11 @@ event_loop:
           retry_budget: 3
           on_exhausted: "plan.blocked(reason=precheck_failed)"
           reason: "work_done_evidence_insufficient"
+        recovery_guidance:
+          common:
+            - "open post_verification_file, verification_delta_file, and the trace_file or decisions_file named in the payload; do not only rewrite completed_units or execution_status"
+            - "inspect git history in resolved_baseline_sha..executor_head_sha and git status --porcelain --untracked-files=all outside .ralph/; never stage or commit foreign dirt"
+            - "rebuild work.done from that evidence and rerun ralph emit work.done --policy-check before a real emit"
       stabilization.done:
         prompt:
           - "Step 1: read the current `stabilization.done` payload fields `tested_from_sha`, `head_sha`, `stabilization_audit_file`, `correction_ids`, `worktree_status`, `tests_run`, and `tests_passed`. The runtime independently verifies the actual HEAD, worktree status, and activation dirty fingerprint before forwarding this event."
@@ -152,6 +165,10 @@ event_loop:
           retry_budget: 3
           on_exhausted: "plan.blocked(reason=precheck_failed)"
           reason: "stabilization_handoff_inconsistent"
+        recovery_guidance:
+          common:
+            - "open stabilization_audit_file and verify every correction_ids entry against actual test results; do not only rewrite worktree_status or tests_passed"
+            - "never report clean while non-.ralph/ changes remain; rebuild stabilization.done and rerun ralph emit stabilization.done --policy-check before a real emit"
   event_policy:
     enabled: true
     mode: enforce
@@ -215,6 +232,12 @@ event_loop:
               - {field: new_business_regressions_count, gt: 0}
               - {field: post_verification_status, eq: green}
           message: "post_verification_status=green contradicts new_business_regressions_count>0; set post_verification_status to red or resolve the introduced regressions"
+          recovery_guidance:
+            common:
+              - "open post_verification_file and verification_delta_file; do not only flip post_verification_status"
+            by_check:
+              fix-done-green-with-regressions:
+                - "set post_verification_status from those files, or resolve the introduced regressions first, then rebuild fix.done"
         - id: work-done-green-with-regressions
           topic: work.done
           when:
@@ -222,6 +245,12 @@ event_loop:
               - {field: new_business_regressions_count, gt: 0}
               - {field: post_verification_status, eq: green}
           message: "post_verification_status=green contradicts new_business_regressions_count>0; set post_verification_status to red or resolve the introduced regressions"
+          recovery_guidance:
+            common:
+              - "open post_verification_file and verification_delta_file; do not only flip post_verification_status"
+            by_check:
+              work-done-green-with-regressions:
+                - "set post_verification_status from those files, or resolve the introduced regressions first, then rebuild work.done"
         # plan 2026-07-29-001 U1: fail-gate shape rules — harden the existing
         # soft instructions ("never emit work.failed with completed units")
         # into deterministic gates. Both rules predicate on the CURRENT
@@ -239,6 +268,12 @@ event_loop:
             all:
               - {field: completed_units, non_empty: true}
           message: "work.failed contradicts completed_units being non-empty; emit work.done with execution_status=partial instead and route the failed Units through failed_units/blocked_units there"
+          recovery_guidance:
+            common:
+              - "work.failed is a dead-end with zero completed Units; do not park finished Units here"
+            by_check:
+              work-failed-with-completed-units:
+                - "emit work.done with execution_status=partial instead; list finished Units in completed_units and remaining Units in failed_units or blocked_units"
         - id: fix-done-blocked-with-completed-fix-units
           topic: fix.done
           when:
@@ -262,6 +297,12 @@ event_loop:
               - {field: execution_status, eq: complete}
               - {field: failed_units, non_empty: true}
           message: "execution_status=complete contradicts failed_units being non-empty; set execution_status to partial and route the failed Units through failed_units"
+          recovery_guidance:
+            common:
+              - "do not keep execution_status=complete while failed_units is non-empty"
+            by_check:
+              work-done-complete-with-failed-units:
+                - "set execution_status to partial and keep failed Units in failed_units; rebuild from the Unit bill in trace_file or decisions_file"
         - id: work-done-complete-with-blocked-units
           topic: work.done
           when:
@@ -269,6 +310,12 @@ event_loop:
               - {field: execution_status, eq: complete}
               - {field: blocked_units, non_empty: true}
           message: "execution_status=complete contradicts blocked_units being non-empty; set execution_status to partial and list the blocked Units under blocked_units"
+          recovery_guidance:
+            common:
+              - "do not keep execution_status=complete while blocked_units is non-empty"
+            by_check:
+              work-done-complete-with-blocked-units:
+                - "set execution_status to partial and keep blocked Units in blocked_units; rebuild from the Unit bill in trace_file or decisions_file"
         - id: work-done-completed-units-zero-commits
           topic: work.done
           when:
@@ -276,6 +323,12 @@ event_loop:
               - {field: completed_units, non_empty: true}
               - {field: commit_count, eq: 0}
           message: "completed_units non-empty contradicts commit_count=0; a completed Unit must have a deliverable commit — report the real commit_count or move that Unit out of completed_units"
+          recovery_guidance:
+            common:
+              - "do not claim completed_units without a deliverable commit"
+            by_check:
+              work-done-completed-units-zero-commits:
+                - "inspect git log on resolved_baseline_sha..executor_head_sha; fill the real commit_count or move that Unit out of completed_units"
         - id: fix-done-applied-zero-fixes
           topic: fix.done
           when:
