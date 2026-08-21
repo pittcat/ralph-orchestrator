@@ -48,7 +48,7 @@
 #   - Verdict is single field (pass / pass_with_residuals / blocked) —
 #     downstream subscribes to ONE terminal pair, never two siblings.
 #
-# The chain passes WAC strict lint cleanly: `EGRESS_MAX_HOPS=12` in
+# The chain passes WAC strict lint cleanly: `EGRESS_MAX_HOPS=24` in
 # `crates/ralph-core/src/preset_lint/workflow_activation.rs` covers the
 # 10-hop path from `dim:goal-alignment` to `report.done`. No topology
 # exemption needed.
@@ -175,8 +175,8 @@ event_loop:
       # re-emit its review event. No payload-consistency predicate is added.
       review.goalalign.done:
         prompt:
-          - "Run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
-          - "Reject if any source, config, lockfile, cache, generated, deleted, or other non-`.ralph/` path is dirty; do not accept a producer claim that the path is harmless."
+          - "Read the dimension's `git-state-goal-alignment-start.txt` and `git-state-goal-alignment-end.txt` under `.ralph/review/<plan_name>/` when present, then run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
+          - "Compare start and end evidence: unchanged pre-existing foreign paths may remain, but reject any newly created, newly modified, deleted, or content-changed source, config, lockfile, cache, generated, or other non-`.ralph/` path. Missing start/end evidence is a failed check, not proof of cleanliness."
           - "Confirm the goal-alignment findings artifact named by the event exists and is readable."
           - "If all checks pass, forward `review.goalalign.done` verbatim. Otherwise emit `review.goalalign.done.rejected` with `failed_checks` and one actionable `reason`."
         on_fail:
@@ -190,8 +190,8 @@ event_loop:
             - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
       review.correctness.done:
         prompt:
-          - "Run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
-          - "Reject if any source, config, lockfile, cache, generated, deleted, or other non-`.ralph/` path is dirty; do not accept a producer claim that the path is harmless."
+          - "Read the dimension's `git-state-correctness-start.txt` and `git-state-correctness-end.txt` under `.ralph/review/<plan_name>/` when present, then run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
+          - "Compare start and end evidence: unchanged pre-existing foreign paths may remain, but reject any newly created, newly modified, deleted, or content-changed source, config, lockfile, cache, generated, or other non-`.ralph/` path. Missing start/end evidence is a failed check, not proof of cleanliness."
           - "Confirm the correctness findings artifact named by the event exists and is readable."
           - "If all checks pass, forward `review.correctness.done` verbatim. Otherwise emit `review.correctness.done.rejected` with `failed_checks` and one actionable `reason`."
         on_fail:
@@ -205,8 +205,8 @@ event_loop:
             - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
       review.testing.done:
         prompt:
-          - "Run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
-          - "Reject if any source, config, lockfile, cache, generated, deleted, or other non-`.ralph/` path is dirty; do not accept a producer claim that the path is harmless."
+          - "Read the dimension's `git-state-testing-start.txt` and `git-state-testing-end.txt` under `.ralph/review/<plan_name>/` when present, then run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
+          - "Compare start and end evidence: unchanged pre-existing foreign paths may remain, but reject any newly created, newly modified, deleted, or content-changed source, config, lockfile, cache, generated, or other non-`.ralph/` path. Missing start/end evidence is a failed check, not proof of cleanliness."
           - "Confirm the testing findings artifact named by the event exists and is readable."
           - "If all checks pass, forward `review.testing.done` verbatim. Otherwise emit `review.testing.done.rejected` with `failed_checks` and one actionable `reason`."
         on_fail:
@@ -220,8 +220,8 @@ event_loop:
             - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
       review.maintainability.done:
         prompt:
-          - "Run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
-          - "Reject if any source, config, lockfile, cache, generated, deleted, or other non-`.ralph/` path is dirty; do not accept a producer claim that the path is harmless."
+          - "Read the dimension's `git-state-maintainability-start.txt` and `git-state-maintainability-end.txt` under `.ralph/review/<plan_name>/` when present, then run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
+          - "Compare start and end evidence: unchanged pre-existing foreign paths may remain, but reject any newly created, newly modified, deleted, or content-changed source, config, lockfile, cache, generated, or other non-`.ralph/` path. Missing start/end evidence is a failed check, not proof of cleanliness."
           - "Confirm the maintainability findings artifact named by the event exists and is readable."
           - "If all checks pass, forward `review.maintainability.done` verbatim. Otherwise emit `review.maintainability.done.rejected` with `failed_checks` and one actionable `reason`."
         on_fail:
@@ -235,8 +235,8 @@ event_loop:
             - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
       review.standards.done:
         prompt:
-          - "Run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
-          - "Reject if any source, config, lockfile, cache, generated, deleted, or other non-`.ralph/` path is dirty; do not accept a producer claim that the path is harmless."
+          - "Read the dimension's `git-state-standards-start.txt` and `git-state-standards-end.txt` under `.ralph/review/<plan_name>/` when present, then run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
+          - "Compare start and end evidence: unchanged pre-existing foreign paths may remain, but reject any newly created, newly modified, deleted, or content-changed source, config, lockfile, cache, generated, or other non-`.ralph/` path. Missing start/end evidence is a failed check, not proof of cleanliness."
           - "Confirm the project-standards findings artifact named by the event exists and is readable."
           - "If all checks pass, forward `review.standards.done` verbatim. Otherwise emit `review.standards.done.rejected` with `failed_checks` and one actionable `reason`."
         on_fail:
@@ -250,8 +250,8 @@ event_loop:
             - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
       review.adversarial.done:
         prompt:
-          - "Run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
-          - "Reject if any source, config, lockfile, cache, generated, deleted, or other non-`.ralph/` path is dirty; do not accept a producer claim that the path is harmless."
+          - "Read the dimension's `git-state-adversarial-start.txt` and `git-state-adversarial-end.txt` under `.ralph/review/<plan_name>/` when present, then run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
+          - "Compare start and end evidence: unchanged pre-existing foreign paths may remain, but reject any newly created, newly modified, deleted, or content-changed source, config, lockfile, cache, generated, or other non-`.ralph/` path. Missing start/end evidence is a failed check, not proof of cleanliness."
           - "Confirm the adversarial findings artifact named by the event exists and is readable."
           - "If all checks pass, forward `review.adversarial.done` verbatim. Otherwise emit `review.adversarial.done.rejected` with `failed_checks` and one actionable `reason`."
         on_fail:
@@ -2053,6 +2053,8 @@ hats:
       events:
         - work.start
     instructions: |
+      Before any payload construction, run `ralph tools skill load ralph-tools-emit`.
+      If the load fails, stop this activation and emit nothing.
       ## PLAN REVIEWER MODE — Review semantic readiness, preserve compliant source plans, then hand off to executor
 
       You own the **plan review** phase. You do NOT implement code. You do NOT split the plan into units or create task ledger entries (`tasks.enabled: false` for this preset — executor handles the whole plan as one execution). You ONLY review the plan document itself.
@@ -2400,6 +2402,8 @@ hats:
     timeout: 7200
     missing_event_grace_secs: 540
     instructions: |
+      Before any payload construction, run `ralph tools skill load ralph-tools-emit`.
+      If the load fails, stop this activation and emit nothing.
       ## EXECUTOR MODE — Whole-plan TDD execution with baseline-aware verification
 
       You own **whole-plan execution** with TDD. Runtime tasks are
@@ -3232,6 +3236,8 @@ hats:
     timeout: 3600
     missing_event_grace_secs: 600
     instructions: |
+      Before any payload construction, run `ralph tools skill load ralph-tools-emit`.
+      If the load fails, stop this activation and emit nothing.
       ## TEST HAT (STABILIZER) MODE — post-execution test stabilization gate
 
       You have write authority on test code and on production code (after
@@ -3544,6 +3550,8 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      Before any payload construction, run `ralph tools skill load ralph-tools-emit`.
+      If the load fails, stop this activation and emit nothing.
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph tools skill load ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:goal-alignment — read-only single-dimension reviewer
 
@@ -3573,6 +3581,11 @@ hats:
         precheck gate's workspace consistency check. Any source, config,
         lockfile, cache, or other non-`.ralph/` side effect must be cleaned
         or explicitly reported for retry.
+      - Artifact lifecycle: this activation owns the dimension findings and
+        `git-state-*-{start,end}.txt`; the next dimension and
+        `review-synthesizer` read them, `reporter` receives their paths via
+        the report-input bundle, and the operator cleans them after the loop.
+        Never commit these `.ralph/` artifacts as business changes.
       - Do NOT emit `work.done` / `work.failed` / `plan.*` /
         `review.complete` / `fix.*` / `align.done` / `report.done`
         / `LOOP_COMPLETE` — those belong to other hats.
@@ -3600,7 +3613,7 @@ hats:
       - Read `.ralph/review/{plan_name}/` if it exists (prior dimension
         products — your review stands alone).
 
-      ### Entry Precheck (HARD RULE — read-only proof of clean handoff)
+      ### Entry Precheck (HARD RULE — record activation baseline)
 
       Before you start any dimension audit, prove that the upstream
       handoff is clean and matches the trigger payload. The same
@@ -3611,18 +3624,15 @@ hats:
          payload (plan-reviewer reconciles this through plan.ready
          §Step 2.5b).
       2. `actual_start_head_sha` = `git rev-parse HEAD`. If it does not
-         equal `expected_head_sha`, the upstream hat moved the
-         worktree since `work.done`. **Do NOT attempt to reset, restore,
-         or fix the upstream state** — that is the executor's or
-         fixer's job, not yours. Follow **Handoff failure emit** below.
-      3. Worktree clean check. Run the porcelain filter from the
-         executor precheck (staged + unstaged + untracked, excluding
-         `.ralph/`). Anything outside `.ralph/` is an upstream dirty
-         carryover. **You MUST NOT commit, restore, stash, or clean
-         these changes** — reviewer is read-only. On dirty carryover,
-         follow **Handoff failure emit** below. The runtime's global
-         audit may still flag this run; that is a known residual and
-         is NOT fixed by the reviewer attempting repairs.
+         equal `expected_head_sha`, record the mismatch and stop the
+         normal audit; do not rewrite upstream commits.
+      3. Capture the staged + unstaged + untracked porcelain state,
+         excluding `.ralph/`, in the start evidence. Pre-existing foreign
+         paths are allowed only if their status/content is unchanged at exit.
+         A path created or changed by this activation MUST be restored or
+         quarantined before the final emit; never stage or commit foreign
+         changes. The reviewer may clean only paths proven to be created by
+         this activation, and must leave pre-existing foreign paths intact.
       4. Save the start evidence for the run to
          `.ralph/review/{plan_name}/git-state-goal-alignment-start.txt`
          with `expected_head_sha`, `actual_start_head_sha`, the
@@ -3632,15 +3642,12 @@ hats:
          commit; it is the reviewer-side proof of who introduced any
          later dirty state.
 
-      **Handoff failure emit (Entry or Exit Precheck failure — HARD)**
-      Do NOT silent-stop with zero events (that stalls the loop). Skip
-      the normal dimension audit, write a single P0 finding
-      `handoff_precheck_failed` (SHA mismatch and/or dirty paths) into
-      `.ralph/review/{plan_name}/goal-alignment.md`, then emit exactly
-      one `review.goalalign.done` with `findings_count: 1` and the
-      trigger passthrough fields. This is a failed handoff signal, not
-      a successful audit. Never re-emit a previous dimension's done
-      event as recovery.
+      A dirty path is not itself a reason to emit a fake successful review.
+      First compare the start/end evidence and clean only activation-owned
+      side effects. If evidence is missing or a pre-existing path changed
+      unexpectedly, emit the normal proposed review event with an honest
+      finding; the synthesized precheck gate owns rejection, resume, and
+      exhaustion. Do not bypass that gate with a second recovery protocol.
 
       Only after the four checks above all pass may you proceed to
       Step 2.
@@ -3839,6 +3846,8 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      Before any payload construction, run `ralph tools skill load ralph-tools-emit`.
+      If the load fails, stop this activation and emit nothing.
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph tools skill load ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:correctness — read-only single-dimension reviewer
 
@@ -3869,6 +3878,11 @@ hats:
         run tests and helper scripts, but before emitting you MUST pass the
         precheck gate's workspace consistency check. Any non-`.ralph/`
         side effect must be cleaned or explicitly reported for retry.
+      - Artifact lifecycle: this activation owns the dimension findings and
+        `git-state-*-{start,end}.txt`; the next dimension and
+        `review-synthesizer` read them, `reporter` receives their paths via
+        the report-input bundle, and the operator cleans them after the loop.
+        Never commit these `.ralph/` artifacts as business changes.
       - Do NOT emit `work.*` / `plan.*` / `review.complete` /
         `fix.*` / `align.done` / `report.done` / `LOOP_COMPLETE`.
       - Do NOT re-emit another dimension's done event.
@@ -3894,23 +3908,20 @@ hats:
         `.ralph/review/{plan_name}/review.diffstat.txt` if present.
       - Read `.ralph/review/{plan_name}/goal-alignment.md` if present.
 
-      ### Entry Precheck (HARD RULE — read-only proof of clean handoff)
+      ### Entry Precheck (HARD RULE — record activation baseline)
       Same protocol as `dim:goal-alignment` Step 1 (read-only
-      reviewer proof), including **Handoff failure emit**:
+      reviewer proof), while allowing activation-owned cleanup:
 
       1. `expected_head_sha` is `executor_head_sha` from the trigger
          payload (carried through every `review.<dim>.done`).
       2. `actual_start_head_sha` = `git rev-parse HEAD`. If it does
-         not equal `expected_head_sha`, record the SHA mismatch in
-         `.ralph/agent/decisions.md`, do NOT reset / restore / clean
-         upstream state, and use **Handoff failure emit** (write one
-         P0 `handoff_precheck_failed` finding; emit this hat's done
-         topic with `findings_count: 1`; skip normal audit).
-      3. Porcelain filter from the executor precheck (staged +
-         unstaged + untracked, excluding `.ralph/`) MUST be empty.
-         Any non-`.ralph/` dirty path is an upstream carryover —
-         do NOT commit / restore / stash / reset; record it and use
-         **Handoff failure emit**.
+         not equal `expected_head_sha`, record the mismatch and do not
+         rewrite upstream commits.
+      3. Record the staged + unstaged + untracked porcelain filter,
+         excluding `.ralph/`, as this activation's baseline. Unchanged
+         pre-existing foreign paths may remain. A path created or changed
+         by this activation MUST be restored or quarantined before emit;
+         never stage or commit foreign changes.
       4. Save start evidence to
          `.ralph/review/{plan_name}/git-state-correctness-start.txt`
          (`expected_head_sha`, `actual_start_head_sha`, porcelain
@@ -3989,6 +4000,8 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      Before any payload construction, run `ralph tools skill load ralph-tools-emit`.
+      If the load fails, stop this activation and emit nothing.
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph tools skill load ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:testing — read-only single-dimension reviewer
 
@@ -4021,6 +4034,10 @@ hats:
         run tests and helper scripts, but before emitting you MUST pass the
         precheck gate's workspace consistency check. Any non-`.ralph/`
         side effect must be cleaned or explicitly reported for retry.
+      - Artifact lifecycle: this activation owns its findings and start/end
+        Git evidence; downstream dimensions and `review-synthesizer` read it,
+        `reporter` receives it through the report-input bundle, and the
+        operator cleans it after the loop. Never commit `.ralph/` artifacts.
       - Do NOT emit any other business topic.
 
       ### Step 1 — Read context
@@ -4048,17 +4065,15 @@ hats:
         `.ralph/review/{plan_name}/review.diffstat.txt` if present.
       - Read `.ralph/review/{plan_name}/correctness.md` if present.
 
-      ### Entry Precheck (HARD RULE — read-only proof of clean handoff)
+      ### Entry Precheck (HARD RULE — record activation baseline)
       Same protocol as `dim:goal-alignment` Step 1: confirm
       `actual_start_head_sha` matches `executor_head_sha` from the
-      trigger; porcelain filter (excluding `.ralph/`) is empty; save
-      start evidence to
-      `.ralph/review/{plan_name}/git-state-testing-start.txt`. On any
-      mismatch or non-`.ralph/` dirty state, record the violation in
-      `.ralph/agent/decisions.md`, do NOT modify upstream state, and
-      use **Handoff failure emit** (one P0 `handoff_precheck_failed`
-      finding + emit this hat's done topic with `findings_count: 1`;
-      skip normal audit).
+      trigger; record the porcelain filter (excluding `.ralph/`) as
+      activation-start evidence and save it to
+      `.ralph/review/{plan_name}/git-state-testing-start.txt`. Unchanged
+      pre-existing foreign paths may remain; paths created or changed by
+      this activation MUST be restored or quarantined before emit. Do not
+      bypass the synthesized precheck gate with a second failure protocol.
 
       ### Step 2 — Testing audit
       For each Implementation Unit, verify:
@@ -4123,6 +4138,8 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      Before any payload construction, run `ralph tools skill load ralph-tools-emit`.
+      If the load fails, stop this activation and emit nothing.
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph tools skill load ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:maintainability — read-only single-dimension reviewer
 
@@ -4155,6 +4172,10 @@ hats:
         run tests and helper scripts, but before emitting you MUST pass the
         precheck gate's workspace consistency check. Any non-`.ralph/`
         side effect must be cleaned or explicitly reported for retry.
+      - Artifact lifecycle: this activation owns its findings and start/end
+        Git evidence; downstream dimensions and `review-synthesizer` read it,
+        `reporter` receives it through the report-input bundle, and the
+        operator cleans it after the loop. Never commit `.ralph/` artifacts.
       - Do NOT emit any other business topic.
 
       ### Step 1 — Read context
@@ -4178,17 +4199,16 @@ hats:
         `.ralph/review/{plan_name}/review.diffstat.txt` if present.
       - Read `.ralph/review/{plan_name}/testing.md` if present.
 
-      ### Entry Precheck (HARD RULE — read-only proof of clean handoff)
+      ### Entry Precheck (HARD RULE — record activation baseline)
       Same protocol as `dim:goal-alignment` Step 1: confirm
       `actual_start_head_sha` matches `executor_head_sha` from the
-      trigger; porcelain filter (excluding `.ralph/`) is empty; save
-      start evidence to
+      trigger; record the porcelain filter (excluding `.ralph/`) as
+      activation-start evidence and save it to
       `.ralph/review/{plan_name}/git-state-maintainability-start.txt`.
-      On any mismatch or non-`.ralph/` dirty state, record the
-      violation in `.ralph/agent/decisions.md`, do NOT modify
-      upstream state, and use **Handoff failure emit** (one P0
-      `handoff_precheck_failed` finding + emit this hat's done topic
-      with `findings_count: 1`; skip normal audit).
+      Unchanged pre-existing foreign paths may remain; paths created or
+      changed by this activation MUST be restored or quarantined before
+      emit. Do not bypass the synthesized precheck gate with a second
+      failure protocol.
 
       ### Step 2 — Maintainability audit
       1. Walk new / modified files. Flag:
@@ -4252,6 +4272,8 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      Before any payload construction, run `ralph tools skill load ralph-tools-emit`.
+      If the load fails, stop this activation and emit nothing.
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph tools skill load ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:project-standards — read-only single-dimension reviewer
 
@@ -4282,6 +4304,10 @@ hats:
         run tests and helper scripts, but before emitting you MUST pass the
         precheck gate's workspace consistency check. Any non-`.ralph/`
         side effect must be cleaned or explicitly reported for retry.
+      - Artifact lifecycle: this activation owns its findings and start/end
+        Git evidence; downstream dimensions and `review-synthesizer` read it,
+        `reporter` receives it through the report-input bundle, and the
+        operator cleans it after the loop. Never commit `.ralph/` artifacts.
       - Do NOT emit any other business topic.
 
       ### Step 1 — Read context
@@ -4306,17 +4332,15 @@ hats:
         `.ralph/review/{plan_name}/review.diffstat.txt` if present.
       - Read `.ralph/review/{plan_name}/maintainability.md` if present.
 
-      ### Entry Precheck (HARD RULE — read-only proof of clean handoff)
+      ### Entry Precheck (HARD RULE — record activation baseline)
       Same protocol as `dim:goal-alignment` Step 1: confirm
       `actual_start_head_sha` matches `executor_head_sha` from the
-      trigger; porcelain filter (excluding `.ralph/`) is empty; save
-      start evidence to
-      `.ralph/review/{plan_name}/git-state-standards-start.txt`. On
-      any mismatch or non-`.ralph/` dirty state, record the violation
-      in `.ralph/agent/decisions.md`, do NOT modify upstream state,
-      and use **Handoff failure emit** (one P0 `handoff_precheck_failed`
-      finding + emit this hat's done topic with `findings_count: 1`;
-      skip normal audit).
+      trigger; record the porcelain filter (excluding `.ralph/`) as
+      activation-start evidence and save it to
+      `.ralph/review/{plan_name}/git-state-standards-start.txt`. Unchanged
+      pre-existing foreign paths may remain; paths created or changed by
+      this activation MUST be restored or quarantined before emit. Do not
+      bypass the synthesized precheck gate with a second failure protocol.
 
       ### Step 2 — Standards audit
       1. Hard rules check: walk the diff and confirm none of the
@@ -4386,6 +4410,8 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      Before any payload construction, run `ralph tools skill load ralph-tools-emit`.
+      If the load fails, stop this activation and emit nothing.
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph tools skill load ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:adversarial — read-only single-dimension reviewer
 
@@ -4418,6 +4444,10 @@ hats:
         run tests and helper scripts, but before emitting you MUST pass the
         precheck gate's workspace consistency check. Any non-`.ralph/`
         side effect must be cleaned or explicitly reported for retry.
+      - Artifact lifecycle: this activation owns its findings and start/end
+        Git evidence; downstream dimensions and `review-synthesizer` read it,
+        `reporter` receives it through the report-input bundle, and the
+        operator cleans it after the loop. Never commit `.ralph/` artifacts.
       - Do NOT emit any other business topic.
 
       ### Step 1 — Read context
@@ -4441,17 +4471,15 @@ hats:
         `.ralph/review/{plan_name}/review.diffstat.txt` if present.
       - Read `.ralph/review/{plan_name}/standards.md` if present.
 
-      ### Entry Precheck (HARD RULE — read-only proof of clean handoff)
+      ### Entry Precheck (HARD RULE — record activation baseline)
       Same protocol as `dim:goal-alignment` Step 1: confirm
       `actual_start_head_sha` matches `executor_head_sha` from the
-      trigger; porcelain filter (excluding `.ralph/`) is empty; save
-      start evidence to
-      `.ralph/review/{plan_name}/git-state-adversarial-start.txt`. On
-      any mismatch or non-`.ralph/` dirty state, record the violation
-      in `.ralph/agent/decisions.md`, do NOT modify upstream state,
-      and use **Handoff failure emit** (one P0 `handoff_precheck_failed`
-      finding + emit this hat's done topic with `findings_count: 1`;
-      skip normal audit).
+      trigger; record the porcelain filter (excluding `.ralph/`) as
+      activation-start evidence and save it to
+      `.ralph/review/{plan_name}/git-state-adversarial-start.txt`. Unchanged
+      pre-existing foreign paths may remain; paths created or changed by
+      this activation MUST be restored or quarantined before emit. Do not
+      bypass the synthesized precheck gate with a second failure protocol.
 
       ### Step 2 — Adversarial probe
       For each new public API / entry point / untrusted input
@@ -4519,6 +4547,8 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      Before any payload construction, run `ralph tools skill load ralph-tools-emit`.
+      If the load fails, stop this activation and emit nothing.
       ## REVIEW SYNTHESIZER MODE — Merge and rank dimension findings
 
       You are the final aggregator of the 6-dim serial chain. You
@@ -4720,6 +4750,8 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      Before any payload construction, run `ralph tools skill load ralph-tools-emit`.
+      If the load fails, stop this activation and emit nothing.
       ## FIX PLANNER MODE — Turn synthesized review into fix plan
 
       You receive `review.synthesized` from `review-synthesizer`.
@@ -5039,6 +5071,8 @@ hats:
     timeout: 3600
     missing_event_grace_secs: 540
     instructions: |
+      Before any payload construction, run `ralph tools skill load ralph-tools-emit`.
+      If the load fails, stop this activation and emit nothing.
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph tools skill load ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## FIXER MODE — Apply the fix-planner plan only (NOT the original plan)
 
@@ -5498,6 +5532,8 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      Before any payload construction, run `ralph tools skill load ralph-tools-emit`.
+      If the load fails, stop this activation and emit nothing.
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph tools skill load ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## ALIGNMENT MODE — Cross-check original plan vs fix-plan execution
 
@@ -5641,6 +5677,8 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
+      Before any payload construction, run `ralph tools skill load ralph-tools-emit`.
+      If the load fails, stop this activation and emit nothing.
       ## REPORTER MODE — Final report + LOOP_COMPLETE
 
       You are the terminal aggregator. On the first activation you emit

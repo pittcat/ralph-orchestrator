@@ -1,0 +1,15 @@
+version: 1
+scenarios:
+  - name: plan-reviewer-no-output
+    responses:
+      - hat: plan-reviewer
+        output: ""
+        success: true
+    expect:
+      start_event: work.start
+      accepted_events: []
+      forbidden_events: [LOOP_COMPLETE, plan.ready, plan.blocked]
+      terminal: none
+    limits:
+      max_steps: 3
+      no_progress_steps: 1

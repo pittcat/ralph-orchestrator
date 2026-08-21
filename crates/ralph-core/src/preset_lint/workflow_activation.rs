@@ -442,7 +442,8 @@ pub fn check_re_emit_trap(
 ///
 /// Bound history: 4 → 8 (2026-06-24 10-hat refactor) → 9 → 10
 /// (2026-07-02-003 `ce-executor-pipeline` 13-hat flat chain) → 12
-/// (2026-07-08 `ce-executor-pipeline-loop` 15-hat chain).
+/// (2026-07-08 `ce-executor-pipeline-loop` 15-hat chain) → 24
+/// (2026-08-21 precheck gates on six serial dimension handoffs).
 ///
 /// The 12-hop bound accommodates the `ce-executor-pipeline-loop`
 /// preset, which adds `review-reentry` and `review-gate` hats on top
@@ -455,14 +456,14 @@ pub fn check_re_emit_trap(
 /// report.done`. The BFS budget must cover 11 hops so the loop
 /// preset's chain terminates through the lint check.
 ///
-/// 12 hops is still tight enough to catch genuine dead ends: a hat
+/// 24 hops is still tight enough to catch genuine dead ends: a hat
 /// publishing to a topic with no consumer at all fails at hop 1, and
 /// a handoff chain that dead-ends mid-way fails well before 12. The
 /// bound only limits how deep the BFS searches for a *valid* path to
 /// a terminal; it does not affect detection of truly broken
 /// topologies. The T-U1-03 test fixture uses a 1-hop chain and
 /// continues to fire under the wider bound.
-const EGRESS_MAX_HOPS: usize = 12;
+const EGRESS_MAX_HOPS: usize = 24;
 
 pub fn check_activation_egress(
     config: &RalphConfig,

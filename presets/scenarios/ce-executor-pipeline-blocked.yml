@@ -1,0 +1,28 @@
+version: 1
+scenarios:
+  - name: plan-reviewer-blocked-terminal
+    responses:
+      - hat: plan-reviewer
+        output: |
+          <event topic="plan.blocked">
+          {"plan_name":"verify-blocked","plan_path":"docs/plans/verify-blocked.md","plan_contract_version":"ce-unified-plan/v1","plan_contract_digest":"0123456789abcdef","reason":"plan_unusable","semantic_gaps":["scenario fixture intentionally blocks before execution"],"report_input_file":".ralph/review/verify-blocked/report-input.plan-blocked.json"}
+          </event>
+        success: true
+      - hat: reporter
+        output: |
+          <event topic="report.done">
+          {"plan_name":"verify-blocked","report_path":".ralph/review/verify-blocked/report.md","verdict":"blocked"}
+          </event>
+          <event topic="LOOP_COMPLETE">
+          {"reason":"blocked plan reported","report_path":".ralph/review/verify-blocked/report.md"}
+          </event>
+        success: true
+    expect:
+      start_event: work.start
+      accepted_events: [plan.blocked, report.done, LOOP_COMPLETE]
+      forbidden_events: [plan.ready, work.done, work.failed]
+      terminal: blocked
+      terminal_topic: LOOP_COMPLETE
+    limits:
+      max_steps: 4
+      no_progress_steps: 2

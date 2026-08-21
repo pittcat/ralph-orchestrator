@@ -709,6 +709,11 @@ impl DriverWorkspace {
         let temp_dir = tempfile::Builder::new()
             .prefix("ralph-preset-verify-")
             .tempdir()?;
+        // The real event loop captures activation-scoped Git snapshots for
+        // hats with worktree guards.  A verifier workspace must therefore
+        // have the same minimal Git contract as a real workspace; otherwise
+        // a valid scripted scenario fails before its first observable event.
+        init_verifier_git_repo(temp_dir.path())?;
         Ok(Self { temp_dir })
     }
 
@@ -718,6 +723,46 @@ impl DriverWorkspace {
 
     pub fn events_path(&self) -> PathBuf {
         self.ralph_dir().join("events.jsonl")
+    }
+}
+
+fn init_verifier_git_repo(workspace: &Path) -> std::io::Result<()> {
+    run_verifier_git(workspace, &["init", "--quiet"])?;
+    run_verifier_git(
+        workspace,
+        &[
+            "config",
+            "user.email",
+            "ralph-preset-verify@example.invalid",
+        ],
+    )?;
+    run_verifier_git(workspace, &["config", "user.name", "ralph-preset-verify"])?;
+    run_verifier_git(
+        workspace,
+        &[
+            "commit",
+            "--allow-empty",
+            "--quiet",
+            "-m",
+            "verify baseline",
+        ],
+    )
+}
+
+fn run_verifier_git(workspace: &Path, args: &[&str]) -> std::io::Result<()> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "git {} failed with status {}: {}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
     }
 }
 
