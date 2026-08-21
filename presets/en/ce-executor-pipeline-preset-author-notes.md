@@ -1,5 +1,32 @@
 # ce-executor-pipeline preset author notes
 
+## Preset Intent Confirmation（2026-08-21 dim side-effect precheck）
+
+- **目标：** 允许六个维度 hat 使用可用工具；在维度完成事件进入下一阶段前，由现有 `precheck` 执行 Git 工作树一致性检查。发现非 `.ralph/` 副作用时拒绝本次完成事件，并通过既有 resume/retry 让同一维度清理后重新提交。
+- **操作者与启动路径：** 沿用 `ralph run -H builtin:ce-executor-pipeline --plan …`。
+- **输入与事实源：** `git status --porcelain=v1 --untracked-files=all`、`git diff --stat HEAD`、`git diff --name-status HEAD`，以及维度事件声明的 findings artifact。
+- **成功条件：** 非 `.ralph/` 工作树干净、findings artifact 可读、完成事件原样转发；每个维度最多恢复 3 次。
+- **阻塞条件：** 连续 3 次仍有非 `.ralph/` 副作用时，由 precheck 发出 `plan.blocked(reason=precheck_exhausted)`；不再因首次 dirty 直接终止整个循环。
+- **允许的修改范围：** 六个维度可运行测试和辅助脚本，但不得把 source、config、lockfile、cache、generated 或其他非 `.ralph/` 副作用带入完成交接；不要求 runtime 代码改动。
+- **必须独立执行的评审：** 六个维度完成事件各有一个现有 precheck gate；gate 只检查和转发/拒绝，不替维度修改文件。
+- **重要 artifact：** findings artifact 仍由维度写入 `.ralph/`；dirty-path 证据由 gate 从 Git 命令获得。
+- **execution_model：** single-chain；本次只增加六个完成事件的 precheck，不引入 wave/supervisor。
+- **非目标：** 不新增 payload consistency 谓词；不恢复 `disallowed_tools: ["Edit"]`；不增加 runtime cleanup handler；不让 gate stage、commit 或删除外部 dirty 文件。
+- **用户确认：** 已确认选择 1：六个维度统一 `precheck`，retry budget=3，payload consistency 不新增规则。
+
+## Key-stage event gate（2026-08-21 dim side-effect precheck）
+
+| key_stage | guard_selection | precheck_guard | precheck_retry_budget | payload_consistency_guard | payload_consistency_retry_budget | reason | confirmation_status |
+|---|---|---:|---:|---:|---:|---|---|
+| `review.goalalign.done` | precheck | true | 3 | false | null | `dimension_worktree_dirty` | confirmed |
+| `review.correctness.done` | precheck | true | 3 | false | null | `dimension_worktree_dirty` | confirmed |
+| `review.testing.done` | precheck | true | 3 | false | null | `dimension_worktree_dirty` | confirmed |
+| `review.maintainability.done` | precheck | true | 3 | false | null | `dimension_worktree_dirty` | confirmed |
+| `review.standards.done` | precheck | true | 3 | false | null | `dimension_worktree_dirty` | confirmed |
+| `review.adversarial.done` | precheck | true | 3 | false | null | `dimension_worktree_dirty` | confirmed |
+
+- **schema 结论：** 本次只增加已有 precheck 配置和作者指令，不增删事件字段、required_fields 或 payload consistency 谓词，因此 `presets/schemas/ce-executor-pipeline.yml` 无需修改。
+
 ## Preset Intent Confirmation（2026-08-17 recovery_guidance 增量）
 
 - **目标：** 在现有 `event_loop.precheck` 与 `event_policy.payload_consistency` 上补充作者 `recovery_guidance`，让被拒的 executor / fixer / test-stabilizer 下一轮看到「修证据、不要只改字段」的纸条。不改判定、不改 resume/retry/exhaustion。
@@ -13,7 +40,7 @@
 - **execution_model：** single-chain
   **why：** 无拓扑/并行变更，沿用既有单链。
 - **非目标：** 不改 `when`/checklist；precheck 不加 `by_check`（命名 `failed_checks` 与 1-based key 不对齐）；不动 `ce-executor-pipeline-loop`；不新增 `suggested_command`。
-- **Author 推导与假设：** 用户已确认「consistency = common+by_check；precheck = 仅 common」。0e 不新选 guard，只给已有 both/precheck 位置加文案。
+- **Author 推导与假设（历史增量）：** 当时用户已确认「consistency = common+by_check；precheck = 仅 common」。2026-08-21 新增的六个维度完成事件另行采用 `precheck`，不新增 consistency 谓词。
 - **用户确认：** 已确认（对话内要求 `/ralph-preset-author` 按该方案修改）
 
 ## Key-stage event gate（本增量；0e 字段，非 0d mode）

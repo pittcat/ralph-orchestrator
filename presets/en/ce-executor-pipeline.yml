@@ -169,6 +169,100 @@ event_loop:
           common:
             - "open stabilization_audit_file and verify every correction_ids entry against actual test results; do not only rewrite worktree_status or tests_passed"
             - "never report clean while non-.ralph/ changes remain; rebuild stabilization.done and rerun ralph emit stabilization.done --policy-check before a real emit"
+      # 2026-08-21: dim hats may use their available tools, but every review
+      # completion is checked for non-.ralph/ side effects before it advances.
+      # Rejection resumes the same dim hat; it must clean the side effect and
+      # re-emit its review event. No payload-consistency predicate is added.
+      review.goalalign.done:
+        prompt:
+          - "Run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
+          - "Reject if any source, config, lockfile, cache, generated, deleted, or other non-`.ralph/` path is dirty; do not accept a producer claim that the path is harmless."
+          - "Confirm the goal-alignment findings artifact named by the event exists and is readable."
+          - "If all checks pass, forward `review.goalalign.done` verbatim. Otherwise emit `review.goalalign.done.rejected` with `failed_checks` and one actionable `reason`."
+        on_fail:
+          target: "dim:goal-alignment"
+          retry_budget: 3
+          on_exhausted: "plan.blocked(reason=precheck_exhausted)"
+          reason: "dimension_worktree_dirty"
+        recovery_guidance:
+          common:
+            - "Read the dirty-path evidence, clean or quarantine every non-.ralph/ side effect from this activation, rerun the Git checks, then rebuild and re-emit the same review event."
+            - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
+      review.correctness.done:
+        prompt:
+          - "Run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
+          - "Reject if any source, config, lockfile, cache, generated, deleted, or other non-`.ralph/` path is dirty; do not accept a producer claim that the path is harmless."
+          - "Confirm the correctness findings artifact named by the event exists and is readable."
+          - "If all checks pass, forward `review.correctness.done` verbatim. Otherwise emit `review.correctness.done.rejected` with `failed_checks` and one actionable `reason`."
+        on_fail:
+          target: "dim:correctness"
+          retry_budget: 3
+          on_exhausted: "plan.blocked(reason=precheck_exhausted)"
+          reason: "dimension_worktree_dirty"
+        recovery_guidance:
+          common:
+            - "Read the dirty-path evidence, clean or quarantine every non-.ralph/ side effect from this activation, rerun the Git checks, then rebuild and re-emit the same review event."
+            - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
+      review.testing.done:
+        prompt:
+          - "Run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
+          - "Reject if any source, config, lockfile, cache, generated, deleted, or other non-`.ralph/` path is dirty; do not accept a producer claim that the path is harmless."
+          - "Confirm the testing findings artifact named by the event exists and is readable."
+          - "If all checks pass, forward `review.testing.done` verbatim. Otherwise emit `review.testing.done.rejected` with `failed_checks` and one actionable `reason`."
+        on_fail:
+          target: "dim:testing"
+          retry_budget: 3
+          on_exhausted: "plan.blocked(reason=precheck_exhausted)"
+          reason: "dimension_worktree_dirty"
+        recovery_guidance:
+          common:
+            - "Read the dirty-path evidence, clean or quarantine every non-.ralph/ side effect from this activation, rerun the Git checks, then rebuild and re-emit the same review event."
+            - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
+      review.maintainability.done:
+        prompt:
+          - "Run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
+          - "Reject if any source, config, lockfile, cache, generated, deleted, or other non-`.ralph/` path is dirty; do not accept a producer claim that the path is harmless."
+          - "Confirm the maintainability findings artifact named by the event exists and is readable."
+          - "If all checks pass, forward `review.maintainability.done` verbatim. Otherwise emit `review.maintainability.done.rejected` with `failed_checks` and one actionable `reason`."
+        on_fail:
+          target: "dim:maintainability"
+          retry_budget: 3
+          on_exhausted: "plan.blocked(reason=precheck_exhausted)"
+          reason: "dimension_worktree_dirty"
+        recovery_guidance:
+          common:
+            - "Read the dirty-path evidence, clean or quarantine every non-.ralph/ side effect from this activation, rerun the Git checks, then rebuild and re-emit the same review event."
+            - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
+      review.standards.done:
+        prompt:
+          - "Run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
+          - "Reject if any source, config, lockfile, cache, generated, deleted, or other non-`.ralph/` path is dirty; do not accept a producer claim that the path is harmless."
+          - "Confirm the project-standards findings artifact named by the event exists and is readable."
+          - "If all checks pass, forward `review.standards.done` verbatim. Otherwise emit `review.standards.done.rejected` with `failed_checks` and one actionable `reason`."
+        on_fail:
+          target: "dim:project-standards"
+          retry_budget: 3
+          on_exhausted: "plan.blocked(reason=precheck_exhausted)"
+          reason: "dimension_worktree_dirty"
+        recovery_guidance:
+          common:
+            - "Read the dirty-path evidence, clean or quarantine every non-.ralph/ side effect from this activation, rerun the Git checks, then rebuild and re-emit the same review event."
+            - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
+      review.adversarial.done:
+        prompt:
+          - "Run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
+          - "Reject if any source, config, lockfile, cache, generated, deleted, or other non-`.ralph/` path is dirty; do not accept a producer claim that the path is harmless."
+          - "Confirm the adversarial findings artifact named by the event exists and is readable."
+          - "If all checks pass, forward `review.adversarial.done` verbatim. Otherwise emit `review.adversarial.done.rejected` with `failed_checks` and one actionable `reason`."
+        on_fail:
+          target: "dim:adversarial"
+          retry_budget: 3
+          on_exhausted: "plan.blocked(reason=precheck_exhausted)"
+          reason: "dimension_worktree_dirty"
+        recovery_guidance:
+          common:
+            - "Read the dirty-path evidence, clean or quarantine every non-.ralph/ side effect from this activation, rerun the Git checks, then rebuild and re-emit the same review event."
+            - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
   event_policy:
     enabled: true
     mode: enforce
@@ -3447,7 +3541,6 @@ hats:
       enabled: true
       events:
         - stabilization.done
-    disallowed_tools: ["Edit"]
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
@@ -3475,10 +3568,11 @@ hats:
       ### HARD RULES (shared by all 6 dim hats)
       - Emit EXACTLY ONE event per activation: `review.<dim>.done`
         (this hat: `review.goalalign.done`).
-      - Read-only role: `disallowed_tools: ["Edit"]`. You MAY
-        write the findings product file (see Step 4) and use
-        read-only shell commands (cat / grep / find / rg / ls /
-        echo). You MAY NOT modify source code, configs, or docs.
+      - Tool permissions are intentionally open for this reviewer. You MAY
+        run tests and helper scripts, but before emitting you MUST pass the
+        precheck gate's workspace consistency check. Any source, config,
+        lockfile, cache, or other non-`.ralph/` side effect must be cleaned
+        or explicitly reported for retry.
       - Do NOT emit `work.done` / `work.failed` / `plan.*` /
         `review.complete` / `fix.*` / `align.done` / `report.done`
         / `LOOP_COMPLETE` — those belong to other hats.
@@ -3742,7 +3836,6 @@ hats:
       enabled: true
       events:
         - review.goalalign.done
-    disallowed_tools: ["Edit"]
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
@@ -3764,18 +3857,18 @@ hats:
       - Null / None / default handling: every nullable is checked
         or the type is non-nullable by design.
 
-      You MAY re-run the project's test suite to cross-verify
-      (the repo's documented test runner, or `pytest <path>`).
-      Do NOT modify source — only observe.
+      You MAY re-run the project's test suite or helper scripts to
+      cross-verify. If those commands modify the workspace, clean or
+      quarantine the side effects before the completion precheck.
 
       Output dimension name in event: `dimension: "correctness"`.
 
       ### HARD RULES (shared by all 6 dim hats)
       - Emit EXACTLY ONE event per activation: `review.correctness.done`.
-      - Read-only role: `disallowed_tools: ["Edit"]`. You MAY
-        write the findings product file (see Step 4) and use
-        read-only shell commands (cat / grep / find / rg / ls /
-        echo / test runners for cross-verification).
+      - Tool permissions are intentionally open for this reviewer. You MAY
+        run tests and helper scripts, but before emitting you MUST pass the
+        precheck gate's workspace consistency check. Any non-`.ralph/`
+        side effect must be cleaned or explicitly reported for retry.
       - Do NOT emit `work.*` / `plan.*` / `review.complete` /
         `fix.*` / `align.done` / `report.done` / `LOOP_COMPLETE`.
       - Do NOT re-emit another dimension's done event.
@@ -3893,7 +3986,6 @@ hats:
       enabled: true
       events:
         - review.correctness.done
-    disallowed_tools: ["Edit"]
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
@@ -3917,17 +4009,18 @@ hats:
       - Brittleness: tests don't depend on real time, real
         network, real filesystem outside temp dirs.
 
-      You MAY re-run the project's test suite to verify it
-      actually passes on the current commit (the repo's documented
-      test runner, or `pytest <path>`). Do NOT modify source.
+      You MAY re-run the project's test suite or helper scripts to verify
+      the current commit. If those commands modify the workspace, clean or
+      quarantine the side effects before the completion precheck.
 
       Output dimension name in event: `dimension: "testing"`.
 
       ### HARD RULES (shared by all 6 dim hats)
       - Emit EXACTLY ONE event per activation: `review.testing.done`.
-      - Read-only role: `disallowed_tools: ["Edit"]`. You MAY
-        write the findings product file and use read-only commands
-        (including test runners for cross-verification).
+      - Tool permissions are intentionally open for this reviewer. You MAY
+        run tests and helper scripts, but before emitting you MUST pass the
+        precheck gate's workspace consistency check. Any non-`.ralph/`
+        side effect must be cleaned or explicitly reported for retry.
       - Do NOT emit any other business topic.
 
       ### Step 1 — Read context
@@ -4027,7 +4120,6 @@ hats:
       enabled: true
       events:
         - review.testing.done
-    disallowed_tools: ["Edit"]
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
@@ -4059,9 +4151,10 @@ hats:
       ### HARD RULES (shared by all 6 dim hats)
       - Emit EXACTLY ONE event per activation:
         `review.maintainability.done`.
-      - Read-only role: `disallowed_tools: ["Edit"]`. You MAY
-        write the findings product file and use read-only
-        commands.
+      - Tool permissions are intentionally open for this reviewer. You MAY
+        run tests and helper scripts, but before emitting you MUST pass the
+        precheck gate's workspace consistency check. Any non-`.ralph/`
+        side effect must be cleaned or explicitly reported for retry.
       - Do NOT emit any other business topic.
 
       ### Step 1 — Read context
@@ -4156,7 +4249,6 @@ hats:
       enabled: true
       events:
         - review.maintainability.done
-    disallowed_tools: ["Edit"]
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
@@ -4186,7 +4278,10 @@ hats:
 
       ### HARD RULES (shared by all 6 dim hats)
       - Emit EXACTLY ONE event per activation: `review.standards.done`.
-      - Read-only role: `disallowed_tools: ["Edit"]`.
+      - Tool permissions are intentionally open for this reviewer. You MAY
+        run tests and helper scripts, but before emitting you MUST pass the
+        precheck gate's workspace consistency check. Any non-`.ralph/`
+        side effect must be cleaned or explicitly reported for retry.
       - Do NOT emit any other business topic.
 
       ### Step 1 — Read context
@@ -4288,7 +4383,6 @@ hats:
       enabled: true
       events:
         - review.standards.done
-    disallowed_tools: ["Edit"]
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
@@ -4320,7 +4414,10 @@ hats:
 
       ### HARD RULES (shared by all 6 dim hats)
       - Emit EXACTLY ONE event per activation: `review.adversarial.done`.
-      - Read-only role: `disallowed_tools: ["Edit"]`.
+      - Tool permissions are intentionally open for this reviewer. You MAY
+        run tests and helper scripts, but before emitting you MUST pass the
+        precheck gate's workspace consistency check. Any non-`.ralph/`
+        side effect must be cleaned or explicitly reported for retry.
       - Do NOT emit any other business topic.
 
       ### Step 1 — Read context
