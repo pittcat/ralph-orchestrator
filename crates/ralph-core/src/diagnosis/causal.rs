@@ -54,11 +54,17 @@
 
 use std::path::Path;
 
-pub mod domain;
-pub mod evidence;
-pub mod report;
-pub mod rules;
-pub mod scoring;
+// 子模块下沉到 `causal/` 子目录与 plan §19「不下沉新模块」字面存在 deviation:
+// 因 causal 模块语义聚合度高、5 子模块间耦合紧(evidence 同时被 rules /
+// scoring / report 消费,inline 合并会显著拉长 causal.rs 并模糊边界),故采用
+// `pub(crate)` 收紧外部命名空间 + 仅通过顶层 `pub use` re-export 对外 API
+// 表面。deviation 选择记录于 execution-plan.yml allowed_paths(U08)显式列举 +
+// U08 completion report risk 段。
+pub(crate) mod domain;
+pub(crate) mod evidence;
+pub(crate) mod report;
+pub(crate) mod rules;
+pub(crate) mod scoring;
 
 pub use domain::Domain;
 pub use report::{

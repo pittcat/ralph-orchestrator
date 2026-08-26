@@ -321,9 +321,9 @@ impl CorpusCounters {
                                 .accepted_transitions
                                 .iter()
                                 .any(|t| &t.transition_id == tid)
-                            {
-                                counters.committed_join_count += 1;
-                            }
+                        {
+                            counters.committed_join_count += 1;
+                        }
                     }
                     Some("rolled_back") => counters.rolled_back_count += 1,
                     _ => {}
