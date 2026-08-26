@@ -2293,6 +2293,217 @@ fn truncate_md(s: &str, max: usize) -> String {
     crate::safe_display::safe_display(s, max).text
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// U9 (plan 2026-08-26-1104): `ralph diagnose --causal` rendering.
+//
+// `render_causal_markdown` and `render_causal_json` project the
+// deterministic [`CausalAttributionReport`] (U8) into the same
+// formats the existing reporter emits, so `--causal` is purely
+// additive: passing the flag adds a "Causal Attribution" section
+// to the markdown output or a `causal` object to the JSON output,
+// and the no-flag output is byte-identical to the U7/U8 baseline.
+//
+// The wrappers [`render_markdown_with_causal`] /
+// [`render_json_with_causal`] thread the optional causal report
+// through the existing pipeline so `render_markdown` and
+// `render_json` remain untouched and the 17 pre-existing tests
+// keep their asserted shape.
+// ─────────────────────────────────────────────────────────────────────
+
+/// U9: extension of [`render_markdown`] that appends the
+/// "Causal Attribution" section when `causal` is `Some`. When
+/// `causal` is `None` the output is byte-identical to
+/// [`render_markdown`] (R6: 同一版本化契约,无平行分类).
+#[must_use]
+pub fn render_markdown_with_causal(
+    report: &Report,
+    causal: Option<&super::causal::CausalAttributionReport>,
+) -> String {
+    let mut out = render_markdown(report);
+    if let Some(causal_report) = causal {
+        out.push('\n');
+        out.push_str(&render_causal_markdown(causal_report));
+    }
+    out
+}
+
+/// U9: extension of [`render_json`] that adds the `causal`
+/// object when `causal` is `Some`. When `causal` is `None`
+/// the output is byte-identical to [`render_json`].
+#[must_use]
+pub fn render_json_with_causal(
+    report: &Report,
+    causal: Option<&super::causal::CausalAttributionReport>,
+) -> Value {
+    let mut value = render_json(report);
+    if let Some(causal_report) = causal
+        && let Value::Object(map) = &mut value
+    {
+        map.insert("causal".to_string(), render_causal_json(causal_report));
+    }
+    value
+}
+
+/// U9: render a `CausalAttributionReport` as the operator-facing
+/// "Causal Attribution" markdown section. Three states:
+///
+/// - `not_evaluable` — emit a single `status: not_evaluable` line
+///   with the gap reason surfaced (legacy / missing manifest /
+///   unknown schema), and do **not** claim any `primary_domain`.
+///   This is the legacy / v1 / 无契约降级 path (S9.2 / R14).
+/// - `complete` — emit `status: complete` with `primary_domain`,
+///   `fix_point`, `confidence` breakdown (5 组件), `rejected_hypotheses`,
+///   `evidence_refs`, and `coverage_gaps` (S9.1).
+/// - `incomplete` — same as `complete` minus the `>85` claim. The
+///   `confidence.total` line carries the actual score so operators
+///   can audit why the strict gate failed (R10 / DT7).
+#[must_use]
+pub fn render_causal_markdown(report: &super::causal::CausalAttributionReport) -> String {
+    use super::causal::AttributionStatus;
+
+    let status_str = serde_json::to_value(&report.status)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| format!("{:?}", report.status));
+
+    let mut out = String::new();
+    out.push_str("## Causal Attribution\n\n");
+    out.push_str(&format!(
+        "- contract_version: `{}`\n- status: `{}`\n",
+        report.contract_version, status_str
+    ));
+
+    match report.status {
+        AttributionStatus::NotEvaluable => {
+            // Legacy / v1 / missing manifest → only surface the
+            // gap reason; never claim a `primary_domain` or a
+            // confidence above the 85 gate (R14).
+            if !report.coverage_gaps.is_empty() {
+                out.push_str("- reason: ");
+                out.push_str(&report.coverage_gaps[0].reason);
+                out.push('\n');
+            } else {
+                out.push_str(
+                    "- reason: session manifest is legacy or missing; engine cannot evaluate\n",
+                );
+            }
+            // Confidence is always zeroed on `not_evaluable`
+            // (see causal::report::compute_status); surface it
+            // so consumers can iterate safely without null
+            // checks.
+            out.push_str("- confidence:\n");
+            out.push_str(&format!("  - total: {}\n", report.confidence.total));
+            return out;
+        }
+        AttributionStatus::Complete | AttributionStatus::Incomplete => {}
+    }
+
+    // complete / incomplete: full structured output.
+    if let Some(domain) = report.primary_domain {
+        out.push_str(&format!("- primary_domain: `{}`\n", domain.as_str()));
+    }
+    if let Some(fp) = &report.fix_point {
+        let (category, target, evidence, summary) = fix_point_fields(fp);
+        out.push_str("- fix_point:\n");
+        out.push_str(&format!("  - category: `{category}`\n"));
+        out.push_str(&format!("  - target: `{target}`\n"));
+        out.push_str(&format!("  - evidence: `{evidence}`\n"));
+        out.push_str(&format!("  - summary: {summary}\n"));
+    }
+    // DT7 confidence breakdown — five components plus the total.
+    // `complete` requires `total > 85` (strict gate); `incomplete`
+    // surfaces the actual number so operators can audit why the
+    // gate did not flip.
+    out.push_str("- confidence:\n");
+    out.push_str(&format!("  - coverage: {}\n", report.confidence.coverage));
+    out.push_str(&format!("  - integrity: {}\n", report.confidence.integrity));
+    out.push_str(&format!(
+        "  - refutation: {}\n",
+        report.confidence.refutation
+    ));
+    out.push_str(&format!(
+        "  - correlation: {}\n",
+        report.confidence.correlation
+    ));
+    out.push_str(&format!(
+        "  - freeze_window: {}\n",
+        report.confidence.freeze_window
+    ));
+    out.push_str(&format!("  - total: {}\n", report.confidence.total));
+    if !report.rejected_hypotheses.is_empty() {
+        out.push_str("- rejected_hypotheses:\n");
+        for h in &report.rejected_hypotheses {
+            out.push_str(&format!("  - domain: `{}`\n", h.domain.as_str()));
+            out.push_str(&format!("    refutation: {}\n", h.refutation));
+        }
+    }
+    if !report.coverage_gaps.is_empty() {
+        out.push_str("- coverage_gaps:\n");
+        for g in &report.coverage_gaps {
+            out.push_str(&format!("  - boundary: `{}`\n", g.boundary));
+            out.push_str(&format!("    reason: {}\n", g.reason));
+        }
+    }
+    if !report.evidence_refs.is_empty() {
+        out.push_str("- evidence_refs:\n");
+        for e in &report.evidence_refs {
+            out.push_str(&format!("  - `{}` @ `{}`: {}\n", e.kind, e.locator, e.note));
+        }
+    }
+    out
+}
+
+/// U9: render a `CausalAttributionReport` as the `causal` JSON
+/// object. Fields mirror `serde_json::to_value(&report)` so the
+/// shape stays consistent with the on-the-wire
+/// `CausalAttributionReport` contract consumed by the U10
+/// diagnosis skill (R6: 同一版本化契约).
+#[must_use]
+pub fn render_causal_json(report: &super::causal::CausalAttributionReport) -> Value {
+    serde_json::to_value(report).unwrap_or_else(|_| {
+        serde_json::json!({
+            "contract_version": report.contract_version,
+            "status": "not_evaluable",
+        })
+    })
+}
+
+/// Extract `(category, target, evidence, summary)` from a
+/// `FixPoint`. Pulled out so the markdown renderer does not need
+/// to grow additional `FixPoint` accessors on the causal module
+/// (out of U9's allowed paths). The category strings are the
+/// serde snake_case spellings pinned by [`super::causal::Domain::as_str`].
+fn fix_point_fields(fp: &super::causal::FixPoint) -> (&'static str, &str, &str, &str) {
+    use super::causal::FixPoint;
+    match fp {
+        FixPoint::Backend {
+            target,
+            evidence,
+            summary,
+        } => ("backend", target, evidence, summary),
+        FixPoint::Runtime {
+            target,
+            evidence,
+            summary,
+        } => ("runtime", target, evidence, summary),
+        FixPoint::Preset {
+            target,
+            evidence,
+            summary,
+        } => ("preset", target, evidence, summary),
+        FixPoint::Agent {
+            target,
+            evidence,
+            summary,
+        } => ("agent", target, evidence, summary),
+        FixPoint::CaptureContract {
+            target,
+            evidence,
+            summary,
+        } => ("diagnostic_capture_contract", target, evidence, summary),
+    }
+}
+
 /// Convenience helper: resolve + load + build a [`Report`] in one
 /// call. Returns `Err(ReporterError::NoSession)` when no session
 /// can be located.

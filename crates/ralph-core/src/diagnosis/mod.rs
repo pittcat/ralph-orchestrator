@@ -62,8 +62,9 @@ pub use reporter::{
     DIAGNOSE_JSON_SCHEMA_VERSION, DIAGNOSIS_LEDGER_SCHEMA_VERSION, DiagnosisReport,
     LedgerReportError, LedgerSummary, RankedFinding, RejectionSummary, Report, ReporterError,
     RootCause, SessionData, SessionSelector, build_report, load_session, read_rejection_records,
-    render_diagnosis_report_json, render_diagnosis_report_markdown, render_json, render_markdown,
-    report_from_ledger, resolve_session,
+    render_causal_json, render_causal_markdown, render_diagnosis_report_json,
+    render_diagnosis_report_markdown, render_json, render_json_with_causal, render_markdown,
+    render_markdown_with_causal, report_from_ledger, resolve_session,
 };
 pub use responder::{
     AcceptedEventEvidence, EscalationDecision, EscalationLevel, RUNTIME_DIAGNOSIS_ALERT_HEADER,
