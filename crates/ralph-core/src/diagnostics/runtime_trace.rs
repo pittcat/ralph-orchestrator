@@ -42,8 +42,35 @@ pub enum RuntimeTracePhase {
     Accepted,
     Rejected,
     Commit,
+    /// Plan 2026-08-26-1104 Unit 2 (`Causal Identity + Contract
+    /// Receipt`). Decision-side rows stamped with `kind=contract_receipt`
+    /// (and, in later units, `policy_receipt` / `commit_receipt` /
+    /// `recovery_receipt`) all live under this phase so consumers can
+    /// pull the receipt stream with a single phase filter without
+    /// scanning the lifecycle phases.
+    Decision,
     WatchdogTimeout,
     Termination,
+}
+
+/// Stable per-iteration correlation identity stamped onto every
+/// runtime-trace row by [`crate::diagnostics::DiagnosticsCollector`]
+/// once the loop's identity has been resolved (U02, plan
+/// 2026-08-26-1104). `loop_id` is the canonical loop identifier
+/// produced by `loop_runner`; `iteration` is the 0-based loop
+/// iteration counter that matches `RuntimeTraceEntry::iteration`
+/// and `LoopState::iteration`. The pair is the join key that the
+/// attribution engine (U8) uses to slice the receipt stream per
+/// run, and the per-iteration coherence check the diagnostic
+/// reader enforces (S2.1).
+///
+/// BTreeMap / canonical JSON ordering on the wire is the
+/// collector's responsibility; this struct is plain serde so a
+/// downstream reader can decode it without a custom deserializer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CausalContext {
+    pub loop_id: String,
+    pub iteration: u64,
 }
 
 /// Single JSONL row. The set of populated fields depends on
@@ -84,6 +111,16 @@ pub struct RuntimeTraceEntry {
     /// `commit`, `watchdog_timeout`, `termination:<reason>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Plan 2026-08-26-1104 Unit 2: per-row correlation identity
+    /// (`loop_id` + `iteration`) used by the attribution engine to
+    /// slice the receipt stream per run and by readers to enforce
+    /// per-iteration coherence. `None` when the collector has not yet
+    /// been told the loop identity, or when a test deliberately omits
+    /// the field. `skip_serializing_if = Option::is_none` keeps the
+    /// on-disk shape backwards-compatible: pre-U02 reader code
+    /// continues to parse rows that do not carry the field (S2.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causal: Option<CausalContext>,
     /// Bounded JSON object with extra context (e.g. attempt count,
     /// payload_violation kind, watchdog reason). Field count is
     /// small on purpose.
@@ -106,6 +143,7 @@ impl RuntimeTraceEntry {
             source_ref: None,
             reference: None,
             status: None,
+            causal: None,
             fields: None,
         }
     }
@@ -113,6 +151,15 @@ impl RuntimeTraceEntry {
     /// Set the `hat` field. Builder-style; returns the modified entry.
     pub fn with_hat(mut self, hat: impl Into<String>) -> Self {
         self.hat = Some(hat.into());
+        self
+    }
+
+    /// Override the `causal` correlation identity. The collector
+    /// auto-stamps this when the caller omits it; this builder is
+    /// for tests that want to pin the value without going through
+    /// the collector (S2.1, S2.4).
+    pub fn with_causal(mut self, causal: CausalContext) -> Self {
+        self.causal = Some(causal);
         self
     }
 
@@ -155,6 +202,7 @@ fn phase_kind(phase: RuntimeTracePhase) -> &'static str {
         RuntimeTracePhase::Accepted => "accepted",
         RuntimeTracePhase::Rejected => "rejected",
         RuntimeTracePhase::Commit => "commit",
+        RuntimeTracePhase::Decision => "decision",
         RuntimeTracePhase::WatchdogTimeout => "watchdog_timeout",
         RuntimeTracePhase::Termination => "termination",
     }

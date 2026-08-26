@@ -56,7 +56,8 @@ pub use orchestration::{
 pub use performance::{PerformanceLogger, PerformanceMetric};
 pub use recovery::{MAX_RECOVERY_NOTE_CHARS, RecoveryLogger};
 pub use runtime_trace::{
-    RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceEntry, RuntimeTraceLogger, RuntimeTracePhase,
+    CausalContext, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceEntry, RuntimeTraceLogger,
+    RuntimeTracePhase,
 };
 pub use session::probe_session_dir_writable;
 pub use stream_handler::DiagnosticStreamHandler;
@@ -230,8 +231,83 @@ pub(crate) fn resume_sidecar_sequence(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Deterministic SHA-256 digest of a JSON value, returned as the
+/// first 16 lowercase hex chars. Used by the contract-receipt
+/// helper below; the engine's "shorter hex" convention keeps the
+/// 8KiB-capped receipt fields human-readable without sacrificing
+/// collision resistance for our payload sizes.
+pub(crate) fn json_digest_hex(value: &serde_json::Value) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.to_string().as_bytes());
+    let digest = hasher.finalize();
+    let hex = format!("{:x}", digest);
+    hex.chars().take(16).collect()
+}
+
+/// Plan 2026-08-26-1104 Unit 2: bundle the inputs that define the
+/// loop's effective contract into the four digest-bearing fields
+/// the `kind=contract_receipt` row carries (S2.2). The full bundle
+/// is also returned so callers can either write it verbatim into
+/// the receipt's `fields` JSON or split it.
+///
+/// `BTreeMap` is used to sort the per-hashmap input before
+/// serializing — `HashMap` iteration order is randomized, so two
+/// runs of the same config would otherwise yield different
+/// digests (S2.3 stability guard).
+pub fn compute_contract_digest(
+    event_policy: Option<&crate::config::EventPolicyConfig>,
+    hats: &std::collections::HashMap<String, crate::config::HatConfig>,
+    preset_label: &str,
+) -> serde_json::Value {
+    let sorted_hats: std::collections::BTreeMap<&String, &crate::config::HatConfig> =
+        hats.iter().collect();
+    let sorted_policy = event_policy.map(|policy| {
+        let sorted_schemas: std::collections::BTreeMap<&String, &crate::config::EventSchema> =
+            policy.schemas.iter().collect();
+        let schemas_value = serde_json::json!(sorted_schemas);
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "schemas".to_string(),
+            serde_json::to_value(&schemas_value).unwrap_or(serde_json::Value::Null),
+        );
+        payload.insert(
+            "terminal_topics".to_string(),
+            serde_json::to_value(&policy.terminal_topics).unwrap_or(serde_json::Value::Null),
+        );
+        payload.insert(
+            "business_topics".to_string(),
+            serde_json::to_value(&policy.business_topics).unwrap_or(serde_json::Value::Null),
+        );
+        payload.insert(
+            "enabled".to_string(),
+            serde_json::Value::Bool(policy.enabled),
+        );
+        serde_json::Value::Object(payload)
+    });
+    let hats_value = serde_json::to_value(&sorted_hats).unwrap_or(serde_json::Value::Null);
+    let contract_input = serde_json::json!({
+        "preset_label": preset_label,
+        "event_policy": sorted_policy,
+        "hats": hats_value,
+    });
+    let hats_only = serde_json::json!({
+        "preset_label": preset_label,
+        "hats": hats_value,
+    });
+    let terminal_only = serde_json::json!({
+        "event_policy": sorted_policy,
+    });
+    serde_json::json!({
+        "contract_digest": json_digest_hex(&contract_input),
+        "terminal_topics_digest": json_digest_hex(&terminal_only),
+        "hats_digest": json_digest_hex(&hats_only),
+        "preset_label": preset_label,
+    })
+}
+
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -413,6 +489,21 @@ pub struct DiagnosticsCollector {
     /// by `feedback_id == diagnosis_id` (with `retry_key`
     /// fallback for envelopes that lack a diagnosis_id).
     feedback_logger: Option<Arc<Mutex<feedback::FeedbackLogger>>>,
+    /// Plan 2026-08-26-1104 Unit 2: correlation identity stamped
+    /// onto every `log_runtime_trace` row that did not bring its
+    /// own `causal` value. Set by `set_causal_context` from the
+    /// loop runner once the loop id is resolved and re-stamped at
+    /// every iteration boundary so `causal.iteration` stays in
+    /// lockstep with `RuntimeTraceEntry::iteration`.
+    causal_context: Arc<Mutex<Option<runtime_trace::CausalContext>>>,
+    /// Plan 2026-08-26-1104 Unit 2: idempotency latch for
+    /// `emit_contract_receipt`. Exactly one `kind=contract_receipt`
+    /// row lands in `runtime-trace.jsonl` per session regardless of
+    /// how many times the call is re-issued (the spec demands
+    /// "恰好一条", S2.2). The latch is held even when the
+    /// underlying logger is degraded / disabled so a re-emit on a
+    /// `null` collector never silently fans out.
+    contract_receipt_emitted: Arc<Mutex<bool>>,
 }
 
 impl std::fmt::Debug for DiagnosticsCollector {
@@ -681,6 +772,8 @@ impl DiagnosticsCollector {
             input_bundle,
             runtime_trace_logger,
             feedback_logger,
+            causal_context: Arc::new(Mutex::new(None)),
+            contract_receipt_emitted: Arc::new(Mutex::new(false)),
         })
     }
 
@@ -701,6 +794,8 @@ impl DiagnosticsCollector {
             input_bundle: None,
             runtime_trace_logger: None,
             feedback_logger: None,
+            causal_context: Arc::new(Mutex::new(None)),
+            contract_receipt_emitted: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -1206,7 +1301,22 @@ impl DiagnosticsCollector {
     /// Best-effort: failures flip the underlying logger into
     /// `degraded` and emit a warning; the orchestration main
     /// path is never affected.
-    pub fn log_runtime_trace(&self, entry: RuntimeTraceEntry) {
+    ///
+    /// Plan 2026-08-26-1104 Unit 2: when the caller did not
+    /// supply an explicit `entry.causal`, the entry is stamped
+    /// with the collector's currently-held [`CausalContext`]
+    /// (see [`Self::set_causal_context`]). Stamping happens at
+    /// the collector boundary so the existing call sites in
+    /// `dispatch_and_handoff.rs` / `loop_runner/inner.rs` keep
+    /// their tight, per-row shape and only the loop boundaries
+    /// (run start, iteration start) need to call `set_causal_context`.
+    pub fn log_runtime_trace(&self, mut entry: RuntimeTraceEntry) {
+        if entry.causal.is_none()
+            && let Ok(guard) = self.causal_context.lock()
+            && let Some(ctx) = guard.as_ref()
+        {
+            entry.causal = Some(ctx.clone());
+        }
         let Some(logger) = self.runtime_trace_logger.as_ref() else {
             return;
         };
@@ -1219,6 +1329,68 @@ impl DiagnosticsCollector {
                     "runtime trace logger mutex poisoned; entry dropped"
                 );
             }
+        }
+    }
+
+    /// Plan 2026-08-26-1104 Unit 2: record the loop identity used
+    /// to stamp every subsequent `runtime-trace.jsonl` row. The
+    /// runner calls this once at bootstrap (`iteration = 0`)
+    /// and again at every iteration boundary so `causal.iteration`
+    /// matches `RuntimeTraceEntry::iteration` row-for-row (S2.1).
+    /// Re-setting the value mid-run is a no-op replacement
+    /// (intentional: the identity may be resolved in stages, e.g.
+    /// the loop id might land a beat before the first iteration).
+    pub fn set_causal_context(&self, ctx: CausalContext) {
+        match self.causal_context.lock() {
+            Ok(mut guard) => {
+                *guard = Some(ctx);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    error = %err,
+                    "causal context mutex poisoned; identity not updated"
+                );
+            }
+        }
+    }
+
+    /// Plan 2026-08-26-1104 Unit 2: emit the **single**
+    /// `kind=contract_receipt` row for this session. The receipt
+    /// carries `contract_digest` / `terminal_topics_digest` /
+    /// `hats_digest` / `preset_label` (S2.2) so the attribution
+    /// engine (U8) and the contract-stability test (S2.3) can
+    /// join the receipt back to a config snapshot.
+    ///
+    /// Idempotent: subsequent calls are no-ops even if the
+    /// caller hands in different `fields`, because the spec
+    /// mandates exactly one row per session (S2.2) and a second
+    /// row would silently inflate the diagnostic-receipt count.
+    pub fn emit_contract_receipt(&self, fields: serde_json::Value) {
+        let already = match self.contract_receipt_emitted.lock() {
+            Ok(g) => *g,
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    error = %err,
+                    "contract_receipt latch mutex poisoned; receipt dropped"
+                );
+                return;
+            }
+        };
+        if already {
+            return;
+        }
+        let entry = RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Decision)
+            .with_kind("contract_receipt")
+            .with_fields(fields);
+        self.log_runtime_trace(entry);
+        // Flip the latch even when the underlying logger was
+        // disabled / degraded so a later re-emit (e.g. on a
+        // re-bound resume run sharing the same collector)
+        // cannot double-write.
+        if let Ok(mut guard) = self.contract_receipt_emitted.lock() {
+            *guard = true;
         }
     }
 
