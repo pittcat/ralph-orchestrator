@@ -48,6 +48,10 @@
 |------|--------|------------|
 | `.ralph/diagnostics/<timestamp>/` | `RALPH_DIAGNOSTICS=1` 或 `telemetry.runtime_diagnosis.write_artifacts` | §Diagnostics |
 | `.ralph/diagnostics/<ses>/drift.jsonl` | MINIMAL/FULL session | drift 三指标（**非** workspace 根） |
+| `.ralph/diagnostics/<ses>/runtime-trace.jsonl` | MINIMAL/FULL session | 诊断 trace；含 4 类收据行（U02-U05）：`kind=contract_receipt` / `policy_receipt` / `commit_receipt` / `recovery_receipt`；`phase=decision` / `phase=activation` |
+| `.ralph/diagnostics/<ses>/feedback.jsonl` | MINIMAL/FULL session | 反馈 stage（discovered/evidence/action/validation/final） |
+| `.ralph/diagnostics/<ses>/diagnosis-input.json` | MINIMAL/FULL session | bundle 入口；v2 manifest 含 `boundary_coverage[]`（U07：8 边界 covered/gap），reader 三分支（v1 → Legacy / v2 → 完整 / 未知 → SchemaMismatch） |
+| `.ralph/diagnostics/<ses>/evidence-window.jsonl` | 5 类异常之一触发（watchdog timeout / 非零退出 / precheck 耗尽 / recovery 耗尽 / 异常 activation outcome） | U06 冻结窗口；首行 anomaly 描述 + 触发前至多 200 条 + 触发后行；正常终止不写入；DT7 freeze_window 项来源 |
 | `.ralph/diagnostics/agent_doc_sync.json` | doc sync | doctor 快照 |
 | `.ralph/diagnostics/channel-routing-fallback-*.md` | hat-channel 回退 | `hat_channel.rs` |
 | `.ralph/agent/memories.md` | `memories.enabled` | 跨 loop 记忆 |
@@ -58,6 +62,13 @@
 | `.ralph/merge-queue.jsonl` | merge preset | 合并队列 |
 | `.ralph/supervisor.db` | supervisor + feature | runtime only（**仅** capability +supervisor 时存在属预期；缺则按 Phase 0 推断结果分情况记为缺失 / 正常） |
 | `run_dir/ralph.yml` | 用户工作区 | 配置漂移（**必读**） |
+
+**v2 coverage 与 evidence-window 的 DT7 角色**（U10 plan）：
+
+- `diagnosis-input.json.boundary_coverage[]`（v2 manifest）→ DT7 `coverage`（+30）来源；8 边界全部 `covered` 拿满分。
+- `evidence-window.jsonl`（首行 anomaly + ≤200 触发前行）→ DT7 `freeze_window`（+10）来源；正常 LOOP_COMPLETE 时不存在 → 该项 0 分（按 `--causal` 机检输出）。
+- `runtime-trace.jsonl` 三类收据（`policy_receipt` / `commit_receipt` / `recovery_receipt`）+ `ledger.jsonl` join 一致 → DT7 `integrity`（+25）来源。
+- `runtime-trace.jsonl` `phase=decision kind=contract_receipt`（含 `contract_digest` / `terminal_topics_digest` / `hats_digest` / `preset_label`）+ sequence 严格单调 → DT7 `correlation`（+15）来源。
 
 `LoopStateSnapshot` **无磁盘文件** — `ralph inspect loop` / events 回放。
 

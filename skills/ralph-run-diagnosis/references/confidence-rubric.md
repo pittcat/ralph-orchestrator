@@ -1,135 +1,86 @@
 # 根因置信度评分规程
 
-与 `ralph-preset-review` 对齐：**每条 P0/P1 的根因结论必须有 0–100 置信度**；置信度太低不得当作定论，必须加深调查。
+> 本规程配套 `ralph diagnose --causal` 输出（U08/U09）为归因事实来源；agent 不另行打分。所有「置信度」数字直接来自 `ralph diagnose --causal` 的 `confidence` 字段及其分项 breakdown。
 
-OPAC 单项置信度见 [opac-audit-by-mode.md](opac-audit-by-mode.md)。本文管 **DEV 偏离 → 根因归因** 的置信度。
+OPAC 单项置信度见 [opac-audit-by-mode.md](opac-audit-by-mode.md)。本文管 **归因完成度** 的判定。
 
 ---
 
-## 入表门槛
+## 入表门槛（DT7 机检，>85 严格）
 
 | 区域 | 规则 |
 |------|------|
-| **§5 问题归因表** | 只收录 **confidence ≥ 60** 的 P0/P1/P2 |
-| **P0 行** | confidence **< 70** 时不得标 P0，降为 P1 或继续深挖直至 ≥70 |
-| **§4 证据清单** | 每条 DEV 附 **严重度初判 + 置信度初估**（C 产出，用计分卡） |
-| **§7 未核实疑点** | confidence < 60 且已深挖 **2 轮**仍不足 → 单独列出，**不得驱动修复建议** |
+| **§5 问题归因表** | 仅收录 **`status == complete`**（`confidence > 85`，DT7 机检） |
+| **P0 行** | 同样 `confidence > 85`；`status == incomplete` 不得标 P0，降为 P1 或落入 §7 |
+| **§4 证据清单** | 每条 DEV 列「DT7 分项加分」与「来源锚点」（来自 `--causal` JSON） |
+| **§7 未核实疑点** | `status == incomplete`（`confidence ≤ 85` 或 `not_evaluable`）单独列出，**不得驱动修复建议** |
+| **legacy / v1 / 无契约** | `status == not_evaluable`，按 bundle 既有规则兜底（见 [report-template.md](report-template.md) §0.2） |
+
+> **DT7 严格门禁（hard rule）**：`> 85` 必须**严格**大于 85（不接受 `≥ 85`）。边界判定：85 → `incomplete`；86 → `complete`。该边界由 U08 的 `causal_attribution` 单测钉住。
 
 ---
 
-## 证据向量计分卡（可计算，替代文字锚点）
+## DT7 机检计分卡（5 项，max 100）
 
-每条 DEV 的根因置信度 = **基础分 40** + **证据向量加分**（逐项累加，上限 100）。**禁止**凭直觉给「感觉像 80 分」。
+`ralph diagnose --causal` 输出 `confidence_breakdown` 字段即下表五项分值的逐项明细。**禁止**按本表手动加总；与 JSON 字段不一致视为工具漂移，按 HARD RULE 上报。
 
-| 证据项 | 加分 | 判定标准（必须可审计） |
-|--------|------|------------------------|
-| `file:line` 源码锚点 | +25 | 有具体 Rust 文件 + 行号，且 `sed -n` 读过该分支语义 |
-| 双账本一致 | +20 | events + recovery（或 ledger / agent-output / orchestration）**两条独立记录**指向同一结论 |
-| preset/schema 行号 | +15 | `preset_file` 或 `presets/schemas/` 具体行号 + 实际违规 event/log 对照 |
-| BDD 预期吻合 | +10 | `crates/ralph-core/tests/scenarios/<preset>*.yml` 的 `expected.events` 与本次实际偏离一致 |
-| 历史同根因 | +10 | Agent B 找到 30 天内同 `problem_type` + 同根因分类的历史报告（仅 `--include-history ≠ disabled` 时可用） |
-| Tier C 产物交叉验证 | +10 | findings / fix-log / progress / scratchpad 与 event payload 交叉印证 |
-| agent-output 明确违例 | +15 | FULL 模式下 `agent-output.jsonl` 中 tool_call 序列明确违例（仅 agent 归因可用） |
-| prompt visibility 矛盾 | +10 | `inspect prompt` JSON 显示 auto_inject 与 instructions 声明不一致（仅 agent/preset 归因可用） |
-| activation outcome row（plan 2026-08-15-1823） | +10 | runtime-trace.jsonl `phase=activation`/`kind=hat_activation_outcome` 行 + 第二账本（events / recovery / fallback）交叉验证；仅机制/编排/compound 归因可用；**仅凭 `status=empty` 不得升 P0**——必须配合 `terminal_obligation_topics` + 无 accepted/rejected candidate + recovery 一致 |
+| DT7 项 | 分值 | 机检判定 | 来源 sidecar / 收据 |
+|--------|------|----------|---------------------|
+| **coverage**（覆盖完整） | +30 | 8 边界（contract / activation / backend_outcome / event_candidate / policy_decision / state_commit / recovery_action / termination）全部 `covered` | `diagnosis-input.json` `boundary_coverage[]`（U7 v2 manifest） |
+| **integrity**（收据/账本一致） | +25 | `outbox ↔ commit_receipt` join 一致；`policy_receipt` accept/reject 计数匹配；`recovery_receipt.action ∈ {resume, exhausted, correction}` 与 `plan.blocked` payload `retry_key` 对账 | `runtime-trace.jsonl` 三类收据（U03-U05）+ `.ralph/ledger.jsonl` |
+| **refutation**（落选域反驳） | +20 | 4 个落选域（除 `primary_domain` 外的 4 个）各自提供 ≥1 条反驳证据，列入 `rejected_hypotheses[]` | `CausalAttributionReport.rejected_hypotheses[]` |
+| **correlation**（关联链完整） | +15 | `contract_digest` + `sequence` 严格单调 + `retry_key` 与 `plan.blocked{kind=precheck_exhausted}` payload 一致 | `runtime-trace.jsonl` `phase=decision` `kind=contract_receipt` 行（U02） |
+| **freeze_window**（异常冻结窗口） | +10 | 5 类异常（watchdog timeout / 非零退出 / precheck 耗尽 / recovery 耗尽 / 异常 activation outcome）之一触发时 `evidence-window.jsonl` 存在且首行 anomaly 描述 | `<session>/evidence-window.jsonl`（U6） |
 
-**计分示例**：
+**总置信度** = 上述 5 项逐项累加（**机器读 `--causal` JSON，不手算**）。
 
-- `file:line` (+25) + 双账本 (+20) + BDD (+10) = **95**（可审计定论）
-- `file:line` (+25) + 单账本 (+0) + preset 行号 (+15) = **80**（强推断）
-- 仅 recovery `reason_code` + 源码段，无 file:line，无第二账本 = **40 + 0 = 40**（不可定论，必须加深）
+**门禁**：`total > 85` ⇒ `status == complete`；否则 `status == incomplete`。
 
-### 根因分类加分门槛
+### 计分示例（来自 `--causal` JSON）
 
-| 根因分类 | 升到 ≥70 的最低证据组合（必须同时满足） |
-|----------|----------------------------------------|
-| **mechanism** | `file:line` (+25) + 双账本 (+20) = 85；或 `file:line` (+25) + 单账本 + BDD (+10) = 75 |
-| **preset** | preset/schema 行号 (+15) + 实际违规 event/log (+0，但必须有) + 双账本 (+20) = 75；或 preset 行号 (+15) + prompt visibility 矛盾 (+10) + 单账本 = 65（P1 可入，P0 需再加深） |
-| **agent** | agent-output 违例 (+15) + schema 要求对照 (+0，但必须有) + 双账本 (+20) = 75；或 logs 明确违例 (+0) + prompt visibility 矛盾 (+10) + 单账本 = 50（LOGS_ONLY 下常见，须加深） |
-| **compound** | 各成分分别按上表计分；**整行置信度 = min(成分置信度)** 或写明加权公式（如 `0.6×mechanism + 0.4×preset`） |
-
-### Diagnostics 模式封顶（硬顶，不可突破）
-
-| 模式 | 根因置信度硬顶（无 FULL agent-output 时） | 例外 |
-|------|------------------------------------------|------|
-| FULL | 100 | — |
-| MINIMAL | 85 | 缺 agent-output 的 agent 归因 ≤60 |
-| LOGS_ONLY | 75 | mechanism 有 `file:line` + recovery 可例外到 85；纯 OPAC/agent ≤50 |
-| DISABLED | 70 | — |
-
-**封顶规则**：计分卡算出分数后，**再受模式硬顶约束**。例如 LOGS_ONLY 下 mechanism 算出 80，硬顶 75 → 最终 75；若机制有 `file:line` + recovery，例外到 85。
-
-### 置信度传播规则（C → D）
-
-Agent C 的「置信度初估」与 Agent D 的「终评置信度」必须满足：
-
-- **C 用计分卡初估**：C 在 §4 证据清单中对每条 DEV 按上述计分卡打分，标注「已计分证据项」。
-- **D 在 C 基础上加深**：D 的终评 = C 初估 + 加深轮次新增证据项加分（每轮最多 +25，即一个 `file:line` 或双账本）。
-- **D 不得无理由低于 C**：若 D 终评 < C 初估，必须在 §5 该行「加深轮次」列写明「D 认为 C 的某证据项无效，理由：...」。
-- **D 不得突破模式硬顶**：无论加深多少轮，终评 ≤ 模式硬顶。
+- 全 8 边界 covered（+30）+ 三类收据 join 一致（+25）+ 4 落选域各 1 条反驳（+20）+ contract_digest 一致（+15）+ watchdog 触发有 evidence-window（+10）= **100** → `complete`
+- 7 边界 covered（boundary_coverage 缺 1）+ 三类收据 join（+25）+ 4 落选域各 1 条（+20）+ contract_digest 一致（+15）+ 无异常触发（+0）= **70** → `incomplete`
 
 ---
 
-## 低置信度 → 加深调查（强制）
+## 落选域与被否决假设
 
-当某条 DEV 或候选根因 **confidence < 60**（或 P0 候选 **< 70**）时，**禁止**写入 §5 定论表；按根因分类走加深决策树，每轮须记录「做了什么 → 新增证据项 → 分数变化」。
+`CausalAttributionReport.rejected_hypotheses[]` 列出 `primary_domain` 之外 4 个落选域的反驳证据。报告 §4.x 与 §6 引用时**只引用域名 + 反驳证据类型**，不复述具体 evidence_refs（per HARD RULE 4.8）。
 
-### 加深决策树（按根因分类，每轮最多 2 项，有信息增量阈值）
+| 落选域 | 含义（domain 枚举固定 5 项） |
+|--------|------------------------------|
+| `runtime` | runtime 行为/契约偏离 |
+| `preset` | preset / schema 配置问题 |
+| `agent` | agent 在自己 activation 内可见的行为 |
+| `backend` | 后端适配器 / 模型输出 |
+| `diagnostic_capture_contract` | 诊断捕获契约缺口（coverage 决定） |
 
-**信息增量阈值（hard rule）**：每轮加深必须新增至少 **一个可计分证据项**（见计分卡），否则视为无效轮次，直接入 §7。
-
-#### mechanism 归因加深路径
-
-```
-第 1 轮（必做）：源码反查 — reason_code → Rust 函数 → file:line（+25）
-    ↓ 若仍 <70
-第 2 轮（二选一）：
-    a) 补读第二账本 — workspace recovery ↔ session recovery ↔ ledger（+20）
-    b) BDD 对照 — scenarios/<preset>*.yml expected.events 是否覆盖此偏离（+10）
-```
-
-#### preset 归因加深路径
-
-```
-第 1 轮（必做）：preset/schema 行级 — sed -n 读 triggers/publishes/instructions 具体行号（+15）
-    ↓ 若仍 <70
-第 2 轮（二选一）：
-    a) 双账本 — events + recovery 同时指向 preset 违规（+20）
-    b) prompt visibility 对账 — inspect prompt JSON 与 instructions 声明矛盾（+10）
-```
-
-#### agent 归因加深路径
-
-```
-第 1 轮（FULL 模式必做）：agent-output 审计 — tool_call 序列明确违例（+15）
-    ↓ 若仍 <70（或 LOGS_ONLY 模式）
-第 2 轮（二选一）：
-    a) logs 关键词 — rg 'policy-check|scope violation' diagnostics/logs/（+0，但可补双账本）
-    b) prompt visibility 对账 — inspect prompt JSON 显示 agent 看不到某 skill（+10）
-```
-
-#### compound 归因加深路径
-
-```
-各成分并行第 1 轮：分别按 mechanism/preset/agent 路径第 1 轮加深
-    ↓ 若整行 <70
-第 2 轮：对最低分成分补第 2 轮（或补历史对照 +10，仅 --include-history ≠ disabled）
-```
-
-### 轮次上限
-
-- 每条候选根因最多 **2 轮**加深；仍 < 60 → 移入 **§7 未核实疑点**，标注 `blocked_by: <缺什么证据项>`（必须是计分卡中的具体项，如「缺 file:line」「缺双账本」）
-- 主 Agent 可发起 **一轮**补充 sub-agent（仅针对未达标 DEV），不得无限循环
+> **禁止** 维护平行根因分类：`mechanism / preset / agent / compound` 等旧分类不再独立打分；归因落点由 `--causal` 的 `primary_domain` 字段给定。Agent C/D 不再按旧分类加深决策树。
 
 ---
 
-## Agent 分工
+## 分数变化记录（DT7 重新打分）
 
-| Agent | 置信度职责 |
-|-------|------------|
-| **C** | DEV 表：`严重度初判` + `置信度初估`（按计分卡，列出已计分证据项） + `缺口说明`（缺哪些证据项） |
-| **D** | 根因表：终评置信度（C 初估 + 加深新增，≤ 模式硬顶）；< 60 触发按分类决策树加深；compound 加权 |
-| **主 Agent** | 汇总前审计：§5 无 < 60 行；P0 无 < 70 行；§7 与 §5 不重复；**校验每行是否有计分卡证据项列出** |
+每次 Agent D 重新触发 `ralph diagnose --causal` 后，`confidence` / `confidence_breakdown` / `primary_domain` 可能变化。报告 §4 必须记录每次「分数变化」：
+
+| 重新打分原因 | 上次 total | 本次 total | Δ | primary_domain 是否变化 | 落选域反驳新增 |
+|--------------|------------|------------|---|--------------------------|------------------|
+| 加深：补 read 第二账本 | 70 | 95 | +25 | 否（仍为 preset） | 无 |
+| 加深：refutation 增 2 条 | 95 | 100 | +5 | 否 | +2 条 |
+
+> **禁止** 在分数变化小节捏造上次分数；如属首次打分，写 `N/A (initial scoring)`。
+
+---
+
+## Agent 分工（DT7 重新对齐）
+
+| Agent | 职责 |
+|-------|------|
+| **C** | 触发 `ralph diagnose --causal` 第一次，把 JSON 五项分项与 `rejected_hypotheses` 抄录到 §4 证据清单；标注每条 DEV 的「DT7 分项来源」。 |
+| **D** | 必要时重跑 `--causal`（重新打分），记录「分数变化」；不再用 legacy 计分卡加深。 |
+| **主 Agent** | 汇总前审计：§5 行 `status == complete` 才入表；`status == incomplete` / `not_evaluable` 不得入 §5 / §6。 |
+
+> **回退禁止**：DT7 严格门禁下，**禁止** legacy "low-confidence → 加深调查" 决策树作为补分手段。加深调查可以补 **新证据**，但补证据后必须重跑 `--causal`，由机检重新打分；不允许 Agent 自行加分。
 
 ---
 
@@ -138,39 +89,46 @@ Agent C 的「置信度初估」与 Agent D 的「终评置信度」必须满足
 §4 证据：
 
 ```text
-| ID | 描述 | 证据锚点 | 严重度 | 置信度初估 | 已计分证据项 | 证据缺口 |
+| ID | 描述 | 证据锚点 | 严重度 | DT7 分项来源 | 缺口 |
+|----|------|----------|--------|--------------|------|
+| DEV-001 | ... | file:line / event#L / event_candidate:L<N> | P0 | coverage(+30) / integrity(+25) / correlation(+15) | freeze_window 缺 |
 ```
 
-§5 归因（**P0/P1 必填置信度**）：
+§5 归因（**P0/P1 必填 status + confidence**）：
 
 ```text
-| 优先级 | 问题 | 根因分类 | 置信度 | 证据 DEV | 已计分证据项 | 历史关联 | 加深轮次 |
+| 优先级 | 问题 | primary_domain | status | confidence | 证据 DEV | DT7 分项来源 | rejected_hypotheses | 历史关联 | 加深轮次 |
+|--------|------|----------------|--------|------------|----------|--------------|---------------------|----------|----------|
+| P0 | ... | preset | complete | 95 | DEV-00x | coverage / integrity / correlation / refutation / freeze_window | 4 落选域 | 高 | 1→95 |
 ```
 
-§1.2 四问：Q4 格增加 **归因置信度**（取 §5 最高 P0 或 compound 整行置信度）。
+§1.2 四问：Q4 格增加 **归因置信度**（取 §5 最高 P0 的 `confidence` 字段；`status == incomplete` 时附 `not_evaluable` 备注）。
 
-§1.1 健康度：`P0 / P1 / P2 数量` 旁注明 **（均为 confidence≥门槛）**。
+§1.1 健康度：`P0 / P1 / P2 数量` 旁注明 **（均为 status=complete）**。
 
 ---
 
-## 示例（按计分卡）
+## 示例（按 DT7 + `--causal`）
 
 ```text
 DEV-004 | review-synthesizer verdict=blocked 且 findings_count=0 | events:L24 | P0初判
-C 初估：40（无计分证据项，仅 events 单点）
-→ D 加深第 1 轮：读 preset L2374（preset 行号 +15）+ recovery 拒收记录（双账本 +20）→ 75 → 入 §5 P0
+--causal confidence=95, status=complete, primary_domain=preset
+DT7 分项：coverage(+30) + integrity(+25) + refutation(+20) + correlation(+15) + freeze_window(+5, partial)
+rejected_hypotheses：runtime(recovery:1) / agent(empty_channel:1) / backend(timeout_audit:1) / capture_contract(no)
+→ §5 P0 入表
 ```
 
 ```text
 候选：mechanism silent-success | 仅见 LOOP_COMPLETE + summary 乐观
-C 初估：40
-→ D 加深第 1 轮：shipper_reason.rs file:line（+25）→ 65
-→ D 加深第 2 轮：events 终态链 + recovery 双账本（+20）→ 85 → 入 §5
+--causal confidence=70, status=incomplete, primary_domain=runtime
+DT7 分项：coverage(+30, 缺 backend_outcome) + integrity(+25) + refutation(+0, 落选域未反驳) + correlation(+15) + freeze_window(+0)
+→ §7 未核实疑点；blocked_by: coverage.backend_outcome 缺 / refutation 未给出
 ```
 
 ```text
 候选：agent 未做 policy-check | LOGS_ONLY 模式
-C 初估：40（仅 logs 弱信号）
-→ D 加深第 1 轮：logs 中 rg 'policy-check' 无结果（+0，不算新增证据项，无效轮次）
-→ 直接入 §7，blocked_by: 缺 agent-output（FULL 模式才可用）
+--causal confidence=20, status=incomplete, primary_domain=capture_contract
+DT7 分项：coverage(+0, 4 边界 covered 缺失) + integrity(+10, 仅 ledger 单账本) + correlation(+10) + freeze_window(+0)
+rejected_hypotheses：runtime(/health 拒收缺) / preset(policy_check OK) / agent(无 agent-output) / backend(no_logs)
+→ §7；不驱动修复
 ```

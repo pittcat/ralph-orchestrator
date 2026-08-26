@@ -23,6 +23,7 @@ argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file] [--incl
 **产物隔离 HARD RULE**：`docs/report/` 只允许写入最终 Markdown 报告；诊断过程中的 JSON、工作笔记、sub-agent 输出、stderr、临时清单和其它中间产物，必须写入由 `mktemp -d` 创建的临时诊断目录（或用户明确指定的非 git 工作区），不得写入 target branch、`docs/report/`、`docs/plans/`、`docs/solutions/` 或 `docs/brainstorms/`。开始前记录 `DIAG_WORKDIR`，结束时清理；若清理失败，必须在最终回复中报告残留路径。
 
 > **变更日志**：
+> - 2026-08-26：U10 plan — `ralph diagnose --causal` 作为归因事实来源；DT7 机检 + `confidence > 85` 门禁；§0/§3/§5 改消费；移除 60/70 旧 entry-gate；新增 §4.3 Causal Attribution + frontmatter `causal_*` 字段。
 > - 2026-07-25：新增 §0.1 历史检索开关 + SSOT 常量 + §0.x 编号扩展约定。若主项目文档（CLAUDE.md / AGENTS.md / operator docs）需说明此开关，在此 `变更日志` 行追加即可（不触发 CLAUDE.md/AGENTS.md 强制同步——本 skill 不属于 `crates/ralph-core/data/`）。
 
 ## 0.1 历史检索开关（HARD RULE）
@@ -172,6 +173,21 @@ ralph diagnose --legacy --session latest --diagnostics-root "$RUN/.ralph/diagnos
 - `$DIAG_WORKDIR` 是唯一的中间产物根目录；不要把 JSON、stderr 或工作笔记路径设为 `docs/report/...`。
 - 最终报告 frontmatter 的 `structured_result_ref` 写 `inline: summarized in report`，不得引用清理后不存在的临时绝对路径。
 
+### Phase 0 causal attribution（plan 2026-08-26-1104, U10）
+
+紧接 bundle-first 之后，**session 视图下必须**再触发一次 `ralph diagnose --causal` 拿归因事实。该命令与上面 `--legacy` 互不替代：
+
+```bash
+CAUSAL_RESULT="$DIAG_WORKDIR/causal.json"
+ralph diagnose --causal --session latest --diagnostics-root "$RUN/.ralph/diagnostics" --format json --output "$CAUSAL_RESULT"
+```
+
+- `--causal`：开关输出 deterministic causal attribution（DT7 机检 5 项 + `>85` 门禁）；ledger 视图下传 `--causal` 即报错（互斥）。
+- **legacy / v1 / 无契约** session：命令仍返回 `causal_status=not_evaluable` + 原因；报告 frontmatter `causal_status: not_evaluable`，§4.3 整节写 `N/A (causal attribution unavailable)`。
+- 归因事实**只来自**该 JSON；Phase 3 / §5 / §6 引用 `primary_domain` / `confidence` / `rejected_hypotheses` / `causal_score_change` 时**只引用字段名 + 引用计数**，不复述具体 evidence_refs 或 payload 内容（per HARD RULE 4.8）。
+
+若命令退出码非零（典型：ledger 视图传 `--causal`、diagnostics 目录不存在、session latest 解析失败），把 stderr 暂存到 `$DIAG_WORKDIR/causal.stderr`，并将摘要写进报告 §0 的「环境异常」段，按 §0.2 legacy 兜底继续后续步骤。**禁止** 把 `ralph diagnose --causal` 退出码当 `causal_status` 判定（causal 状态以 `$CAUSAL_RESULT` 的 `causal_status` 字段为准）。
+
 若命令退出码非零（典型：diagnostics 目录不存在、session latest 解析失败），把 stderr 暂存到 `$DIAG_WORKDIR/diagnose.stderr`，并将摘要写进报告 §0 的「环境异常」段，按 §0.2 legacy 兜底继续后续步骤。**禁止** 把 `ralph diagnose` 退出码当 bundle 状态判定（bundle 状态以 `$STRUCTURED_RESULT` 的 `bundle.status` 字段为准）。
 
 ### Phase 0 能力推断（execution capabilities）
@@ -199,13 +215,15 @@ ralph diagnose --legacy --session latest --diagnostics-root "$RUN/.ralph/diagnos
 
 见 [subagent-charters.md](references/subagent-charters.md)、[verification-pipeline.md](references/verification-pipeline.md)。
 
+**归因事实来源**：Phase 0 的 `ralph diagnose --causal` 输出（详见 §Phase 0 causal attribution）。Agent C / D 仅抄录与引用，**不另行打分**。
+
 **根因置信度**（详见 [confidence-rubric.md](references/confidence-rubric.md)）：
 
-- **§5 入表门槛**：confidence ≥ 60；**P0 须 ≥ 70**，否则继续深挖或降为 P1
-- **低分强制加深**：< 60 不得写入 §5 定论；按 rubric 补读 recovery/源码/preset 行号/历史，最多 2 轮
-- **仍不足**：移入 §7「未核实疑点」，不得写修复建议
-- 有 `file:line` + 双账本一致 → 可 ≥85；LOGS_ONLY 下 OPAC/agent 单项 ≤50
-- compound 须写贡献比例 + 各成分置信度
+- **§5 入表门槛**：DT7 机检 `confidence > 85` 且 `status == complete`；否则入 §7
+- **P0 须 `status == complete`**；`status == incomplete` 降为 P1 或落入 §7
+- **`status == not_evaluable`**（legacy / v1 / 无契约）：报告 §4.3 整节 `N/A (causal attribution unavailable)`，不写修复建议
+- `confidence` / `primary_domain` / `rejected_hypotheses` 来自 `--causal` JSON；分数变化记录在 §4.3.3（causal_score_change）
+- compound / 加深决策树 / 旧 60/70 阈值 **全部移除**（U10 DT7 严格门禁）
 
 **OPAC 置信度**：[opac-audit-by-mode.md](references/opac-audit-by-mode.md)
 
@@ -218,11 +236,12 @@ ralph diagnose --legacy --session latest --diagnostics-root "$RUN/.ralph/diagnos
 - [ ] Phase 0 盘点表在报告中
 - [ ] 只读了 `current-events` 指向的 events
 - [ ] LOGS_ONLY 未因缺 orchestration 标 P0
-- [ ] 每条 P0/P1 在 §5 有 **置信度**；P0≥70、入表≥60
-- [ ] confidence<60 的候选已加深或落入 §7，未混入 §5/§6
+- [ ] 每条 P0/P1 在 §5 有 **status + confidence**；P0/P1 均为 `status == complete` 且 `confidence > 85`
+- [ ] `status == incomplete` / `not_evaluable` 的候选已落入 §7，未混入 §5/§6
 - [ ] 未引用 ssot-guardrails 禁止项
 - [ ] `docs/report/` 只包含最终 Markdown 报告；JSON、stderr、工作笔记等中间产物均在 `$DIAG_WORKDIR` 并已清理
 - [ ] **历史检索开关状态已写入 frontmatter**（`history_search: disabled | preset-only | full`）
+- [ ] **Causal attribution 已写入 frontmatter**（`causal_status` / `causal_confidence` / `causal_primary_domain` / `causal_rejected_hypotheses` / `causal_score_change`，session 视图）
 
 ## 参考
 

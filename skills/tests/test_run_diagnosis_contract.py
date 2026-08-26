@@ -321,3 +321,185 @@ def test_source_trace_guide_lists_activation_outcome_entry() -> None:
     assert "activation_outcome.rs" in body, (
         "source-trace-guide.md must point at the activation_outcome.rs Rust entry"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Plan 2026-08-26-1104 U10: skill confidence gate upgrade + contract sync.
+# The skill is now a thin consumer of `ralph diagnose --causal` output.
+# Anchors enforce:
+#  - DT7 >85 strict gate replaces the legacy 60/70 entry-gates.
+#  - The five mechanical scoring categories are listed by name.
+#  - No "60" or "70" entry-gate residue remains.
+#  - SKILL.md Phase 0 invokes `ralph diagnose --causal` as the
+#    attribution source.
+#  - report-template.md carries rejected_hypotheses + score change.
+#  - artifact-manifest.md names the evidence-window.jsonl + v2
+#    boundary_coverage sidecars that DT7 consumes.
+# ─────────────────────────────────────────────────────────────────────
+
+DT7_CATEGORIES = ("coverage", "integrity", "refutation", "correlation", "freeze_window")
+DT7_GATE_TOKEN = "> 85"
+
+
+def test_confidence_rubric_uses_dt7_strict_85_gate() -> None:
+    """U10: confidence-rubric.md must replace the legacy 60/70 entry-gates
+    with DT7's strict `> 85` mechanical gate."""
+    rubric = (
+        ROOT / "skills" / "ralph-run-diagnosis" / "references" / "confidence-rubric.md"
+    )
+    body = _read(rubric)
+    assert DT7_GATE_TOKEN in body, (
+        f"confidence-rubric.md must declare the DT7 strict gate `{DT7_GATE_TOKEN}`; "
+        "U10 rewrites the legacy 60/70 entry-gates to a single >85 mechanical gate"
+    )
+    # Boundary example must be present so 85→incomplete / 86→complete is
+    # explicit (U08 boundary tests rely on this wording).
+    assert "85" in body and "86" in body, (
+        "confidence-rubric.md must show the 85/86 boundary example so the "
+        "strict gate is unambiguous"
+    )
+
+
+def test_confidence_rubric_lists_dt7_five_categories() -> None:
+    """U10: confidence-rubric.md must enumerate the five DT7 mechanical
+    scoring categories: coverage / integrity / refutation / correlation /
+    freeze_window."""
+    rubric = (
+        ROOT / "skills" / "ralph-run-diagnosis" / "references" / "confidence-rubric.md"
+    )
+    body = _read(rubric)
+    missing = [c for c in DT7_CATEGORIES if c not in body]
+    assert not missing, (
+        f"confidence-rubric.md must enumerate every DT7 category; missing: {missing}"
+    )
+
+
+def test_confidence_rubric_removes_legacy_entry_gates() -> None:
+    """U10: the legacy `≥ 60` / `≥ 70` entry-gate language must be fully
+    removed from confidence-rubric.md. The rubric may still reference 60/70
+    for historical context inside `rejected_hypotheses` examples, but the
+    "入表门槛" gate numbers must not appear as thresholds."""
+    rubric = (
+        ROOT / "skills" / "ralph-run-diagnosis" / "references" / "confidence-rubric.md"
+    )
+    body = _read(rubric)
+    # The legacy entry-gates were phrases like:
+    #   "confidence ≥ 60"  / "≥ 70"  / "P0 须 ≥ 70"  / "≥ 60 不得写入 §5"
+    # Search for the canonical gate phrasing; reject any match.
+    legacy_patterns = (
+        "confidence ≥ 60",
+        "≥ 60",
+        "P0 须 ≥ 70",
+        "≥ 70",
+        "confidence<60",
+        "confidence<70",
+    )
+    hits = [p for p in legacy_patterns if p in body]
+    assert not hits, (
+        "confidence-rubric.md must drop legacy entry-gate language; "
+        f"found residual: {hits}"
+    )
+
+
+def test_skill_phase_0_invokes_diagnose_causal() -> None:
+    """U10: SKILL.md Phase 0 must trigger `ralph diagnose --causal` as
+    the causal attribution source (paired with the existing --legacy
+    bundle-first invocation)."""
+    body = _read(SKILL_MD)
+    assert "--causal" in body, (
+        "SKILL.md must reference `ralph diagnose --causal` (U10)"
+    )
+    # The Phase 0 invocation block must actually call the flag, not just
+    # mention it once in passing.
+    assert "ralph diagnose --causal" in body, (
+        "SKILL.md must show the concrete `ralph diagnose --causal` "
+        "invocation in Phase 0 causal attribution"
+    )
+
+
+def test_skill_phase_3_consumes_causal_attribution() -> None:
+    """U10: SKILL.md Phase 3 / §根因置信度 must consume the causal
+    attribution rather than re-deriving scores locally."""
+    body = _read(SKILL_MD)
+    # Phase 3 area: locate the 根因置信度 block.
+    assert "Phase 1–3" in body or "Phase 1-3" in body or "Phase 1~3" in body, (
+        "SKILL.md must keep the Phase 1-3 section anchor"
+    )
+    # The 根因置信度 line must name --causal as the source.
+    lower = body.lower()
+    assert "ralph diagnose --causal" in body, (
+        "SKILL.md 根因置信度 must reference `ralph diagnose --causal` as "
+        "the attribution source"
+    )
+    # The legacy 60/70 entry-gate language must be gone from the skill too.
+    assert "≥ 60" not in body and "≥ 70" not in body, (
+        "SKILL.md must drop legacy 60/70 entry-gate thresholds; U10 replaces "
+        "them with DT7 >85"
+    )
+
+
+def test_report_template_has_rejected_hypotheses_section() -> None:
+    """U10: report-template.md must carry the `rejected_hypotheses` and
+    `causal_score_change` sections so DT7 outputs are surfaced."""
+    body = _read(REPORT_TEMPLATE)
+    for token in ("rejected_hypotheses", "causal_score_change"):
+        assert token in body, (
+            f"report-template.md must contain `{token}` (U10 DT7 attribution)"
+        )
+    # The §4.3 anchor is the documented location.
+    assert "4.3" in body, "report-template.md must include §4.3 Causal Attribution"
+
+
+def test_report_template_frontmatter_has_causal_fields() -> None:
+    """U10: report-template.md frontmatter must declare the DT7 causal
+    fields: causal_status / causal_confidence / causal_primary_domain /
+    causal_rejected_hypotheses / causal_score_change."""
+    body = _read(REPORT_TEMPLATE)
+    for field in (
+        "causal_status",
+        "causal_confidence",
+        "causal_primary_domain",
+        "causal_rejected_hypotheses",
+        "causal_score_change",
+    ):
+        assert field in body, (
+            f"report-template.md frontmatter must declare {field!r} (U10 DT7)"
+        )
+
+
+def test_artifact_manifest_lists_evidence_window_jsonl() -> None:
+    """U10: artifact-manifest.md must list `evidence-window.jsonl` as a
+    Tier B sidecar (U6 → DT7 freeze_window source)."""
+    manifest = (
+        ROOT / "skills" / "ralph-run-diagnosis" / "references" / "artifact-manifest.md"
+    )
+    body = _read(manifest)
+    assert "evidence-window.jsonl" in body, (
+        "artifact-manifest.md must enumerate evidence-window.jsonl as a "
+        "Tier B sidecar (DT7 freeze_window source)"
+    )
+
+
+def test_artifact_manifest_mentions_v2_boundary_coverage() -> None:
+    """U10: artifact-manifest.md must reference the v2 manifest's
+    `boundary_coverage[]` section (U7 → DT7 coverage source)."""
+    manifest = (
+        ROOT / "skills" / "ralph-run-diagnosis" / "references" / "artifact-manifest.md"
+    )
+    body = _read(manifest)
+    assert "boundary_coverage" in body, (
+        "artifact-manifest.md must mention the v2 manifest `boundary_coverage[]` "
+        "section (DT7 coverage source)"
+    )
+
+
+def test_skill_lists_causal_status_field_in_frontmatter_checklist() -> None:
+    """U10: SKILL.md 提交前检查 must reference the causal frontmatter
+    fields so the operator's pre-submit gate is anchored."""
+    body = _read(SKILL_MD)
+    # The pre-submit checklist is the anchor; causal_status must appear
+    # at least once (could be either in the checklist or 变更日志).
+    assert "causal_status" in body, (
+        "SKILL.md must surface `causal_status` so the operator pre-submit "
+        "checklist can verify the DT7 field is filled"
+    )
