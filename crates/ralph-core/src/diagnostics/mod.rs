@@ -51,8 +51,10 @@ pub use evidence_window::{
 pub use feedback::{FEEDBACK_SCHEMA_VERSION, FeedbackEntry, FeedbackLogger, FeedbackPhase};
 pub use hook_runs::{HookDisposition, HookRunLogger, HookRunTelemetryEntry};
 pub use input_bundle::{
-    ArtifactIntegrity, ArtifactStatus, CodeBaseline, DIAGNOSIS_INPUT_SCHEMA_VERSION,
-    DiagnosisInputBundle, ManifestStatus, RunMetadata, read_manifest, write_manifest,
+    ArtifactIntegrity, ArtifactStatus, BoundaryCounter, BoundaryCoverageEntry,
+    BoundaryCoverageStatus, CausalBoundary, CodeBaseline, DIAGNOSIS_INPUT_SCHEMA_VERSION,
+    DiagnosisInputBundle, ManifestStatus, RunMetadata, kind_to_boundary, read_manifest,
+    write_manifest,
 };
 pub use log_rotation::{create_log_file, rotate_logs};
 pub use orchestration::{
@@ -120,6 +122,25 @@ where
                 label,
             );
             None
+        }
+    }
+}
+
+/// Plan 2026-08-26-1104 U07: helper that mutates a
+/// `boundary_coverage[]` vector in place, stamping `reason` onto
+/// every `Gap` row. Used by `finalize_input_bundle` when the
+/// underlying manifest write failed mid-run so the
+/// `evidence_gap` entries the reporter builds later carry a
+/// concrete failure cause (rather than an empty string). Lives
+/// outside the `DiagnosticsCollector` impl because it has no
+/// `self` dependency — only the row vector.
+fn annotate_gaps_with_reason(
+    coverage: &mut [input_bundle::BoundaryCoverageEntry],
+    reason: &str,
+) {
+    for entry in coverage.iter_mut() {
+        if entry.status == input_bundle::BoundaryCoverageStatus::Gap {
+            entry.reason = Some(reason.to_string());
         }
     }
 }
@@ -677,6 +698,17 @@ pub struct DiagnosticsCollector {
     /// criterion). `None` until the bootstrap contract receipt
     /// has been emitted.
     cached_contract_digest: Arc<Mutex<Option<String>>>,
+    /// Plan 2026-08-26-1104 U07: per-boundary coverage counters.
+    /// `expected` is bumped at the entry of any recording method
+    /// that maps to a [`CausalBoundary`]; `recorded` is bumped
+    /// after the row lands in `runtime-trace.jsonl`. When the
+    /// underlying logger is disabled or degraded, `expected` keeps
+    /// bumping but `recorded` stops increasing — the diff surfaces
+    /// as `BoundaryCoverageStatus::Gap` in the finalized manifest.
+    /// Initialized to eight zero counters (one per `CausalBoundary`)
+    /// so a session with no events still serializes eight covered
+    /// rows.
+    boundary_counters: Arc<Mutex<std::collections::BTreeMap<CausalBoundary, input_bundle::BoundaryCounter>>>,
 }
 
 impl std::fmt::Debug for DiagnosticsCollector {
@@ -978,6 +1010,7 @@ impl DiagnosticsCollector {
             contract_receipt_emitted: Arc::new(Mutex::new(false)),
             cached_contract_digest: Arc::new(Mutex::new(None)),
             evidence_window_writer,
+            boundary_counters: Arc::new(Mutex::new(Self::initial_boundary_counters())),
         })
     }
 
@@ -1002,7 +1035,83 @@ impl DiagnosticsCollector {
             contract_receipt_emitted: Arc::new(Mutex::new(false)),
             cached_contract_digest: Arc::new(Mutex::new(None)),
             evidence_window_writer: None,
+            boundary_counters: Arc::new(Mutex::new(Self::initial_boundary_counters())),
         }
+    }
+
+    /// Plan 2026-08-26-1104 U07: build the canonical initial
+    /// boundary counter table. Every session, enabled or not,
+    /// starts with the eight canonical boundaries zeroed; the
+    /// reporter iterates `CausalBoundary::ALL` to produce stable
+    /// `boundary_coverage[]` rows even on a session that never
+    /// recorded anything.
+    fn initial_boundary_counters()
+    -> std::collections::BTreeMap<CausalBoundary, input_bundle::BoundaryCounter> {
+        let mut map = std::collections::BTreeMap::new();
+        for boundary in CausalBoundary::all() {
+            map.insert(boundary, input_bundle::BoundaryCounter::default());
+        }
+        map
+    }
+
+    /// Plan 2026-08-26-1104 U07: bump the `expected` counter for
+    /// the boundary that maps to `kind` (if any). Called at the
+    /// entry of `log_runtime_trace` so the counter tracks every
+    /// attempt, regardless of whether the underlying logger
+    /// is enabled or the row is persisted.
+    fn increment_boundary_expected(&self, kind: &str) {
+        let Some(boundary) = input_bundle::kind_to_boundary(kind) else {
+            return;
+        };
+        if let Ok(mut counters) = self.boundary_counters.lock() {
+            let entry = counters
+                .entry(boundary)
+                .or_insert_with(input_bundle::BoundaryCounter::default);
+            entry.expected = entry.expected.saturating_add(1);
+        }
+    }
+
+    /// Plan 2026-08-26-1104 U07: bump the `recorded` counter for
+    /// the boundary that maps to `kind` (if any). Called by
+    /// `log_runtime_trace` after the row is successfully appended
+    /// to `runtime-trace.jsonl` so a logger failure leaves the
+    /// counter pinned at the last successful row count.
+    fn increment_boundary_recorded(&self, kind: &str) {
+        let Some(boundary) = input_bundle::kind_to_boundary(kind) else {
+            return;
+        };
+        if let Ok(mut counters) = self.boundary_counters.lock() {
+            let entry = counters
+                .entry(boundary)
+                .or_insert_with(input_bundle::BoundaryCounter::default);
+            entry.recorded = entry.recorded.saturating_add(1);
+        }
+    }
+
+    /// Plan 2026-08-26-1104 U07: snapshot the eight canonical
+    /// boundary counters into the manifest-friendly row format.
+    /// `gap_reason` is stamped onto every `Gap` row whose
+    /// `expected > recorded` (typically only populated when the
+    /// underlying writer was degraded mid-run). Always returns
+    /// eight rows in `CausalBoundary::ALL` order so the
+    /// serialized manifest is stable across runs.
+    pub fn snapshot_boundary_coverage(
+        &self,
+        gap_reason: Option<String>,
+    ) -> Vec<input_bundle::BoundaryCoverageEntry> {
+        let counters = match self.boundary_counters.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        CausalBoundary::all()
+            .map(|boundary| {
+                let counter = counters
+                    .get(&boundary)
+                    .cloned()
+                    .unwrap_or_default();
+                input_bundle::BoundaryCoverageEntry::new(boundary, &counter, gap_reason.clone())
+            })
+            .collect()
     }
 
     /// Returns whether any diagnostics are enabled.
@@ -1472,7 +1581,13 @@ impl DiagnosticsCollector {
                 return;
             }
         };
-        *guard = guard.with_finalized(artifacts, execution_capabilities);
+        // Plan 2026-08-26-1104 U07: snapshot the eight boundary
+        // counters before any write attempt. If the write
+        // fails below, we re-stamp the `Gap` rows with a
+        // structured reason and re-write the manifest so the
+        // reporter can surface the underlying writer failure.
+        let mut boundary_coverage = self.snapshot_boundary_coverage(None);
+        *guard = guard.with_finalized(artifacts, execution_capabilities, boundary_coverage.clone());
         match input_bundle::write_manifest(session_dir, &guard) {
             Ok(Some(_)) => {}
             Ok(None) => {
@@ -1481,7 +1596,14 @@ impl DiagnosticsCollector {
                     session_dir = %session_dir.display(),
                     "diagnosis-input.json finalization was not persisted; marking degraded"
                 );
+                annotate_gaps_with_reason(&mut boundary_coverage, "logger write failed");
+                *guard = guard.with_finalized(
+                    guard.artifacts.clone(),
+                    guard.execution_capabilities.clone(),
+                    boundary_coverage.clone(),
+                );
                 *guard = guard.mark_degraded();
+                let _ = input_bundle::write_manifest(session_dir, &guard);
             }
             Err(err) => {
                 tracing::warn!(
@@ -1490,7 +1612,14 @@ impl DiagnosticsCollector {
                     error = %err,
                     "failed to write diagnosis-input.json on finalize; marking degraded"
                 );
+                annotate_gaps_with_reason(&mut boundary_coverage, "logger write failed");
+                *guard = guard.with_finalized(
+                    guard.artifacts.clone(),
+                    guard.execution_capabilities.clone(),
+                    boundary_coverage.clone(),
+                );
                 *guard = guard.mark_degraded();
+                let _ = input_bundle::write_manifest(session_dir, &guard);
             }
         }
     }
@@ -1517,6 +1646,13 @@ impl DiagnosticsCollector {
     /// their tight, per-row shape and only the loop boundaries
     /// (run start, iteration start) need to call `set_causal_context`.
     pub fn log_runtime_trace(&self, mut entry: RuntimeTraceEntry) {
+        // Plan 2026-08-26-1104 U07: bump the per-boundary
+        // `expected` counter at entry so the diff between
+        // `expected` and `recorded` flags writer-side failures.
+        // Cheap (single BTreeMap lookup + saturating add) and
+        // safe to skip when the kind is not a recognized
+        // boundary (orchestration / performance / hook rows).
+        self.increment_boundary_expected(&entry.kind);
         if entry.causal.is_none()
             && let Ok(guard) = self.causal_context.lock()
             && let Some(ctx) = guard.as_ref()
@@ -1527,7 +1663,23 @@ impl DiagnosticsCollector {
             return;
         };
         match logger.lock() {
-            Ok(mut guard) => guard.append(entry),
+            Ok(mut guard) => {
+                let kind_for_counter = entry.kind.clone();
+                guard.append(entry);
+                // Only bump `recorded` when the row actually
+                // landed on disk. `append` already flips the
+                // logger into `degraded` on write failure, but
+                // a no-op success would still be reflected
+                // through `recorded` so the per-row contract
+                // stays coherent. The logger's internal flush
+                // is the authoritative "did this make it to
+                // disk" signal — when degraded, future rows
+                // also become no-ops, so the diff surfaces
+                // naturally as the gap.
+                if !guard.is_degraded() {
+                    self.increment_boundary_recorded(&kind_for_counter);
+                }
+            }
             Err(err) => {
                 tracing::warn!(
                     target: "ralph_core::diagnostics",
