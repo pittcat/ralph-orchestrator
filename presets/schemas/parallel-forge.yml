@@ -559,6 +559,9 @@ schemas:
       - verified_base_commit
       - plan_key
       - settlement_log_path
+    field_types:
+      settled_task_ids: array
+      settled_unit_ids: array
     payload: json_object
     field_docs:
       wave_id:
@@ -570,12 +573,12 @@ schemas:
         source: Integrator reading the current work.
         fill_rule: Non-negative integer.
       settled_task_ids:
-        meaning: JSON string array of live task IDs to close atomically (U3 CloseTaskBatch).
+        meaning: JSON array of live task IDs to close atomically (U3 CloseTaskBatch).
         source: ralph tools task list filtered by unit_ids in this wave.
         fill_rule: Must be a non-empty JSON array, with one string per live task ID for this wave's unit_ids; do not join IDs into a comma-separated string; duplicates / unknown IDs reject.
         examples: ['["task-<timestamp>-<suffix>"]']
       settled_unit_ids:
-        meaning: JSON string array of Unit ids that were settled in this wave.
+        meaning: JSON array of Unit ids that were settled in this wave.
         source: Integrator reading the current wave's Unit roster.
         fill_rule: Must be a JSON array of strings, not a comma-separated string; same length and order as settled_task_ids.
         examples: ['["U01", "U02"]']

@@ -1092,8 +1092,8 @@ hats:
          verified `candidate_commit_sha` and becomes the next wave's worktree
          base.
          **Payload shape is a hard requirement:** `settled_task_ids` and
-         `settled_unit_ids` must be JSON string arrays, never comma-separated strings
-         or empty arrays. Validate with `ralph emit forge.wave.settled --schema`
+         `settled_unit_ids` must be JSON arrays of strings, never a JSON string
+         containing an array, comma-separated strings, or empty arrays. Validate with `ralph emit forge.wave.settled --schema`
          and `--policy-check`; if live ID arrays are unavailable, stop and write
          `failures/integrator-failed.md` instead of guessing or fabricating IDs.
          Runtime atomically closes tasks through `CloseTaskBatch` when it receives
@@ -1104,6 +1104,18 @@ hats:
 
       Emit only one business event per activation. Use the new topics on the main path;
       retain `forge.integration.done` only as a legacy alias in `publishes`.
+
+      ### Rejected-resume discipline
+
+      If the runtime rejects `forge.wave.settled` and sends `task.resume`,
+      read the correction context and rebuild both ID arrays from the current
+      settlement evidence. Do not call `ralph tools task close` and do not
+      resend the rejected string-encoded payload. First run
+      `ralph emit forge.wave.settled --policy-check -j '<payload>' --output json`,
+      then formally emit the identical corrected payload and require
+      `recorded=true`. If the live IDs cannot be proven, stop and emit the
+      declared integration-failure or blocked event with its evidence instead
+      of guessing.
 
   verifier:
     name: "Verifier"

@@ -5,6 +5,35 @@
 use crate::config::{PayloadConsistencyConfig, PayloadConsistencyRule, ViolationAction};
 use serde_json::{Value, json};
 
+#[test]
+fn field_types_reject_string_encoded_settlement_arrays_before_projection() {
+    let mut config = test_config();
+    let mut schema = EventSchema {
+        payload: Some(PayloadType::JsonObject),
+        required_fields: vec!["settled_task_ids".into(), "settled_unit_ids".into()],
+        ..Default::default()
+    };
+    schema
+        .field_types
+        .insert("settled_task_ids".into(), PayloadType::Array);
+    schema
+        .field_types
+        .insert("settled_unit_ids".into(), PayloadType::Array);
+    config.schemas.insert("forge.wave.settled".into(), schema);
+
+    let decision = validate_event(
+        "forge.wave.settled",
+        Some(r#"{"settled_task_ids":"[\"task-1\"]","settled_unit_ids":"[\"U01\"]"}"#),
+        &config,
+        &mut PolicyRuntimeState::default(),
+    );
+
+    assert!(
+        matches!(decision, PolicyDecision::RejectWithResume(_)),
+        "string-encoded arrays must be rejected before projection: {decision:?}"
+    );
+}
+
     #[test]
     fn test_plan_name_equality_mismatch_rejected() {
         // work.ready with plan_name=A → work.done with plan_name=B → Reject

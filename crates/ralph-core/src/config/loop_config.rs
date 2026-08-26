@@ -82,6 +82,11 @@ pub struct EventSchema {
     /// review-synthesizer may use 'aggregate_timeout'".
     #[serde(default)]
     pub hat_allowed_values: HashMap<String, Vec<HatAllowedValues>>,
+    /// Expected JSON value types for top-level payload fields. Unlike
+    /// `field_docs`, this is an enforcement contract used by policy
+    /// validation before an event is accepted.
+    #[serde(default)]
+    pub field_types: HashMap<String, PayloadType>,
     /// 2026-07-03-005 plan (P0 fix C7): per-element shape constraint for
     /// array fields in the payload. Key = array field name (e.g.
     /// `"dimensions"`); value = element-level field shape. When `None` or

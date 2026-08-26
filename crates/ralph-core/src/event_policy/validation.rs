@@ -1630,6 +1630,32 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
             }
         }
 
+        // Explicit field type contracts. `required_fields` only checks
+        // presence, so array-valued settlement fields must be validated
+        // before the event reaches state projection.
+        for (field_path, expected_type) in &schema.field_types {
+            if let Some(p) = payload
+                && let Ok(value) = serde_json::from_str::<Value>(p)
+                && let Some(field_value) = extract_json_field(&value, field_path)
+                && !payload_type_matches(expected_type, &field_value)
+            {
+                findings.push(PolicyFinding {
+                    topic: topic.to_string(),
+                    violation_type: ViolationType::PayloadTypeMismatch {
+                        expected: expected_payload_type_name(expected_type).to_string(),
+                        actual: type_name(&field_value).to_string(),
+                    },
+                    message: format!(
+                        "Field '{}' must be {}, got {}",
+                        field_path,
+                        expected_payload_type_name(expected_type),
+                        type_name(&field_value)
+                    ),
+                    evidence: None,
+                });
+            }
+        }
+
         // Hat-aware allowed values.
         // U1 (2026-06-17-004 plan, R2): fail-closed when provenance is
         // missing and the schema carries per-hat restrictions. Without
@@ -1982,6 +2008,27 @@ fn type_name(value: &Value) -> &'static str {
         Value::String(_) => "string",
         Value::Array(_) => "array",
         Value::Object(_) => "object",
+    }
+}
+
+fn payload_type_matches(expected: &crate::config::PayloadType, value: &Value) -> bool {
+    matches!(
+        (expected, value),
+        (crate::config::PayloadType::JsonObject, Value::Object(_))
+            | (crate::config::PayloadType::String, Value::String(_))
+            | (crate::config::PayloadType::Number, Value::Number(_))
+            | (crate::config::PayloadType::Bool, Value::Bool(_))
+            | (crate::config::PayloadType::Array, Value::Array(_))
+    )
+}
+
+fn expected_payload_type_name(expected: &crate::config::PayloadType) -> &'static str {
+    match expected {
+        crate::config::PayloadType::JsonObject => "object",
+        crate::config::PayloadType::String => "string",
+        crate::config::PayloadType::Number => "number",
+        crate::config::PayloadType::Bool => "bool",
+        crate::config::PayloadType::Array => "array",
     }
 }
 
