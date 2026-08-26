@@ -20,6 +20,13 @@ status: <一句话健康度>
 diagnostics_mode: FULL | MINIMAL | LOGS_ONLY | DISABLED
 bundle: present | finalized | degraded | legacy | missing   # 来自 §0.2 bundle-first 读取
 bundle_path: <rel-path-to-diagnosis-input.json>             # 同源；缺失时省略
+# U10 plan: causal 归因（DT7 机检，>85 严格门禁）
+# 来自 `ralph diagnose --causal` JSON；非 session 视图下省略
+causal_status: complete | incomplete | not_evaluable
+causal_confidence: <0-100, ralph diagnose --causal.confidence>
+causal_primary_domain: runtime | preset | agent | backend | diagnostic_capture_contract
+causal_rejected_hypotheses: <list, 4 落选域各自 ≥1 条反驳证据>
+causal_score_change: <list of {prev, current, delta, reason}；首次 N/A>
 history_search: disabled | preset-only | full   # 来自主 SKILL §0.1 的 AskUserQuestion；默认 disabled
 # plan 2026-08-12-001 fix-plan U3: bundle-first 报告配套 frontmatter 字段
 # 全部 required: true，缺一即视为模板漂移（grep 校验）
@@ -29,7 +36,7 @@ feedback_status: present | missing | degraded | legacy     # feedback.jsonl 读�
 # plan 2026-08-15-1823 (U3): activation outcome 报告 frontmatter 字段
 # 仅记录 presence / classification 状态；具体行表在报告 §4.2 中展示
 activation_outcomes: present | missing | degraded | legacy  # runtime-trace.jsonl 中 phase=activation/kind=hat_activation_outcome 行集状态
-evidence_gaps: <list of strings>                          # bundle reader / trace reader / feedback reader / activation outcome reader 上报的证据缺口
+evidence_gaps: <list of strings>                          # bundle reader / trace reader / feedback reader / activation outcome reader / causal attribution reader 上报的证据缺口
 ---
 
 # <preset> Loop `<loop_id>` 运行链路诊断报告
@@ -43,7 +50,7 @@ evidence_gaps: <list of strings>                          # bundle reader / trac
 > **execution_capabilities**: [single-chain | wave | supervisor | supervisor+wave 的子集]（Phase 0 推断结果; 由 `event_loop.supervisor.enabled` / hat `ralph wave emit` / `.ralph/supervisor.db` 存在 / events 含 `wave_id` 等 capability 信号决定; **`ralph inspect loop` 的 `supervisor` 键**在 enabled **或** 盘上已有可打开 wave 账本时出现，先 `has("supervisor")`；**禁止**按 builtin preset 名称点名; 详见 `SKILL.md`「Phase 0 能力推断」段）
 > **报告仓库**: `ralph-orchestrator` 主仓（非 run_dir）
 > **Tier C 根**: （从 preset+schema 解析）
-> **置信度规则**: §5 仅收录 confidence≥60；P0 须 confidence≥70（见 confidence-rubric）
+> **置信度规则**: §5 仅收录 `status == complete`（DT7 机检 confidence > 85）；P0 同样要求 confidence > 85；`status == incomplete` / `not_evaluable` 移入 §7（见 confidence-rubric DT7）
 
 ---
 
@@ -117,9 +124,9 @@ evidence_gaps: <list of strings>                          # bundle reader / trac
 
 ## 4. 证据清单
 
-| ID | 描述 | 证据锚点 | 严重度初判 | 置信度初估 | 已计分证据项 | 证据缺口 |
-|----|------|----------|------------|------------|--------------|----------|
-| DEV-001 | ... | file:line / event#L | P0 | 40 | （无） | 缺 file:line、缺双账本 |
+| ID | 描述 | 证据锚点 | 严重度 | DT7 分项来源 | 缺口 |
+|----|------|----------|--------|--------------|------|
+| DEV-001 | ... | file:line / event#L | P0 | coverage(+30) / integrity(+25) / correlation(+15) | freeze_window 缺 |
 
 ### 4.1 OPAC 逐 hat 审计表
 
@@ -148,18 +155,55 @@ evidence_gaps: <list of strings>                          # bundle reader / trac
 - 凭 activation outcome row 跳过 L6 源码反查。
 - 在 `activation_outcomes: missing` / `legacy` 时仍填写本节——直接 N/A。
 
+### 4.3 Causal Attribution（plan 2026-08-26-1104, U10）
+
+> **⚠️ 启动条件**：仅当 frontmatter `causal_status` ∈ {`complete`, `incomplete`} 时填写本节。`not_evaluable`（legacy / v1 / 无契约）时整节写 `N/A (causal attribution unavailable)`，并把缺失原因写进 `evidence_gaps`。
+
+`ralph diagnose --causal` 是归因事实唯一来源；agent 不另行打分。
+
+#### 4.3.1 DT7 分项 + 总置信度
+
+| DT7 项 | 分值 | 实测值（来自 `--causal`） | 来源 |
+|--------|------|---------------------------|------|
+| coverage | +30 | `<covered 边界数 / 8>` | `diagnosis-input.json` `boundary_coverage[]` |
+| integrity | +25 | `<join 一致计数 / 应一致计数>` | 三类收据 + ledger |
+| refutation | +20 | `<4 落选域反驳条数 / 4>` | `rejected_hypotheses[]` |
+| correlation | +15 | `<contract_digest 一致 / sequence 单调 / retry_key 对账 三项布尔>` | `runtime-trace.jsonl` |
+| freeze_window | +10 | `<evidence-window.jsonl 是否存在 + 首行 anomaly>` | `<session>/evidence-window.jsonl` |
+| **总置信度** | **max 100** | **`<--causal JSON .confidence>`** | `ralph diagnose --causal` |
+
+#### 4.3.2 被否决假设（rejected_hypotheses）
+
+| 落选域 | 反驳证据类型 | 反驳证据引用 |
+|--------|----------------|----------------|
+| runtime | ... | `event:L<N>` / `recovery.jsonl:L<N>` |
+| agent | ... | ... |
+| backend | ... | ... |
+| diagnostic_capture_contract | ... | ... |
+
+> 仅记录 `primary_domain` 之外 4 个落选域；域枚举固定为 `runtime / preset / agent / backend / diagnostic_capture_contract`，**禁止**扩展。证据引用仅用 `file:line` 或 `*.jsonl:L<N>`，不复述具体 payload（per HARD RULE 4.8）。
+
+#### 4.3.3 分数变化（causal_score_change）
+
+| 重新打分原因 | 上次 total | 本次 total | Δ | primary_domain 是否变化 | 落选域反驳新增 |
+|--------------|------------|------------|---|--------------------------|------------------|
+| 加深：补 read 第二账本 | 70 | 95 | +25 | 否 | 无 |
+| 首次打分 | N/A (initial scoring) | 100 | — | — | — |
+
+> 禁止在分数变化小节捏造上次分数；首次写 `N/A (initial scoring)`。
+
 ---
 
-## 5. 问题归因表（confidence ≥ 60；P0 ≥ 70）
+## 5. 问题归因表（DT7 机检，confidence > 85）
 
-| 优先级 | 问题 | 根因分类 | **置信度** | 证据 DEV | 已计分证据项 | 历史关联 | 加深轮次 |
-|--------|------|----------|------------|----------|--------------|----------|----------|
-| P0 | ... | mechanism / preset / agent / compound | **82** | DEV-00x | file:line(+25) + 双账本(+20) + preset行号(+15) + BDD(+10) | 高 | 1→82 |
-| P1 | ... | preset | **65** | DEV-00y | preset行号(+15) + 单账本 | N/A (history disabled) | 0 |
+| 优先级 | 问题 | primary_domain | status | confidence | 证据 DEV | DT7 分项来源 | rejected_hypotheses | 历史关联 | 加深轮次 |
+|--------|------|----------------|--------|------------|----------|--------------|---------------------|----------|----------|
+| P0 | ... | preset | complete | 95 | DEV-00x | coverage / integrity / correlation / refutation / freeze_window | 4 落选域 | 高 | 1→95 |
+| P1 | ... | runtime | complete | 88 | DEV-00y | coverage / integrity / correlation / refutation | 4 落选域 | N/A (history disabled) | 0 |
 
 > **历史关联列规则**：`history_search=disabled`（默认）一律 `N/A (history disabled)`；`preset-only` / `full` 才填高/中/低/新。
-
-**compound 行须附**：成分 A(conf%) + 成分 B(conf%) → 整行置信度 = min 或加权公式。
+>
+> **status 列规则**（U10 DT7）：仅 `status == complete`（confidence > 85）入表；`status == incomplete` / `not_evaluable` 移入 §7，不得入 §5 / §6。`primary_domain` 枚举固定 `runtime / preset / agent / backend / diagnostic_capture_contract`，**禁止**扩展。`rejected_hypotheses` 列每行固定 4 条（4 落选域各自 ≥1 条反驳），不全填视为工具漂移。
 
 ---
 
@@ -191,9 +235,11 @@ confidence < 60 且已加深 2 轮仍不足；**不驱动修复**。
 ## 质量门槛
 
 - §1 四问 **不可省略**；Q1–Q4 均有 **置信度** 列。
-- §5 **每条 P0/P1 必有置信度**；无 < 60 行；P0 无 < 70 行。
-- 每条 P0 至少一条 DEV +（mechanism）源码行号。
-- `compound` 须写贡献比例 + 各成分置信度。
-- 低置信度须走 [confidence-rubric.md](confidence-rubric.md) 加深流程并记录轮次。
+- §5 **每条 P0/P1 必有 `status` + `confidence`**；无 `status == incomplete` / `not_evaluable` 行；P0 / P1 confidence 均 > 85。
+- 每条 P0 至少一条 DEV +（DT7 任一分项来源 + 反驳证据）。
+- `primary_domain` 枚举固定 `runtime / preset / agent / backend / diagnostic_capture_contract`，**禁止**扩展。
+- `rejected_hypotheses` 每行固定 4 条（4 落选域各自 ≥1 条反驳），不全填视为漂移。
+- 低置信度由 [confidence-rubric.md](confidence-rubric.md) DT7 重打分流程处理（不允许手算补分）。
 - 路径一律 **repo-relative**。
 - frontmatter 必含 `history_search: <disabled | preset-only | full>`（默认 `disabled`，与执行实际一致）。
+- frontmatter 必含 `causal_status` / `causal_confidence` / `causal_primary_domain` / `causal_rejected_hypotheses` / `causal_score_change`（session 视图）。
