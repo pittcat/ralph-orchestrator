@@ -1,0 +1,39 @@
+version: 1
+# parallel-forge blocked-path dynamic verification (review 2026-08-26 F-107).
+# Covers: failure/blocked terminal closure — inspector blocks the plan, the
+# loop must converge through cleanup to the reporter's dual-terminal pair
+# (forge.report.done + LOOP_COMPLETE, narrow required-event-to-completion
+# exception) with honest BLOCKED status mapping.
+scenarios:
+  - name: inspector-blocked-terminal
+    responses:
+      - hat: inspector
+        output: |
+          <event topic="forge.plan.blocked">
+          {"reason":"scenario fixture intentionally blocks at inspection","plan_path":"docs/plans/verify-pf.md","context_artifact_path":".ralph/forge/verify-pf/blocks/inspector-blocked.md","forge_artifact_root":".ralph/forge/verify-pf/","plan_key":"verify-pf"}
+          </event>
+        success: true
+      - hat: cleanup
+        output: |
+          <event topic="forge.cleanup.done">
+          {"cleanup_report_path":".ralph/forge/verify-pf/cleanup.md","cleanup_status":"retained_for_diagnosis","attempted_count":0,"cleaned_count":0,"pending_count":0,"plan_key":"verify-pf"}
+          </event>
+        success: true
+      - hat: reporter
+        output: |
+          <event topic="forge.report.done">
+          {"report_path":"docs/reports/2026-08-26-verify-pf-manager-report.md","status":"BLOCKED","final_audit":"BLOCKED","plan_key":"verify-pf"}
+          </event>
+          <event topic="LOOP_COMPLETE">
+          {"report_path":"docs/reports/2026-08-26-verify-pf-manager-report.md"}
+          </event>
+        success: true
+    expect:
+      start_event: forge.start
+      accepted_events: [forge.plan.blocked, forge.cleanup.done, forge.report.done, LOOP_COMPLETE]
+      forbidden_events: [forge.plan.inspected, forge.plan.ready, work.failed]
+      terminal: blocked
+      terminal_topic: LOOP_COMPLETE
+    limits:
+      max_steps: 6
+      no_progress_steps: 3

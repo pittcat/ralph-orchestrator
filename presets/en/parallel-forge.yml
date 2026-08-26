@@ -81,8 +81,11 @@ mechanism:
       # terminal that triggers the next iteration's prepare (or the
       # final `forge.exec.development.done` once the plan is empty).
       # `transition_emits` controls the loop body's step ordering; the
-      # outside-this-loop flow advances to `final_verify` only when the
-      # last wave's `forge.wave.settled` lands.
+      # outside-this-loop flow advances to `full_verify` either when
+      # the last wave settles and the dispatcher emits
+      # `forge.exec.development.done`, or when the correction budget
+      # is exhausted and the failure handler emits
+      # `forge.final.correction.settled` (tester's second entry).
       - id: development_loop
         kind: loop
         runs: forge.development_loop
@@ -110,10 +113,16 @@ mechanism:
           - work.failed
         transition_emits:
           - forge.exec.development.done
+          - forge.final.correction.settled
           - work.failed
       - id: full_verify
         kind: linear
-        "on": forge.exec.development.done
+        # Two entries: the normal all-waves-settled path, and the
+        # correction-exhausted path where the tester runs the full gate
+        # on the final correction's result (review 2026-08-26 F-003).
+        on_any_of:
+          - forge.exec.development.done
+          - forge.final.correction.settled
         allowed_emits:
           - forge.full.verified
           - work.failed
@@ -162,7 +171,7 @@ event_loop:
   supervisor:
     enabled: true
     db_path: .ralph/supervisor.db
-    max_concurrent_workers: 10
+    max_concurrent_workers: 8
     aggregate_timeout_secs: 7200
     # A unit gets three executor attempts in total (one initial run plus
     # two retries). Every attempt is a fresh backend process resuming the
@@ -576,8 +585,10 @@ hats:
         `forge.wave.worktrees.ready` with the wave-scoped map.
         Future waves are **absent** from the map.
 
-      Worktrees are cleaned by **reporter** after the manager
-      report (lifecycle owner). When reused, the prior wave's
+      Worktrees are cleaned by the **cleanup** hat before the
+      reporter runs (lifecycle owner, per the artifact lifecycle
+      declaration at the top of this preset); never delete them in
+      this hat. When reused, the prior wave's
       runtime record is archived to the worktree's
       `.ralph/reuse-history/` first, matching the
       `--worktree --reuse-worktree` rule.
@@ -601,9 +612,6 @@ hats:
     triggers:
       - forge.wave.worktrees.ready
       - forge.worktrees.ready
-      - forge.wave.settled
-    trigger_multi_consumer_topics:
-      - forge.wave.worktrees.ready
       - forge.wave.settled
     publishes:
       - exec.unit.ready
@@ -775,10 +783,18 @@ hats:
         `context_artifact_path`, `forge_artifact_root`, and `plan_key`.
         If any class is `timeout`, `orphan_or_empty_result`,
         `required_slot_failure`, or `cancel`, continue because partial work may exist.
-      - **Restore wave context.** Read `plan_key`, `wave_index`,
-        `execution_plan_path`, `worktree_map_path`, and `verified_base_commit`
-        from the projection for this `wave_id`, using `forge.wave.prepare` or
-        `forge.wave.worktrees.ready`; ignore values for another wave.
+      - **Restore wave context.** Read the global projection keys
+        (`forge.plan_key`, `forge.execution_plan_path`,
+        `forge.worktree_map_path`) and the wave-scoped projection keys
+        (`forge.wave.current_wave_id`, `forge.wave.current_wave_index`,
+        `forge.wave.verified_base_commit` — pinned by
+        `forge.wave.worktrees.ready` and refreshed by each
+        `forge.wave.settled`). Fail closed: if
+        `forge.wave.current_wave_id` does not match the trigger's
+        `wave_id`, write `blocks/forge-failure-handler-blocked.md` with
+        the mismatch and emit `forge.plan.blocked`; never use another
+        wave's base. Use the restored `forge.wave.verified_base_commit`
+        as the `base_commit` for `forge.correction.requested`.
       - **Map slots back to Units.** Use `worktree_map_path` to map each
         `blocking_slots.slot_index` to `unit_id` and `candidate_branch`, producing
         `affected_unit_ids`. Get live `affected_task_ids` from
@@ -943,18 +959,13 @@ hats:
   reviewer:
     name: "Reviewer"
     description: "Per-wave independent review after supervisor fan-in; emits forge.wave.reviewed (accept) or forge.wave.review.failed (reject)."
-    triggers: [forge.wave.worktrees.ready, exec.wave.complete, forge.correction.done]
-    trigger_multi_consumer_topics:
-      - forge.wave.worktrees.ready
-      - exec.wave.complete
-      - forge.correction.done
+    triggers: [exec.wave.complete, forge.correction.done]
     publishes: [forge.wave.reviewed, forge.wave.review.failed, forge.units.reviewed, forge.plan.blocked]
     exempt_topics: [forge.wave.reviewed, forge.wave.review.failed, forge.units.reviewed, forge.plan.blocked]
     terminal_events: [forge.wave.reviewed, forge.wave.review.failed, forge.units.reviewed, forge.plan.blocked]
     event_filter:
       enabled: true
       events:
-        - forge.wave.worktrees.ready
         - exec.wave.complete
         - forge.correction.done
     instructions: |
@@ -969,13 +980,16 @@ hats:
          `execution_plan_path` from the current projection. Do not assume the
          trigger provides `wave_total` or `unit_verdicts`: read the current wave's
          completion artifacts and diffs, then calculate each verdict and the wave total.
-         Valid trigger entries are `forge.wave.worktrees.ready`, `exec.wave.complete`,
-         or `forge.correction.done` (the three `event_filter` entries per U3).
+         Valid trigger entries are `exec.wave.complete` (first review after the
+         wave's fan-in) or `forge.correction.done` (re-review after a fix round).
       2. List Units from the execution plan and `ralph tools task list`.
       3. For each Unit, read its completion report and inspect its worktree diff via the map.
-      4. Write `.ralph/forge/<plan_key>/reviews/<unit-id>-review.md` and `reviews/summary.md`.
-         The summary commit must be the integrated `forge.wave.integrated.candidate_commit_sha`;
-         never use the source commit from `forge.wave.worktrees.ready` in a cherry-pick case.
+      4. Write `.ralph/forge/<plan_key>/waves/<wave_id>/review.md` with one entry
+         per fan-in Unit — this is the `review_report_path` you will emit. Record
+         each Unit's reviewed commit as its worktree HEAD at review time
+         (`git rev-parse` in that Unit's worktree). Review happens **before**
+         integration, so never reference `forge.wave.integrated.*` fields — that
+         event does not exist yet in your activation.
       5. If all Units are APPROVED, emit `forge.wave.reviewed` with `wave_id`, `wave_index`,
          `unit_verdicts`, `aggregate_verdict: ACCEPTED`, `review_report_path`, and `plan_key`.
       6. Otherwise write `waves/<wave_id>/failure-observation.md` and emit
@@ -1029,9 +1043,9 @@ hats:
     name: "Integrator"
     description: "Per-wave sequential rebase/merge of approved Units; emits forge.wave.integrated then fast-forwards and emits forge.wave.settled."
     triggers: [forge.wave.reviewed, forge.wave.verified]
-    publishes: [forge.wave.integrated, forge.wave.settled, forge.wave.integration.failed, forge.integration.done, work.failed]
-    exempt_topics: [forge.wave.integrated, forge.wave.settled, forge.wave.integration.failed, forge.integration.done, work.failed]
-    terminal_events: [forge.wave.integrated, forge.wave.settled, forge.wave.integration.failed, forge.integration.done, work.failed]
+    publishes: [forge.wave.integrated, forge.wave.settled, forge.wave.integration.failed, forge.integration.done, work.failed, forge.plan.blocked]
+    exempt_topics: [forge.wave.integrated, forge.wave.settled, forge.wave.integration.failed, forge.integration.done, work.failed, forge.plan.blocked]
+    terminal_events: [forge.wave.integrated, forge.wave.settled, forge.wave.integration.failed, forge.integration.done, work.failed, forge.plan.blocked]
     event_filter:
       enabled: true
       events:
@@ -1053,9 +1067,14 @@ hats:
          the wave, verdict, fingerprint, affected IDs, observation path, and `plan_key`;
          **do not** emit `work.failed` directly.
       2. **Entry two** (`forge.wave.verified`): verification passed; fast-forward
-         `integration_branch`. Read `verification_log_path`, `integration_branch`,
-         `candidate_commit_sha`, `settled_unit_ids`, and `plan_key`; do not read
-         `verified_base_commit` because it is not an input to this trigger.
+         `integration_branch`. Read `wave_id`, `wave_index`,
+         `candidate_commit_sha`, `verification_log_path`, and `plan_key` from the
+         trigger (those are its schema fields); read `integration_branch` from
+         the projection (`forge.integration_branch`, pinned by
+         `forge.worktrees.ready`). The trigger does not carry `settled_unit_ids`
+         or `verified_base_commit`: derive the settled id arrays at step 8 and
+         the verified base after the fast-forward; never copy them from the
+         trigger.
       3. Read the real `integration_branch` from the worktree map or projection and
          confirm it with `git branch --list` in the main repository.
       4. In `integration_order`, rebase, squash, and fast-forward merge each Unit;
@@ -1063,10 +1082,15 @@ hats:
       5. Write `.ralph/forge/<plan_key>/integration-log.md` and `commit-map.yml`.
       6. Verify linear history: one commit per Unit, with no merge or WIP tail.
       7. On entry one success, emit `forge.wave.integrated` with the schema fields
-         `integration_branch`, `integration_log_path`, `integration_complete`,
-         `commit_map_path`, `linear_history`, and `plan_key`.
+         `wave_id`, `wave_index`, `candidate_branch`, `candidate_commit_sha`
+         (`git rev-parse` of the candidate branch HEAD after this wave's merges),
+         `commit_map_path`, `units_integrated`, and `plan_key`.
       8. On entry two success, emit `forge.wave.settled` with `wave_id`, `wave_index`, `settled_task_ids`,
          `settled_unit_ids`、`verified_base_commit`、`plan_key`、`settlement_log_path`）。
+         `verified_base_commit` is the integration branch HEAD after the
+         fast-forward (`git rev-parse <integration_branch>`); it must equal the
+         verified `candidate_commit_sha` and becomes the next wave's worktree
+         base.
          **Payload shape is a hard requirement:** `settled_task_ids` and
          `settled_unit_ids` must be JSON string arrays, never comma-separated strings
          or empty arrays. Validate with `ralph emit forge.wave.settled --schema`
@@ -1101,10 +1125,15 @@ hats:
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. Read `integration_log_path`, `integration_branch`, and `plan_key` from the
-         trigger. `forge.wave.integrated` also provides `candidate_commit_sha`;
-         the compatibility entry `forge.integration.done` gets candidate HEAD from
-         integration-log/commit-map artifacts. Do not read `verified_base_commit`.
+      1. On the main-path trigger `forge.wave.integrated`, read `wave_id`,
+         `wave_index`, `candidate_branch`, `candidate_commit_sha`,
+         `commit_map_path`, and `plan_key` from the trigger (its schema fields);
+         read `integration_branch` from the projection (`forge.integration_branch`,
+         pinned by `forge.worktrees.ready`) and per-Unit integration detail from
+         the commit map artifact. The compatibility entry `forge.integration.done`
+         carries `integration_branch` and `integration_log_path` directly and gets
+         candidate HEAD from integration-log/commit-map artifacts. Do not read
+         `verified_base_commit`.
       2. Run incremental tests from the development and execution plans. Although
          verification is serial after integration, check for fixed ports, databases,
          Docker projects, temp files, and external services; if safety is unknown,
@@ -1147,10 +1176,12 @@ hats:
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. Read `verification_log_path` (or the final correction's
-         `correction_report_path`) and `plan_key`. The trigger is
-         `forge.exec.development.done` for the first full run or
-         `forge.final.correction.settled` after three correction rounds.
+      1. Read `plan_key` from the trigger. The trigger is
+         `forge.exec.development.done` for the first full run — also read its
+         `execution_plan_path`; per-wave verification logs, when needed for
+         context, live at `.ralph/forge/<plan_key>/waves/*/verification.md` —
+         or `forge.final.correction.settled` after three correction rounds,
+         which carries `verification_log_path` and `wave_id` in its schema.
       2. This hat owns full verification for the loop. Before starting, check
          whether an equivalent full verification is already running; wait for it
          or report the conflict instead of launching a second gate in parallel.
@@ -1228,7 +1259,8 @@ hats:
          `forge.plan.blocked`; never reset, force-push, or overwrite the target.
       3. Before cleanup, materialize every required artifact into the main
          repository artifact root: `final-audit.md`, `full-verification.md`,
-         `integration-log.md`, `reviews/summary.md`, and one
+         `integration-log.md`, one `waves/<wave_id>/review.md` for every
+         settled wave, and one
          `units/<unit_id>-completion.md` for every settled Unit. If an artifact
          exists only in an integration or executor worktree, copy it to the
          corresponding main-repository path and verify it with `test -f`.
@@ -1357,7 +1389,7 @@ hats:
 
       Then read the complete artifacts referenced by the trigger/projection:
       - `<forge_artifact_root>/development-plan.md` and `execution-plan.yml`
-      - `units/*-completion.md` and `reviews/summary.md` if present
+      - `units/*-completion.md` and `waves/*/review.md` if present
       - `integration-log.md`, `full-verification.md`, and `final-audit.md` if present
       - the complete `context_artifact_path`
 
@@ -1424,6 +1456,21 @@ state_projection:
         forge.target_branch: "$.target_branch"
         forge.base_commit: "$.base_commit"
         forge.plan_key: "$.plan_key"
+    # Per-wave keys so the failure handler can restore wave context on
+    # `exec.wave.failed` (which carries no plan_key / wave_index /
+    # verified_base_commit). `forge.wave.worktrees.ready` pins the base
+    # the current wave was built from; each `forge.wave.settled`
+    # refreshes the verified base that the next wave will build on.
+    - on: forge.wave.worktrees.ready
+      set:
+        forge.wave.current_wave_id: "$.wave_id"
+        forge.wave.current_wave_index: "$.wave_index"
+        forge.wave.verified_base_commit: "$.verified_base_commit"
+    - on: forge.wave.settled
+      set:
+        forge.wave.last_settled_wave_id: "$.wave_id"
+        forge.wave.last_settled_wave_index: "$.wave_index"
+        forge.wave.verified_base_commit: "$.verified_base_commit"
     - on: forge.exec.development.done
       set:
         forge.execution_plan_path: "$.execution_plan_path"

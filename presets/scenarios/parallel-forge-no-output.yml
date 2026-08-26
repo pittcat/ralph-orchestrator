@@ -1,0 +1,19 @@
+version: 1
+# parallel-forge no-output dynamic verification (review 2026-08-26 F-107).
+# Covers: abnormal-output handling — an empty inspector response must starve
+# the loop into no_progress; a silent-success pass is a misclassification
+# (mirrors ce-executor-pipeline-no-output.yml semantics).
+scenarios:
+  - name: inspector-no-output
+    responses:
+      - hat: inspector
+        output: ""
+        success: true
+    expect:
+      start_event: forge.start
+      accepted_events: []
+      forbidden_events: [LOOP_COMPLETE, forge.plan.inspected, forge.plan.ready, forge.plan.blocked]
+      terminal: none
+    limits:
+      max_steps: 3
+      no_progress_steps: 1
