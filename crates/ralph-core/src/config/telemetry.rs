@@ -154,25 +154,12 @@ impl TelemetryConfig {
             && self.runtime_diagnosis.enabled
             && self.runtime_diagnosis.write_artifacts;
 
-        // U01a → U01b bridge seam.
-        //
-        // The new `causal_evidence: bool` field is owned by U01b on
-        // `DiagnosticsOptions` (in `crates/ralph-core/src/diagnostics/
-        // mod.rs`, which U01a is forbidden from touching). U01a
-        // computes the value via `causal_evidence_enabled_for_bridge`
-        // so the integration commit (or the U01b-side matrix wiring
-        // paired with this commit) can populate
-        // `options.causal_evidence` without re-reading `TelemetryConfig`.
-        //
-        // Until the field exists in `DiagnosticsOptions` (i.e., until
-        // U01b lands), the struct literal below cannot name
-        // `causal_evidence` directly without breaking U01a's
-        // standalone compile. The local assignment is therefore
-        // intentionally shadowed by `let _ =` to suppress the
-        // unused-variable warning while keeping the seam discoverable
-        // for the integration step.
+        // Bridge `telemetry.causal_evidence.enabled` (U01a) into
+        // `DiagnosticsOptions.causal_evidence` (U01b). The bridge helper
+        // exists so each Wave-1 unit could land independently; this
+        // integration step is where the seam actually carries the value
+        // into the activation matrix.
         let causal_evidence_enabled = self.causal_evidence_enabled_for_bridge();
-        let _ = causal_evidence_enabled;
 
         DiagnosticsOptions {
             full_diagnostics,
@@ -180,14 +167,7 @@ impl TelemetryConfig {
             trace_only: false,
             session_dir: None,
             workspace_root: None,
-            // U01b: causal_evidence lives in `DiagnosticsOptions` so the
-            // collector matrix can drive a minimal session off the
-            // `telemetry.causal_evidence.enabled` flag (U01a). The U01a
-            // commit fills this slot from `self.causal_evidence.enabled`
-            // — keeping it on `..Default::default()` here means neither
-            // parallel wave-1 commit has to enumerate the field at this
-            // call site, and the integrator auto-resolves cleanly because
-            // both edits target the same struct literal.
+            causal_evidence: causal_evidence_enabled,
             ..Default::default()
         }
     }
@@ -781,17 +761,19 @@ runtime_diagnosis:
         );
     }
 
-    /// Default config + no env = no-op `DiagnosticsOptions` (matches
-    /// `DiagnosticsOptions::default()`).
+    /// Default config + no env produces an options struct that matches
+    /// `DiagnosticsOptions::default()` for the pre-existing flags, with
+    /// the wave-1 addition that `causal_evidence` defaults to `true`
+    /// (from `telemetry.causal_evidence.enabled`).
     #[test]
     fn test_to_diagnostics_options_default_config_is_disabled() {
         let cfg = TelemetryConfig::default();
         let opts = cfg.to_diagnostics_options_with_full(Path::new("."), false);
-        assert!(!opts.full_diagnostics);
-        assert!(!opts.runtime_diagnosis_artifacts);
-        assert!(opts.session_dir.is_none());
-        // Matches the U0 default constructor.
-        assert_eq!(opts, DiagnosticsOptions::default());
+        let expected = DiagnosticsOptions {
+            causal_evidence: true,
+            ..DiagnosticsOptions::default()
+        };
+        assert_eq!(opts, expected);
     }
 
     /// `write_artifacts=true` while `enabled=false` must NOT silently
