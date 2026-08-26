@@ -402,6 +402,27 @@ impl EventLoop {
                         "precheck correction blocked (no safe target)"
                     );
                 }
+
+                // Plan 2026-08-26-1104 Unit 5 / S5.1: append a
+                // `kind=recovery_receipt, action=resume` row so the
+                // attribution engine (U8) can reconstruct the
+                // precheck retry bookkeeping that drove the resume
+                // injection. `retry_key` matches the
+                // `task.resume` envelope's `target_hat` / `topic`
+                // pair so the two streams reconcile by string match.
+                let retry_key_resume = format!("precheck:{}:{}", gate_hat_id, guarded);
+                let budget_remaining = rule.on_fail.retry_budget.saturating_sub(new_count);
+                self.diagnostics.emit_recovery_receipt(
+                    crate::diagnostics::RecoveryReceiptAction::Resume,
+                    guarded,
+                    gate_hat_id,
+                    retry_key_resume,
+                    new_count,
+                    budget_remaining,
+                    Some(target_hat.as_str()),
+                    Some("precheck_rejected"),
+                );
+
                 self.state
                     .redispatch_hat_obligation(&HatId::new(target_hat));
             }
@@ -419,6 +440,26 @@ impl EventLoop {
                     .with_source(HatId::new(gate_hat_id));
                 self.state.record_event(&blocked);
                 self.bus.publish(blocked);
+
+                // Plan 2026-08-26-1104 Unit 5 / S5.2: append a
+                // `kind=recovery_receipt, action=exhausted` row so
+                // the attribution engine (U8) can join the
+                // `plan.blocked{kind=precheck_exhausted}` envelope
+                // by string match. `retry_key` mirrors the triple
+                // `(gate, topic, kind)` so the two streams reconcile
+                // without an extra index.
+                let retry_key_exhausted = format!("{}:{}:precheck_exhausted", gate_hat_id, guarded);
+                self.diagnostics.emit_recovery_receipt(
+                    crate::diagnostics::RecoveryReceiptAction::Exhausted,
+                    topic.clone(),
+                    gate_hat_id,
+                    retry_key_exhausted,
+                    rejection_count,
+                    0,
+                    None,
+                    Some("precheck_rejected"),
+                );
+
                 self.terminal_event_emitted = true;
             }
             runner::DispatchOutcome::Pass => {}

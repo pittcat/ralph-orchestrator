@@ -1536,6 +1536,25 @@ impl EventLoop {
                 &rej.topic,
                 "",
             );
+            // Plan 2026-08-26-1104 U3 (S3.3): persist a
+            // `kind=policy_receipt` row per origin-guard rejection.
+            // Today this gate has no recovery.jsonl path — the
+            // receipt is the new evidence layer. `rule_refs`
+            // contains `origin_guard` so downstream dashboards
+            // can group origin vs policy rejections. `reason_code`
+            // is the stable machine-readable string
+            // (`origin:{reason}`) and `retry_key` matches
+            // `RejectionRecord::retry_key` shape so the
+            // attribution engine (U8) can reconcile.
+            let reason_code = format!("origin:{}", rej.reason);
+            self.diagnostics.emit_policy_receipt(
+                crate::diagnostics::PolicyReceiptDecision::Reject,
+                rej.topic.clone(),
+                rej.source_hat.as_deref(),
+                &["origin_guard"],
+                Some(&reason_code),
+                None,
+            );
         }
         // --- End origin guard ---
 
@@ -2102,6 +2121,28 @@ impl EventLoop {
                     }
                 }
                 if event_accepted {
+                    // Plan 2026-08-26-1104 U3 (S3.1): persist
+                    // a `kind=policy_receipt` row with
+                    // `decision=accept` per event that clears
+                    // the unified pipeline. The receipt
+                    // carries `rule_refs` listing the gates the
+                    // event passed, plus `event_digest` /
+                    // `topic` / `hat` / `contract_digest` so
+                    // the attribution engine (U8) can join the
+                    // per-event decision stream back to the
+                    // session's `contract_receipt`. Per-field
+                    // bytes are capped to `MAX_SIDECAR_FIELD_BYTES`
+                    // at the writer boundary (S3.4) — we do not
+                    // put the full event payload on disk.
+                    let event_json = serde_json::to_value(evt).ok();
+                    self.diagnostics.emit_policy_receipt(
+                        crate::diagnostics::PolicyReceiptDecision::Accept,
+                        evt.topic.clone(),
+                        evt.hat.as_deref(),
+                        &["event_policy"],
+                        None,
+                        event_json.as_ref(),
+                    );
                     // U3 (2026-06-27-002 plan completion): the
                     // emit-gate facade was originally wired
                     // here, but breaking the invariant that
@@ -2170,6 +2211,45 @@ impl EventLoop {
                 }
                 if !policy_rejections.is_empty() {
                     had_policy_rejections = true;
+                    // Plan 2026-08-26-1104 U3 (S3.2): persist a
+                    // `kind=policy_receipt` row per policy
+                    // rejection. `reason_code` is the stable
+                    // machine-readable string
+                    // (`policy:{violation_type.reason_code()}`)
+                    // that the recovery.jsonl RejectionRecord
+                    // shares, and `retry_key` matches
+                    // `RejectionRecord::retry_key` so the
+                    // attribution engine (U8) can reconcile
+                    // the receipt row to the journal row by
+                    // exact string match. `rule_refs` contains
+                    // `event_policy` so dashboards can group
+                    // policy rejections distinctly from origin
+                    // ones (which carry `origin_guard`).
+                    //
+                    // `PolicyFinding` does not implement
+                    // `serde::Serialize`, so we project a
+                    // minimal JSON shape that preserves the
+                    // observable evidence (reason_code, topic,
+                    // message) without changing the upstream
+                    // type's contract.
+                    for rejection in &policy_rejections {
+                        let reason_code =
+                            format!("policy:{}", rejection.finding.violation_type.reason_code());
+                        let event_json = serde_json::json!({
+                            "topic": rejection.finding.topic,
+                            "reason_code":
+                                rejection.finding.violation_type.reason_code(),
+                            "message": rejection.finding.message,
+                        });
+                        self.diagnostics.emit_policy_receipt(
+                            crate::diagnostics::PolicyReceiptDecision::Reject,
+                            rejection.topic.clone(),
+                            rejection.source_hat.as_deref(),
+                            &["event_policy"],
+                            Some(&reason_code),
+                            Some(&event_json),
+                        );
+                    }
                 }
             }
 
@@ -3095,6 +3175,7 @@ impl EventLoop {
                          event will not transition loop to terminal"
                     );
                     let _ = Self::inject_completion_correction(
+                        &self.diagnostics,
                         &mut self.state,
                         "missing_required_events",
                         &free_form,

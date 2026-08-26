@@ -56,6 +56,14 @@ pub struct TelemetryConfig {
     /// Runtime-diagnosis configuration block.
     #[serde(default)]
     pub runtime_diagnosis: RuntimeDiagnosisConfig,
+
+    /// Causal-evidence configuration block (U01a, plan
+    /// `2026-08-26-1104-feat-ralph-causal-diagnosis-evidence-loop-plan`).
+    /// Controls whether the orchestrator captures causal-evidence
+    /// recordings (decision context, correlation IDs, ring-buffered
+    /// traces) and how large the per-session window is.
+    #[serde(default)]
+    pub causal_evidence: CausalEvidenceConfig,
 }
 
 impl TelemetryConfig {
@@ -69,7 +77,24 @@ impl TelemetryConfig {
     /// method runs the validate path may not have access to the global
     /// subscriber.
     pub fn validate(&self) -> Result<Vec<ConfigWarning>, ConfigError> {
-        self.runtime_diagnosis.validate()
+        let warnings = self.runtime_diagnosis.validate()?;
+        self.causal_evidence.validate()?;
+        Ok(warnings)
+    }
+
+    /// Bridge helper for U01b's `DiagnosticsOptions.causal_evidence`
+    /// field (owned by `crates/ralph-core/src/diagnostics/mod.rs`).
+    ///
+    /// U01a cannot directly populate `options.causal_evidence` because
+    /// that field lives in a different module that U01a is forbidden
+    /// from touching. This method exposes the *value* U01a would assign
+    /// so the U01a side of the bridge can be unit-tested in isolation
+    /// and the U01b side can call it from `DiagnosticsCollector`'s
+    /// activation matrix. After integration, `to_diagnostics_options_inner`
+    /// will populate `options.causal_evidence` from this value.
+    #[must_use]
+    pub fn causal_evidence_enabled_for_bridge(&self) -> bool {
+        self.causal_evidence.enabled
     }
 
     /// Bridge telemetry config + `RALPH_DIAGNOSTICS` env into the
@@ -129,12 +154,21 @@ impl TelemetryConfig {
             && self.runtime_diagnosis.enabled
             && self.runtime_diagnosis.write_artifacts;
 
+        // Bridge `telemetry.causal_evidence.enabled` (U01a) into
+        // `DiagnosticsOptions.causal_evidence` (U01b). The bridge helper
+        // exists so each Wave-1 unit could land independently; this
+        // integration step is where the seam actually carries the value
+        // into the activation matrix.
+        let causal_evidence_enabled = self.causal_evidence_enabled_for_bridge();
+
         DiagnosticsOptions {
             full_diagnostics,
             runtime_diagnosis_artifacts,
             trace_only: false,
             session_dir: None,
             workspace_root: None,
+            causal_evidence: causal_evidence_enabled,
+            ..Default::default()
         }
     }
 }
@@ -405,6 +439,66 @@ impl DriftConfig {
     }
 }
 
+/// Causal-evidence configuration block.
+///
+/// Sits under `telemetry.causal_evidence` in `ralph.yml`. Controls
+/// whether the orchestrator captures causal-evidence recordings
+/// (decision context, correlation IDs, ring-buffered traces) and how
+/// large the per-session window is. The defaults are opt-in (enabled)
+/// so existing `ralph.yml` files capture causal evidence without an
+/// explicit configuration migration; operators can disable recording
+/// with `telemetry.causal_evidence.enabled: false`.
+///
+/// The actual `DiagnosticsOptions.causal_evidence` field is owned by
+/// U01b (`crates/ralph-core/src/diagnostics/mod.rs`); this struct
+/// defines the config-side input only and exposes
+/// [`TelemetryConfig::causal_evidence_enabled_for_bridge`] so U01b can
+/// pick up the value without `to_diagnostics_options_inner` having to
+/// reach into forbidden modules.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CausalEvidenceConfig {
+    /// Master switch for causal-evidence recording.
+    ///
+    /// When `true` (default), the orchestrator captures decision
+    /// context and correlation IDs into a per-session ring buffer
+    /// (U6 wires the buffer). When `false`, causal-evidence recording
+    /// is suppressed and no extra session directory is created.
+    #[serde(default = "default_causal_evidence_enabled")]
+    pub enabled: bool,
+
+    /// Capacity of the per-session ring buffer that backs causal
+    /// evidence (U6). Larger values retain more decision context at
+    /// the cost of memory (8 KiB per slot per the plan's risk
+    /// mitigation). `0` is rejected by [`Self::validate`].
+    #[serde(default = "default_causal_evidence_window_capacity")]
+    pub window_capacity: usize,
+}
+
+impl Default for CausalEvidenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_causal_evidence_enabled(),
+            window_capacity: default_causal_evidence_window_capacity(),
+        }
+    }
+}
+
+impl CausalEvidenceConfig {
+    /// Validate the causal-evidence configuration. Mirrors the
+    /// zero-rejection style of [`RuntimeDiagnosisConfig::validate`]:
+    /// sizing fields below their minimum are a hard error rather than
+    /// a silent no-op.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.window_capacity == 0 {
+            return Err(ConfigError::TelemetryValidation {
+                field: "telemetry.causal_evidence.window_capacity".to_string(),
+                message: "must be greater than 0".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// How the orchestrator treats a malformed line in a diagnostics JSONL
 /// artifact (`recovery.jsonl`, `drift.jsonl`, etc.).
 ///
@@ -473,6 +567,14 @@ fn default_coord_join_rate_threshold() -> f64 {
 
 fn default_emit_cadence_sigma() -> f64 {
     2.0
+}
+
+fn default_causal_evidence_enabled() -> bool {
+    true
+}
+
+fn default_causal_evidence_window_capacity() -> usize {
+    200
 }
 
 fn is_unit_interval(value: f64) -> bool {
@@ -649,6 +751,7 @@ runtime_diagnosis:
                 write_artifacts: true,
                 ..RuntimeDiagnosisConfig::default()
             },
+            ..TelemetryConfig::default()
         };
         let opts = cfg.to_diagnostics_options_with_full(Path::new("."), false);
         assert!(!opts.full_diagnostics);
@@ -658,17 +761,19 @@ runtime_diagnosis:
         );
     }
 
-    /// Default config + no env = no-op `DiagnosticsOptions` (matches
-    /// `DiagnosticsOptions::default()`).
+    /// Default config + no env produces an options struct that matches
+    /// `DiagnosticsOptions::default()` for the pre-existing flags, with
+    /// the wave-1 addition that `causal_evidence` defaults to `true`
+    /// (from `telemetry.causal_evidence.enabled`).
     #[test]
     fn test_to_diagnostics_options_default_config_is_disabled() {
         let cfg = TelemetryConfig::default();
         let opts = cfg.to_diagnostics_options_with_full(Path::new("."), false);
-        assert!(!opts.full_diagnostics);
-        assert!(!opts.runtime_diagnosis_artifacts);
-        assert!(opts.session_dir.is_none());
-        // Matches the U0 default constructor.
-        assert_eq!(opts, DiagnosticsOptions::default());
+        let expected = DiagnosticsOptions {
+            causal_evidence: true,
+            ..DiagnosticsOptions::default()
+        };
+        assert_eq!(opts, expected);
     }
 
     /// `write_artifacts=true` while `enabled=false` must NOT silently
@@ -684,6 +789,7 @@ runtime_diagnosis:
                 write_artifacts: true,
                 ..RuntimeDiagnosisConfig::default()
             },
+            ..TelemetryConfig::default()
         };
         let opts = cfg.to_diagnostics_options_with_full(Path::new("."), false);
         assert!(!opts.runtime_diagnosis_artifacts);
@@ -805,6 +911,166 @@ runtime_diagnosis:
             .unwrap_or(false);
         let from_injected = cfg.to_diagnostics_options_with_full(Path::new("."), env_value);
         assert_eq!(from_env, from_injected);
+    }
+
+    // ── Causal-evidence (U01a) ─────────────────────────────────────────
+
+    /// `CausalEvidenceConfig::default()` must produce the documented
+    /// opt-in state: causal-evidence recording is on by default so the
+    /// orchestrator can capture decision context without an explicit
+    /// configuration migration, but operators can disable it via
+    /// `telemetry.causal_evidence.enabled: false`.
+    #[test]
+    fn test_causal_evidence_default_is_enabled_with_capacity_200() {
+        let cfg = CausalEvidenceConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.window_capacity, 200);
+    }
+
+    /// `telemetry:` block without a `causal_evidence:` sub-key must
+    /// leave `TelemetryConfig.causal_evidence` at the documented defaults
+    /// (`enabled=true, window_capacity=200`). This is the contract that
+    /// existing `ralph.yml` files continue to opt into causal-evidence
+    /// recording without any explicit configuration.
+    #[test]
+    fn test_telemetry_default_includes_causal_evidence_defaults() {
+        let cfg = TelemetryConfig::default();
+        assert_eq!(cfg.causal_evidence, CausalEvidenceConfig::default());
+        assert!(cfg.causal_evidence.enabled);
+        assert_eq!(cfg.causal_evidence.window_capacity, 200);
+    }
+
+    /// Explicit `enabled: false` must override the default-on contract.
+    #[test]
+    fn test_yaml_causal_evidence_enabled_false_parses() {
+        let yaml = r"
+causal_evidence:
+  enabled: false
+  window_capacity: 50
+";
+        let cfg: TelemetryConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!cfg.causal_evidence.enabled);
+        assert_eq!(cfg.causal_evidence.window_capacity, 50);
+    }
+
+    /// A `ralph.yml` that omits the entire `telemetry:` block must
+    /// continue to parse byte-equivalent to `TelemetryConfig::default()`.
+    /// This guards the existing contract for files that don't know about
+    /// `telemetry.causal_evidence` yet.
+    #[test]
+    fn test_yaml_without_telemetry_section_uses_defaults_with_causal_evidence() {
+        let yaml = r"
+agent: claude
+event_loop:
+  completion_promise: DONE
+";
+        let parsed: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.telemetry, TelemetryConfig::default());
+        // Causal-evidence defaults must also be present.
+        assert!(parsed.telemetry.causal_evidence.enabled);
+        assert_eq!(parsed.telemetry.causal_evidence.window_capacity, 200);
+    }
+
+    /// `window_capacity = 0` would silently disable the ring buffer
+    /// (U6 will wire the buffer; U01a only validates the field). This
+    /// must be a hard error rather than a silent no-op.
+    #[test]
+    fn test_validate_rejects_zero_window_capacity() {
+        let cfg = CausalEvidenceConfig {
+            enabled: true,
+            window_capacity: 0,
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::TelemetryValidation { ref field, .. }
+                if field == "telemetry.causal_evidence.window_capacity"),
+            "expected TelemetryValidation for window_capacity=0, got {err:?}"
+        );
+    }
+
+    /// The `TelemetryConfig::validate` aggregator must propagate the
+    /// `CausalEvidenceConfig` validation error rather than swallowing it.
+    #[test]
+    fn test_telemetry_validate_propagates_causal_evidence_error() {
+        let cfg = TelemetryConfig {
+            runtime_diagnosis: RuntimeDiagnosisConfig::default(),
+            causal_evidence: CausalEvidenceConfig {
+                enabled: true,
+                window_capacity: 0,
+            },
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::TelemetryValidation { ref field, .. }
+                if field == "telemetry.causal_evidence.window_capacity"),
+            "TelemetryConfig::validate must surface CausalEvidenceConfig errors, got {err:?}"
+        );
+    }
+
+    /// Default `CausalEvidenceConfig` must validate cleanly.
+    #[test]
+    fn test_validate_default_causal_evidence_is_clean() {
+        let cfg = CausalEvidenceConfig::default();
+        cfg.validate()
+            .expect("default causal_evidence must validate");
+    }
+
+    /// Round-trip: serialize `TelemetryConfig` with causal_evidence
+    /// configured and parse the result back. Catches typos in
+    /// `rename_all` / `default = "fn"` and verifies the field survives
+    /// the YAML boundary.
+    #[test]
+    fn test_yaml_full_block_round_trip_includes_causal_evidence() {
+        let yaml = r"
+runtime_diagnosis:
+  enabled: true
+causal_evidence:
+  enabled: false
+  window_capacity: 512
+";
+        let cfg: TelemetryConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!cfg.causal_evidence.enabled);
+        assert_eq!(cfg.causal_evidence.window_capacity, 512);
+        // Reserialize and parse again — the parsed value must match.
+        let reserialized = serde_yaml::to_string(&cfg).unwrap();
+        let cfg2: TelemetryConfig = serde_yaml::from_str(&reserialized).unwrap();
+        assert_eq!(cfg, cfg2);
+    }
+
+    /// `to_diagnostics_options_with_full` must continue to produce a
+    /// valid `DiagnosticsOptions` when `causal_evidence` is in its
+    /// default state. The actual `causal_evidence` field on
+    /// `DiagnosticsOptions` is owned by U01b (`diagnostics/mod.rs`); the
+    /// U01a-side bridge lives in `to_diagnostics_options_inner` and is
+    /// verified at integration time. Here we ensure the addition of the
+    /// new config block does not regress the existing activation matrix.
+    #[test]
+    fn test_to_diagnostics_options_default_causal_evidence_does_not_regress() {
+        let cfg = TelemetryConfig::default();
+        let opts = cfg.to_diagnostics_options_with_full(Path::new("."), false);
+        // Existing semantics must remain intact.
+        assert!(!opts.full_diagnostics);
+        assert!(!opts.runtime_diagnosis_artifacts);
+        // Causal-evidence is enabled by default, so the bridge function
+        // must compute a non-zero causal-evidence readiness signal even
+        // though we cannot assert on the field directly until U01b lands.
+        // We assert via the helper exposed by the bridge below.
+        assert!(
+            cfg.causal_evidence_enabled_for_bridge(),
+            "default config must produce causal_evidence=true via the bridge"
+        );
+        // Explicit disable must propagate through the bridge.
+        let cfg_off = TelemetryConfig {
+            causal_evidence: CausalEvidenceConfig {
+                enabled: false,
+                window_capacity: 200,
+            },
+            ..TelemetryConfig::default()
+        };
+        assert!(
+            !cfg_off.causal_evidence_enabled_for_bridge(),
+            "explicit enabled=false must propagate through the bridge"
+        );
     }
 
     /// `max_repeated_recoveries > u32::MAX` would cause a truncation when

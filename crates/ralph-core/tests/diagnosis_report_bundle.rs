@@ -112,6 +112,7 @@ fn present_bundle_projects_to_report() {
             last_modified: None,
         }],
         vec!["single-chain".to_string()],
+        Vec::new(),
     );
     let _ = write_input_bundle(&session, &bundle).expect("write_manifest");
 
@@ -178,7 +179,7 @@ fn report_from_session_includes_bundle_fields() {
     fs::create_dir_all(&session).expect("create session dir");
     write_pending_bundle(&session);
     let bundle = DiagnosisInputBundle::new_pending(&session)
-        .with_finalized(vec![], vec!["single-chain".to_string()]);
+        .with_finalized(vec![], vec!["single-chain".to_string()], Vec::new());
     let _ = write_input_bundle(&session, &bundle).expect("write_manifest");
     let data = load_session(&session);
     let report = Report::from_session(&data);
@@ -522,4 +523,176 @@ fn u13_distinct_retry_keys_yield_distinct_feedback_ids() {
         "5 distinct retry_keys must map to 5 distinct feedback_ids, got {:?}",
         ids
     );
+}
+
+// =============================================================================
+// Plan 2026-08-26-1104 Unit 7 (U07): boundary coverage report projection tests.
+// - v1 manifest reads as legacy with empty coverage
+// - v2 gap surfaces as structured evidence_gap entries that name the
+//   affected boundary so the operator can pin the missing receipt.
+// - Unknown (higher) schema version still maps to SchemaMismatch,
+//   not Legacy or Present.
+// =============================================================================
+
+#[test]
+fn v1_manifest_reads_as_legacy_without_coverage() {
+    let tmp = TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    fs::create_dir_all(&session).expect("create session dir");
+    // Build a v1 manifest (no `boundary_coverage` field at all) by
+    // overwriting the schema_version on the standard pending bundle.
+    let mut bundle = DiagnosisInputBundle::new_pending(&session);
+    bundle.schema_version = "run-diagnosis-input/v1".to_string();
+    write_input_bundle(&session, &bundle).expect("write v1 manifest");
+
+    let report = read_input_bundle_report(&session);
+    assert_eq!(report.status, BundleStatus::Legacy);
+    assert!(
+        report.boundary_coverage.is_empty(),
+        "v1 reader must surface empty boundary_coverage; got {:?}",
+        report.boundary_coverage
+    );
+
+    // Suggestions still mention the bundle, but the per-boundary
+    // gap evidence is NOT injected (legacy path can't fabricate
+    // boundary coverage that never existed on disk).
+    let mut trace = ralph_core::diagnosis::RuntimeTraceReport::default();
+    trace.status = BundleStatus::Present;
+    let mut feedback = ralph_core::diagnosis::FeedbackLifecycleReport::default();
+    feedback.status = BundleStatus::Present;
+    let (suggestions, gaps) =
+        ralph_core::diagnosis::build_suggestions_and_gaps(
+            &report,
+            &trace,
+            &feedback,
+            &[],
+            Path::new("/tmp/x"),
+        );
+    assert!(
+        gaps.iter().all(|g| !g.affects.as_deref().unwrap_or("").starts_with("boundary:")),
+        "legacy v1 reader must not inject synthetic boundary gap evidence"
+    );
+    // Suggestions are still produced for the missing bundle path.
+    assert!(!suggestions.is_empty());
+}
+
+#[test]
+fn v2_gap_projects_evidence_gap_with_boundary_affects() {
+    use ralph_core::diagnostics::{BoundaryCoverageEntry, BoundaryCoverageStatus, CausalBoundary};
+    let tmp = TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    fs::create_dir_all(&session).expect("create session dir");
+    // Two boundaries covered (1/1), one boundary gap (expected=2,
+    // recorded=1), rest covered (0/0). The reader must surface
+    // the gap boundary in the report AND in the evidence_gaps
+    // list with `affects="boundary:<name>"`.
+    let mut coverage: Vec<BoundaryCoverageEntry> = CausalBoundary::all()
+        .map(|b| {
+            let (expected, recorded) = if b == CausalBoundary::StateCommit {
+                (2, 1)
+            } else {
+                (1, 1)
+            };
+            let mut entry = BoundaryCoverageEntry::new(
+                b,
+                &ralph_core::diagnostics::BoundaryCounter { expected, recorded },
+                None,
+            );
+            if entry.status == BoundaryCoverageStatus::Gap {
+                entry.reason = Some("commit_receipt missing".to_string());
+            }
+            entry
+        })
+        .collect();
+    // Force at least one covered row to have a 0/0 profile so the
+    // test covers the "no emission yet" path.
+    for entry in coverage.iter_mut() {
+        if entry.boundary == CausalBoundary::Activation {
+            entry.expected = 0;
+            entry.recorded = 0;
+            entry.status = BoundaryCoverageStatus::Covered;
+            entry.reason = None;
+        }
+    }
+
+    let bundle = DiagnosisInputBundle::new_pending(&session)
+        .with_finalized(Vec::new(), Vec::new(), coverage);
+    write_input_bundle(&session, &bundle).expect("write v2 manifest");
+
+    let report = read_input_bundle_report(&session);
+    assert_eq!(report.status, BundleStatus::Finalized);
+    assert_eq!(report.boundary_coverage.len(), 8);
+    let gap = report
+        .boundary_coverage
+        .iter()
+        .find(|e| e.boundary == "state_commit")
+        .expect("state_commit gap entry");
+    assert_eq!(gap.expected, 2);
+    assert_eq!(gap.recorded, 1);
+    assert_eq!(gap.status, BoundaryCoverageStatus::Gap);
+    assert_eq!(gap.reason.as_deref(), Some("commit_receipt missing"));
+
+    // Pre-populate trace/feedback as Present so the suggestion mapper
+    // doesn't inject unrelated suggestions.
+    let mut trace = ralph_core::diagnosis::RuntimeTraceReport::default();
+    trace.status = BundleStatus::Present;
+    let mut feedback = ralph_core::diagnosis::FeedbackLifecycleReport::default();
+    feedback.status = BundleStatus::Present;
+    let (suggestions, gaps) =
+        ralph_core::diagnosis::build_suggestions_and_gaps(
+            &report,
+            &trace,
+            &feedback,
+            &[],
+            Path::new("/tmp/x"),
+        );
+    let state_commit_gap = gaps
+        .iter()
+        .find(|g| g.affects.as_deref() == Some("boundary:state_commit"))
+        .expect("evidence_gap entry for state_commit");
+    assert_eq!(state_commit_gap.artifact, "diagnosis-input.json");
+    assert!(
+        state_commit_gap.reason.contains("commit_receipt missing"),
+        "gap reason must surface the producer-supplied reason; got {:?}",
+        state_commit_gap
+    );
+    // And the suggestion mapper should attach a boundary-tagged
+    // suggestion so the operator can pin the missing receipt.
+    assert!(
+        suggestions
+            .iter()
+            .any(|s| s.finding_refs.iter().any(|r| r == "bundle.boundary_gap")),
+        "missing boundary_gap suggestion: {:?}",
+        suggestions
+    );
+}
+
+#[test]
+fn unknown_higher_version_is_schema_mismatch_not_present() {
+    let tmp = TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    fs::create_dir_all(&session).expect("create session dir");
+    let mut bundle = DiagnosisInputBundle::new_pending(&session);
+    bundle.schema_version = "run-diagnosis-input/v999".to_string();
+    write_input_bundle(&session, &bundle).expect("write far-future manifest");
+    let report = read_input_bundle_report(&session);
+    match &report.status {
+        BundleStatus::SchemaMismatch {
+            on_disk_version,
+            reader_version,
+        } => {
+            assert_eq!(on_disk_version, "run-diagnosis-input/v999");
+            assert_eq!(
+                reader_version,
+                ralph_core::diagnostics::DIAGNOSIS_INPUT_SCHEMA_VERSION
+            );
+        }
+        other => panic!(
+            "expected SchemaMismatch for v999 manifest, got {:?}",
+            other
+        ),
+    }
+    // Boundary coverage must NOT be silently promoted to v2 data
+    // when the schema version is unknown.
+    assert!(report.boundary_coverage.is_empty());
 }

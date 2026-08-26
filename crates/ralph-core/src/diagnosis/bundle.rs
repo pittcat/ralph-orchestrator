@@ -17,6 +17,7 @@ use serde_json::Value;
 use crate::diagnostics::{
     ArtifactStatus, DIAGNOSIS_INPUT_SCHEMA_VERSION, DiagnosisInputBundle, ManifestStatus,
     input_bundle as bundle_schema,
+    input_bundle::{BoundaryCoverageEntry, BoundaryCoverageStatus},
 };
 
 /// Public status of the bundle, surfaced both in the report and in
@@ -88,6 +89,44 @@ pub struct DiagnosisInputReport {
     pub execution_capabilities: Vec<String>,
     #[serde(default)]
     pub artifacts: Vec<ArtifactReport>,
+    /// Plan 2026-08-26-1104 U07: per-boundary coverage rows
+    /// projected from the manifest's `boundary_coverage[]`.
+    /// Empty for v1 (legacy) sessions and for unknown schema
+    /// versions (the reader never fabricates rows when the
+    /// on-disk format is unrecognized). For v2 finalized
+    /// manifests, the vector is always eight entries long and
+    /// ordered by `CausalBoundary::ALL`.
+    #[serde(default)]
+    pub boundary_coverage: Vec<BoundaryCoverageReport>,
+}
+
+/// One row of the boundary coverage report, projected from
+/// [`crate::diagnostics::BoundaryCoverageEntry`]. The
+/// `affects` token (`"boundary:<name>"`) is what the
+/// suggestion mapper keys on when emitting evidence gaps for
+/// per-receipt coverage misses.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundaryCoverageReport {
+    pub boundary: String,
+    #[serde(default)]
+    pub expected: u64,
+    #[serde(default)]
+    pub recorded: u64,
+    pub status: BoundaryCoverageStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl From<&BoundaryCoverageEntry> for BoundaryCoverageReport {
+    fn from(entry: &BoundaryCoverageEntry) -> Self {
+        Self {
+            boundary: entry.boundary.as_str().to_string(),
+            expected: entry.expected,
+            recorded: entry.recorded,
+            status: entry.status,
+            reason: entry.reason.clone(),
+        }
+    }
 }
 
 /// Per-artifact integrity / status, projected from the manifest.
@@ -239,13 +278,23 @@ fn project_bundle(bundle: &DiagnosisInputBundle) -> DiagnosisInputReport {
     // writer" (SchemaMismatch). The latter must NOT be
     // collapsed into Legacy — that destroyed rollback safety
     // when an operator downgraded `ralph` to an older binary.
-    let status = if bundle.schema_version != DIAGNOSIS_INPUT_SCHEMA_VERSION {
+    //
+    // Plan 2026-08-26-1104 U07: v1 is now a KNOWN prior
+    // version (the v1 manifest schema shipped with the prior
+    // plan). Readers must keep v1 sessions on the Legacy
+    // path so the existing legacy fallback still works for
+    // sessions recorded before the v2 bump. Truly unknown
+    // versions (anything other than v1 / v2) surface as
+    // SchemaMismatch.
+    let status = if bundle.schema_version == DIAGNOSIS_INPUT_SCHEMA_VERSION {
+        BundleStatus::from(bundle.manifest_status)
+    } else if bundle.schema_version == "run-diagnosis-input/v1" {
+        BundleStatus::Legacy
+    } else {
         BundleStatus::SchemaMismatch {
             on_disk_version: bundle.schema_version.clone(),
             reader_version: DIAGNOSIS_INPUT_SCHEMA_VERSION.to_string(),
         }
-    } else {
-        BundleStatus::from(bundle.manifest_status)
     };
     DiagnosisInputReport {
         status,
@@ -261,6 +310,12 @@ fn project_bundle(bundle: &DiagnosisInputBundle) -> DiagnosisInputReport {
         worktree: Some(bundle.code_baseline.worktree),
         execution_capabilities: bundle.execution_capabilities.clone(),
         artifacts: bundle.artifacts.iter().cloned().map(Into::into).collect(),
+        // Plan 2026-08-26-1104 U07: project the on-disk
+        // `boundary_coverage[]` rows. The reader relies on
+        // `CausalBoundary::ALL` to keep iteration order
+        // stable across runs; the producer already
+        // serializes in that order.
+        boundary_coverage: bundle.boundary_coverage.iter().map(Into::into).collect(),
     }
 }
 
@@ -475,6 +530,7 @@ pub mod suggestions {
         BundleStatus, DiagnosisInputReport, EvidenceGap, FeedbackLifecycleReport, RepairSuggestion,
         RuntimeTraceReport,
     };
+    use crate::diagnostics::input_bundle as bundle_schema;
     use std::path::Path;
 
     /// Build a deterministic set of repair suggestions and
@@ -549,6 +605,56 @@ pub mod suggestions {
                 });
             }
             _ => {}
+        }
+
+        // Plan 2026-08-26-1104 U07: per-boundary gap evidence.
+        // For v2 manifests the producer already stamped a
+        // `reason` onto every `Gap` row; the mapper re-emits
+        // one `evidence_gap` per gap row with
+        // `affects="boundary:<name>"` so the suggestion
+        // mapper's downstream consumers (the report's
+        // "Causal Attribution" section, the offline `ralph
+        // diagnose` report) can pin the missing receipt
+        // kind. v1 / legacy / schema-mismatch paths skip
+        // this branch — the on-disk manifest never carried
+        // `boundary_coverage[]` so we must not fabricate
+        // gaps that don't exist on disk.
+        if matches!(
+            input.status,
+            BundleStatus::Finalized | BundleStatus::Present | BundleStatus::Degraded
+        ) {
+            for entry in &input.boundary_coverage {
+                if entry.status != bundle_schema::BoundaryCoverageStatus::Gap {
+                    continue;
+                }
+                let name = entry.boundary.clone();
+                let producer_reason = entry
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "expected != recorded".to_string());
+                gaps.push(EvidenceGap {
+                    artifact: "diagnosis-input.json".to_string(),
+                    reason: format!(
+                        "{} boundary gap: expected={}, recorded={}, reason={producer_reason}",
+                        name, entry.expected, entry.recorded,
+                    ),
+                    affects: Some(format!("boundary:{name}")),
+                });
+            }
+            if input
+                .boundary_coverage
+                .iter()
+                .any(|e| e.status == bundle_schema::BoundaryCoverageStatus::Gap)
+            {
+                suggestions.push(RepairSuggestion {
+                    tier: "short".to_string(),
+                    finding_refs: vec!["bundle.boundary_gap".to_string()],
+                    evidence_refs: vec!["diagnosis-input.json".to_string()],
+                    confidence: Some(70),
+                    text: "Boundary coverage has gap(s) — the affected receipt kind was attempted but not persisted. Check the runtime-trace.jsonl writer state and the per-receipt emit counters."
+                        .to_string(),
+                });
+            }
         }
 
         if trace.status == BundleStatus::Missing {

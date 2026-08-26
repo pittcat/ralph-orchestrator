@@ -683,6 +683,26 @@ pub(super) async fn run_loop_impl_inner(
             Some(execution_capability.to_string()),
             code_baseline,
         );
+
+        // U02 (plan 2026-08-26-1104): stamp the loop identity onto
+        // every subsequent `runtime-trace.jsonl` row and write the
+        // **single** `kind=contract_receipt` row so the attribution
+        // engine (U8) and the run-diagnosis skill (U10) can join
+        // the receipt back to a config snapshot. Both helpers are
+        // idempotent / no-ops when the collector is disabled, so
+        // this stays best-effort and never affects the business path.
+        let causal_ctx = ralph_core::diagnostics::CausalContext {
+            loop_id: loop_id.clone(),
+            iteration: 0,
+        };
+        diagnostics.set_causal_context(causal_ctx);
+        let preset_label_owned = hats_source_label.clone().unwrap_or_default();
+        let contract_fields = ralph_core::diagnostics::compute_contract_digest(
+            config.event_loop.event_policy.as_ref(),
+            &config.hats,
+            &preset_label_owned,
+        );
+        diagnostics.emit_contract_receipt(contract_fields);
     }
 
     let state_machine_enabled = config
@@ -3514,6 +3534,33 @@ pub(super) async fn run_loop_impl_inner(
                     "partial_output": !outcome.output.is_empty(),
                 })),
             );
+            // Plan 2026-08-26-1104 U06: flush the bounded frozen
+            // evidence window when the watchdog fires. The file
+            // is the per-anomaly artifact consumed by the
+            // boundary-coverage reader (U7) and the deterministic
+            // attribution engine (U8). The flush is best-effort:
+            // a writer failure emits one `tracing::warn!` and the
+            // loop continues.
+            if let Err(err) = event_loop.diagnostics().flush_evidence_window(
+                ralph_core::diagnostics::AnomalyDescriptor {
+                    trigger_kind: ralph_core::diagnostics::trigger_kinds::WATCHDOG_TIMEOUT
+                        .to_string(),
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    iteration: iteration as u64,
+                    details: Some(serde_json::json!({
+                        "backend": backend_name_for_timeout,
+                        "partial_output": !outcome.output.is_empty(),
+                        "hat": display_hat.to_string(),
+                    })),
+                },
+                vec![],
+            ) {
+                warn!(
+                    iteration = iteration,
+                    error = %err,
+                    "failed to flush evidence-window on watchdog timeout; loop continues",
+                );
+            }
             warn!(
                 iteration = iteration,
                 hat = %display_hat.as_str(),
@@ -3530,6 +3577,36 @@ pub(super) async fn run_loop_impl_inner(
             .termination
             .as_ref()
             .map(|reason| format!("{reason:?}"));
+
+        // Plan 2026-08-26-1104 U06: flush the bounded frozen
+        // evidence window on non-zero backend exit. The watchdog
+        // branch above already flushed (its own trigger kind); we
+        // guard with `!outcome.watchdog_timeout` so a single
+        // anomaly never produces two frozen files in one
+        // iteration.
+        if let Some(exit_code) = outcome.backend_exit_code
+            && !outcome.watchdog_timeout
+            && exit_code != 0
+            && let Err(err) = event_loop.diagnostics().flush_evidence_window(
+                ralph_core::diagnostics::AnomalyDescriptor {
+                    trigger_kind: ralph_core::diagnostics::trigger_kinds::NON_ZERO_EXIT
+                        .to_string(),
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    iteration: iteration as u64,
+                    details: Some(serde_json::json!({
+                        "exit_code": exit_code,
+                        "hat": display_hat.to_string(),
+                    })),
+                },
+                vec![],
+            )
+        {
+            warn!(
+                iteration = iteration,
+                error = %err,
+                "failed to flush evidence-window on non-zero backend exit; loop continues",
+            );
+        }
 
         if let Some(reason) = outcome.termination {
             // Backend termination exits before the regular event-processing

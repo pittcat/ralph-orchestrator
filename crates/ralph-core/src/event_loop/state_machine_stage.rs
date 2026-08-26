@@ -21,6 +21,7 @@
 use super::*;
 
 use crate::config::state_machine::StateMachineConfig;
+use crate::diagnostics::CommitReceiptStatus;
 use crate::event_reader::Event as JsonlEvent;
 use crate::state_machine::{
     StateMachineDecision, StateMachineRuntimeState, StateMachineTransitionDelta,
@@ -463,6 +464,18 @@ impl EventLoop {
         // no-op when the durable commit failed.
         let mut pre_apply_snapshot: Option<StateMachineRuntimeState> =
             self.state_machine_apply_snapshot.clone();
+        // Plan 2026-08-26-1104 Unit 4: capture the projection's
+        // transition_id so the rolled_back receipt can join the
+        // receipt stream back to the projection even when the
+        // durable outbox write fails (no OutboxEntry to draw from
+        // in the Err path). The transition_id is identical to the
+        // one that would have been written to the OutboxEntry in
+        // the success path (same `StateMachineTransitionId::build`
+        // inputs flow through both paths via
+        // `apply_state_machine_decisions`).
+        let projection_transition_id = projection
+            .as_ref()
+            .map(|delta| delta.transition_id.as_str().to_string());
         if let Some(ref delta) = projection {
             let live = self
                 .state
@@ -502,6 +515,19 @@ impl EventLoop {
                             live.apply_transition_delta(committed);
                         }
                     }
+                    // Plan 2026-08-26-1104 Unit 4 / S4.2: emit the
+                    // rolled_back receipt BEFORE returning so the
+                    // receipt stream mirrors the commit failure
+                    // row-for-row. We use the projection's
+                    // transition_id (no OutboxEntry exists yet on
+                    // this path) and surface the underlying cause
+                    // as a bounded `failure_reason` summary.
+                    self.diagnostics.emit_commit_receipt(
+                        CommitReceiptStatus::RolledBack,
+                        projection_transition_id.as_deref().unwrap_or(""),
+                        event.topic.as_str(),
+                        Some("state ledger missing"),
+                    );
                     return Err(
                         crate::event_loop::accepted_transition::TransitionError::CommitFailed {
                             source: "state ledger missing".to_string(),
@@ -538,7 +564,54 @@ impl EventLoop {
                     live.apply_transition_delta(committed);
                 }
             }
+            // Plan 2026-08-26-1104 Unit 4 / S4.2: emit the
+            // rolled_back receipt so the attribution engine (U8)
+            // can detect the missing committed counterpart. Prefer
+            // the OutboxEntry's transition_id if the disposition
+            // helper returned one before failing; otherwise fall
+            // back to the projection's transition_id (same id,
+            // same `StateMachineTransitionId::build` inputs).
+            let failure_reason = result
+                .as_ref()
+                .err()
+                .map(|err| err.to_string())
+                .unwrap_or_else(|| "commit failed".to_string());
+            let transition_id = result
+                .as_ref()
+                .ok()
+                .and_then(|entry| entry.as_ref().map(|e| e.transition_id.as_str()))
+                .or(projection_transition_id.as_deref())
+                .unwrap_or("");
+            self.diagnostics.emit_commit_receipt(
+                CommitReceiptStatus::RolledBack,
+                transition_id,
+                event.topic.as_str(),
+                Some(&failure_reason),
+            );
         } else if let Some(delta) = committed_projection {
+            // Plan 2026-08-26-1104 Unit 4 / S4.1: emit the committed
+            // receipt on success so the attribution engine can
+            // join the receipt back to the OutboxEntry by
+            // `transition_id` (S4.1 contract). We use the
+            // OutboxEntry's transition_id rather than the
+            // projection's because the outbox write is what the
+            // engine actually reconciles against; if the
+            // disposition helper short-circuits with `Ok(None)`
+            // (no outbox write happened), we fall back to the
+            // projection's transition_id so the receipt is still
+            // joinable.
+            let transition_id = result
+                .as_ref()
+                .ok()
+                .and_then(|entry| entry.as_ref().map(|e| e.transition_id.as_str()))
+                .or(projection_transition_id.as_deref())
+                .unwrap_or("");
+            self.diagnostics.emit_commit_receipt(
+                CommitReceiptStatus::Committed,
+                transition_id,
+                event.topic.as_str(),
+                None,
+            );
             self.state_machine_committed_deltas.push(delta);
         }
 

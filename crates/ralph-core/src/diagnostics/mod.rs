@@ -3,18 +3,19 @@
 //! Captures agent output, orchestration decisions, traces, performance metrics,
 //! and errors to structured JSONL files when `RALPH_DIAGNOSTICS=1` is set.
 //!
-//! # Activation Matrix (U0 contract)
+//! # Activation Matrix (U0 contract; causal row added in U01b)
 //!
 //! The collector is driven by [`DiagnosticsOptions`]. Exactly one of three modes
 //! is active for a given collector:
 //!
-//! | `full_diagnostics` | `runtime_diagnosis_artifacts` | `session_dir` | Behavior |
-//! |---|---|---|---|
-//! | `false` | `false` | `None` (default) | Disabled. No I/O. `is_enabled()` is false. |
-//! | `true`  | any     | `None`             | Full session. Creates `<base>/.ralph/diagnostics/<timestamp>/` and all existing loggers (orchestration, performance, errors, hook-runs, agent-output, prompt-log). U3 also wires `recovery.jsonl` / `drift.jsonl` / `diagnosis-summary.json`. |
-//! | `false` | `true`  | `None`             | Minimal diagnosis session. Creates the timestamped directory but does NOT instantiate any of the historical full-diagnostics loggers. U3 adds `recovery.jsonl` / `drift.jsonl`; `diagnosis-summary.json` is written on demand via [`DiagnosticsCollector::write_diagnosis_summary_seed`]. |
-//! | `true`  | any     | `Some(p)`          | Full session reusing the provided path. No new dir is created. |
-//! | `false` | `true`  | `Some(p)`          | Minimal diagnosis session reusing the provided path. |
+//! | `full_diagnostics` | `runtime_diagnosis_artifacts` | `causal_evidence` | `trace_only` | `session_dir` | Behavior |
+//! |---|---|---|---|---|---|
+//! | `false` | `false` | `false` | `false` | `None` (default) | Disabled. No I/O. `is_enabled()` is false. |
+//! | `true`  | any     | any     | any     | `None`             | Full session. Creates `<base>/.ralph/diagnostics/<timestamp>/` and all existing loggers (orchestration, performance, errors, hook-runs, agent-output, prompt-log). U3 also wires `recovery.jsonl` / `drift.jsonl` / `diagnosis-summary.json`. |
+//! | `false` | `true`  | `false` | `false` | `None`             | Minimal diagnosis session. Creates the timestamped directory but does NOT instantiate any of the historical full-diagnostics loggers. U3 adds `recovery.jsonl` / `drift.jsonl`; `diagnosis-summary.json` is written on demand via [`DiagnosticsCollector::write_diagnosis_summary_seed`]. |
+//! | `false` | `false` | `true`  | `false` | `None`             | Plan U01b: causal-evidence minimal session. Same logger set as the `runtime_diagnosis_artifacts=true` row (`recovery.jsonl` / `drift.jsonl` / `runtime-trace.jsonl` / `feedback.jsonl` / `input_bundle`), but driven by `telemetry.causal_evidence.enabled=true` rather than the older `runtime_diagnosis.write_artifacts` switch. The two flags are independent and both default to `false`, so neither row activates the collector on its own when the other is unset. |
+//! | `true`  | any     | any     | any     | `Some(p)`          | Full session reusing the provided path. No new dir is created. |
+//! | `false` | `true`  | any     | any     | `Some(p)`          | Minimal diagnosis session reusing the provided path. |
 //!
 //! The CLI is responsible for building **one** authoritative collector per
 //! `ralph run` and threading it through the tracing layer, the loop runner
@@ -26,6 +27,7 @@ mod drift;
 mod errors;
 mod feedback;
 mod hook_runs;
+pub mod evidence_window;
 pub mod input_bundle;
 mod log_rotation;
 mod orchestration;
@@ -42,11 +44,17 @@ mod integration_tests;
 pub use agent_output::{AgentOutputContent, AgentOutputEntry, AgentOutputLogger};
 pub use drift::{DriftLogger, MAX_DRIFT_MESSAGE_CHARS};
 pub use errors::{DiagnosticError, ErrorLogger};
+pub use evidence_window::{
+    AnomalyDescriptor, DEFAULT_WINDOW_CAPACITY, EvidenceWindowWriter, EVIDENCE_WINDOW_SCHEMA_VERSION,
+    trigger_kinds,
+};
 pub use feedback::{FEEDBACK_SCHEMA_VERSION, FeedbackEntry, FeedbackLogger, FeedbackPhase};
 pub use hook_runs::{HookDisposition, HookRunLogger, HookRunTelemetryEntry};
 pub use input_bundle::{
-    ArtifactIntegrity, ArtifactStatus, CodeBaseline, DIAGNOSIS_INPUT_SCHEMA_VERSION,
-    DiagnosisInputBundle, ManifestStatus, RunMetadata, read_manifest, write_manifest,
+    ArtifactIntegrity, ArtifactStatus, BoundaryCounter, BoundaryCoverageEntry,
+    BoundaryCoverageStatus, CausalBoundary, CodeBaseline, DIAGNOSIS_INPUT_SCHEMA_VERSION,
+    DiagnosisInputBundle, ManifestStatus, RunMetadata, kind_to_boundary, read_manifest,
+    write_manifest,
 };
 pub use log_rotation::{create_log_file, rotate_logs};
 pub use orchestration::{
@@ -55,8 +63,14 @@ pub use orchestration::{
 pub use performance::{PerformanceLogger, PerformanceMetric};
 pub use recovery::{MAX_RECOVERY_NOTE_CHARS, RecoveryLogger};
 pub use runtime_trace::{
-    RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceEntry, RuntimeTraceLogger, RuntimeTracePhase,
+    CausalContext, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceEntry, RuntimeTraceLogger,
+    RuntimeTracePhase,
 };
+// Plan 2026-08-26-1104 U3: `PolicyReceiptDecision` is declared at
+// module root below and reachable directly as
+// `crate::diagnostics::PolicyReceiptDecision`. The pub enum
+// does not need a re-export in the `pub use` block because it
+// lives in this module.
 pub use session::probe_session_dir_writable;
 pub use stream_handler::DiagnosticStreamHandler;
 pub use trace_layer::{DiagnosticTraceLayer, TraceEntry};
@@ -108,6 +122,25 @@ where
                 label,
             );
             None
+        }
+    }
+}
+
+/// Plan 2026-08-26-1104 U07: helper that mutates a
+/// `boundary_coverage[]` vector in place, stamping `reason` onto
+/// every `Gap` row. Used by `finalize_input_bundle` when the
+/// underlying manifest write failed mid-run so the
+/// `evidence_gap` entries the reporter builds later carry a
+/// concrete failure cause (rather than an empty string). Lives
+/// outside the `DiagnosticsCollector` impl because it has no
+/// `self` dependency — only the row vector.
+fn annotate_gaps_with_reason(
+    coverage: &mut [input_bundle::BoundaryCoverageEntry],
+    reason: &str,
+) {
+    for entry in coverage.iter_mut() {
+        if entry.status == input_bundle::BoundaryCoverageStatus::Gap {
+            entry.reason = Some(reason.to_string());
         }
     }
 }
@@ -229,8 +262,199 @@ pub(crate) fn resume_sidecar_sequence(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Deterministic SHA-256 digest of a JSON value, returned as the
+/// first 16 lowercase hex chars. Used by the contract-receipt
+/// helper below; the engine's "shorter hex" convention keeps the
+/// 8KiB-capped receipt fields human-readable without sacrificing
+/// collision resistance for our payload sizes.
+pub(crate) fn json_digest_hex(value: &serde_json::Value) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.to_string().as_bytes());
+    let digest = hasher.finalize();
+    let hex = format!("{:x}", digest);
+    hex.chars().take(16).collect()
+}
+
+/// Plan 2026-08-26-1104 Unit 3: deterministic SHA-256 digest of
+/// the per-event payload used by `emit_policy_receipt` so the
+/// attribution engine (U8) can join the receipt stream to the
+/// bus event it describes. When the caller does not have a
+/// payload in hand (origin-guard path: the event was rejected
+/// before the payload was parsed), falls back to a stable hash
+/// over `(topic, hat, reason_code)` so two rejections that hit
+/// the same gate produce identical digests.
+pub(crate) fn compute_event_digest(
+    event_payload: Option<&serde_json::Value>,
+    topic: &str,
+    hat: Option<&str>,
+    reason_code: Option<&str>,
+) -> String {
+    let canonical = match event_payload {
+        Some(value) => value.clone(),
+        None => serde_json::json!({
+            "topic": topic,
+            "hat": hat.unwrap_or(""),
+            "reason_code": reason_code.unwrap_or(""),
+        }),
+    };
+    json_digest_hex(&canonical)
+}
+
+/// Plan 2026-08-26-1104 Unit 3: discriminator for
+/// [`DiagnosticsCollector::emit_policy_receipt`]. Stable strings
+/// so downstream dashboards can match on the literal without
+/// re-deriving from the typed enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyReceiptDecision {
+    /// Event cleared every gate (origin + policy + state
+    /// machine) and was forwarded onto the bus. The receipt row
+    /// carries `rule_refs` listing the gates the event passed.
+    Accept,
+    /// Event was rejected by origin guard or policy validation.
+    /// The receipt row carries `reason_code` (stable machine-
+    /// readable string) and `retry_key` to reconcile with
+    /// `.ralph/recovery.jsonl` RejectionRecord rows (S3.2).
+    Reject,
+}
+
+impl PolicyReceiptDecision {
+    /// Stable string written into the receipt's `decision` field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PolicyReceiptDecision::Accept => "accept",
+            PolicyReceiptDecision::Reject => "reject",
+        }
+    }
+}
+
+/// Plan 2026-08-26-1104 Unit 4: discriminator for
+/// [`DiagnosticsCollector::emit_commit_receipt`]. Stable strings so
+/// the attribution engine (U8) and downstream dashboards can match
+/// on the literal without re-deriving from the typed enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitReceiptStatus {
+    /// StateMachine projection committed successfully: the durable
+    /// outbox write + StateLedger projection commit both succeeded
+    /// (S4.1). The receipt row carries `transition_id` mirroring
+    /// the `OutboxEntry.transition_id` so the attribution engine
+    /// can join the receipt back to the outbox row.
+    Committed,
+    /// Commit failed and the live state was rolled back to the
+    /// pre-apply snapshot (S4.2). The receipt row carries a
+    /// truncated `failure_reason` summary so operators can pinpoint
+    /// the underlying error without grepping the loop logs.
+    RolledBack,
+}
+
+impl CommitReceiptStatus {
+    /// Stable string written into the receipt's `commit_status` field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CommitReceiptStatus::Committed => "committed",
+            CommitReceiptStatus::RolledBack => "rolled_back",
+        }
+    }
+}
+
+/// Plan 2026-08-26-1104 Unit 5: discriminator for
+/// [`DiagnosticsCollector::emit_recovery_receipt`]. Stable strings
+/// so the attribution engine (U8) and downstream dashboards can
+/// match on the literal without re-deriving from the typed enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryReceiptAction {
+    /// Precheck gate rejected within retry budget → resume the
+    /// upstream hat. The receipt row carries `attempt`,
+    /// `budget_remaining`, `target_hat`, `reason_code` so the
+    /// engine can reconstruct the precheck bookkeeping (S5.1).
+    Resume,
+    /// Precheck retry budget exhausted → escalate to
+    /// `plan.blocked{kind=precheck_exhausted}`. The receipt row
+    /// carries a `retry_key` matching the plan.blocked payload
+    /// for join-by-string-match reconciliation (S5.2).
+    Exhausted,
+    /// `LOOP_COMPLETE` correction injected into the next
+    /// prompt via `inject_completion_correction`. The receipt
+    /// row carries `rejection_digest` count mirroring the
+    /// unified ledger snapshot so the engine can detect budget
+    /// exhaustion (S5.3).
+    Correction,
+}
+
+impl RecoveryReceiptAction {
+    /// Stable string written into the receipt's `action` field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecoveryReceiptAction::Resume => "resume",
+            RecoveryReceiptAction::Exhausted => "exhausted",
+            RecoveryReceiptAction::Correction => "correction",
+        }
+    }
+}
+
+/// Plan 2026-08-26-1104 Unit 2: bundle the inputs that define the
+/// loop's effective contract into the four digest-bearing fields
+/// the `kind=contract_receipt` row carries (S2.2). The full bundle
+/// is also returned so callers can either write it verbatim into
+/// the receipt's `fields` JSON or split it.
+///
+/// `BTreeMap` is used to sort the per-hashmap input before
+/// serializing — `HashMap` iteration order is randomized, so two
+/// runs of the same config would otherwise yield different
+/// digests (S2.3 stability guard).
+pub fn compute_contract_digest(
+    event_policy: Option<&crate::config::EventPolicyConfig>,
+    hats: &std::collections::HashMap<String, crate::config::HatConfig>,
+    preset_label: &str,
+) -> serde_json::Value {
+    let sorted_hats: std::collections::BTreeMap<&String, &crate::config::HatConfig> =
+        hats.iter().collect();
+    let sorted_policy = event_policy.map(|policy| {
+        let sorted_schemas: std::collections::BTreeMap<&String, &crate::config::EventSchema> =
+            policy.schemas.iter().collect();
+        let schemas_value = serde_json::json!(sorted_schemas);
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "schemas".to_string(),
+            serde_json::to_value(&schemas_value).unwrap_or(serde_json::Value::Null),
+        );
+        payload.insert(
+            "terminal_topics".to_string(),
+            serde_json::to_value(&policy.terminal_topics).unwrap_or(serde_json::Value::Null),
+        );
+        payload.insert(
+            "business_topics".to_string(),
+            serde_json::to_value(&policy.business_topics).unwrap_or(serde_json::Value::Null),
+        );
+        payload.insert(
+            "enabled".to_string(),
+            serde_json::Value::Bool(policy.enabled),
+        );
+        serde_json::Value::Object(payload)
+    });
+    let hats_value = serde_json::to_value(&sorted_hats).unwrap_or(serde_json::Value::Null);
+    let contract_input = serde_json::json!({
+        "preset_label": preset_label,
+        "event_policy": sorted_policy,
+        "hats": hats_value,
+    });
+    let hats_only = serde_json::json!({
+        "preset_label": preset_label,
+        "hats": hats_value,
+    });
+    let terminal_only = serde_json::json!({
+        "event_policy": sorted_policy,
+    });
+    serde_json::json!({
+        "contract_digest": json_digest_hex(&contract_input),
+        "terminal_topics_digest": json_digest_hex(&terminal_only),
+        "hats_digest": json_digest_hex(&hats_only),
+        "preset_label": preset_label,
+    })
+}
+
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -287,12 +511,41 @@ pub struct DiagnosticsOptions {
     /// directories and write log files in arbitrary system
     /// locations.
     pub workspace_root: Option<PathBuf>,
+
+    /// Plan 2026-08-26-1104 U01b: causal-evidence activation row.
+    /// When `true`, the collector opens a minimal session with the
+    /// same logger set as `runtime_diagnosis_artifacts=true`
+    /// (`recovery.jsonl` / `drift.jsonl` / `runtime-trace.jsonl` /
+    /// `feedback.jsonl` / `input_bundle`) but driven by
+    /// `telemetry.causal_evidence.enabled` rather than the older
+    /// `runtime_diagnosis.write_artifacts` switch. `full_diagnostics`
+    /// subsumes both — when `full_diagnostics=true` this flag is
+    /// ignored, matching the existing precedence contract.
+    ///
+    /// Defaults to `false`. U01a's bridge in
+    /// `config/telemetry.rs::to_diagnostics_options_inner` fills this
+    /// from `telemetry.causal_evidence.enabled` (default true there),
+    /// so once both units are integrated the collector activates on
+    /// a stock `ralph.yml` without `RALPH_DIAGNOSTICS=1`.
+    pub causal_evidence: bool,
+
+    /// Plan 2026-08-26-1104 Unit 6: ring buffer capacity for the
+    /// bounded frozen evidence window. Defaults to
+    /// [`evidence_window::DEFAULT_WINDOW_CAPACITY`] (200) when
+    /// unset; the telemetry bridge in `config/telemetry.rs`
+    /// fills this from `telemetry.causal_evidence.window_capacity`
+    /// (U01a). The collector clamps to at least 1 so a misconfigured
+    /// zero does not silently disable the ring buffer.
+    pub causal_evidence_window_capacity: Option<usize>,
 }
 
 impl DiagnosticsOptions {
     /// Returns true when any diagnostic capture is active.
     pub fn is_enabled(&self) -> bool {
-        self.full_diagnostics || self.runtime_diagnosis_artifacts || self.trace_only
+        self.full_diagnostics
+            || self.runtime_diagnosis_artifacts
+            || self.trace_only
+            || self.causal_evidence
     }
 
     /// Returns true when the trace-only mode is requested. This is a
@@ -315,6 +568,12 @@ impl DiagnosticsOptions {
             trace_only: false,
             session_dir,
             workspace_root: None,
+            // U01b: causal_evidence is driven by the telemetry bridge
+            // (U01a) — the env-only path leaves it at the default
+            // `false`. Activating it from `RALPH_DIAGNOSTICS=1` would
+            // bypass the operator's opt-in toggle in `ralph.yml`.
+            causal_evidence: false,
+            causal_evidence_window_capacity: None,
         }
     }
 
@@ -341,7 +600,28 @@ impl DiagnosticsOptions {
             trace_only: false,
             session_dir,
             workspace_root: None,
+            // U01b: same contract as `from_env` — the bridge from
+            // `telemetry.causal_evidence.enabled` is the U01a
+            // responsibility. Tests that want causal_evidence
+            // activation without the bridge must build
+            // `DiagnosticsOptions` explicitly.
+            causal_evidence: false,
+            causal_evidence_window_capacity: None,
         }
+    }
+
+    /// Resolves the ring buffer capacity for the frozen evidence
+    /// window. Falls back to [`evidence_window::DEFAULT_WINDOW_CAPACITY`]
+    /// when the caller did not set
+    /// [`causal_evidence_window_capacity`]. A zero or unset value
+    /// is clamped to 1 so the ring buffer cannot accidentally
+    /// become a no-op buffer of zero width (which would
+    /// cause `flush` to silently drop every pre-trigger line).
+    pub fn causal_evidence_window_capacity(&self) -> usize {
+        let capacity = self.causal_evidence_window_capacity.unwrap_or(
+            evidence_window::DEFAULT_WINDOW_CAPACITY,
+        );
+        capacity.max(1)
     }
 }
 
@@ -381,6 +661,54 @@ pub struct DiagnosticsCollector {
     /// by `feedback_id == diagnosis_id` (with `retry_key`
     /// fallback for envelopes that lack a diagnosis_id).
     feedback_logger: Option<Arc<Mutex<feedback::FeedbackLogger>>>,
+    /// Plan 2026-08-26-1104 Unit 6: bounded frozen evidence
+    /// window writer (`evidence-window.jsonl`). Wired into the
+    /// collector under the same activation rule as the
+    /// runtime-trace logger (full or minimal session); the
+    /// loop runner pushes candidate lines into the ring buffer
+    /// and calls `flush_evidence_window` at one of the five
+    /// anomaly trigger kinds (watchdog timeout / non-zero exit
+    /// / precheck exhausted / recovery exhausted / abnormal
+    /// activation outcome). Created lazily for `trace_only`
+    /// sessions because that mode owns no loop events to
+    /// record.
+    evidence_window_writer: Option<Arc<Mutex<evidence_window::EvidenceWindowWriter>>>,
+    /// Plan 2026-08-26-1104 Unit 2: correlation identity stamped
+    /// onto every `log_runtime_trace` row that did not bring its
+    /// own `causal` value. Set by `set_causal_context` from the
+    /// loop runner once the loop id is resolved and re-stamped at
+    /// every iteration boundary so `causal.iteration` stays in
+    /// lockstep with `RuntimeTraceEntry::iteration`.
+    causal_context: Arc<Mutex<Option<runtime_trace::CausalContext>>>,
+    /// Plan 2026-08-26-1104 Unit 2: idempotency latch for
+    /// `emit_contract_receipt`. Exactly one `kind=contract_receipt`
+    /// row lands in `runtime-trace.jsonl` per session regardless of
+    /// how many times the call is re-issued (the spec demands
+    /// "恰好一条", S2.2). The latch is held even when the
+    /// underlying logger is degraded / disabled so a re-emit on a
+    /// `null` collector never silently fans out.
+    contract_receipt_emitted: Arc<Mutex<bool>>,
+    /// Plan 2026-08-26-1104 Unit 3: cache of the `contract_digest`
+    /// produced by the prior `emit_contract_receipt` call so that
+    /// every subsequent `emit_policy_receipt` row can carry the
+    /// matching `contract_digest` field without re-deriving it
+    /// from config (the per-event row is the unit's primary
+    /// evidence stream — U4/U5 policy/commit/recovery receipts
+    /// all join back through this digest, S3.1 acceptance
+    /// criterion). `None` until the bootstrap contract receipt
+    /// has been emitted.
+    cached_contract_digest: Arc<Mutex<Option<String>>>,
+    /// Plan 2026-08-26-1104 U07: per-boundary coverage counters.
+    /// `expected` is bumped at the entry of any recording method
+    /// that maps to a [`CausalBoundary`]; `recorded` is bumped
+    /// after the row lands in `runtime-trace.jsonl`. When the
+    /// underlying logger is disabled or degraded, `expected` keeps
+    /// bumping but `recorded` stops increasing — the diff surfaces
+    /// as `BoundaryCoverageStatus::Gap` in the finalized manifest.
+    /// Initialized to eight zero counters (one per `CausalBoundary`)
+    /// so a session with no events still serializes eight covered
+    /// rows.
+    boundary_counters: Arc<Mutex<std::collections::BTreeMap<CausalBoundary, input_bundle::BoundaryCounter>>>,
 }
 
 impl std::fmt::Debug for DiagnosticsCollector {
@@ -492,12 +820,17 @@ impl DiagnosticsCollector {
         // the canonical form above solely for the containment check.
         let session_dir = requested_session_dir;
 
-        // Effective mode: full_diagnostics wins, otherwise honor
-        // runtime_diagnosis_artifacts, otherwise honor trace_only.
-        // trace_only is request-only — the actual logger set is determined
-        // by the resolved `effective_*` booleans below.
+        // Effective mode: full_diagnostics wins, otherwise honor either
+        // runtime_diagnosis_artifacts or the U01b causal_evidence flag,
+        // otherwise honor trace_only. trace_only is request-only — the
+        // actual logger set is determined by the resolved `effective_*`
+        // booleans below. Both `runtime_diagnosis_artifacts` and
+        // `causal_evidence` map to the same minimal logger set; the
+        // union keeps the historical precedence contract intact
+        // (`full_diagnostics` always subsumes).
         let effective_full = options.full_diagnostics;
-        let effective_runtime = options.runtime_diagnosis_artifacts && !options.full_diagnostics;
+        let effective_runtime = (options.runtime_diagnosis_artifacts || options.causal_evidence)
+            && !options.full_diagnostics;
         let effective_trace_only = options.wants_trace_only();
 
         // Historical loggers are tied to full_diagnostics. The minimal
@@ -629,6 +962,35 @@ impl DiagnosticsCollector {
             None
         };
 
+        // Plan 2026-08-26-1104 Unit 6: bounded frozen evidence
+        // window writer. Same activation rule as the runtime
+        // trace logger (full or minimal session); the ring
+        // buffer capacity is the configured value from
+        // `telemetry.causal_evidence.window_capacity` with the
+        // crate-level default as a fallback. Construction is
+        // best-effort: a failure to open the file flips the
+        // slot to None and emits a `tracing::warn!`, mirroring
+        // the runtime-trace logger above.
+        let evidence_window_writer = if effective_full || effective_runtime {
+            match evidence_window::EvidenceWindowWriter::new(
+                &session_dir,
+                options.causal_evidence_window_capacity(),
+            ) {
+                Ok(logger) => Some(Arc::new(Mutex::new(logger))),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "ralph_core::diagnostics",
+                        session_dir = %session_dir.display(),
+                        error = %err,
+                        "failed to create evidence-window writer; frozen sidecar disabled for this session",
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             enabled: true,
             full_diagnostics: effective_full,
@@ -644,6 +1006,11 @@ impl DiagnosticsCollector {
             input_bundle,
             runtime_trace_logger,
             feedback_logger,
+            causal_context: Arc::new(Mutex::new(None)),
+            contract_receipt_emitted: Arc::new(Mutex::new(false)),
+            cached_contract_digest: Arc::new(Mutex::new(None)),
+            evidence_window_writer,
+            boundary_counters: Arc::new(Mutex::new(Self::initial_boundary_counters())),
         })
     }
 
@@ -664,7 +1031,87 @@ impl DiagnosticsCollector {
             input_bundle: None,
             runtime_trace_logger: None,
             feedback_logger: None,
+            causal_context: Arc::new(Mutex::new(None)),
+            contract_receipt_emitted: Arc::new(Mutex::new(false)),
+            cached_contract_digest: Arc::new(Mutex::new(None)),
+            evidence_window_writer: None,
+            boundary_counters: Arc::new(Mutex::new(Self::initial_boundary_counters())),
         }
+    }
+
+    /// Plan 2026-08-26-1104 U07: build the canonical initial
+    /// boundary counter table. Every session, enabled or not,
+    /// starts with the eight canonical boundaries zeroed; the
+    /// reporter iterates `CausalBoundary::ALL` to produce stable
+    /// `boundary_coverage[]` rows even on a session that never
+    /// recorded anything.
+    fn initial_boundary_counters()
+    -> std::collections::BTreeMap<CausalBoundary, input_bundle::BoundaryCounter> {
+        let mut map = std::collections::BTreeMap::new();
+        for boundary in CausalBoundary::all() {
+            map.insert(boundary, input_bundle::BoundaryCounter::default());
+        }
+        map
+    }
+
+    /// Plan 2026-08-26-1104 U07: bump the `expected` counter for
+    /// the boundary that maps to `kind` (if any). Called at the
+    /// entry of `log_runtime_trace` so the counter tracks every
+    /// attempt, regardless of whether the underlying logger
+    /// is enabled or the row is persisted.
+    fn increment_boundary_expected(&self, kind: &str) {
+        let Some(boundary) = input_bundle::kind_to_boundary(kind) else {
+            return;
+        };
+        if let Ok(mut counters) = self.boundary_counters.lock() {
+            let entry = counters
+                .entry(boundary)
+                .or_insert_with(input_bundle::BoundaryCounter::default);
+            entry.expected = entry.expected.saturating_add(1);
+        }
+    }
+
+    /// Plan 2026-08-26-1104 U07: bump the `recorded` counter for
+    /// the boundary that maps to `kind` (if any). Called by
+    /// `log_runtime_trace` after the row is successfully appended
+    /// to `runtime-trace.jsonl` so a logger failure leaves the
+    /// counter pinned at the last successful row count.
+    fn increment_boundary_recorded(&self, kind: &str) {
+        let Some(boundary) = input_bundle::kind_to_boundary(kind) else {
+            return;
+        };
+        if let Ok(mut counters) = self.boundary_counters.lock() {
+            let entry = counters
+                .entry(boundary)
+                .or_insert_with(input_bundle::BoundaryCounter::default);
+            entry.recorded = entry.recorded.saturating_add(1);
+        }
+    }
+
+    /// Plan 2026-08-26-1104 U07: snapshot the eight canonical
+    /// boundary counters into the manifest-friendly row format.
+    /// `gap_reason` is stamped onto every `Gap` row whose
+    /// `expected > recorded` (typically only populated when the
+    /// underlying writer was degraded mid-run). Always returns
+    /// eight rows in `CausalBoundary::ALL` order so the
+    /// serialized manifest is stable across runs.
+    pub fn snapshot_boundary_coverage(
+        &self,
+        gap_reason: Option<String>,
+    ) -> Vec<input_bundle::BoundaryCoverageEntry> {
+        let counters = match self.boundary_counters.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        CausalBoundary::all()
+            .map(|boundary| {
+                let counter = counters
+                    .get(&boundary)
+                    .cloned()
+                    .unwrap_or_default();
+                input_bundle::BoundaryCoverageEntry::new(boundary, &counter, gap_reason.clone())
+            })
+            .collect()
     }
 
     /// Returns whether any diagnostics are enabled.
@@ -1134,7 +1581,13 @@ impl DiagnosticsCollector {
                 return;
             }
         };
-        *guard = guard.with_finalized(artifacts, execution_capabilities);
+        // Plan 2026-08-26-1104 U07: snapshot the eight boundary
+        // counters before any write attempt. If the write
+        // fails below, we re-stamp the `Gap` rows with a
+        // structured reason and re-write the manifest so the
+        // reporter can surface the underlying writer failure.
+        let mut boundary_coverage = self.snapshot_boundary_coverage(None);
+        *guard = guard.with_finalized(artifacts, execution_capabilities, boundary_coverage.clone());
         match input_bundle::write_manifest(session_dir, &guard) {
             Ok(Some(_)) => {}
             Ok(None) => {
@@ -1143,7 +1596,14 @@ impl DiagnosticsCollector {
                     session_dir = %session_dir.display(),
                     "diagnosis-input.json finalization was not persisted; marking degraded"
                 );
+                annotate_gaps_with_reason(&mut boundary_coverage, "logger write failed");
+                *guard = guard.with_finalized(
+                    guard.artifacts.clone(),
+                    guard.execution_capabilities.clone(),
+                    boundary_coverage.clone(),
+                );
                 *guard = guard.mark_degraded();
+                let _ = input_bundle::write_manifest(session_dir, &guard);
             }
             Err(err) => {
                 tracing::warn!(
@@ -1152,7 +1612,14 @@ impl DiagnosticsCollector {
                     error = %err,
                     "failed to write diagnosis-input.json on finalize; marking degraded"
                 );
+                annotate_gaps_with_reason(&mut boundary_coverage, "logger write failed");
+                *guard = guard.with_finalized(
+                    guard.artifacts.clone(),
+                    guard.execution_capabilities.clone(),
+                    boundary_coverage.clone(),
+                );
                 *guard = guard.mark_degraded();
+                let _ = input_bundle::write_manifest(session_dir, &guard);
             }
         }
     }
@@ -1169,12 +1636,50 @@ impl DiagnosticsCollector {
     /// Best-effort: failures flip the underlying logger into
     /// `degraded` and emit a warning; the orchestration main
     /// path is never affected.
-    pub fn log_runtime_trace(&self, entry: RuntimeTraceEntry) {
+    ///
+    /// Plan 2026-08-26-1104 Unit 2: when the caller did not
+    /// supply an explicit `entry.causal`, the entry is stamped
+    /// with the collector's currently-held [`CausalContext`]
+    /// (see [`Self::set_causal_context`]). Stamping happens at
+    /// the collector boundary so the existing call sites in
+    /// `dispatch_and_handoff.rs` / `loop_runner/inner.rs` keep
+    /// their tight, per-row shape and only the loop boundaries
+    /// (run start, iteration start) need to call `set_causal_context`.
+    pub fn log_runtime_trace(&self, mut entry: RuntimeTraceEntry) {
+        // Plan 2026-08-26-1104 U07: bump the per-boundary
+        // `expected` counter at entry so the diff between
+        // `expected` and `recorded` flags writer-side failures.
+        // Cheap (single BTreeMap lookup + saturating add) and
+        // safe to skip when the kind is not a recognized
+        // boundary (orchestration / performance / hook rows).
+        self.increment_boundary_expected(&entry.kind);
+        if entry.causal.is_none()
+            && let Ok(guard) = self.causal_context.lock()
+            && let Some(ctx) = guard.as_ref()
+        {
+            entry.causal = Some(ctx.clone());
+        }
         let Some(logger) = self.runtime_trace_logger.as_ref() else {
             return;
         };
         match logger.lock() {
-            Ok(mut guard) => guard.append(entry),
+            Ok(mut guard) => {
+                let kind_for_counter = entry.kind.clone();
+                guard.append(entry);
+                // Only bump `recorded` when the row actually
+                // landed on disk. `append` already flips the
+                // logger into `degraded` on write failure, but
+                // a no-op success would still be reflected
+                // through `recorded` so the per-row contract
+                // stays coherent. The logger's internal flush
+                // is the authoritative "did this make it to
+                // disk" signal — when degraded, future rows
+                // also become no-ops, so the diff surfaces
+                // naturally as the gap.
+                if !guard.is_degraded() {
+                    self.increment_boundary_recorded(&kind_for_counter);
+                }
+            }
             Err(err) => {
                 tracing::warn!(
                     target: "ralph_core::diagnostics",
@@ -1183,6 +1688,433 @@ impl DiagnosticsCollector {
                 );
             }
         }
+    }
+
+    /// Plan 2026-08-26-1104 Unit 2: record the loop identity used
+    /// to stamp every subsequent `runtime-trace.jsonl` row. The
+    /// runner calls this once at bootstrap (`iteration = 0`)
+    /// and again at every iteration boundary so `causal.iteration`
+    /// matches `RuntimeTraceEntry::iteration` row-for-row (S2.1).
+    /// Re-setting the value mid-run is a no-op replacement
+    /// (intentional: the identity may be resolved in stages, e.g.
+    /// the loop id might land a beat before the first iteration).
+    pub fn set_causal_context(&self, ctx: CausalContext) {
+        match self.causal_context.lock() {
+            Ok(mut guard) => {
+                *guard = Some(ctx);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    error = %err,
+                    "causal context mutex poisoned; identity not updated"
+                );
+            }
+        }
+    }
+
+    /// Plan 2026-08-26-1104 Unit 6: push a candidate line into
+    /// the bounded frozen evidence window ring buffer. Lines are
+    /// retained in arrival order; once it holds
+    /// [`DiagnosticsOptions::causal_evidence_window_capacity`]
+    /// entries the oldest line is dropped silently. When the
+    /// collector is disabled or the sidecar failed to open, this
+    /// method is a no-op — the loop runner can call it without a
+    /// feature flag. Used by the loop runner on every receipt
+    /// row (`contract_receipt` / `policy_receipt` /
+    /// `commit_receipt` / `recovery_receipt`) so the frozen
+    /// window always reflects the most recent evidence.
+    pub fn push_evidence_window_line(&self, line: serde_json::Value) {
+        let Some(writer) = self.evidence_window_writer.as_ref() else {
+            return;
+        };
+        match writer.lock() {
+            Ok(mut guard) => {
+                guard.push(line);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    error = %err,
+                    "evidence-window writer mutex poisoned; line dropped",
+                );
+            }
+        }
+    }
+
+    /// Plan 2026-08-26-1104 Unit 6: flush the frozen evidence
+    /// window to `evidence-window.jsonl`. Called by the loop
+    /// runner at one of the five anomaly trigger kinds
+    /// (`watchdog_timeout` / `non_zero_exit` /
+    /// `precheck_exhausted` / `recovery_exhausted` /
+    /// `abnormal_activation_outcome`). The frozen file holds:
+    ///
+    /// 1. the [`AnomalyDescriptor`] as the first row;
+    /// 2. the buffered candidate rows in arrival order (at most
+    ///    `capacity` entries, oldest dropped on overflow);
+    /// 3. `post_trigger_lines` in caller-supplied order.
+    ///
+    /// When the collector is disabled or the sidecar failed to
+    /// open, this method is a no-op (returns `Ok(())`). I/O
+    /// failures degrade the writer (subsequent flushes become
+    /// silent no-ops) and emit one `tracing::warn!` naming the
+    /// failure — the orchestration main path is never affected.
+    pub fn flush_evidence_window(
+        &self,
+        anomaly: AnomalyDescriptor,
+        post_trigger_lines: Vec<serde_json::Value>,
+    ) -> std::io::Result<()> {
+        let Some(writer) = self.evidence_window_writer.as_ref() else {
+            return Ok(());
+        };
+        let mut guard = writer.lock().map_err(|err| {
+            std::io::Error::other(format!(
+                "evidence-window writer mutex poisoned: {err}"
+            ))
+        })?;
+        guard.flush(anomaly, post_trigger_lines)
+    }
+
+    /// Plan 2026-08-26-1104 Unit 2: emit the **single**
+    /// `kind=contract_receipt` row for this session. The receipt
+    /// carries `contract_digest` / `terminal_topics_digest` /
+    /// `hats_digest` / `preset_label` (S2.2) so the attribution
+    /// engine (U8) and the contract-stability test (S2.3) can
+    /// join the receipt back to a config snapshot.
+    ///
+    /// Idempotent: subsequent calls are no-ops even if the
+    /// caller hands in different `fields`, because the spec
+    /// mandates exactly one row per session (S2.2) and a second
+    /// row would silently inflate the diagnostic-receipt count.
+    pub fn emit_contract_receipt(&self, fields: serde_json::Value) {
+        let already = match self.contract_receipt_emitted.lock() {
+            Ok(g) => *g,
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    error = %err,
+                    "contract_receipt latch mutex poisoned; receipt dropped"
+                );
+                return;
+            }
+        };
+        if already {
+            return;
+        }
+        let entry = RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Decision)
+            .with_kind("contract_receipt")
+            .with_fields(fields.clone());
+        self.log_runtime_trace(entry);
+        // Plan 2026-08-26-1104 U3: cache the contract_digest so
+        // every subsequent policy / commit / recovery receipt
+        // (U3-U5) can carry the matching `contract_digest` field
+        // without re-deriving it from config. The `contract_receipt`
+        // payload is the SSOT for the digest: `compute_contract_digest`
+        // returns it as the first field of the JSON object it builds.
+        if let Some(digest_value) = fields.get("contract_digest")
+            && let Some(digest_str) = digest_value.as_str()
+            && let Ok(mut guard) = self.cached_contract_digest.lock()
+        {
+            *guard = Some(digest_str.to_string());
+        }
+        // Flip the latch even when the underlying logger was
+        // disabled / degraded so a later re-emit (e.g. on a
+        // re-bound resume run sharing the same collector)
+        // cannot double-write.
+        if let Ok(mut guard) = self.contract_receipt_emitted.lock() {
+            *guard = true;
+        }
+    }
+
+    /// Plan 2026-08-26-1104 Unit 3: emit one
+    /// `kind=policy_receipt` row per event-level policy / origin
+    /// decision so the attribution engine (U8) and the diagnostic
+    /// reconciler can join the per-event decision stream back to
+    /// the session's `contract_receipt` row.
+    ///
+    /// **Wire shape (S3.1–S3.4)**:
+    ///
+    /// | `fields` key        | Accept | Reject | Source                          |
+    /// |---------------------|--------|--------|---------------------------------|
+    /// | `decision`          | "accept" | "reject" | `decision` arg              |
+    /// | `rule_refs`         | ✅     | ✅     | `rule_refs` arg (slice of stable rule ids) |
+    /// | `event_digest`      | ✅     | ✅     | SHA-256 hex prefix of `event_payload` (or stable hash of `(topic, hat, reason_code)` if payload absent) |
+    /// | `topic`             | ✅     | ✅     | mirrored onto `RuntimeTraceEntry.topic` |
+    /// | `hat`               | ✅     | ✅     | mirrored onto `RuntimeTraceEntry.hat` |
+    /// | `contract_digest`   | ✅     | ✅     | cache populated by [`Self::emit_contract_receipt`]; `None` when no contract receipt has been emitted yet |
+    /// | `reason_code`       | ❌     | ✅     | stable machine-readable code (e.g. `missing_required_field`, `origin:missing_field`) |
+    /// | `retry_key`         | ❌     | ✅     | `hat:topic:reason_code` to reconcile with `.ralph/recovery.jsonl` RejectionRecord rows (S3.2) |
+    ///
+    /// The row carries **no full event payload** — only digests /
+    /// truncated summaries. Per-field bytes are capped to
+    /// `MAX_SIDECAR_FIELD_BYTES` at the writer boundary (S3.4).
+    ///
+    /// Caller pattern: the unified validation pipeline emits one
+    /// `emit_policy_receipt(decision=Reject, ...)` per rejection
+    /// and one `emit_policy_receipt(decision=Accept, ...)` per
+    /// event that survives the pipeline. Origin guard rejections
+    /// route through this method too (rule_refs carries the
+    /// `origin_guard` rule id).
+    pub fn emit_policy_receipt(
+        &self,
+        decision: PolicyReceiptDecision,
+        topic: impl Into<String>,
+        hat: Option<&str>,
+        rule_refs: &[&str],
+        reason_code: Option<&str>,
+        event_payload: Option<&serde_json::Value>,
+    ) {
+        let topic = topic.into();
+        let hat_owned = hat.map(str::to_string);
+        let event_digest =
+            compute_event_digest(event_payload, &topic, hat_owned.as_deref(), reason_code);
+        let contract_digest = self
+            .cached_contract_digest
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+
+        let mut fields_map = serde_json::Map::new();
+        fields_map.insert(
+            "decision".to_string(),
+            serde_json::Value::String(decision.as_str().to_string()),
+        );
+        fields_map.insert(
+            "rule_refs".to_string(),
+            serde_json::Value::Array(
+                rule_refs
+                    .iter()
+                    .map(|s| serde_json::Value::String((*s).to_string()))
+                    .collect(),
+            ),
+        );
+        fields_map.insert(
+            "event_digest".to_string(),
+            serde_json::Value::String(event_digest),
+        );
+        fields_map.insert(
+            "topic".to_string(),
+            serde_json::Value::String(topic.clone()),
+        );
+        if let Some(hat) = hat_owned.as_deref() {
+            fields_map.insert(
+                "hat".to_string(),
+                serde_json::Value::String(hat.to_string()),
+            );
+        }
+        if let Some(digest) = contract_digest {
+            fields_map.insert(
+                "contract_digest".to_string(),
+                serde_json::Value::String(digest),
+            );
+        }
+        if let Some(code) = reason_code {
+            fields_map.insert(
+                "reason_code".to_string(),
+                serde_json::Value::String(code.to_string()),
+            );
+            // retry_key mirrors `RejectionRecord::retry_key` so the
+            // attribution engine can reconcile policy_receipt rows
+            // against `.ralph/recovery.jsonl` rows by string match
+            // (S3.2).
+            let hat_for_key = hat_owned.as_deref().unwrap_or("unknown");
+            fields_map.insert(
+                "retry_key".to_string(),
+                serde_json::Value::String(format!("{}:{}:{}", hat_for_key, topic, code)),
+            );
+        }
+
+        let mut entry = RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Decision)
+            .with_kind("policy_receipt")
+            .with_fields(serde_json::Value::Object(fields_map));
+        if !topic.is_empty() {
+            entry = entry.with_topic(topic);
+        }
+        if let Some(hat) = hat_owned {
+            entry = entry.with_hat(hat);
+        }
+        self.log_runtime_trace(entry);
+    }
+
+    /// Plan 2026-08-26-1104 Unit 4: emit one
+    /// `kind=commit_receipt` row per StateMachine projection commit
+    /// so the attribution engine (U8) can join the durable outbox
+    /// row back to a confirmation row (S4.1–S4.3).
+    ///
+    /// **Wire shape (S4.1–S4.3)**:
+    ///
+    /// | `fields` key        | Committed | RolledBack | Source                          |
+    /// |---------------------|-----------|------------|----------------------------------|
+    /// | `commit_status`     | "committed" | "rolled_back" | `status` arg                 |
+    /// | `transition_id`     | ✅        | ✅         | `OutboxEntry.transition_id` (Committed) or `StateMachineTransitionDelta.transition_id` (RolledBack); the same id lives on the corresponding outbox row so the engine can join by string match |
+    /// | `topic`             | ✅        | ✅         | mirrored onto `RuntimeTraceEntry.topic` |
+    /// | `contract_digest`   | ✅        | ✅         | cache populated by [`Self::emit_contract_receipt`]; absent when no contract receipt has been emitted yet |
+    /// | `failure_reason`    | ❌        | ✅         | truncated summary of the rollback error (S4.2); bounded to `MAX_SIDECAR_FIELD_BYTES` |
+    ///
+    /// The row carries **no full event payload or projection
+    /// delta** — only the join id, the commit status, and (on
+    /// rollback) a bounded failure summary. Per-field bytes are
+    /// capped at `MAX_SIDECAR_FIELD_BYTES` at the writer boundary
+    /// (S4.3 / R12).
+    ///
+    /// Caller pattern: `commit_state_machine_projection` invokes
+    /// this once on `Ok(Some(outbox_entry))` with `Committed` and
+    /// once on `Err(TransitionError::CommitFailed { source })` with
+    /// `RolledBack` + `source` so the receipt stream mirrors the
+    /// commit success/failure outcome row-for-row.
+    pub fn emit_commit_receipt(
+        &self,
+        status: CommitReceiptStatus,
+        transition_id: &str,
+        topic: impl Into<String>,
+        failure_reason: Option<&str>,
+    ) {
+        let topic = topic.into();
+        let contract_digest = self
+            .cached_contract_digest
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+
+        let mut fields_map = serde_json::Map::new();
+        fields_map.insert(
+            "commit_status".to_string(),
+            serde_json::Value::String(status.as_str().to_string()),
+        );
+        fields_map.insert(
+            "transition_id".to_string(),
+            serde_json::Value::String(transition_id.to_string()),
+        );
+        fields_map.insert(
+            "topic".to_string(),
+            serde_json::Value::String(topic.clone()),
+        );
+        if let Some(digest) = contract_digest {
+            fields_map.insert(
+                "contract_digest".to_string(),
+                serde_json::Value::String(digest),
+            );
+        }
+        if let Some(reason) = failure_reason {
+            // Bound failure_reason to MAX_SIDECAR_FIELD_BYTES so a
+            // runaway upstream error string cannot push the row
+            // past the 8 KiB sidecar cap (S4.3 / R12).
+            let bounded = cap_string_field(reason, "commit_receipt.failure_reason");
+            fields_map.insert(
+                "failure_reason".to_string(),
+                serde_json::Value::String(bounded),
+            );
+        }
+
+        let mut entry = RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Decision)
+            .with_kind("commit_receipt")
+            .with_fields(serde_json::Value::Object(fields_map));
+        if !topic.is_empty() {
+            entry = entry.with_topic(topic);
+        }
+        self.log_runtime_trace(entry);
+    }
+
+    /// Plan 2026-08-26-1104 Unit 5: append a
+    /// `kind=recovery_receipt` row per recovery dispatch
+    /// decision so the attribution engine (U8) can join the
+    /// precheck retry bookkeeping back to the terminal event
+    /// that consumed it (S5.1–S5.3).
+    ///
+    /// **Wire shape (S5.1–S5.3)**:
+    ///
+    /// | `fields` key             | Resume | Exhausted | Correction | Source                          |
+    /// |--------------------------|---------|-----------|------------|----------------------------------|
+    /// | `action`                 | "resume" | "exhausted" | "correction" | `action` arg                 |
+    /// | `retry_key`              | ✅      | ✅        | ✅         | caller (mirror of precheck runner / rejection envelope) |
+    /// | `attempt`                | ✅      | ✅        | ❌         | the rejection count at dispatch time |
+    /// | `budget_remaining`       | ✅      | ✅        | ❌         | retry_budget − attempt (clamped to 0) |
+    /// | `target_hat`             | ✅      | ❌        | ❌         | the upstream hat receiving the resume |
+    /// | `reason_code`            | ✅      | ✅        | ✅         | stable machine-readable reason string (bounded to `MAX_SIDECAR_FIELD_BYTES`) |
+    /// | `rejection_digest_count` | ❌      | ❌        | ✅         | count read from the unified ledger snapshot |
+    ///
+    /// The `retry_key` for `Exhausted` rows is constructed by the
+    /// caller to match the
+    /// `plan.blocked{kind=precheck_exhausted}` payload's
+    /// `(gate, topic, kind)` triple so the engine can join on
+    /// string match (S5.2). For `Correction` rows the `retry_key`
+    /// mirrors the unified ledger key so the engine can correlate
+    /// the correction budget against the terminal exhaust.
+    ///
+    /// No full event payload is copied onto the wire; per-field
+    /// bytes are capped at `MAX_SIDECAR_FIELD_BYTES` at the writer
+    /// boundary (R12). No-op when the runtime-trace writer is not
+    /// instantiated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_recovery_receipt(
+        &self,
+        action: RecoveryReceiptAction,
+        topic: impl Into<String>,
+        hat: impl Into<String>,
+        retry_key: impl Into<String>,
+        attempt: u32,
+        budget_remaining: u32,
+        target_hat: Option<&str>,
+        reason_code: Option<&str>,
+    ) {
+        let topic = topic.into();
+        let hat = hat.into();
+        let retry_key = retry_key.into();
+
+        let mut fields_map = serde_json::Map::new();
+        fields_map.insert(
+            "action".to_string(),
+            serde_json::Value::String(action.as_str().to_string()),
+        );
+        fields_map.insert(
+            "retry_key".to_string(),
+            serde_json::Value::String(retry_key),
+        );
+        match action {
+            RecoveryReceiptAction::Resume | RecoveryReceiptAction::Exhausted => {
+                fields_map.insert(
+                    "attempt".to_string(),
+                    serde_json::Value::Number(attempt.into()),
+                );
+                fields_map.insert(
+                    "budget_remaining".to_string(),
+                    serde_json::Value::Number(budget_remaining.into()),
+                );
+            }
+            RecoveryReceiptAction::Correction => {
+                // Correction receipts surface the per-key
+                // `rejection_digest` count so the engine can
+                // detect when the budget is nearing exhaustion.
+                fields_map.insert(
+                    "rejection_digest_count".to_string(),
+                    serde_json::Value::Number(attempt.into()),
+                );
+            }
+        }
+        if let Some(target) = target_hat {
+            fields_map.insert(
+                "target_hat".to_string(),
+                serde_json::Value::String(target.to_string()),
+            );
+        }
+        if let Some(code) = reason_code {
+            let bounded = cap_string_field(code, "recovery_receipt.reason_code");
+            fields_map.insert(
+                "reason_code".to_string(),
+                serde_json::Value::String(bounded),
+            );
+        }
+
+        let mut entry = RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Decision)
+            .with_kind("recovery_receipt")
+            .with_fields(serde_json::Value::Object(fields_map));
+        if !topic.is_empty() {
+            entry = entry.with_topic(topic);
+        }
+        if !hat.is_empty() {
+            entry = entry.with_hat(hat);
+        }
+        self.log_runtime_trace(entry);
     }
 
     /// Plan 2026-08-12-001 Unit 3: append a feedback lifecycle
@@ -1755,6 +2687,11 @@ mod tests {
             trace_only: true,
             session_dir: Some(preset_dir.clone()),
             workspace_root: None,
+            // U01b: causal_evidence defaults to `false` so the
+            // trace_only row stays pinned to its historical shape
+            // (no loop-level loggers, session dir only).
+            causal_evidence: false,
+            causal_evidence_window_capacity: None,
         };
         let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
         assert!(collector.is_trace_only());

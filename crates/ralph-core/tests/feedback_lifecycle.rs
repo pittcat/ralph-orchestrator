@@ -63,6 +63,12 @@ fn enabled_collector_creates_feedback_file() {
         trace_only: false,
         session_dir: None,
         workspace_root: None,
+        // U01b: causal_evidence defaults to `false` so this struct
+        // literal stays equivalent to the pre-U01b minimal-session
+        // shape (assertions below pin the historical logger set).
+        causal_evidence: false,
+
+        causal_evidence_window_capacity: None,
     };
     let collector = DiagnosticsCollector::with_options(tmp.path(), &opts).expect("collector");
     collector.log_feedback(
