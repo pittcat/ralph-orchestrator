@@ -1,7 +1,7 @@
 //! EventLoop implementation region 8.
 
 use super::*;
-use crate::diagnostics::{RuntimeTraceEntry, RuntimeTracePhase};
+use crate::diagnostics::{CausalContext, RuntimeTraceEntry, RuntimeTracePhase};
 
 impl EventLoop {
     /// Determines which hats should be active based on pending events.
@@ -910,6 +910,20 @@ impl EventLoop {
             RuntimeTracePhase::Activation,
         )
         .with_hat(hat_id.to_string());
+        // U02 (plan 2026-08-26-1104): re-stamp the per-iteration
+        // correlation identity so every Activation / Batch /
+        // Rejected row this iteration carries the same
+        // `causal.iteration` value. The loop id is best-effort:
+        // primary (worktree-less) loops have no
+        // `loop_context` and the marker fallback is empty until
+        // the CLI stamps the events file; we still stamp
+        // `iteration` so the receipt reader can correlate rows
+        // even when the loop id lands later in the session.
+        let loop_id = self.current_loop_id().unwrap_or_default();
+        self.diagnostics.set_causal_context(CausalContext {
+            loop_id,
+            iteration: self.state.iteration as u64,
+        });
         self.diagnostics.log_runtime_trace(trace_entry);
 
         // Track failures

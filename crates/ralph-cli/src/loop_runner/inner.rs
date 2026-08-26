@@ -683,6 +683,26 @@ pub(super) async fn run_loop_impl_inner(
             Some(execution_capability.to_string()),
             code_baseline,
         );
+
+        // U02 (plan 2026-08-26-1104): stamp the loop identity onto
+        // every subsequent `runtime-trace.jsonl` row and write the
+        // **single** `kind=contract_receipt` row so the attribution
+        // engine (U8) and the run-diagnosis skill (U10) can join
+        // the receipt back to a config snapshot. Both helpers are
+        // idempotent / no-ops when the collector is disabled, so
+        // this stays best-effort and never affects the business path.
+        let causal_ctx = ralph_core::diagnostics::CausalContext {
+            loop_id: loop_id.clone(),
+            iteration: 0,
+        };
+        diagnostics.set_causal_context(causal_ctx);
+        let preset_label_owned = hats_source_label.clone().unwrap_or_default();
+        let contract_fields = ralph_core::diagnostics::compute_contract_digest(
+            config.event_loop.event_policy.as_ref(),
+            &config.hats,
+            &preset_label_owned,
+        );
+        diagnostics.emit_contract_receipt(contract_fields);
     }
 
     let state_machine_enabled = config
