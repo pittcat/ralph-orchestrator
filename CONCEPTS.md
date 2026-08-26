@@ -28,6 +28,18 @@ A hat modified tracked files despite its read-only or tool-restriction contract.
 
 一次 run 为 `run-diagnosis` 准备的自描述证据集合：包含 run 身份、结构化 trace、反馈生命周期、原始产物索引、完整性状态和可定位的证据引用。它是诊断 skill 的输入组织层，不改变业务运行事实或终态。
 
+### causal flight recorder
+
+Ralph 的有界因果证据记录机制：正常路径只保留关键状态与决策摘要，异常发生时冻结前后窗口，并用稳定关联身份串联 activation、事件决策、状态提交、恢复和 backend 结果。它不保存完整 prompt、完整模型输出或无界 tool stream。
+
+### decision receipt
+
+关键运行决策的可复核记录：引用当时有效的契约与输入事实，声明采用的规则、决策结果、稳定原因和前后状态证据。诊断依靠 receipt 回答“为什么作出这个决定”，而不是从自由文本日志猜测。
+
+### diagnostic_capture_contract
+
+诊断采集契约责任域：当 runtime 应记录的关键因果边界缺失，且 coverage 证据能够证明该缺口阻断业务根因判定时，诊断把唯一根因归到此域，并将缺失采集点作为修复位置。
+
 ### feedback lifecycle
 
 一个运行问题从发现、证据收集、处理动作、验证结果到最终状态的可追踪过程。生命周期用于区分观察到的问题、已经采取的恢复动作、验证成功、重复失败、升级和未决证据，不等同于业务事件本身。
