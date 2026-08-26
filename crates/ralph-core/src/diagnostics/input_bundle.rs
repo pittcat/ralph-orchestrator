@@ -149,7 +149,216 @@ pub struct CodeBaseline {
 /// changes (e.g. dropping a field). Additive changes keep the
 /// version and rely on `Option` defaults to keep old consumers
 /// working.
-pub const DIAGNOSIS_INPUT_SCHEMA_VERSION: &str = "run-diagnosis-input/v1";
+///
+/// Plan 2026-08-26-1104 Unit 7 (U07): v2 introduces the
+/// `boundary_coverage` segment listing the eight causal
+/// boundaries (`effective_contract` / `activation` /
+/// `backend_outcome` / `event_candidate` / `policy_decision` /
+/// `state_commit` / `recovery_action` / `termination`) together
+/// with `expected` / `recorded` counters and a per-row `status`.
+/// The on-disk format is authoritative; v1 readers must surface
+/// the absence as `Legacy` and never invent boundary rows.
+pub const DIAGNOSIS_INPUT_SCHEMA_VERSION: &str = "run-diagnosis-input/v2";
+
+// ============================================================================
+// Plan 2026-08-26-1104 Unit 7 (U07): 8-boundary coverage manifest v2.
+// The boundary table below is the single source of truth for the
+// categorization: every receipt emitter that lands a row in
+// `runtime-trace.jsonl` must map to exactly one boundary here.
+// Adding a ninth category is a breaking change to the manifest
+// schema and must go through the same plan-driven review as adding
+// a new receipt kind.
+// ============================================================================
+
+/// The eight causal boundaries the diagnostics pipeline must
+/// produce evidence for, per U07 §6 / development-plan §6.
+///
+/// The order matters: `CausalBoundary::ALL` is the canonical
+/// iteration order for serializing the manifest, and the variant
+/// discriminant (plus the `snake_case` rename) defines the
+/// `kind -> boundary` mapping consumed by
+/// [`crate::diagnostics::DiagnosticsCollector`].
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CausalBoundary {
+    /// `kind=contract_receipt` — the bootstrap effective contract
+    /// (`emit_contract_receipt`, U2).
+    #[default]
+    EffectiveContract,
+    /// `kind=activation` — hat activation events recorded by the
+    /// loop runner.
+    Activation,
+    /// `kind=hat_activation_outcome` — backend hat activation
+    /// outcomes (success / failure / merge_failed / unreadable).
+    BackendOutcome,
+    /// `kind=event_batch_accepted` — the event-batch receipt that
+    /// names the topics accepted by the unified validation
+    /// pipeline per iteration.
+    EventCandidate,
+    /// `kind=policy_receipt` — per-event accept/reject decisions
+    /// (`emit_policy_receipt`, U3).
+    PolicyDecision,
+    /// `kind=commit_receipt` — StateMachine projection commit /
+    /// rollback confirmations (`emit_commit_receipt`, U4).
+    StateCommit,
+    /// `kind=recovery_receipt` — recovery decision receipts
+    /// (`emit_recovery_receipt`, U5).
+    RecoveryAction,
+    /// `kind=termination` — final termination event recorded by
+    /// the loop runner.
+    Termination,
+}
+
+impl CausalBoundary {
+    /// All eight boundaries in canonical iteration order.
+    pub const ALL: [CausalBoundary; 8] = [
+        CausalBoundary::EffectiveContract,
+        CausalBoundary::Activation,
+        CausalBoundary::BackendOutcome,
+        CausalBoundary::EventCandidate,
+        CausalBoundary::PolicyDecision,
+        CausalBoundary::StateCommit,
+        CausalBoundary::RecoveryAction,
+        CausalBoundary::Termination,
+    ];
+
+    /// Stable `snake_case` identifier; matches the on-disk rename
+    /// and the `kind` prefix used by the receipt emitters.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CausalBoundary::EffectiveContract => "effective_contract",
+            CausalBoundary::Activation => "activation",
+            CausalBoundary::BackendOutcome => "backend_outcome",
+            CausalBoundary::EventCandidate => "event_candidate",
+            CausalBoundary::PolicyDecision => "policy_decision",
+            CausalBoundary::StateCommit => "state_commit",
+            CausalBoundary::RecoveryAction => "recovery_action",
+            CausalBoundary::Termination => "termination",
+        }
+    }
+
+    /// Iterator over all eight boundaries in canonical order.
+    pub fn all() -> impl ExactSizeIterator<Item = CausalBoundary> {
+        Self::ALL.into_iter()
+    }
+}
+
+/// Map a `RuntimeTraceEntry::kind` value to its causal boundary.
+///
+/// Receipt kinds currently produced by the diagnostics pipeline
+/// (`contract_receipt` / `policy_receipt` / `commit_receipt` /
+/// `recovery_receipt`) and the four coverage-only categories
+/// (`activation` / `hat_activation_outcome` / `event_batch_accepted`
+/// / `termination`) are recognized. Anything else returns `None`
+/// so the counter path stays a no-op for unrelated trace rows
+/// (`log_runtime_trace` is also used by orchestration /
+/// performance / hook runs loggers that are NOT boundary rows).
+pub fn kind_to_boundary(kind: &str) -> Option<CausalBoundary> {
+    match kind {
+        "contract_receipt" => Some(CausalBoundary::EffectiveContract),
+        "activation" => Some(CausalBoundary::Activation),
+        "hat_activation_outcome" => Some(CausalBoundary::BackendOutcome),
+        "event_batch_accepted" => Some(CausalBoundary::EventCandidate),
+        "policy_receipt" => Some(CausalBoundary::PolicyDecision),
+        "commit_receipt" => Some(CausalBoundary::StateCommit),
+        "recovery_receipt" => Some(CausalBoundary::RecoveryAction),
+        "termination" => Some(CausalBoundary::Termination),
+        _ => None,
+    }
+}
+
+/// Counter pair for one boundary. `expected` is bumped at the
+/// entry of the recording method; `recorded` is bumped after the
+/// row is successfully appended to `runtime-trace.jsonl`. When
+/// the underlying logger is disabled or degraded, `expected`
+/// still bumps but `recorded` stops increasing, which surfaces
+/// as a `BoundaryCoverageStatus::Gap` in the manifest.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundaryCounter {
+    #[serde(default)]
+    pub expected: u64,
+    #[serde(default)]
+    pub recorded: u64,
+}
+
+impl BoundaryCounter {
+    /// Returns `true` when the boundary was attempted at least
+    /// once and every attempt was recorded successfully.
+    pub fn is_covered(&self) -> bool {
+        self.expected == self.recorded
+    }
+}
+
+/// Per-row status of the boundary coverage.
+///
+/// `Covered` means `expected == recorded` (zero attempts count
+/// as covered so a session with no events still serializes eight
+/// covered rows; the reporter can detect "no events" by looking
+/// at `expected == 0 && recorded == 0` rather than absence).
+/// `Gap` means `expected > recorded`; the row also carries a
+/// reason describing the underlying writer failure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoundaryCoverageStatus {
+    #[default]
+    Covered,
+    Gap,
+}
+
+/// One row of the `boundary_coverage` manifest segment. Always
+/// emitted (the eight rows are unconditional; the receiver can
+/// always iterate without null checks).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundaryCoverageEntry {
+    pub boundary: CausalBoundary,
+    #[serde(default)]
+    pub expected: u64,
+    #[serde(default)]
+    pub recorded: u64,
+    #[serde(default)]
+    pub status: BoundaryCoverageStatus,
+    /// Populated only when `status == Gap`; explains the
+    /// underlying writer failure (e.g. "logger write failed",
+    /// "commit_receipt missing"). `None` for covered rows so the
+    /// serialized form stays compact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl BoundaryCoverageEntry {
+    /// Build an entry from a snapshot counter. `reason` is the
+    /// precomputed reason string for `Gap` rows; pass `None` when
+    /// the caller has no specific failure to surface.
+    pub fn new(
+        boundary: CausalBoundary,
+        counter: &BoundaryCounter,
+        reason: Option<String>,
+    ) -> Self {
+        let status = if counter.is_covered() {
+            BoundaryCoverageStatus::Covered
+        } else {
+            BoundaryCoverageStatus::Gap
+        };
+        // Drop the reason on covered rows to keep the serialized
+        // form compact (skip_serializing_if on the field handles
+        // `None`, but we also normalize empty strings to `None`
+        // for symmetry with callers that pass `Some("".into())`).
+        let reason = if status == BoundaryCoverageStatus::Gap {
+            reason.filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+        Self {
+            boundary,
+            expected: counter.expected,
+            recorded: counter.recorded,
+            status,
+            reason,
+        }
+    }
+}
 
 /// Self-describing manifest written to
 /// `<session_dir>/diagnosis-input.json`.
@@ -169,6 +378,16 @@ pub struct DiagnosisInputBundle {
     /// Per-artifact integrity and status.
     #[serde(default)]
     pub artifacts: Vec<ArtifactIntegrity>,
+    /// Plan 2026-08-26-1104 U07: per-boundary coverage evidence.
+    /// Always serialized as a (possibly empty) array so legacy
+    /// v1 manifests that omit the field deserialize as `[]`. The
+    /// reader distinguishes "v1 / legacy" by `schema_version`,
+    /// not by the presence of the array — the absence in v1 is
+    /// normal, but the array IS populated for v2 even when the
+    /// producer never fired any boundary (the eight canonical
+    /// rows are always present with `expected=0, recorded=0`).
+    #[serde(default)]
+    pub boundary_coverage: Vec<BoundaryCoverageEntry>,
     /// UTC RFC 3339 timestamp the manifest was first created.
     pub created_at: String,
     /// UTC RFC 3339 timestamp the manifest was last updated.
@@ -201,6 +420,7 @@ impl DiagnosisInputBundle {
             code_baseline: CodeBaseline::default(),
             execution_capabilities: Vec::new(),
             artifacts: Vec::new(),
+            boundary_coverage: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
             write_blocked: false,
@@ -246,17 +466,27 @@ impl DiagnosisInputBundle {
     }
 
     /// Transition `Present → Finalized`. The caller passes the
-    /// final artifact integrity list and execution capability
-    /// tags. The returned bundle is what the reporter reads.
+    /// final artifact integrity list, execution capability
+    /// tags, and the snapshot of boundary coverage counters.
+    /// The returned bundle is what the reporter reads.
+    ///
+    /// `boundary_coverage` is the snapshot taken by
+    /// [`crate::diagnostics::DiagnosticsCollector::snapshot_boundary_coverage`]
+    /// (or, in tests, a hand-built vector). When the underlying
+    /// logger was degraded mid-run, the caller should have
+    /// populated the `reason` field on every `Gap` row before
+    /// passing the vector here.
     pub fn with_finalized(
         &self,
         artifacts: Vec<ArtifactIntegrity>,
         execution_capabilities: Vec<String>,
+        boundary_coverage: Vec<BoundaryCoverageEntry>,
     ) -> Self {
         let mut next = self.clone();
         next.manifest_status = ManifestStatus::Finalized;
         next.artifacts = artifacts;
         next.execution_capabilities = execution_capabilities;
+        next.boundary_coverage = boundary_coverage;
         next.updated_at = chrono::Utc::now().to_rfc3339();
         next
     }
