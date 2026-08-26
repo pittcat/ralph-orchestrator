@@ -115,6 +115,8 @@ fn collector_disables_input_bundle_when_initial_write_fails() {
         // probe path stays pinned to the pre-U01b minimal-session
         // shape (test asserts `Ok(None)` for the unwritable probe).
         causal_evidence: false,
+
+        causal_evidence_window_capacity: None,
     };
     let collector =
         DiagnosticsCollector::with_options(tmp.path(), &opts).expect("with_options succeeds");

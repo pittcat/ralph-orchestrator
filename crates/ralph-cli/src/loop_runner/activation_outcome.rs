@@ -419,6 +419,40 @@ pub fn log_activation_outcome_with_diagnostics(
         entry = entry.with_source_ref(reference.clone());
     }
     diagnostics.log_runtime_trace(entry);
+
+    // Plan 2026-08-26-1104 U06: when the activation outcome is
+    // abnormal (the channel could not be read or merged), flush
+    // the bounded frozen evidence window so the boundary-coverage
+    // reader (U7) and the attribution engine (U8) see the same
+    // activation rows that preceeded the failure. Normal
+    // statuses (`merged`, `empty`, `missing`, `interrupted`) do
+    // not trigger the flush — those are expected and the
+    // collector will keep accumulating evidence for a future
+    // anomaly.
+    if matches!(
+        snapshot.status,
+        ActivationOutcomeStatus::MergeFailed | ActivationOutcomeStatus::Unreadable,
+    ) && let Err(err) = diagnostics.flush_evidence_window(
+        ralph_core::diagnostics::AnomalyDescriptor {
+            trigger_kind: ralph_core::diagnostics::trigger_kinds::ABNORMAL_ACTIVATION_OUTCOME
+                .to_string(),
+            ts: chrono::Utc::now().to_rfc3339(),
+            iteration,
+            details: Some(serde_json::json!({
+                "hat": hat,
+                "status": snapshot.status.as_str(),
+            })),
+        },
+        vec![],
+    )
+    {
+        warn!(
+            target: "ralph_cli::loop_runner",
+            iteration = iteration,
+            error = %err,
+            "failed to flush evidence-window on abnormal activation outcome",
+        );
+    }
 }
 
 /// Test-only compatibility helper for direct row-shape tests. Production

@@ -41,6 +41,8 @@ fn enabled_run_writes_input_bundle() {
         // session here stays byte-equivalent to the pre-U01b
         // `runtime_diagnosis_artifacts=true` shape.
         causal_evidence: false,
+
+        causal_evidence_window_capacity: None,
     };
     let collector = DiagnosticsCollector::with_options(base, &opts).expect("collector constructs");
     let session = collector
@@ -229,6 +231,8 @@ fn collector_update_and_finalize_round_trip() {
         // session here stays byte-equivalent to the pre-U01b
         // `runtime_diagnosis_artifacts=true` shape.
         causal_evidence: false,
+
+        causal_evidence_window_capacity: None,
     };
     let collector = DiagnosticsCollector::with_options(base, &opts).expect("collector");
     let session = collector.session_dir().unwrap().to_path_buf();

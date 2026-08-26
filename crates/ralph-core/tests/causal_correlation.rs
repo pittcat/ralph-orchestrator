@@ -51,6 +51,8 @@ fn causal_evidence_options(session_dir: &std::path::Path) -> DiagnosticsOptions 
         session_dir: Some(session_dir.to_path_buf()),
         workspace_root: None,
         causal_evidence: true,
+
+        causal_evidence_window_capacity: None,
     }
 }
 
