@@ -1165,16 +1165,19 @@ impl EventLoop {
         Ok(!has_pending)
     }
 
-    /// Reads the current loop ID from the marker file.
+    /// Returns the loop identity bound to this EventLoop.
     ///
-    /// Returns `None` if no marker exists or is empty, which means
-    /// task queries should be unfiltered (backwards compatible).
+    /// Worktree loops carry an immutable identity in their LoopContext.
+    /// Primary loops have no context identity and retain the marker fallback
+    /// because the primary loop id is assigned by the outer CLI runner.
     pub(super) fn current_loop_id(&self) -> Option<String> {
         self.loop_context
             .as_ref()
             .and_then(|ctx| {
-                let marker_path = ctx.ralph_dir().join("current-loop-id");
-                std::fs::read_to_string(&marker_path).ok()
+                ctx.loop_id().map(str::to_string).or_else(|| {
+                    let marker_path = ctx.ralph_dir().join("current-loop-id");
+                    std::fs::read_to_string(marker_path).ok()
+                })
             })
             .map(|id| id.trim().to_string())
             .filter(|id| !id.is_empty())

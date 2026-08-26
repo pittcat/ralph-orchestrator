@@ -1147,19 +1147,19 @@ pub fn load_flow_authority_current_step(
         let Some(step) = v.get("step").and_then(|s| s.as_str()) else {
             continue;
         };
-        // Plan 2026-07-31-001: when the caller passes a `loop_id`,
-        // skip entries that belong to a different loop. Entries
-        // without a `loop_id` field predate the stamp and are
-        // accepted unconditionally (legacy behaviour) — this lets
-        // pre-fix runs on the same workspace stay readable until
-        // the first new entry overwrites the file.
+        // Active loops must never consume an unstamped record. An
+        // unstamped tail has no ownership boundary and may have been
+        // written by another loop or by a partially initialized
+        // process. It remains observable in the ledger for diagnosis,
+        // but cannot become current authority.
         if let Some(active) = loop_id {
             let entry_loop = v.get("loop_id").and_then(|s| s.as_str());
-            if let Some(entry_loop) = entry_loop
-                && entry_loop != active
-            {
+            if entry_loop != Some(active) {
                 continue;
             }
+        }
+        if step.trim().is_empty() {
+            continue;
         }
         last = Some(step.to_string());
     }

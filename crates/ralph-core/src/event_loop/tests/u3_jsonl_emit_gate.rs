@@ -257,10 +257,18 @@ hats:
 "#;
     let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
     config.core.workspace_root = diagnostics_root.clone();
+    std::fs::create_dir_all(diagnostics_root.join(".ralph")).unwrap();
+    std::fs::write(
+        diagnostics_root.join(".ralph/current-loop-id"),
+        "u3-jsonl-flow-authority",
+    )
+    .unwrap();
     let diagnostics =
         crate::diagnostics::DiagnosticsCollector::with_enabled(&diagnostics_root, true)
             .expect("create diagnostics collector");
-    let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
+    let loop_context = crate::loop_context::LoopContext::primary(diagnostics_root.clone());
+    let mut event_loop = EventLoop::with_context_and_diagnostics(config, loop_context, diagnostics)
+        .expect("create event loop");
     event_loop.initialize("U3 jsonl flow-authority persistence");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 

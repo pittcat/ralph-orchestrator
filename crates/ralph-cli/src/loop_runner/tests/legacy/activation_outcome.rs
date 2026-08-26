@@ -215,7 +215,7 @@ fn u2_runner_path_helper_observes_empty_not_unreadable() {
     // Seed a zero-byte channel (the empty-after-activation case
     // that was previously misclassified as Unreadable when the
     // snapshot ran AFTER merge).
-    let _channel_path = seed_hat_channel(&ctx, "executor", "primary-empty", 1);
+    let channel_path = seed_hat_channel(&ctx, "executor", "primary-empty", 1);
 
     let target = ctx.workspace().join(".ralph/events-main.jsonl");
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -232,6 +232,7 @@ fn u2_runner_path_helper_observes_empty_not_unreadable() {
             false,
             None,
             "",
+            Some(&channel_path),
         );
 
     // Empty channel + merge ok (no-op for empty) → snapshot must

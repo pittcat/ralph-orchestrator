@@ -9,6 +9,7 @@
 //! making the helper public at the parent module level.
 
 use ralph_core::{EventLoop, LoopContext, RalphConfig};
+use std::path::Path;
 
 #[cfg(test)]
 #[allow(clippy::module_inception)]
@@ -215,6 +216,7 @@ pub mod runner_inner_test_api {
         state_machine_enabled: bool,
         event_loop: &EventLoop,
         interrupt_kind: &'static str,
+        owned_channel_path: Option<&Path>,
     ) {
         crate::loop_runner::entry::merge_isolated_channel_on_interrupt(
             ctx,
@@ -224,6 +226,7 @@ pub mod runner_inner_test_api {
             interrupt_kind,
             None,
             None,
+            owned_channel_path,
         )
     }
 }

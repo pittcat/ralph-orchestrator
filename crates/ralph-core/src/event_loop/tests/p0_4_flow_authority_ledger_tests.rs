@@ -146,7 +146,7 @@ fn load_filters_entries_by_loop_id() {
 }
 
 #[test]
-fn load_keeps_unstamped_entries_for_backward_compat() {
+fn load_ignores_unstamped_entries_for_active_loop() {
     let root = workspace_root("load_keeps_unstamped_entries_for_backward_compat");
     let path = root.join(".ralph/flow-authority.jsonl");
     std::fs::write(
@@ -157,10 +157,23 @@ fn load_keeps_unstamped_entries_for_backward_compat() {
     .unwrap();
     let got = load_flow_authority_current_step(&root, Some("loop-C"));
     assert_eq!(
-        got.as_deref(),
-        Some("review_wave"),
-        "unstamped entries must remain readable so pre-fix loops and tests don't break"
+        got, None,
+        "unstamped entries cannot become active authority"
     );
+}
+
+#[test]
+fn load_ignores_empty_step_for_active_loop() {
+    let root = workspace_root("load_ignores_empty_step_for_active_loop");
+    let path = root.join(".ralph/flow-authority.jsonl");
+    std::fs::write(
+        &path,
+        "{\"step\":\"development_loop\",\"topic\":\"exec.unit.done\",\"loop_id\":\"loop-A\"}\n\
+             {\"step\":\"\",\"topic\":\"build.start\",\"loop_id\":\"loop-A\"}\n",
+    )
+    .unwrap();
+    let got = load_flow_authority_current_step(&root, Some("loop-A"));
+    assert_eq!(got.as_deref(), Some("development_loop"));
 }
 
 #[test]

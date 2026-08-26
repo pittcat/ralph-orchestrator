@@ -627,6 +627,49 @@ impl EventLoop {
         }
     }
 
+    /// Publish the business fail-close transition after a terminal channel
+    /// stays empty beyond its bounded targeted recovery. The repair journal
+    /// remains the evidence record, while this derived topic keeps the live
+    /// workflow able to reach its reporter/blocked terminal path.
+    pub(super) fn publish_missing_terminal_fail_close(&mut self, payload: &str) -> bool {
+        let blocked_topic = derive_blocked_topic(&self.config);
+        let blocked = ralph_proto::Event::new(blocked_topic.clone(), payload)
+            .with_target(ralph_proto::HatId::new("ralph"));
+        let mut published = false;
+        if let Some(contract) = self.execution_contract.as_ref()
+            && let Some(ledger) = self.state.state_ledger.as_ref()
+        {
+            let loop_id = self.current_loop_id_for_contract();
+            let activation_id = format!("missing-terminal-fail-close:{}", self.state.iteration);
+            if let Err(error) = crate::event_loop::disposition::publish_synthetic(
+                &blocked,
+                crate::event_loop::disposition::Disposition::Recovery,
+                &loop_id,
+                &activation_id,
+                &contract.contract_digest,
+                ledger,
+                &mut self.bus,
+            ) {
+                tracing::warn!(%error, "missing-terminal fail-close transition could not be committed");
+            } else {
+                published = true;
+            }
+        } else {
+            self.bus.publish(blocked);
+            published = true;
+        }
+        if !published {
+            return false;
+        }
+        if let Some(next) =
+            resolve_escape_step(&self.config, &self.current_plan_step, &blocked_topic)
+        {
+            self.current_plan_step = next;
+        }
+        self.append_flow_authority_snapshot(&blocked_topic);
+        true
+    }
+
     /// U10 (2026-06-27-002 plan completion): when the
     /// dispatcher accepts a terminal emit
     /// (`LOOP_COMPLETE` by default), record the
@@ -858,9 +901,15 @@ impl EventLoop {
         // synchronised with the ledger — the stamp makes the
         // ledger partitionable so each loop sees only its own
         // authoritative step transitions.
-        if let Some(loop_id) = self.current_loop_id() {
-            entry.insert("loop_id".to_string(), serde_json::Value::String(loop_id));
-        }
+        let Some(loop_id) = self.current_loop_id() else {
+            tracing::warn!(
+                workspace = %self.config.core.workspace_root.display(),
+                topic,
+                "skipping flow-authority snapshot without an active loop id"
+            );
+            return;
+        };
+        entry.insert("loop_id".to_string(), serde_json::Value::String(loop_id));
         let line = serde_json::Value::Object(entry).to_string();
         let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)

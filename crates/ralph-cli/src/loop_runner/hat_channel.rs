@@ -10,6 +10,9 @@ use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static FAILED_CHANNEL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Prepare a per-hat write channel for the current activation.
 ///
@@ -58,19 +61,98 @@ pub fn prepare_hat_channel(
 /// from leaking into `triggered` (e.g. `review.dimension.ready` being tagged
 /// with `shipper` instead of `dimension-reviewer`).
 /// The channel file and its marker are removed after a successful merge.
+#[allow(dead_code)] // Kept as the marker-based compatibility entry point for callers/tests.
 pub fn merge_hat_channel(
     ctx: &LoopContext,
     target_file: &Path,
     authoritative_hat: &str,
     config: Option<&RalphConfig>,
 ) -> Result<()> {
-    let Some(channel_path) = crate::loop_runner::paths::resolve_hat_channel_events_path(ctx) else {
+    let channel_path = crate::loop_runner::paths::resolve_hat_channel_events_path(ctx);
+    merge_hat_channel_at_path_impl(
+        ctx,
+        target_file,
+        authoritative_hat,
+        config,
+        channel_path.as_deref(),
+        true,
+    )
+}
+
+/// Merge a channel whose ownership was captured when the activation started.
+/// The marker remains a child-process compatibility mechanism, but it must not
+/// be re-read to decide which channel a completed activation is allowed to
+/// merge. This prevents marker mutation or cleanup races from redirecting an
+/// activation to another channel.
+pub fn merge_hat_channel_at_path(
+    ctx: &LoopContext,
+    target_file: &Path,
+    authoritative_hat: &str,
+    config: Option<&RalphConfig>,
+    owned_channel_path: Option<&Path>,
+) -> Result<()> {
+    merge_hat_channel_at_path_impl(
+        ctx,
+        target_file,
+        authoritative_hat,
+        config,
+        owned_channel_path,
+        false,
+    )
+}
+
+fn merge_hat_channel_at_path_impl(
+    ctx: &LoopContext,
+    target_file: &Path,
+    authoritative_hat: &str,
+    config: Option<&RalphConfig>,
+    owned_channel_path: Option<&Path>,
+    cleanup_marker: bool,
+) -> Result<()> {
+    let Some(channel_path) = owned_channel_path else {
         return Ok(());
     };
 
+    let channel_path = channel_path.to_path_buf();
+    let agent_dir = ctx.agent_dir().canonicalize().with_context(|| {
+        format!(
+            "Failed to resolve hat channel owner directory: {}",
+            ctx.agent_dir().display()
+        )
+    })?;
+    let channel_parent = channel_path.parent().ok_or_else(|| {
+        anyhow!(
+            "Hat channel has no parent directory: {}",
+            channel_path.display()
+        )
+    })?;
+    let channel_parent = channel_parent.canonicalize().with_context(|| {
+        format!(
+            "Failed to resolve hat channel parent: {}",
+            channel_parent.display()
+        )
+    })?;
+    if channel_parent != agent_dir {
+        return Err(anyhow!(
+            "Hat channel is outside the activation channel directory: {}",
+            channel_path.display()
+        ));
+    }
+
     if !channel_path.exists() {
-        let _ = fs::remove_file(crate::loop_runner::paths::current_hat_events_marker(ctx));
+        if cleanup_marker {
+            remove_marker_if_points_to(ctx, &channel_path);
+        }
         return Ok(());
+    }
+
+    let channel_metadata = fs::symlink_metadata(&channel_path)
+        .with_context(|| format!("Failed to inspect hat channel: {}", channel_path.display()))?;
+    if !channel_metadata.file_type().is_file() {
+        return Err(anyhow!(
+            "Hat channel is not a regular file: {}",
+            channel_path.display()
+        ));
     }
 
     let content = fs::read_to_string(&channel_path)
@@ -85,13 +167,10 @@ pub fn merge_hat_channel(
             authoritative_hat,
             "hat_channel_empty_after_activation",
         );
-        fs::remove_file(&channel_path).with_context(|| {
-            format!(
-                "Failed to remove empty hat channel file: {}",
-                channel_path.display()
-            )
-        })?;
-        let _ = fs::remove_file(crate::loop_runner::paths::current_hat_events_marker(ctx));
+        quarantine_failed_channel(ctx, &channel_path)?;
+        if cleanup_marker || owned_channel_path.is_some() {
+            remove_marker_if_points_to(ctx, &channel_path);
+        }
         return Err(anyhow!(
             "isolated hat channel is empty after activation: {}",
             channel_path.display()
@@ -164,7 +243,12 @@ pub fn merge_hat_channel(
             channel_path.display()
         )
     })?;
-    let _ = fs::remove_file(crate::loop_runner::paths::current_hat_events_marker(ctx));
+    // Clear the compatibility pointer after every successful owned merge.
+    // The explicit channel path remains authoritative; the marker is only
+    // for child-process compatibility and must not point at a deleted file.
+    if cleanup_marker || owned_channel_path.is_some() {
+        remove_marker_if_points_to(ctx, &channel_path);
+    }
 
     // U6 (2026-07-06-002 plan, R7): merge 成功后扫描 workspace 内
     // 是否残留 subtree `*/.ralph/events*.jsonl` 孤儿(常见于 hat 在
@@ -177,6 +261,55 @@ pub fn merge_hat_channel(
     }
 
     Ok(())
+}
+
+/// Remove the compatibility marker only when it still names this channel.
+/// Another activation may have advanced the marker while this activation was
+/// being closed; deleting that newer marker would strand the newer owner.
+fn remove_marker_if_points_to(ctx: &LoopContext, channel_path: &Path) {
+    let marker = crate::loop_runner::paths::current_hat_events_marker(ctx);
+    let Some(marked_path) = crate::loop_runner::paths::resolve_hat_channel_events_path(ctx) else {
+        return;
+    };
+    let same_path = marked_path
+        .canonicalize()
+        .ok()
+        .zip(channel_path.canonicalize().ok())
+        .is_some_and(|(marked, owned)| marked == owned)
+        || marked_path == channel_path;
+    if same_path {
+        let _ = fs::remove_file(marker);
+    }
+}
+
+/// Preserve a failed activation's channel outside the live channel directory
+/// so later activations cannot mistake it for current state.
+fn quarantine_failed_channel(ctx: &LoopContext, channel_path: &Path) -> Result<PathBuf> {
+    let quarantine_dir = ctx.ralph_dir().join("diagnostics/failed-activations");
+    fs::create_dir_all(&quarantine_dir).with_context(|| {
+        format!(
+            "Failed to create failed activation directory: {}",
+            quarantine_dir.display()
+        )
+    })?;
+    let file_name = channel_path
+        .file_name()
+        .ok_or_else(|| anyhow!("Hat channel has no filename: {}", channel_path.display()))?;
+    let suffix = FAILED_CHANNEL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let destination = quarantine_dir.join(format!(
+        "{}-pid{}-{}",
+        file_name.to_string_lossy(),
+        std::process::id(),
+        suffix
+    ));
+    fs::rename(channel_path, &destination).with_context(|| {
+        format!(
+            "Failed to quarantine failed hat channel {} as {}",
+            channel_path.display(),
+            destination.display()
+        )
+    })?;
+    Ok(destination)
 }
 
 /// U6 (R7): scan the workspace for `subdir/.ralph/events*.jsonl`
@@ -415,6 +548,36 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_owned_channel_ignores_mutated_marker() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = make_ctx(&tmp);
+
+        let owned = prepare_hat_channel(&ctx, "verifier", "loop-1", 8).unwrap();
+        let other = prepare_hat_channel(&ctx, "ralph", "loop-1", 9).unwrap();
+        fs::write(
+            &owned,
+            r#"{"topic":"forge.wave.verified","payload":{},"ts":"2026-08-26T00:00:00Z"}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &other,
+            r#"{"topic":"loop.cancel","payload":{},"ts":"2026-08-26T00:00:01Z"}
+"#,
+        )
+        .unwrap();
+
+        let target = tmp.path().join(".ralph/events-main.jsonl");
+        merge_hat_channel_at_path(&ctx, &target, "verifier", None, Some(&owned)).unwrap();
+
+        let merged = fs::read_to_string(&target).unwrap();
+        assert!(merged.contains("forge.wave.verified"));
+        assert!(!merged.contains("loop.cancel"));
+        assert!(!owned.exists(), "owned channel is retired after merge");
+        assert!(other.exists(), "unowned channel must not be consumed");
+    }
+
+    #[test]
     fn test_merge_hat_channel_preserves_malformed_lines() {
         let tmp = TempDir::new().unwrap();
         let ctx = make_ctx(&tmp);
@@ -527,6 +690,12 @@ mod tests {
         let error = merge_hat_channel(&ctx, &target, "executor", None)
             .expect_err("an empty terminal channel must fail closed");
         assert!(error.to_string().contains("isolated hat channel is empty"));
+        assert!(
+            !channel.exists(),
+            "failed channel leaves the live directory"
+        );
+        let quarantine = ctx.ralph_dir().join("diagnostics/failed-activations");
+        assert_eq!(fs::read_dir(quarantine).unwrap().count(), 1);
 
         // target 应未被修改(空 channel 不 merge 任何内容)
         assert_eq!(fs::read_to_string(&target).unwrap(), "existing\n");

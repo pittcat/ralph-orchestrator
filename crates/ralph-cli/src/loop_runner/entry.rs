@@ -124,6 +124,7 @@ pub(crate) fn merge_isolated_channel_on_interrupt(
     interrupt_kind: &'static str,
     pre_interrupt_outcome: Option<&ExecutionOutcome>,
     output: Option<&str>,
+    owned_channel_path: Option<&std::path::Path>,
 ) {
     let target_events_path = resolve_emit_events_path(ctx, state_machine_enabled);
     let authoritative_hat = event_loop
@@ -137,15 +138,16 @@ pub(crate) fn merge_isolated_channel_on_interrupt(
     // state so the activation outcome row can describe the raw
     // facts even when `merge_hat_channel` deletes the file or
     // returns Err. Best-effort: never fails the interrupt path.
-    let channel_path = crate::loop_runner::paths::resolve_hat_channel_events_path(ctx);
+    let channel_path = owned_channel_path.map(std::path::Path::to_path_buf);
     let pre_snapshot =
         snapshot_channel_with_workspace(channel_path.as_deref(), Some(ctx.workspace()));
 
-    match crate::loop_runner::hat_channel::merge_hat_channel(
+    match crate::loop_runner::hat_channel::merge_hat_channel_at_path(
         ctx,
         &target_events_path,
         authoritative_hat,
         Some(config),
+        channel_path.as_deref(),
     ) {
         Ok(()) => {
             // On success the channel file and `current-hat-events` marker are

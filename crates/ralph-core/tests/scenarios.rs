@@ -2195,6 +2195,17 @@ fn test_parallel_forge_fail_close_runtime() {
             config.event_loop = serde_yaml::from_value(yaml.config.event_loop.clone()).unwrap();
         }
         config.normalize();
+        // The production runner stamps the active loop id before any
+        // fail-close transition. Keep this real-runtime scenario on the
+        // same loop-scoped authority path instead of testing the legacy
+        // unscoped fallback.
+        let ralph_dir = config.core.workspace_root.join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).unwrap();
+        std::fs::write(
+            ralph_dir.join("current-loop-id"),
+            "parallel-forge-fail-close-runtime",
+        )
+        .unwrap();
     });
     let ledger = temp_dir.path().join(".ralph/flow-authority.jsonl");
     let contents = std::fs::read_to_string(&ledger).unwrap_or_default();

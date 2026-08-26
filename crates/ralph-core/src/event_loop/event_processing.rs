@@ -61,7 +61,8 @@ impl EventLoop {
                     r#"{{"reason":"{}","task_key":"{}","retries_consumed":{},"budget":{}}}"#,
                     exhausted.reason_code, task_key, exhausted.retries_consumed, exhausted.max,
                 );
-                let blocked = Event::new("plan.blocked", payload).with_target(HatId::new("ralph"));
+                let blocked =
+                    Event::new("plan.blocked", payload.clone()).with_target(HatId::new("ralph"));
                 self.record_repair_event(&blocked);
                 // 2026-06-29 code-review fix: set the
                 // `terminal_event_emitted` flag so U8's
@@ -178,7 +179,8 @@ impl EventLoop {
                     r#"{{"reason":"stall_recovery_exhausted","task_key":"{}","stall_count":{}}}"#,
                     stall_key, stall_count_value,
                 );
-                let blocked = Event::new("plan.blocked", payload).with_target(HatId::new("ralph"));
+                let blocked =
+                    Event::new("plan.blocked", payload.clone()).with_target(HatId::new("ralph"));
                 self.record_repair_event(&blocked);
                 self.terminal_event_emitted = true;
             }
@@ -558,6 +560,30 @@ impl EventLoop {
         hat_id: &HatId,
         terminal_topics: &[String],
     ) -> bool {
+        self.inject_missing_terminal_emit_recovery_with_limit(
+            hat_id,
+            terminal_topics,
+            U2_REJECTION_RETRY_LIMIT,
+        )
+    }
+
+    /// Recover one empty isolated activation at most once. The next empty
+    /// activation is a distinct failure and must fail closed instead of
+    /// consuming the generic missing-event retry budget.
+    pub fn inject_missing_terminal_emit_recovery_once(
+        &mut self,
+        hat_id: &HatId,
+        terminal_topics: &[String],
+    ) -> bool {
+        self.inject_missing_terminal_emit_recovery_with_limit(hat_id, terminal_topics, 1)
+    }
+
+    fn inject_missing_terminal_emit_recovery_with_limit(
+        &mut self,
+        hat_id: &HatId,
+        terminal_topics: &[String],
+        retry_limit: u32,
+    ) -> bool {
         if self.state.completion_honored || terminal_topics.is_empty() {
             return false;
         }
@@ -602,7 +628,7 @@ impl EventLoop {
         );
         let retry_count = self.state.record_rejection_key(&retry_key);
 
-        if retry_count > U2_REJECTION_RETRY_LIMIT {
+        if retry_count > retry_limit {
             if !self.terminal_event_emitted {
                 let payload = serde_json::json!({
                     "reason": "missing_terminal_emit",
@@ -613,7 +639,8 @@ impl EventLoop {
                     "retry_count": retry_count,
                 })
                 .to_string();
-                let blocked = Event::new("plan.blocked", payload).with_target(HatId::new("ralph"));
+                let blocked =
+                    Event::new("plan.blocked", payload.clone()).with_target(HatId::new("ralph"));
                 self.record_repair_event(&blocked);
                 self.record_recovery_envelope(
                     &crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
@@ -634,8 +661,11 @@ impl EventLoop {
                         .outcome(crate::diagnosis::DiagnosisOutcome::Failed)
                         .retry_key(retry_key.clone())
                         .build(),
-                    vec![format!("retry limit {U2_REJECTION_RETRY_LIMIT}")],
+                    vec![format!("retry limit {retry_limit}")],
                 );
+                if retry_limit == 1 {
+                    let _ = self.publish_missing_terminal_fail_close(&payload);
+                }
                 self.terminal_event_emitted = true;
             }
             return false;

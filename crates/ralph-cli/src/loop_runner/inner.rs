@@ -2412,6 +2412,9 @@ pub(super) async fn run_loop_impl_inner(
                 "iteration_top_interrupt",
                 None,
                 None,
+                // No activation owns a channel before the first iteration;
+                // never fall back to the mutable shared marker here.
+                None,
             );
 
             let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
@@ -3446,6 +3449,7 @@ pub(super) async fn run_loop_impl_inner(
                     "mid_loop_select_interrupt",
                     None,
                     None,
+                    hat_channel_path.as_deref(),
                 );
 
                 let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
@@ -3543,6 +3547,7 @@ pub(super) async fn run_loop_impl_inner(
                         outcome.watchdog_timeout,
                         backend_termination.as_ref(),
                         &outcome.output,
+                        hat_channel_path.as_deref(),
                     );
                 crate::loop_runner::activation_outcome_close::write_activation_outcome_for_normal_merge(
                     &event_loop,
@@ -3711,6 +3716,7 @@ pub(super) async fn run_loop_impl_inner(
                     outcome.watchdog_timeout,
                     backend_termination.as_ref(),
                     &output,
+                    hat_channel_path.as_deref(),
                 );
             empty_terminal_channel = outcome_row.empty_terminal_channel;
             normal_merge_state = Some(merge_state);
@@ -4721,7 +4727,8 @@ pub(super) async fn run_loop_impl_inner(
                 .get_config(&display_hat)
                 .map(|hat| hat.terminal_events.clone())
                 .unwrap_or_default();
-            if event_loop.inject_missing_terminal_emit_recovery(&display_hat, &terminal_topics) {
+            if event_loop.inject_missing_terminal_emit_recovery_once(&display_hat, &terminal_topics)
+            {
                 info!(
                     hat = %display_hat.as_str(),
                     "Immediate missing-terminal recovery targeted the responsible hat"

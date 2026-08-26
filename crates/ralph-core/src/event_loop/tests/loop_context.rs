@@ -193,6 +193,28 @@ hats:
 }
 
 #[test]
+fn test_empty_channel_recovery_allows_one_retry_then_fails_closed() {
+    let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+    terminal_events: ["work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    let hat_id = HatId::new("executor");
+    event_loop.state.last_activation_events = vec![ralph_proto::Event::new("work.ready", "{}")];
+
+    assert!(event_loop.inject_missing_terminal_emit_recovery_once(&hat_id, &["work.done".into()]));
+    assert!(!event_loop.inject_missing_terminal_emit_recovery_once(&hat_id, &["work.done".into()]));
+    let pending = event_loop.bus.peek_pending(&hat_id).expect("first retry");
+    assert_eq!(pending.len(), 1);
+    assert!(event_loop.terminal_event_emitted);
+}
+
+#[test]
 fn test_missing_terminal_emit_recovery_without_reporter_keeps_ralph_fallback() {
     let yaml = r#"
 hats:

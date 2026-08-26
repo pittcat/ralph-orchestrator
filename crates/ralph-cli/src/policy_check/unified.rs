@@ -521,7 +521,9 @@ pub(crate) fn check_cli_flow_step_scope(
         } else {
             step
         }
-    } else if let Some(events_path) = events_file {
+    } else if active_loop_id.is_none()
+        && let Some(events_path) = events_file
+    {
         recover_from_topics(config, workspace_root, Some(events_path))
     } else if active_main_ledger != default_events_path {
         recover_from_topics(config, workspace_root, Some(active_main_ledger.as_path()))

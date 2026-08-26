@@ -801,6 +801,7 @@ fn test_interrupt_helper_merges_hat_channel_content_into_main_events() {
         state_machine_enabled,
         &event_loop,
         "test_interrupt_helper_merges_hat_channel_content_into_main_events",
+        Some(&channel_path),
     );
 
     // The line from the hat-channel must now appear in the main events file.
@@ -858,6 +859,7 @@ fn test_interrupt_helper_with_empty_hat_channel_does_not_corrupt_events() {
         state_machine_enabled,
         &event_loop,
         "test_interrupt_helper_with_empty_hat_channel_does_not_corrupt_events",
+        Some(&_channel_path),
     );
 
     // Empty channel must not append anything to main events.
@@ -919,6 +921,7 @@ fn test_interrupt_helper_with_no_marker_is_a_safe_noop() {
         state_machine_enabled,
         &event_loop,
         "test_interrupt_helper_with_no_marker_is_a_safe_noop",
+        None,
     );
 
     let main_after = std::fs::read_to_string(&target_events_path).unwrap();

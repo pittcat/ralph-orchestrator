@@ -12,6 +12,7 @@
 use ralph_core::event_loop::ProcessedEvents;
 use ralph_core::{EventLoop, LoopContext, RalphConfig};
 use ralph_proto::HatId;
+use std::path::Path;
 use tracing::{error, warn};
 
 use super::activation_outcome::{
@@ -66,10 +67,11 @@ pub(crate) fn prepare_normal_merge(
     outcome_watchdog_timeout: bool,
     backend_termination: Option<&String>,
     output: &str,
+    owned_channel_path: Option<&Path>,
 ) -> (NormalMergeOutcome, NormalMergeState) {
     let mut result = NormalMergeOutcome::default();
 
-    let channel_path = crate::loop_runner::paths::resolve_hat_channel_events_path(ctx);
+    let channel_path = owned_channel_path.map(Path::to_path_buf);
     let pre_snapshot =
         snapshot_channel_with_workspace(channel_path.as_deref(), Some(ctx.workspace()));
     let pre_bytes = pre_snapshot.bytes;
@@ -78,11 +80,12 @@ pub(crate) fn prepare_normal_merge(
         .and_then(|path| channel_reference_for_log(Some(path), ctx.workspace()));
 
     let target_events_path = resolve_emit_events_path(ctx, state_machine_enabled);
-    let merge_result = crate::loop_runner::hat_channel::merge_hat_channel(
+    let merge_result = crate::loop_runner::hat_channel::merge_hat_channel_at_path(
         ctx,
         &target_events_path,
         display_hat.as_str(),
         Some(config),
+        channel_path.as_deref(),
     );
     let merge_succeeded = merge_result.is_ok();
     if let Err(e) = merge_result {
