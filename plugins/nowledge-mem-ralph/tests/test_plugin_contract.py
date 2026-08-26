@@ -322,7 +322,6 @@ def test_manifest_and_marketplace_expose_dedicated_plugin_by_name() -> None:
     # R3 regression — the pre-existing root plugin keeps its skill set.
     root_entry = _marketplace_entry_by_name(ROOT_PLUGIN_NAME)
     assert set(root_entry.get("skills", [])) == {
-        "./skills/ralph-e2e-bootstrap",
         "./skills/ralph-preset-author",
         "./skills/ralph-preset-review",
         "./skills/ralph-project-bootstrap",

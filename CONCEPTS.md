@@ -147,18 +147,3 @@ Hat 完成声明进入系统接受前必须满足的统一决策记录：包含 
 多 Hat 或多 worktree 结果合并后生成的系统级收敛证明，记录合并后的接口、行为、配置、依赖、回归、证据覆盖和 critical unknowns 验证结果。Git merge 成功本身不是 convergence receipt。
 
 ## Operator skills（loop 外）
-
-### ralph-e2e-bootstrap
-
-Loop 外 Skill：对**外仓** E2E 沙箱，验证**当前仓改动 plan**。强制入口
-`scripts/bootstrap_pipeline.run_pipeline` / CLI。输入 sandbox + 改动
-plan + preset；自动发现沙箱业务 workload 作为 `ralph run --plan`；改动
-意图写入 `PROMPT` 且经 `--prompt-file` 进入 agent 可见主 prompt（与
-`--plan` 同发）；检查当前仓最新 `ralph`（不新鲜则停）；静态门后交启动
-命令。不静默改写沙箱 plan；`presets/` 触达走 `preset_gap` combo-box；
-不代跑 live / 不做诊断（`ralph-run-diagnosis`）。实现面仅 skill +
-Python，**不改 Rust**（共享 probe 可同时带 `--prompt-file` 与 `--plan`）。
-
-### E2E 沙箱目录
-
-Operator 指定的、用本仓编译出的 `ralph` 对真实 plan 手跑 preset 的可写沙箱（典型为独立 sibling 仓）。**不是**本仓 `crates/ralph-e2e` 测试 harness。

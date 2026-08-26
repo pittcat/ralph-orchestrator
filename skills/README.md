@@ -7,7 +7,6 @@ It ships operator skills:
 
 | Skill | Purpose |
 |---|---|
-| `ralph-e2e-bootstrap` | Bootstrap an E2E sandbox directory from a development plan + git diff via combo-box decisions and static gates; deliver a copy-paste launch command |
 | `ralph-preset-author` | Draft presets (builtin + local) with per-hat AAF tables **+ payload contract notes** before review |
 | `ralph-preset-review` | Per-hat activation dry-run + **payload audit** + mechanical lint → `preset-review-report.md` |
 | `ralph-project-bootstrap` | Audit a target project via ONE unified pipeline entry (`bootstrap_pipeline.py`), generate or safely update the preset-bound `ralph.<stem>.yml` + `PROMPT.<stem>.md` suite and the AGENTS.md / CLAUDE.md managed sections from an existing preset, run staged validation, and hand off the official launch command (`dry-run green != loop closed`) |
@@ -40,9 +39,8 @@ ralph-task-discovery → ralph-preset-author → ralph-preset-review
 - `ralph-preset-author` drafts the preset from the brief;
   `ralph-preset-review` then audits it (the closed-loop pair below).
 - Orthogonal to this chain: `ralph-project-bootstrap` provisions a target
-  project onto an existing preset, `ralph-e2e-bootstrap` builds an E2E
-  sandbox from a plan + diff, and `ralph-run-diagnosis` diagnoses a loop
-  that already ran. None of them replaces task discovery before planning,
+  project onto an existing preset, and `ralph-run-diagnosis` diagnoses a loop
+  that already ran. Neither replaces task discovery before planning,
   and task discovery never authors presets itself.
 
 ## Verification levels

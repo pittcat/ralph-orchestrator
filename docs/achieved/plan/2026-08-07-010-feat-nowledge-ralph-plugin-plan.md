@@ -70,7 +70,6 @@ deepened: 2026-08-07
 
 - `.claude-plugin/marketplace.json` 是本仓库 Claude marketplace，目前只有 `ralph-orchestrator` plugin。
 - `scripts/setup_nowledge_ralph.py` 是既有安装入口，接收 target path/`--dry-run`，当前安装 Community plugin。
-- `skills/tests/test_install.py` 与 `skills/tests/test_e2e_bootstrap_e2e.py` 读取 marketplace，部分代码假设目标为 `plugins[0]`。
 - `crates/ralph-adapters/src/cli_backend.rs` 的所有 Claude 构造器传入 `--setting-sources project,local`。
 
 ### 2.2 Evidence Ledger
@@ -259,7 +258,7 @@ Feature: 项目级插件迁移
 3. **外部可观察结果**：plugin validate 通过；commands/skill 可发现且查询合同有界；任何 session 事件无自动命令；operator 可仅凭设计文档和README正确选型与操作。
 4. **当前行为基线**：专用目录不存在；root marketplace 只有 root plugin；先写失败 contract。
 5. **输入与输出**：输入插件目录、search query或status动作；输出合法manifest、2 commands、1 skill、README、独立设计文档，以及JSON只读查询合同；无runtime状态变化。
-6. **修改位置**：计划新增 `plugins/nowledge-mem-ralph/.claude-plugin/plugin.json`（name/version/description）、`README.md`（operator操作合同）、`commands/search.md`（必填query与有界search）、`commands/status.md`（JSON健康检查）、`skills/search-memory/SKILL.md`（何时查/何时停止/只读allowlist）、`tests/test_plugin_contract.py`（manifest/capability/docs contract）、`.ralph/specs/nowledge-mem-ralph-plugin-design.md`（稳定设计合同）；修改 `.claude-plugin/marketplace.json`（第二个name-based entry）、`skills/tests/test_install.py` 与 `skills/tests/test_e2e_bootstrap_e2e.py`（移除`plugins[0]`位置假设）。不改 `PUBLIC_SKILLS`、root plugin内容或Rust代码。
+6. **修改位置**：计划新增 `plugins/nowledge-mem-ralph/.claude-plugin/plugin.json`（name/version/description）、`README.md`（operator操作合同）、`commands/search.md`（必填query与有界search）、`commands/status.md`（JSON健康检查）、`skills/search-memory/SKILL.md`（何时查/何时停止/只读allowlist）、`tests/test_plugin_contract.py`（manifest/capability/docs contract）、`.ralph/specs/nowledge-mem-ralph-plugin-design.md`（稳定设计合同）；修改 `.claude-plugin/marketplace.json`。不改 `PUBLIC_SKILLS`、root plugin内容或Rust代码。
 7. **可依赖能力**：Claude plugin manifest/marketplace格式、nmem 0.10.53 search/status CLI。
 8. **禁止依赖未来能力**：不得实现 installer、Ralph config/runtime、Thread save/distill。
 9. **验收测试**：`test_manifest_and_marketplace_expose_dedicated_plugin_by_name`验证name=`nowledge-mem-ralph`、version=`0.1.0`、source与资源；`test_plugin_has_no_lifecycle_entrypoints`验证manifest无hooks且不存在hooks/scripts自动入口；`test_search_contract_is_bounded_and_read_only`验证query必填、JSON memory search、limit=5、仅条件式有界thread search/show；`test_status_contract_is_single_read_only_call`验证JSON status且失败不降级；`test_capability_denylist_has_no_write_or_working_memory`解析所有command/skill代码块并拒绝`t create/append/save/distill`、`m add/update/delete`、`wm read`；`test_design_and_readme_cover_required_contracts`按稳定章节/决策表检查文档覆盖。运行相关pytest与plugin validate。
@@ -269,7 +268,7 @@ Feature: 项目级插件迁移
 13. **最小实现范围**：version 0.1.0；search默认执行`nmem --json m search "$ARGUMENTS" --limit 5`，空query先显示用法；status执行`nmem --json status`；只有追溯原对话确有必要时才允许`t search --limit 5`和`t show --limit 8 --offset 0 --content-limit 1200`，翻页必须由仍缺信息触发；没有hooks/save/WM。设计文档必须包含：问题与目标/非目标、插件—runtime边界、组件树、command/skill合同、信任边界、scope矩阵、installer desired-state与失败状态、数据/隐私、版本策略、需求—测试追踪。U1版README必须包含：人工Claude与Ralph选型表、前置、直接通过local marketplace完成project-scope安装与验证、search/status示例、无自动捕获保证、nmem故障排查、dedicated project卸载且保留数据、隐私说明、与runtime适配计划“相关但不依赖”的说明；不得提前声称U2 installer已经可用。
 14. **集成验证**：真实 `claude plugin validate` 解析目录；pytest 解析root marketplace和plugin manifest。
 15. **风险驱动测试**：Contract防插件结构漂移；negative capability test防未来误加自动捕获；文档contract只锁章节和命令/边界，不锁可演进文案；人工Claude smoke仅检查命令可发现和错误可读，不将LLM措辞作为CI断言。
-16. **回归范围**：root plugin PUBLIC_SKILLS、E2E bootstrap catalog、所有 plugin manifest consumers。
+16. **回归范围**：root plugin PUBLIC_SKILLS、所有 plugin manifest consumers。
 17. **预期文件变更**：
 
     | 位置 | 变更类型 | 变更原因 | Evidence |
@@ -282,7 +281,6 @@ Feature: 项目级插件迁移
     | `.ralph/specs/nowledge-mem-ralph-plugin-design.md` | 新增设计文档 | 固定跨U1/U2的职责、状态机、信任与测试设计 | E12 |
     | `.claude-plugin/marketplace.json` | 修改marketplace | 新增第二个独立plugin entry | E9,E10 |
     | `skills/tests/test_install.py` | 修改回归测试 | 将首项位置假设改为name-based lookup | E10 |
-    | `skills/tests/test_e2e_bootstrap_e2e.py` | 修改回归测试 | 保持多entry marketplace consumer正确 | E10 |
 18. **完成标准**：S1–S6全绿；plugin validate和相关pytest通过；设计文档与README逐项通过审查清单；无skip/弱断言；可独立提交。
 19. **停止条件**：manifest格式与真实CLI冲突、必须添加hook才能发现能力、root plugin被迫替换时停止并重决策。
 20. **风险与注意事项**：Claude command/skill本质是agent-facing指令，不是强制沙箱；结构化allow/deny contract能防插件自身引导写入，但不能限制agent在插件外自行执行任意shell。用无hooks、最小能力面、明确skill停止条件和Ralph自身权限边界缓解；不得在文档中虚假声称“技术上禁止所有写入”。插件内容可能与通用插件命令同名，依靠plugin namespace隔离并以真实validate检测。剩余风险是Claude plugin格式版本漂移。
@@ -330,10 +328,9 @@ U2 使用U1的name/source/capability合同；顺序不可交换，否则installe
 
 | 时机 | 命令 | 验证目的 | 失败后继续？ |
 |---|---|---|---|
-| U1 Red/Green | `.venv/bin/python -m pytest plugins/nowledge-mem-ralph/tests skills/tests/test_install.py skills/tests/test_e2e_bootstrap_e2e.py -q` | plugin与catalog contract | 否 |
 | U1 集成 | `claude plugin validate --strict plugins/nowledge-mem-ralph` | 真实插件解析 | 否 |
 | U2 Red/Green | `.venv/bin/python -m pytest scripts/tests/test_setup_nowledge_ralph.py -q` | installer状态矩阵 | 否 |
-| 相关回归 | `.venv/bin/python -m pytest plugins/nowledge-mem-ralph/tests scripts/tests/test_setup_nowledge_ralph.py skills/tests/test_install.py skills/tests/test_e2e_bootstrap_e2e.py -q` | 两Unit联合 | 否 |
+| 相关回归 | `.venv/bin/python -m pytest plugins/nowledge-mem-ralph/tests scripts/tests/test_setup_nowledge_ralph.py skills/tests/test_install.py -q` | 两Unit联合 | 否 |
 | 文档漂移 | `bash scripts/check-cli-doc-drift.sh --strict` | CLI/文档引用 | 否 |
 | 最终回归 | `./scripts/run-tests.sh` | workspace既有行为 | 否 |
 

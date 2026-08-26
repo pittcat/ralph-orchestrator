@@ -162,14 +162,14 @@ def test_task_discovery_in_marketplace() -> None:
     assert "ralph-task-discovery" in _marketplace_skill_names()
 
 
-def test_catalog_and_marketplace_both_have_six_skills(catalog_names: set[str]) -> None:
-    """Catalog ↔ marketplace parity must hold at the new size of 6."""
+def test_catalog_and_marketplace_both_have_five_skills(catalog_names: set[str]) -> None:
+    """Catalog ↔ marketplace parity must hold at the current size of 5."""
     advertised = _marketplace_skill_names()
     assert advertised == catalog_names, (
         f"missing={catalog_names - advertised} extra={advertised - catalog_names}"
     )
-    assert len(catalog_names) == 6
-    assert len(advertised) == 6
+    assert len(catalog_names) == 5
+    assert len(advertised) == 5
 
 
 def test_readme_lists_every_catalog_skill(catalog_names: set[str]) -> None:

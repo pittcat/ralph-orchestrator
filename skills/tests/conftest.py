@@ -50,26 +50,6 @@ for _name, _path in (
         _load(_name, _path)
 
 
-# Pre-load the ralph-e2e-bootstrap helpers under distinct module
-# names so they don't clash with ralph-project-bootstrap's
-# identically-named ``handoff`` module.
-_E2E_BOOTSTRAP_SCRIPTS = SKILLS_DIR / "ralph-e2e-bootstrap" / "scripts"
-for _name, _path in (
-    ("plan_diff", _E2E_BOOTSTRAP_SCRIPTS / "plan_diff.py"),
-    ("plan_resolve", _E2E_BOOTSTRAP_SCRIPTS / "plan_resolve.py"),
-    ("binary_resolve", _E2E_BOOTSTRAP_SCRIPTS / "binary_resolve.py"),
-    ("sandbox_suite", _E2E_BOOTSTRAP_SCRIPTS / "sandbox_suite.py"),
-    ("gate", _E2E_BOOTSTRAP_SCRIPTS / "gate.py"),
-    ("e2e_handoff", _E2E_BOOTSTRAP_SCRIPTS / "e2e_handoff.py"),
-    # Distinct name: ralph-project-bootstrap's ``bootstrap_pipeline``
-    # is preloaded above under the plain name; loading the e2e module
-    # under its own name keeps both suites importable in one process.
-    ("e2e_bootstrap_pipeline", _E2E_BOOTSTRAP_SCRIPTS / "bootstrap_pipeline.py"),
-):
-    if _path.is_file():
-        _load(_name, _path)
-
-
 # ralph-task-discovery ships the task-brief data contract and its hard-gate
 # validator as flat modules; ``task_brief`` must load first because
 # ``brief_validator`` and ``discovery_transcript`` import it.

@@ -27,7 +27,7 @@ date: 2026-08-09
 
 - **状态：READY。** 所有实施关键决策的当前置信度均不低于 0.85；详见第 3 节。
 - **基线：** 分支 `pittcat-dev`，HEAD `81881076`（`chore(docs): archive 17 completed plans from docs/plans/ to docs/achieved/plan/`）。复查后的工作树仅包含本计划新增的未跟踪文件，没有其他待处理变更；Executor仍不得重置或清理计划范围外的工作。
-- **调查范围：** builtin manifest/build embedding/CLI registry/index/zsh completion；目标 preset 与 schema；专属 Rust integration/unit/BDD 测试；supervisor runtime 和 `parallel-forge`；E2E bootstrap 活动 skill 与 Python tests；活动 operator 文档、AGENTS/CLAUDE、`.cursor` 规则、项目 overlay；相关 Git 历史。
+- **调查范围：** builtin manifest/build embedding/CLI registry/index/zsh completion；目标 preset 与 schema；专属 Rust integration/unit/BDD 测试；supervisor runtime 和 `parallel-forge`；活动 operator 文档、AGENTS/CLAUDE、`.cursor` 规则、项目 overlay；相关 Git 历史。
 - **已执行的验证命令：**
   - `git status --short`
   - `git log -1 --format='%h %s'`
@@ -43,7 +43,7 @@ date: 2026-08-09
 ### 1. 功能目标
 
 - **业务目标：** 减少一个已不再作为推荐 Ralph primary path 的大型并行执行 preset 所带来的维护、文档、测试和 operator surface 成本。
-- **用户/调用方：** 使用 `ralph preset ...` 查询或运行 builtin 的 CLI 用户；使用 `ralph run -H builtin:<name>` 的 shell/zsh 用户；`ralph-e2e-bootstrap` skill；维护 builtin catalog、preset lint 和 supervisor runtime 的开发者。
+- **用户/调用方：** 使用 `ralph preset ...` 查询或运行 builtin 的 CLI 用户；使用 `ralph run -H builtin:<name>` 的 shell/zsh 用户；维护 builtin catalog、preset lint 和 supervisor runtime 的开发者。
 - **当前行为：** `ce-executor-supervisor` 出现在 `presets/manifest.yml`、Rust `PRESETS`、`presets/index.json` 和 zsh completion；`get_preset` 可解析它；目标 YAML/schema、项目级 `ralph.supervisor.yml`、专属 supervisor primary integration test、专属 preset lint test 和多个 BDD/结构测试都直接加载或描述它。
 - **目标行为：**
   - `ralph preset builtin list --format json` 不再列出该名称。
@@ -52,7 +52,7 @@ date: 2026-08-09
   - `parallel-forge` 继续使用 supervisor runtime，并继续通过它已有的结构测试、BDD、wave supervisor 测试和严格 preset lint。
   - 活动文档/skill 不再把已删除 preset 当作可用入口；历史归档材料可以保留原名称作为事实记录。
 - **行为差异：** 仅删除 `ce-executor-supervisor` 的可发现、可加载、可运行和活动文档引用；通用 supervisor 事件、数据库、worktree、fan-in、wave kind、lint 规则和 `parallel-forge` 行为不变。
-- **本次范围：** 目标 preset YAML/schema、嵌入注册、公开索引、zsh completion、专属 overlay、专属测试与场景命名/注册、E2E bootstrap 的旧 preset 特殊 gate、活动 Rust/skill/operator 文档引用。
+- **本次范围：** 目标 preset YAML/schema、嵌入注册、公开索引、zsh completion、专属 overlay、专属测试与场景命名/注册、活动 Rust/skill/operator 文档引用。
 - **非目标：** 不删除 `crates/ralph-core/src/supervisor/**`；不删除 `supervisor-db`；不删除 `crates/ralph-cli/src/loop_runner/wave/**`；不重构 `parallel-forge`；不删除 `preset_lint::supervisor`；不修改历史 `docs/achieved/**`、`docs/report/**`、`docs/reports/**`、`docs/handoffs/**`、`docs/solutions/**` 或历史 `docs/plans/**`，除非执行前重新确认它们是活动入口而非历史记录；不清理 `.ralph/` 运行时状态。
 - **输入：** builtin name、preset catalog、活动文档/skill 引用、现有 supervisor/parallel-forge 测试配置。
 - **输出：** 删除后的 builtin catalog、unknown-preset 解析结果、同步后的活动文档/skill、保留下来的 supervisor/parallel-forge 验证结果。
@@ -79,7 +79,6 @@ date: 2026-08-09
 - **目标 preset 边界：** `presets/en/ce-executor-supervisor.yml` 与 `presets/schemas/ce-executor-supervisor.yml` 是目标 preset 的 canonical YAML/schema；`ralph.supervisor.yml` 是仓库根目录明确命名为该 preset overlay 的 operator 配置。
 - **通用 supervisor 边界：** `crates/ralph-core/src/supervisor/**`、`crates/ralph-cli/src/loop_runner/wave/**`、`event_loop.supervisor.enabled`、`supervisor-db` feature；`presets/en/parallel-forge.yml` 明确启用 `execution_model: supervisor`、isolated mode 和 `event_loop.supervisor.enabled: true`。
 - **专属测试边界：** `crates/ralph-cli/tests/integration_supervisor_primary.rs`、`crates/ralph-core/src/preset_lint/supervisor_preset_test.rs`、`wave.rs` 中的目标 lease test、`handoff_dispatch.rs` 中 include 目标 YAML 的测试，以及 `supervisor/ce_executor_supervisor_minimal.yml` 对应的注册测试直接绑定目标 preset。
-- **活动 skill 边界：** `skills/ralph-e2e-bootstrap/SKILL.md` 与 `scripts/gate.py` 对旧 preset 有示例/特殊 finding 豁免；对应 Python tests 固定旧名称和生成文件名。`ralph-preset-*` references 中的名称只应作为通用 capability 文档，不应继续点名已删除 builtin。
 - **测试与构建方式：** Rust 使用 `cargo nextest run` 系列，完整入口是 `./scripts/run-tests.sh`；builtin 严格校验使用 `./scripts/validate-builtin-presets.sh --strict`；skill tests 使用 `skills/.venv/bin/python -m pytest skills/tests -q`；CLI 文档 drift 使用 `scripts/check-cli-doc-drift.sh`。
 
 #### 2.2 Evidence Ledger
@@ -92,10 +91,8 @@ date: 2026-08-09
 | E4 | `presets/en/parallel-forge.yml`、`crates/ralph-cli/src/presets.rs` 中 parallel-forge tests、`crates/ralph-core/tests/scenarios.rs`、`wave_supervisor/**` | `parallel-forge` 已独立声明 supervisor execution model、enabled supervisor、isolated mode，并已有真实 runtime/BDD/wave 覆盖。 | 保留通用 supervisor 和 parallel-forge；其回归是删除后的保留能力验收。 | 高 |
 | E5 | `integration_supervisor_primary.rs`、`preset_lint/supervisor_preset_test.rs`、`wave.rs` target lease test | 这些测试直接 include/启动/断言 `ce-executor-supervisor` 或其 schema，不能在目标文件删除后继续作为活动测试。 | 删除目标专属测试；不把旧 topology 伪装成 parallel-forge 测试。 | 高 |
 | E6 | `crates/ralph-core/tests/scenarios.rs` 与 `tests/scenarios/supervisor/ce_executor_supervisor_*.yml` | supervisor 目录有三个带目标名称的场景；其中 minimal 走真实 `InMemoryCoordinatorBridge`，另外两个是 fixture-neutral 的 origin/event 测试。 | 保留行为覆盖但改为 generic supervisor 场景名；同步 test registration 和 bridge 注释，避免保留删除对象名称。 | 高 |
-| E7 | `skills/ralph-e2e-bootstrap/scripts/gate.py`、`test_e2e_bootstrap_contract.py` | E2E gate 对旧 preset 特殊接受两类 strict findings，并有两条专门测试；该特例通过名称而非 capability 触发。 | 删除旧 preset 专属豁免和对应 tests；通用 gate 必须重新 fail-closed。 | 高 |
 | E8 | `crates/ralph-core/src/supervisor/**`、`crates/ralph-cli/src/loop_runner/wave/**`、`integration_supervisor_runtime_p0.rs` | supervisor store/bridge/worker env/runtime fixture 是通用层；runtime P0 fixture 只有 env source 字符串绑旧名称。 | 不删通用 fixture；将其 source 改为仍存活的 `builtin:parallel-forge` 或改成可注入 generic source，保持测试语义。 | 高 |
 | E9 | `AGENTS.md`、`CLAUDE.md`、`.cursor/rules/multi-hat-isolation.mdc`、`README.md`、`docs/guide/presets.md`、`docs/guide/project-usage.md` | 活动 operator/product 文档列出或推荐旧 preset；AGENTS/CLAUDE 还把其 topology 当当前 builtin 描述。 | 同步删除活动入口和推荐；保留 generic supervisor/parallel-forge 说明。 | 高 |
-| E10 | `skills/ralph-e2e-bootstrap/SKILL.md`、`skills/tests/**`、`skills/ralph-preset-{author,review}/references/**` | 活动 skill 示例、生成 stem、测试 fixture 和 rubric/patterns 含旧名称。 | 更新活动 skill 为 generic/parallel-forge 语义；历史文档不进入修改范围。 | 高 |
 | E11 | `AGENTS.md` Build & Test、`skills/README.md`、`crates/*/Cargo.toml`、`scripts/run-tests.sh` | 仓库规定 Rust 用 nextest、Python 用 `.venv`、全量入口是 `./scripts/run-tests.sh`。 | 计划中的验证命令必须遵守这些入口，禁止裸 `cargo test -p ralph-cli`。 | 高 |
 | E12 | `git status --short`（计划写入后复查） | 工作树仅显示本计划新增文件，没有其他待处理变更。 | Executor 只能修改本计划列出的文件，不得重置或清理计划范围外的工作。 | 高 |
 | E13 | `crates/ralph-core/src/capability_inventory.rs` | `supervisor-emit` capability 的 evidence source 指向已删除目标 schema。 | 将 evidence source 改到仍存在且启用 supervisor 的 `presets/en/parallel-forge.yml`，保持 compile-time inventory 可构建。 | 高 |
@@ -110,7 +107,6 @@ date: 2026-08-09
 | 配置/数据 | `ralph.supervisor.yml`、`presets/index.json`、三份 supervisor 场景 YAML | 删除 overlay；更新 catalog 和 generic fixture 文件名。 |
 | CLI/API | builtin list/show/run/preset check；registry parity tests | 旧 name 变为 unknown；其他 builtin 不变。 |
 | UI/操作面 | `scripts/ralph-zsh-plugin.zsh`、README、guide、AGENTS/CLAUDE、`.cursor` | 去除旧 completion/推荐/拓扑说明。 |
-| 外部边界 | `skills/ralph-e2e-bootstrap/**`、`skills/tests/**` | 去除旧 preset special gate；保留通用 bootstrap pipeline。 |
 | 保留调用方 | `parallel-forge`、`crates/ralph-core/src/supervisor/**`、`crates/ralph-cli/src/loop_runner/wave/**`、`wave_supervisor/**` | 只做名称/注释清理或回归，不删除 runtime 能力。 |
 | 历史资料 | `docs/achieved/**`、`docs/report/**`、`docs/reports/**`、`docs/handoffs/**`、`docs/solutions/**`、历史 `docs/plans/**` | 默认只读；不得为了全局 `rg` 零结果而改写历史。 |
 
@@ -122,7 +118,6 @@ date: 2026-08-09
 | D2 | 是否删除 supervisor runtime？ | 连 supervisor runtime 一起删；保留 runtime 并迁移旧 preset；保留 runtime 与 `parallel-forge` | 保留 runtime、feature、dispatcher、store、lint 和 `parallel-forge` | E4、E8 | `parallel-forge` 当前真实启用 supervisor；删除 runtime 会破坏仍受支持的 builtin | 0.99 |
 | D3 | 旧名称是否保留 alias/fallback？ | alias 到 `parallel-forge`；alias 到 pipeline；完全 unknown | 完全 unknown，沿用现有 unknown preset 错误路径 | 目标是删除 builtin，且 `get_preset`/CLI registry 没有 alias 层；兼容旧名称不是本次要求 | alias 会让已删除产品仍可运行并掩盖调用方迁移问题 | 0.95 |
 | D4 | 目标专属测试如何处理？ | 全部保留并改 path；全部删除；generic runtime 场景改名保留，旧 topology/lease/primary test 删除 | generic supervisor BDD/origin 场景改名保留；旧 preset primary integration、preset-lint topology pin、旧 preset lease test 删除 | E5、E6、E8、E4 | `parallel-forge` hat topology 不等于旧 preset，不能机械改 path；通用 store/runtime 已有独立覆盖 | 0.94 |
-| D5 | E2E bootstrap 的旧 special gate 如何处理？ | 迁移特殊豁免到 `parallel-forge`；按 capability 泛化；删除旧名称特例并恢复普通 fail-closed | 删除 `_SUPERVISOR_PRESET` 特例及其专属 approved-finding tests；保留普通 gate 和通用 supervisor capability tests | E7、E4 | 旧豁免验证的是旧 preset 的具体错误消息/拓扑，不是 supervisor runtime 公共契约；迁移会把旧例外错误扩大 | 0.94 |
 | D6 | capability inventory 的 evidence source 放哪里？ | 删除 source；保留已删除 path；指向 surviving supervisor preset | 指向 `presets/en/parallel-forge.yml`，保留 `supervisor-emit` capability | E4、E13 | 删除 source 会让 capability 失去可审计证据；已删除 path 会令 compile-time artifact 悬空 | 0.96 |
 | D7 | supervisor BDD 场景是否删除？ | 删除全部；保留目标名称；保留行为并改为 generic supervisor 文件名 | 保留行为，重命名 `ce_executor_supervisor_*` fixtures/registration 为 generic supervisor 名称，并同步 bridge 注释 | E6、E8 | 这些场景中 minimal 真实驱动 supervisor coordinator；删除会降低通用 runtime 证据 | 0.92 |
 | D8 | 活动文档和 skill 是否要求仓库内旧字符串为零？ | 全仓库零字符串；只清理活动引用；只改代码 | 清理活动入口/代码/skill/docs；历史资料保留原字符串 | E9、E10、项目历史目录用途 | 全仓库零字符串会篡改审计历史；只改代码会留下用户可执行的失效入口 | 0.97 |
@@ -170,7 +165,6 @@ Feature: 删除 ce-executor-supervisor builtin preset
     Then runtime 产生 `exec.wave.complete`
     And downstream integrator 行为仍按 fixture 断言工作
 
-  Scenario: E2E bootstrap 不再对删除对象提供特殊 gate 豁免
     Given bootstrap 使用仍存活的 builtin 或任意 preset
     When preset check/preflight 返回未被通用规则允许的 finding
     Then static gate 保持 blocked
@@ -192,7 +186,6 @@ Feature: 删除 ce-executor-supervisor builtin preset
 | S3 四方 parity | manifest、PRESETS、index、zsh values 全部一致；hidden preset 规则仍成立 | 现有 `presets_array_matches_manifest`、`test_public_preset_names_in_index_json`、`test_index_json_entries_have_zsh_completion`、`test_zsh_builtin_completion_arrays_consistent` | 结构化集成测试 | `./scripts/validate-builtin-presets.sh --strict` | 否 |
 | S4 parallel-forge 保留 | supervisor enabled/isolated 配置、flow、payload、wave failure/success 场景和 `wave_supervisor` 测试通过 | `crates/ralph-cli/src/presets.rs` parallel-forge tests；`crates/ralph-core/tests/scenarios.rs` `parallel_forge_*`；`wave_supervisor` | 集成/BDD | supervisor-db branch 与 `integration_worktree_isolation`/resume 回归 | 不新增 E2E；已有真实 runner 覆盖足够 |
 | S5 generic supervisor BDD | generic minimal 场景真实经过 EventLoop/coordinator，不是 stub；fan-out/origin guard 既有断言通过 | `crates/ralph-core/tests/scenarios.rs` generic renamed scenarios | BDD integration | 运行 `-p ralph-core --test scenarios` 相关子集 | 否 |
-| S6 bootstrap gate | 删除名称特例后，旧 approved findings 不再被名称放行；普通 success/failure/plan-missing 行为保持 | `skills/ralph-e2e-bootstrap/scripts/gate.py` + `skills/tests/test_e2e_bootstrap_contract.py` | Python unit/contract | `skills/.venv/bin/python -m pytest skills/tests -q` | 否 |
 | S7 活动入口清理 | active source/docs/skills 不再把旧名称作为可运行入口；历史目录不改 | `rg` audit + `scripts/check-cli-doc-drift.sh` + skill contract tests | 静态 contract/integration | 检查生成 stem、overlay、zsh install/load | 否 |
 
 每项验收必须同时断言主结果、副作用和不变量：不得生成旧 preset 文件、不得删除 `parallel-forge`、不得改变 supervisor DB schema/runtime、不得新增 skip/only/弱断言。由于本次是删除/重命名和 catalog 行为变更，不引入 snapshot、golden、property-based、mutation 或 fuzz；这些测试对本次风险没有额外收益。
@@ -425,7 +418,6 @@ E5 证明多个测试直接依赖目标文件；E6 证明 supervisor 场景中 m
 
 - 不把旧 `integration_supervisor_primary` 改造成 parallel-forge fake-backend E2E；两者 topology 不同。
 - 不删除 generic `integration_supervisor_runtime_p0`，不删除 supervisor store/bridge。
-- 不在本 Unit 修改 E2E bootstrap gate、活动 README/skill references；这些属于 Unit 3。
 - 不用“改名”掩盖旧 preset 专属 topology 断言；无法泛化的 test 必须删除并由 surviving coverage 证明保留能力。
 
 #### 9. 验收测试
@@ -536,7 +528,7 @@ E5 证明多个测试直接依赖目标文件；E6 证明 supervisor 场景中 m
 
 #### 1. Unit 目标
 
-让当前活动的 skill、operator 文档、项目规则和补全不再提供已删除 preset 的可执行示例或旧拓扑说明，同时让 E2E bootstrap 的 static gate 回到通用 fail-closed 行为。一个可观察行为是：新用户从活动入口无法得到旧 preset 的启动命令，但仍能得到有效的 `parallel-forge`/current catalog 入口。
+让当前活动的 skill、operator 文档、项目规则和补全不再提供已删除 preset 的可执行示例或旧拓扑说明。一个可观察行为是：新用户从活动入口无法得到旧 preset 的启动命令，但仍能得到有效的 `parallel-forge`/current catalog 入口。
 
 #### 2. 对应需求与 Scenario
 
@@ -547,7 +539,6 @@ E5 证明多个测试直接依赖目标文件；E6 证明 supervisor 场景中 m
 
 #### 3. 外部可观察结果
 
-- `ralph-e2e-bootstrap` skill 示例使用 surviving/generic preset；不再按旧 preset name 特殊放行 findings。
 - `skills/tests` 的生成 stem、plan-touch fixture、static gate contract 不再要求旧 preset 文件名。
 - README、guides、AGENTS/CLAUDE、`.cursor` 和 zsh completion 不再把旧 name作为当前可运行入口；历史目录仍可出现。
 - `scripts/check-cli-doc-drift.sh` 和 skill test suite 通过。
@@ -558,7 +549,7 @@ E7/E10 证明活动 skill 硬编码旧 name、旧 generated filenames 和旧 gat
 
 #### 5. 输入与输出
 
-- 输入：`skills/ralph-e2e-bootstrap/SKILL.md`、`scripts/gate.py`、skills Python tests、preset author/review references、活动 docs/rules。
+- 输入：skills Python tests、preset author/review references、活动 docs/rules。
 - 输出：generic/parallel-forge skill examples；无 target-specific gate override；同步 operator catalog。
 - 错误：未获通用批准的 strict finding仍 blocked；旧 preset运行文档不再出现。
 - 副作用：只修改活动文档/skill；不改历史 archive/report/solution。
@@ -568,9 +559,6 @@ E7/E10 证明活动 skill 硬编码旧 name、旧 generated filenames 和旧 gat
 
 | 位置 | 当前职责 | 预计修改边界 | 明确不修改 |
 |---|---|---|---|
-| `skills/ralph-e2e-bootstrap/SKILL.md` | skill operator contract | 将示例替换为 `builtin:parallel-forge` 或 generic `<name>`，不再默认旧 preset | skill workflow/guardrails |
-| `skills/ralph-e2e-bootstrap/scripts/gate.py` | E2E static gate | 删除 `_SUPERVISOR_PRESET`、approved finding/preflight 特例和名称分支，恢复统一 `validate_pipeline` | generic gate stages/argv |
-| `skills/tests/test_e2e_bootstrap_contract.py` | gate/suite contract tests | 删除旧 special approval helper/tests；将仍属 generic supervisor suite的生成测试改为 parallel-forge；保留普通 fail-closed tests | non-supervisor bootstrap contracts |
 | `skills/tests/test_plan_resolve.py`、`test_bootstrap_pipeline.py` | plan/preset-gap tests | 用 surviving preset和路径 fixture替换旧 target literal | plan resolution behavior |
 | `skills/tests/test_execution_model_contract.py`、`test_project_bootstrap_contract.py` | capability/name hygiene tests | 移除对已删除名称的 forbidden literal；保留 capability-triggered assertions | capability model |
 | `skills/ralph-preset-author/references/{patterns,finding-rubric,agent-native-model}.md` | active author guidance | 将 target-specific example改为 capability/supervisor-enabled generic wording | lint finding IDs和通用流程 |
@@ -622,7 +610,6 @@ E7/E10 证明活动 skill 硬编码旧 name、旧 generated filenames 和旧 gat
 2. 最小实现：删除 `gate.py` 特例、helper、旧 special tests；保留普通 `validate_pipeline`。
 3. Test 1 Green：普通 gate contract suite通过，unapproved findings仍 blocked。
 4. Test 2 Red：将 generic suite fixtures/stems改为 parallel-forge后，尚未同步 expected filenames/argv时失败。
-5. 最小实现：同步 `test_e2e_bootstrap_contract.py`、`test_plan_resolve.py`、`test_bootstrap_pipeline.py` 和 skill 示例。
 6. Test 2 Green：Python contract suite通过。
 7. Test 3 Red：active `rg` audit列出 AGENTS/CLAUDE/docs/rubric/patterns 等残留旧入口。
 8. 最小实现：逐个清理活动 docs/rules/skill references，并保持 AGENTS/CLAUDE同步。
@@ -639,7 +626,7 @@ E7/E10 证明活动 skill 硬编码旧 name、旧 generated filenames 和旧 gat
 
 #### 14. 集成验证
 
-- Python：运行与 E2E bootstrap、plan resolution、execution-model contract相关的 targeted tests，再运行完整 `skills/.venv/bin/python -m pytest skills/tests -q`。
+- Python：运行 execution-model contract 相关的 targeted tests，再运行完整 `skills/.venv/bin/python -m pytest skills/tests -q`。
 - CLI docs：运行 `scripts/check-cli-doc-drift.sh --strict`。
 - Catalog/operator：运行 `./scripts/validate-builtin-presets.sh --strict`、CLI list/show/check smoke、zsh plugin load。
 - 真实边界：`gate.py` 真实调用 `validate_pipeline`；可注入 fake subprocess 只用于既有 contract tests，不能绕过 finding classification。
@@ -654,8 +641,6 @@ E7/E10 证明活动 skill 硬编码旧 name、旧 generated filenames 和旧 gat
 
 #### 16. 回归范围
 
-- 直接：`skills/tests/test_e2e_bootstrap_contract.py`、`test_bootstrap_pipeline.py`、`test_plan_resolve.py`、`test_execution_model_contract.py`、`test_project_bootstrap_contract.py`。
-- 相邻：`skills/ralph-e2e-bootstrap/scripts/{gate,plan_resolve,bootstrap_pipeline,sandbox_suite}.py`、author/review references/fixtures。
 - 公开接口：CLI preset list/check and zsh builtin completion。
 - 文档：README/guides/AGENTS/CLAUDE/.cursor，不要求历史归档零命中。
 - Build/lint/typecheck：Python suite、CLI drift、Rust full gate；失败不得进入 final quality gate。
@@ -664,9 +649,6 @@ E7/E10 证明活动 skill 硬编码旧 name、旧 generated filenames 和旧 gat
 
 | 位置 | 变更类型 | 变更原因 | Evidence |
 |---|---|---|---|
-| `skills/ralph-e2e-bootstrap/SKILL.md` | 修改文档 | 删除旧 preset example | E7/E10 |
-| `skills/ralph-e2e-bootstrap/scripts/gate.py` | 修改 skill production file | 删除 name-based exception | E7 |
-| `skills/tests/test_e2e_bootstrap_contract.py` | 修改/删除测试 helper | 删除 special gate tests，保留 generic contracts | E7 |
 | `skills/tests/test_plan_resolve.py`、`test_bootstrap_pipeline.py` | 修改测试 | 替换 old preset fixture | E10 |
 | `skills/tests/test_execution_model_contract.py`、`test_project_bootstrap_contract.py` | 修改测试 | 删除 dead literal，保留 capability assertions | E10 |
 | `skills/ralph-preset-author/references/**`、`skills/ralph-preset-review/references/**`、`skills/ralph-preset-review/fixtures/README.md` | 修改文档 | 清理 active target-specific wording | E10 |
@@ -733,7 +715,6 @@ Unit 3：清理活动 skill、文档、rules、zsh operator surface
 | `cargo nextest run -p ralph-cli --bin ralph -- parallel_forge` | Unit 2/3 | parallel-forge structured contracts | parallel-forge所有命中测试通过 | 任何 supervisor regression阻塞后续 |
 | `cargo nextest run -p ralph-cli --test integration_worktree_isolation` | Unit 2/最终 | surviving supervisor/parallel-forge worktree behavior | integration通过 | 检查受影响调用方 |
 | `cargo nextest run -p ralph-cli --test integration_resume` | Unit 2/最终 | surviving resume/loop behavior | integration通过 | 检查 runtime path，不改 old alias |
-| `skills/.venv/bin/python -m pytest skills/tests/test_e2e_bootstrap_contract.py skills/tests/test_bootstrap_pipeline.py skills/tests/test_plan_resolve.py skills/tests/test_execution_model_contract.py skills/tests/test_project_bootstrap_contract.py -q` | Unit 3 Red/Green | gate/plan/bootstrap/name hygiene targeted | targeted suite通过 | 非预期失败停止 Unit 3 |
 | `skills/.venv/bin/python -m pytest skills/tests -q` | Unit 3 final | 全 skill contract regression | 三层 skill tests全绿 | 不允许跳过/切换系统 Python |
 | `./scripts/validate-builtin-presets.sh --strict` | Unit 1/3 final | 所有 public builtin strict lint | 9 public preset全部通过 | 修复 parity/lint，不放宽 strict |
 | `scripts/check-cli-doc-drift.sh --strict` | Unit 3 final | CLI injected docs drift | 无新增 drift | 只更新受影响文档 |

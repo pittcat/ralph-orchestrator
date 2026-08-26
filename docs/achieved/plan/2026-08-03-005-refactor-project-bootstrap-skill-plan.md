@@ -22,7 +22,6 @@ execution: code
 - `skills/ralph-project-bootstrap/SKILL.md`、`agents/openai.yaml` 与 references；
 - `scripts/audit.py`、`pipeline_suite.py`、`agent_docs.py`、`cli_probe.py`、`smoke_runner.py`、`handoff.py`；
 - `skills/tests/test_project_bootstrap_contract.py`、`test_project_bootstrap_e2e.py`、`test_project_bootstrap_real_cli.py`、`conftest.py`；
-- `skills/ralph-e2e-bootstrap/scripts/bootstrap_pipeline.py` 作为同仓库已有编排模式；
 - `skills/install.py`、`skills/README.md`、`docs/guide/project-bootstrap.md`；
 - 相关 Git 历史，特别是 preset-bound 两文件套件和静态验证契约的提交。
 
@@ -49,7 +48,7 @@ execution: code
 
 当前 skill 文档要求 agent 依次自行完成：读取并解析 preset、执行 root/input audit、调用 `compose_preset_bound_suite`、调用 `agent_docs` 写文档、执行 `cli_probe.validate_pipeline`、可选执行 `smoke_runner.run_smoke`，最后手工构造 `handoff.HandoffInputs`。现有跨层测试 `test_project_bootstrap_e2e.py::TestCrossLayerBootstrap::test_e2e_blank_project_to_complete` 正是这样手工串联的。
 
-现有 helper 没有一个属于 `ralph-project-bootstrap` 的统一 `run_pipeline` 入口；`bootstrap_pipeline.py` 只存在于 `ralph-e2e-bootstrap`，不能复用其 sandbox/change-plan 语义替代本 skill 的目标项目语义。
+现有 helper 没有一个属于 `ralph-project-bootstrap` 的统一 `run_pipeline` 入口；不能复用其他 bootstrap 流程的 sandbox/change-plan 语义替代本 skill 的目标项目语义。
 
 ### 1.3 目标行为
 
@@ -111,7 +110,7 @@ execution: code
 
 **范围：**统一 bootstrap 编排入口、preset 解析、结果/状态归一、写入后生成物校验、静态 gate/smoke/handoff wiring、CLI/skill 文档和端到端 contract tests。
 
-**非目标：**修改 Ralph runtime CLI、改变 preset lint/schema、创建或切换 git branch/worktree、改写目标项目非 owned 内容、增加新的 backend、把 loop 日常操作并入 skill、修改 `ralph-e2e-bootstrap` 的业务契约。
+**非目标：**修改 Ralph runtime CLI、改变 preset lint/schema、创建或切换 git branch/worktree、改写目标项目非 owned 内容、增加新的 backend、把 loop 日常操作并入 skill。
 
 ## 2. 代码库现状与证据
 
@@ -136,7 +135,6 @@ execution: code
 | E7 | `smoke_runner.py::run_smoke` | nine typed outcomes；只有 replay 自动可信；`bounded_terminal_reached` 表示 bounded terminal | smoke 只能在 static gate 之后执行，并由 typed outcome 驱动 handoff | 高 |
 | E8 | `handoff.py::build_handoff`、`_enforce_typed_outcome` | 无 typed outcome 或 unsafe/失败 outcome 会降级/阻塞，blocked 不生成命令 | 复用 handoff 的反伪阳性规则，不在 orchestrator 重复实现等级判断 | 高 |
 | E9 | `skills/tests/test_project_bootstrap_e2e.py::test_e2e_blank_project_to_complete` | 当前跨层测试必须手工调用 6 个阶段，证明 helper 能协作但没有 public pipeline | 新增测试应直接调用 `bootstrap_pipeline.run_pipeline`，验证外部行为 | 高 |
-| E10 | `skills/ralph-e2e-bootstrap/scripts/bootstrap_pipeline.py::run_pipeline` | 同仓库已有 `PipelineResult`、`run_pipeline`、CLI JSON 输出和 hard gates 模式，但其输入是 sandbox/change-plan | 复用结果/CLI 形态，不复用 e2e 的业务步骤或模块 | 高 |
 | E11 | `skills/ralph-project-bootstrap/SKILL.md`、`references/{context-audit,validation,handoff}.md` | 文档分别描述输入、校验和 handoff，但没有一个可调用入口及完整状态表 | U5 必须把文档改为入口驱动，并列出产物/状态/证据 | 高 |
 | E12 | `skills/tests/conftest.py` | 测试通过 flat-module preload 加载 bootstrap helper；e2e helper 使用独立 module name | 新模块必须加入 conftest，测试不应自行修改 sys.path | 高 |
 | E13 | `skills/install.py`、当前三份 `SKILL.md` `cmp` 结果 | public skill 从 `skills/` physical-copy 到 `.claude/skills` 与 `.agents/skills`；当前 SKILL 副本一致 | 更新源文件后必须通过 installer 重新物化并增加 parity 检查 | 高 |
@@ -157,7 +155,7 @@ execution: code
 
 ### D1：新增 project-bootstrap 统一入口，而不是只改文档
 
-- **候选：**A. 仅改 `SKILL.md`；B. 新增 `bootstrap_pipeline.py` 并让文档指向它；C. 重用/改造 `ralph-e2e-bootstrap` 入口。
+- **候选：**A. 仅改 `SKILL.md`；B. 新增 `bootstrap_pipeline.py` 并让文档指向它。
 - **选择：**B。
 - **证据：**E9 证明当前只能手工串联；E10 证明仓库已有适合的编排结果模式；E11 证明文档本身无法消除调用歧义。
 - **排除：**A 不能保证 agent 实际执行所有阶段；C 会把 sandbox/change-plan 语义错误带入目标项目 bootstrap，扩大范围并破坏边界。
