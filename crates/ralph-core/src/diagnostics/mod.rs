@@ -3,18 +3,19 @@
 //! Captures agent output, orchestration decisions, traces, performance metrics,
 //! and errors to structured JSONL files when `RALPH_DIAGNOSTICS=1` is set.
 //!
-//! # Activation Matrix (U0 contract)
+//! # Activation Matrix (U0 contract; causal row added in U01b)
 //!
 //! The collector is driven by [`DiagnosticsOptions`]. Exactly one of three modes
 //! is active for a given collector:
 //!
-//! | `full_diagnostics` | `runtime_diagnosis_artifacts` | `session_dir` | Behavior |
-//! |---|---|---|---|
-//! | `false` | `false` | `None` (default) | Disabled. No I/O. `is_enabled()` is false. |
-//! | `true`  | any     | `None`             | Full session. Creates `<base>/.ralph/diagnostics/<timestamp>/` and all existing loggers (orchestration, performance, errors, hook-runs, agent-output, prompt-log). U3 also wires `recovery.jsonl` / `drift.jsonl` / `diagnosis-summary.json`. |
-//! | `false` | `true`  | `None`             | Minimal diagnosis session. Creates the timestamped directory but does NOT instantiate any of the historical full-diagnostics loggers. U3 adds `recovery.jsonl` / `drift.jsonl`; `diagnosis-summary.json` is written on demand via [`DiagnosticsCollector::write_diagnosis_summary_seed`]. |
-//! | `true`  | any     | `Some(p)`          | Full session reusing the provided path. No new dir is created. |
-//! | `false` | `true`  | `Some(p)`          | Minimal diagnosis session reusing the provided path. |
+//! | `full_diagnostics` | `runtime_diagnosis_artifacts` | `causal_evidence` | `trace_only` | `session_dir` | Behavior |
+//! |---|---|---|---|---|---|
+//! | `false` | `false` | `false` | `false` | `None` (default) | Disabled. No I/O. `is_enabled()` is false. |
+//! | `true`  | any     | any     | any     | `None`             | Full session. Creates `<base>/.ralph/diagnostics/<timestamp>/` and all existing loggers (orchestration, performance, errors, hook-runs, agent-output, prompt-log). U3 also wires `recovery.jsonl` / `drift.jsonl` / `diagnosis-summary.json`. |
+//! | `false` | `true`  | `false` | `false` | `None`             | Minimal diagnosis session. Creates the timestamped directory but does NOT instantiate any of the historical full-diagnostics loggers. U3 adds `recovery.jsonl` / `drift.jsonl`; `diagnosis-summary.json` is written on demand via [`DiagnosticsCollector::write_diagnosis_summary_seed`]. |
+//! | `false` | `false` | `true`  | `false` | `None`             | Plan U01b: causal-evidence minimal session. Same logger set as the `runtime_diagnosis_artifacts=true` row (`recovery.jsonl` / `drift.jsonl` / `runtime-trace.jsonl` / `feedback.jsonl` / `input_bundle`), but driven by `telemetry.causal_evidence.enabled=true` rather than the older `runtime_diagnosis.write_artifacts` switch. The two flags are independent and both default to `false`, so neither row activates the collector on its own when the other is unset. |
+//! | `true`  | any     | any     | any     | `Some(p)`          | Full session reusing the provided path. No new dir is created. |
+//! | `false` | `true`  | any     | any     | `Some(p)`          | Minimal diagnosis session reusing the provided path. |
 //!
 //! The CLI is responsible for building **one** authoritative collector per
 //! `ralph run` and threading it through the tracing layer, the loop runner
@@ -287,12 +288,32 @@ pub struct DiagnosticsOptions {
     /// directories and write log files in arbitrary system
     /// locations.
     pub workspace_root: Option<PathBuf>,
+
+    /// Plan 2026-08-26-1104 U01b: causal-evidence activation row.
+    /// When `true`, the collector opens a minimal session with the
+    /// same logger set as `runtime_diagnosis_artifacts=true`
+    /// (`recovery.jsonl` / `drift.jsonl` / `runtime-trace.jsonl` /
+    /// `feedback.jsonl` / `input_bundle`) but driven by
+    /// `telemetry.causal_evidence.enabled` rather than the older
+    /// `runtime_diagnosis.write_artifacts` switch. `full_diagnostics`
+    /// subsumes both — when `full_diagnostics=true` this flag is
+    /// ignored, matching the existing precedence contract.
+    ///
+    /// Defaults to `false`. U01a's bridge in
+    /// `config/telemetry.rs::to_diagnostics_options_inner` fills this
+    /// from `telemetry.causal_evidence.enabled` (default true there),
+    /// so once both units are integrated the collector activates on
+    /// a stock `ralph.yml` without `RALPH_DIAGNOSTICS=1`.
+    pub causal_evidence: bool,
 }
 
 impl DiagnosticsOptions {
     /// Returns true when any diagnostic capture is active.
     pub fn is_enabled(&self) -> bool {
-        self.full_diagnostics || self.runtime_diagnosis_artifacts || self.trace_only
+        self.full_diagnostics
+            || self.runtime_diagnosis_artifacts
+            || self.trace_only
+            || self.causal_evidence
     }
 
     /// Returns true when the trace-only mode is requested. This is a
@@ -315,6 +336,11 @@ impl DiagnosticsOptions {
             trace_only: false,
             session_dir,
             workspace_root: None,
+            // U01b: causal_evidence is driven by the telemetry bridge
+            // (U01a) — the env-only path leaves it at the default
+            // `false`. Activating it from `RALPH_DIAGNOSTICS=1` would
+            // bypass the operator's opt-in toggle in `ralph.yml`.
+            causal_evidence: false,
         }
     }
 
@@ -341,6 +367,12 @@ impl DiagnosticsOptions {
             trace_only: false,
             session_dir,
             workspace_root: None,
+            // U01b: same contract as `from_env` — the bridge from
+            // `telemetry.causal_evidence.enabled` is the U01a
+            // responsibility. Tests that want causal_evidence
+            // activation without the bridge must build
+            // `DiagnosticsOptions` explicitly.
+            causal_evidence: false,
         }
     }
 }
@@ -492,12 +524,17 @@ impl DiagnosticsCollector {
         // the canonical form above solely for the containment check.
         let session_dir = requested_session_dir;
 
-        // Effective mode: full_diagnostics wins, otherwise honor
-        // runtime_diagnosis_artifacts, otherwise honor trace_only.
-        // trace_only is request-only — the actual logger set is determined
-        // by the resolved `effective_*` booleans below.
+        // Effective mode: full_diagnostics wins, otherwise honor either
+        // runtime_diagnosis_artifacts or the U01b causal_evidence flag,
+        // otherwise honor trace_only. trace_only is request-only — the
+        // actual logger set is determined by the resolved `effective_*`
+        // booleans below. Both `runtime_diagnosis_artifacts` and
+        // `causal_evidence` map to the same minimal logger set; the
+        // union keeps the historical precedence contract intact
+        // (`full_diagnostics` always subsumes).
         let effective_full = options.full_diagnostics;
-        let effective_runtime = options.runtime_diagnosis_artifacts && !options.full_diagnostics;
+        let effective_runtime = (options.runtime_diagnosis_artifacts || options.causal_evidence)
+            && !options.full_diagnostics;
         let effective_trace_only = options.wants_trace_only();
 
         // Historical loggers are tied to full_diagnostics. The minimal
@@ -1755,6 +1792,10 @@ mod tests {
             trace_only: true,
             session_dir: Some(preset_dir.clone()),
             workspace_root: None,
+            // U01b: causal_evidence defaults to `false` so the
+            // trace_only row stays pinned to its historical shape
+            // (no loop-level loggers, session dir only).
+            causal_evidence: false,
         };
         let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
         assert!(collector.is_trace_only());

@@ -180,6 +180,15 @@ impl TelemetryConfig {
             trace_only: false,
             session_dir: None,
             workspace_root: None,
+            // U01b: causal_evidence lives in `DiagnosticsOptions` so the
+            // collector matrix can drive a minimal session off the
+            // `telemetry.causal_evidence.enabled` flag (U01a). The U01a
+            // commit fills this slot from `self.causal_evidence.enabled`
+            // — keeping it on `..Default::default()` here means neither
+            // parallel wave-1 commit has to enumerate the field at this
+            // call site, and the integrator auto-resolves cleanly because
+            // both edits target the same struct literal.
+            ..Default::default()
         }
     }
 }

@@ -111,6 +111,10 @@ fn collector_disables_input_bundle_when_initial_write_fails() {
         trace_only: false,
         session_dir: Some(session_dir.clone()),
         workspace_root: None,
+        // U01b: causal_evidence defaults to `false` so the readonly
+        // probe path stays pinned to the pre-U01b minimal-session
+        // shape (test asserts `Ok(None)` for the unwritable probe).
+        causal_evidence: false,
     };
     let collector =
         DiagnosticsCollector::with_options(tmp.path(), &opts).expect("with_options succeeds");
