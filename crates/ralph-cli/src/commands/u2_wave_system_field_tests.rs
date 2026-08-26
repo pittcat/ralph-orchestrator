@@ -13,7 +13,9 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::commands::emit::normalize_wave_worker_system_fields;
+    use crate::commands::emit::{
+        normalize_wave_worker_system_fields, validate_wave_worker_context,
+    };
     use serde_json::json;
 
     /// R7 / S6: a non-wave hat emit must NOT receive wave_id /
@@ -150,5 +152,20 @@ mod tests {
             rendered.contains("string"),
             "must describe the payload kind; got {rendered}"
         );
+    }
+
+    /// Test-only environment cleanup must not downgrade a wave worker into a
+    /// normal CLI invocation when wave identity variables remain present.
+    #[test]
+    fn u2_partial_wave_context_is_rejected() {
+        let err = validate_wave_worker_context(false, true, true)
+            .expect_err("partial wave context must fail closed");
+        assert!(format!("{err:#}").contains("wave_context_partially_scrubbed"));
+    }
+
+    #[test]
+    fn u2_complete_wave_context_is_accepted() {
+        validate_wave_worker_context(true, true, true)
+            .expect("complete wave context must be accepted");
     }
 }

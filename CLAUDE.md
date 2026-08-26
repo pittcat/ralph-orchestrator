@@ -18,7 +18,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 >
 > **2026-07-25 起两阶段策略**:`./scripts/run-tests.sh` 默认拆 phase 1(`-E 'not test(/partial_timeout_events_visible/)'`,num-cpus 并发) + phase 2(`-E 'test(/partial_timeout_events_visible/)' -j 1`,3 个 race-sensitive 测试串行隔离)。理由 + 验证见 `docs/solutions/developer-experience/two-phase-nextest-run-with-isolated-slow-path.md`。**不要**手动 `cargo nextest run --workspace` 跑全量(会跳过 phase 2 隔离,3 个 partial_timeout 测试在 CI/saturated CI runner 上偶现 flake)。
 >
-> **⚠️ HARD RULE 5: 写测试必须假设外层可能带着 hat 的 agent-context env**。`ralph run` 的 hat 跑 `./scripts/run-tests.sh` / `cargo nextest` 时会继承 `RALPH_CURRENT_HAT` / `RALPH_CURRENT_LOOP_ID` / `RALPH_EVENTS_FILE` / `RALPH_WAVE_WORKER`(以及 `RALPH_TRIGGERED_HAT` / `RALPH_HATS_SOURCE` / `RALPH_CONFIG`)。任何 spawn `ralph` 且假设 **human CLI** 语义的测试,必须先 scrub 这些键,否则 ACL / emit allowlist / skill 可见性会把 fixture 当成 in-loop agent,出现「人壳全绿、hat 内必挂」。`ralph-cli` 集成测试统一用 `crates/ralph-cli/tests/common/mod.rs` 的 `common::ralph_bin()` / `scrub_agent_runtime_env`;需要模拟 agent 时先 scrub 再显式 `.env(...)`。全量入口 `./scripts/run-tests.sh` 也会在开头 unset 上述键作第二道保险——**不能替代**测试侧 scrub。验收:带污染跑一遍相关集成测必须仍绿,例如 `RALPH_CURRENT_HAT=executor RALPH_EVENTS_FILE=/tmp/x.jsonl cargo nextest run -p ralph-cli --test integration_tasks`。
+> **⚠️ HARD RULE 5: 写测试必须假设外层可能带着 hat 的 agent-context env**。`ralph run` 的 hat 跑 `./scripts/run-tests.sh` / `cargo nextest` 时会继承 `RALPH_CURRENT_HAT` / `RALPH_CURRENT_LOOP_ID` / `RALPH_EVENTS_FILE` / `RALPH_WAVE_WORKER`(以及 `RALPH_TRIGGERED_HAT` / `RALPH_HATS_SOURCE` / `RALPH_CONFIG`)。任何 spawn `ralph` 且假设 **human CLI** 语义的测试,必须先 scrub 这些键,否则 ACL / emit allowlist / skill 可见性会把 fixture 当成 in-loop agent,出现「人壳全绿、hat 内必挂」。`ralph-cli` 集成测试统一用 `crates/ralph-cli/tests/common/mod.rs` 的 `common::ralph_bin()` / `scrub_agent_runtime_env`;需要模拟 agent 时先 scrub 再显式 `.env(...)`。全量入口 `./scripts/run-tests.sh` 也会在开头 unset 上述键作第二道保险——**不能替代**测试侧 scrub。
+>
+> **测试环境清理必须只作用于测试子进程**：统一使用 `./scripts/run-tests.sh`，或 targeted test 明确写成：
+> ```bash
+> env -u RALPH_CURRENT_HAT \
+>     -u RALPH_CURRENT_LOOP_ID \
+>     -u RALPH_EVENTS_FILE \
+>     -u RALPH_WAVE_WORKER \
+>     -u RALPH_TRIGGERED_HAT \
+>     -u RALPH_HATS_SOURCE \
+>     -u RALPH_CONFIG \
+>     cargo nextest run ...
+> ```
+> 这段清理前缀只能放在测试命令前，不能复制到测试之后的 Ralph 业务命令上。尤其是 wave worker 正式执行 `ralph emit`、`ralph tools task ...` 等命令时，必须保留 runtime 注入的环境变量；清除它们会把结果写入错误的账本或触发 `wave_context_partially_scrubbed`。验收:带污染跑一遍相关集成测必须仍绿,例如 `RALPH_CURRENT_HAT=executor RALPH_EVENTS_FILE=/tmp/x.jsonl cargo nextest run -p ralph-cli --test integration_tasks`。
 
 ### 并行 vs 串行分级速查表
 

@@ -563,6 +563,31 @@ pub(crate) fn normalize_wave_worker_system_fields(
     Ok(payload)
 }
 
+/// Validate the wave-worker environment as one atomic handshake.
+///
+/// Test commands may need a clean human-CLI environment, but that cleanup
+/// must never be applied to the worker's own result emit. Treating leftover
+/// wave identity as a partial worker context makes the mistake fail closed
+/// instead of silently writing a worker result to the main ledger.
+pub(crate) fn validate_wave_worker_context(
+    wave_worker: bool,
+    wave_id_present: bool,
+    slot_index_present: bool,
+) -> Result<()> {
+    let partial_wave_context = wave_worker || wave_id_present || slot_index_present;
+    if partial_wave_context && !wave_worker {
+        anyhow::bail!(
+            "wave_context_partially_scrubbed: RALPH_WAVE_WORKER, RALPH_WAVE_ID, and \
+             RALPH_WAVE_INDEX must be preserved together for a wave worker. \
+             Test-only environment scrubbing must be scoped to the test \
+             subprocess; do not prefix this worker's `ralph emit` command \
+             with `env -u` or `unset`. Refusing rather than falling back to \
+             the main events ledger."
+        );
+    }
+    Ok(())
+}
+
 /// Write a recovery envelope to `.ralph/recovery.jsonl` when the CLI
 /// emit precheck rejects an event. The envelope captures the rejected
 /// topic, the offending hat (if known), and the policy finding so
@@ -1680,16 +1705,22 @@ pub(super) fn emit_command_with_root_and_hats(
     // mirror the late `wave_worker` block further down — we hoist
     // the read so the normalisation happens in the correct order.
     let wave_worker = std::env::var("RALPH_WAVE_WORKER").ok().as_deref() == Some("1");
-    let wave_id_env = wave_worker
-        .then(|| std::env::var("RALPH_WAVE_ID").ok())
-        .flatten();
-    let slot_index_env = wave_worker
-        .then(|| {
-            std::env::var("RALPH_WAVE_INDEX")
-                .ok()
-                .and_then(|v| v.parse::<u32>().ok())
-        })
-        .flatten();
+    // Keep the raw identity signals separate from `wave_worker`. A caller
+    // that accidentally clears only RALPH_WAVE_WORKER must not turn a
+    // wave result into an ordinary main-ledger emit. The worker identity is
+    // a single handshake; partial removal is a broken context, not a
+    // non-wave invocation.
+    let wave_id_env_any = std::env::var("RALPH_WAVE_ID")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let slot_index_env_raw = std::env::var("RALPH_WAVE_INDEX")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let slot_index_env_any = slot_index_env_raw
+        .as_deref()
+        .and_then(|value| value.parse::<u32>().ok());
+    let wave_id_env = wave_worker.then(|| wave_id_env_any.clone()).flatten();
+    let slot_index_env = wave_worker.then_some(slot_index_env_any).flatten();
 
     // Validate JSON payload if --json flag is set
     let payload = if args.json && !args.payload.is_empty() {
@@ -1863,17 +1894,6 @@ pub(super) fn emit_command_with_root_and_hats(
     // contract; we deliberately do not call `std::env::var`
     // again because the contract requires the worker PID to be
     // bound exactly once at spawn time.
-    let wave_worker = std::env::var("RALPH_WAVE_WORKER").ok().as_deref() == Some("1");
-    let wave_id_env = wave_worker
-        .then(|| std::env::var("RALPH_WAVE_ID").ok())
-        .flatten();
-    let slot_index_env = wave_worker
-        .then(|| {
-            std::env::var("RALPH_WAVE_INDEX")
-                .ok()
-                .and_then(|v| v.parse::<u32>().ok())
-        })
-        .flatten();
     // Plan 2026-07-27-003 U2 (R4): wave workers MUST also have
     // their loop identity in env (set by the dispatcher at spawn
     // time) so the registry resolver can authenticate the
@@ -1901,6 +1921,11 @@ pub(super) fn emit_command_with_root_and_hats(
     // This is the test-side mirror of `scenario_02_worker_unset_events_file_emits_rejected`:
     // the worker POV has `RALPH_WAVE_WORKER=1` set but neither
     // `RALPH_WAVE_ID` nor `RALPH_WAVE_INDEX` injected.
+    validate_wave_worker_context(
+        wave_worker,
+        wave_id_env_any.is_some(),
+        slot_index_env_raw.is_some(),
+    )?;
     if wave_worker && (wave_id_env.is_none() || slot_index_env.is_none()) {
         let missing = match (wave_id_env.is_none(), slot_index_env.is_none()) {
             (true, true) => "RALPH_WAVE_ID and RALPH_WAVE_INDEX",

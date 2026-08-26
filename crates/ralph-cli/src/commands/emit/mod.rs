@@ -125,11 +125,11 @@ mod test_support;
 // contract even when no current code path uses them — `allow(unused_imports)`
 // silences the lint without changing the public surface.
 #[allow(unused_imports)]
-pub(crate) use command_impl::normalize_wave_worker_system_fields;
-#[allow(unused_imports)]
 pub use command_impl::{
     PolicyCheckMode, emit_command, looks_like_json, resolve_provenance, should_policy_check_emit,
     should_policy_check_emit_with_ctx,
 };
+#[allow(unused_imports)]
+pub(crate) use command_impl::{normalize_wave_worker_system_fields, validate_wave_worker_context};
 #[cfg(test)]
 pub use test_support::emit_command_with_root;
