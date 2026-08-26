@@ -32,6 +32,7 @@
 //! for context.
 
 mod bundle;
+mod causal;
 mod envelope;
 mod journal;
 mod reporter;
@@ -45,6 +46,11 @@ pub use bundle::{
     ArtifactReport, BundleStatus, DiagnosisInputReport, EvidenceGap, FeedbackLifecycleReport,
     FeedbackLifecycleRow, RepairSuggestion, RuntimeTraceReport, read_feedback_lifecycle_report,
     read_input_bundle_report, read_runtime_trace_report, suggestions::build_suggestions_and_gaps,
+};
+pub use causal::report::EvidenceRef as CausalEvidenceRef;
+pub use causal::{
+    AttributionStatus, CAUSAL_ATTRIBUTION_CONTRACT_VERSION, CausalAttributionReport,
+    ConfidenceBreakdown, CoverageGapRef, Domain, FixPoint, RejectedHypothesis, analyze_session,
 };
 pub(crate) use envelope::normalize_part;
 pub use envelope::{
