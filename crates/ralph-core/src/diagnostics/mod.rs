@@ -301,6 +301,35 @@ impl PolicyReceiptDecision {
     }
 }
 
+/// Plan 2026-08-26-1104 Unit 4: discriminator for
+/// [`DiagnosticsCollector::emit_commit_receipt`]. Stable strings so
+/// the attribution engine (U8) and downstream dashboards can match
+/// on the literal without re-deriving from the typed enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitReceiptStatus {
+    /// StateMachine projection committed successfully: the durable
+    /// outbox write + StateLedger projection commit both succeeded
+    /// (S4.1). The receipt row carries `transition_id` mirroring
+    /// the `OutboxEntry.transition_id` so the attribution engine
+    /// can join the receipt back to the outbox row.
+    Committed,
+    /// Commit failed and the live state was rolled back to the
+    /// pre-apply snapshot (S4.2). The receipt row carries a
+    /// truncated `failure_reason` summary so operators can pinpoint
+    /// the underlying error without grepping the loop logs.
+    RolledBack,
+}
+
+impl CommitReceiptStatus {
+    /// Stable string written into the receipt's `commit_status` field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CommitReceiptStatus::Committed => "committed",
+            CommitReceiptStatus::RolledBack => "rolled_back",
+        }
+    }
+}
+
 /// Plan 2026-08-26-1104 Unit 2: bundle the inputs that define the
 /// loop's effective contract into the four digest-bearing fields
 /// the `kind=contract_receipt` row carries (S2.2). The full bundle
@@ -1581,6 +1610,85 @@ impl DiagnosticsCollector {
         }
         if let Some(hat) = hat_owned {
             entry = entry.with_hat(hat);
+        }
+        self.log_runtime_trace(entry);
+    }
+
+    /// Plan 2026-08-26-1104 Unit 4: emit one
+    /// `kind=commit_receipt` row per StateMachine projection commit
+    /// so the attribution engine (U8) can join the durable outbox
+    /// row back to a confirmation row (S4.1–S4.3).
+    ///
+    /// **Wire shape (S4.1–S4.3)**:
+    ///
+    /// | `fields` key        | Committed | RolledBack | Source                          |
+    /// |---------------------|-----------|------------|----------------------------------|
+    /// | `commit_status`     | "committed" | "rolled_back" | `status` arg                 |
+    /// | `transition_id`     | ✅        | ✅         | `OutboxEntry.transition_id` (Committed) or `StateMachineTransitionDelta.transition_id` (RolledBack); the same id lives on the corresponding outbox row so the engine can join by string match |
+    /// | `topic`             | ✅        | ✅         | mirrored onto `RuntimeTraceEntry.topic` |
+    /// | `contract_digest`   | ✅        | ✅         | cache populated by [`Self::emit_contract_receipt`]; absent when no contract receipt has been emitted yet |
+    /// | `failure_reason`    | ❌        | ✅         | truncated summary of the rollback error (S4.2); bounded to `MAX_SIDECAR_FIELD_BYTES` |
+    ///
+    /// The row carries **no full event payload or projection
+    /// delta** — only the join id, the commit status, and (on
+    /// rollback) a bounded failure summary. Per-field bytes are
+    /// capped at `MAX_SIDECAR_FIELD_BYTES` at the writer boundary
+    /// (S4.3 / R12).
+    ///
+    /// Caller pattern: `commit_state_machine_projection` invokes
+    /// this once on `Ok(Some(outbox_entry))` with `Committed` and
+    /// once on `Err(TransitionError::CommitFailed { source })` with
+    /// `RolledBack` + `source` so the receipt stream mirrors the
+    /// commit success/failure outcome row-for-row.
+    pub fn emit_commit_receipt(
+        &self,
+        status: CommitReceiptStatus,
+        transition_id: &str,
+        topic: impl Into<String>,
+        failure_reason: Option<&str>,
+    ) {
+        let topic = topic.into();
+        let contract_digest = self
+            .cached_contract_digest
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+
+        let mut fields_map = serde_json::Map::new();
+        fields_map.insert(
+            "commit_status".to_string(),
+            serde_json::Value::String(status.as_str().to_string()),
+        );
+        fields_map.insert(
+            "transition_id".to_string(),
+            serde_json::Value::String(transition_id.to_string()),
+        );
+        fields_map.insert(
+            "topic".to_string(),
+            serde_json::Value::String(topic.clone()),
+        );
+        if let Some(digest) = contract_digest {
+            fields_map.insert(
+                "contract_digest".to_string(),
+                serde_json::Value::String(digest),
+            );
+        }
+        if let Some(reason) = failure_reason {
+            // Bound failure_reason to MAX_SIDECAR_FIELD_BYTES so a
+            // runaway upstream error string cannot push the row
+            // past the 8 KiB sidecar cap (S4.3 / R12).
+            let bounded = cap_string_field(reason, "commit_receipt.failure_reason");
+            fields_map.insert(
+                "failure_reason".to_string(),
+                serde_json::Value::String(bounded),
+            );
+        }
+
+        let mut entry = RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Decision)
+            .with_kind("commit_receipt")
+            .with_fields(serde_json::Value::Object(fields_map));
+        if !topic.is_empty() {
+            entry = entry.with_topic(topic);
         }
         self.log_runtime_trace(entry);
     }
