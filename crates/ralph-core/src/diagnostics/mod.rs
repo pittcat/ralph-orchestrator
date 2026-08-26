@@ -59,6 +59,11 @@ pub use runtime_trace::{
     CausalContext, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceEntry, RuntimeTraceLogger,
     RuntimeTracePhase,
 };
+// Plan 2026-08-26-1104 U3: `PolicyReceiptDecision` is declared at
+// module root below and reachable directly as
+// `crate::diagnostics::PolicyReceiptDecision`. The pub enum
+// does not need a re-export in the `pub use` block because it
+// lives in this module.
 pub use session::probe_session_dir_writable;
 pub use stream_handler::DiagnosticStreamHandler;
 pub use trace_layer::{DiagnosticTraceLayer, TraceEntry};
@@ -242,6 +247,58 @@ pub(crate) fn json_digest_hex(value: &serde_json::Value) -> String {
     let digest = hasher.finalize();
     let hex = format!("{:x}", digest);
     hex.chars().take(16).collect()
+}
+
+/// Plan 2026-08-26-1104 Unit 3: deterministic SHA-256 digest of
+/// the per-event payload used by `emit_policy_receipt` so the
+/// attribution engine (U8) can join the receipt stream to the
+/// bus event it describes. When the caller does not have a
+/// payload in hand (origin-guard path: the event was rejected
+/// before the payload was parsed), falls back to a stable hash
+/// over `(topic, hat, reason_code)` so two rejections that hit
+/// the same gate produce identical digests.
+pub(crate) fn compute_event_digest(
+    event_payload: Option<&serde_json::Value>,
+    topic: &str,
+    hat: Option<&str>,
+    reason_code: Option<&str>,
+) -> String {
+    let canonical = match event_payload {
+        Some(value) => value.clone(),
+        None => serde_json::json!({
+            "topic": topic,
+            "hat": hat.unwrap_or(""),
+            "reason_code": reason_code.unwrap_or(""),
+        }),
+    };
+    json_digest_hex(&canonical)
+}
+
+/// Plan 2026-08-26-1104 Unit 3: discriminator for
+/// [`DiagnosticsCollector::emit_policy_receipt`]. Stable strings
+/// so downstream dashboards can match on the literal without
+/// re-deriving from the typed enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyReceiptDecision {
+    /// Event cleared every gate (origin + policy + state
+    /// machine) and was forwarded onto the bus. The receipt row
+    /// carries `rule_refs` listing the gates the event passed.
+    Accept,
+    /// Event was rejected by origin guard or policy validation.
+    /// The receipt row carries `reason_code` (stable machine-
+    /// readable string) and `retry_key` to reconcile with
+    /// `.ralph/recovery.jsonl` RejectionRecord rows (S3.2).
+    Reject,
+}
+
+impl PolicyReceiptDecision {
+    /// Stable string written into the receipt's `decision` field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PolicyReceiptDecision::Accept => "accept",
+            PolicyReceiptDecision::Reject => "reject",
+        }
+    }
 }
 
 /// Plan 2026-08-26-1104 Unit 2: bundle the inputs that define the
@@ -504,6 +561,16 @@ pub struct DiagnosticsCollector {
     /// underlying logger is degraded / disabled so a re-emit on a
     /// `null` collector never silently fans out.
     contract_receipt_emitted: Arc<Mutex<bool>>,
+    /// Plan 2026-08-26-1104 Unit 3: cache of the `contract_digest`
+    /// produced by the prior `emit_contract_receipt` call so that
+    /// every subsequent `emit_policy_receipt` row can carry the
+    /// matching `contract_digest` field without re-deriving it
+    /// from config (the per-event row is the unit's primary
+    /// evidence stream — U4/U5 policy/commit/recovery receipts
+    /// all join back through this digest, S3.1 acceptance
+    /// criterion). `None` until the bootstrap contract receipt
+    /// has been emitted.
+    cached_contract_digest: Arc<Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for DiagnosticsCollector {
@@ -774,6 +841,7 @@ impl DiagnosticsCollector {
             feedback_logger,
             causal_context: Arc::new(Mutex::new(None)),
             contract_receipt_emitted: Arc::new(Mutex::new(false)),
+            cached_contract_digest: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -796,6 +864,7 @@ impl DiagnosticsCollector {
             feedback_logger: None,
             causal_context: Arc::new(Mutex::new(None)),
             contract_receipt_emitted: Arc::new(Mutex::new(false)),
+            cached_contract_digest: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1383,8 +1452,20 @@ impl DiagnosticsCollector {
         }
         let entry = RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Decision)
             .with_kind("contract_receipt")
-            .with_fields(fields);
+            .with_fields(fields.clone());
         self.log_runtime_trace(entry);
+        // Plan 2026-08-26-1104 U3: cache the contract_digest so
+        // every subsequent policy / commit / recovery receipt
+        // (U3-U5) can carry the matching `contract_digest` field
+        // without re-deriving it from config. The `contract_receipt`
+        // payload is the SSOT for the digest: `compute_contract_digest`
+        // returns it as the first field of the JSON object it builds.
+        if let Some(digest_value) = fields.get("contract_digest")
+            && let Some(digest_str) = digest_value.as_str()
+            && let Ok(mut guard) = self.cached_contract_digest.lock()
+        {
+            *guard = Some(digest_str.to_string());
+        }
         // Flip the latch even when the underlying logger was
         // disabled / degraded so a later re-emit (e.g. on a
         // re-bound resume run sharing the same collector)
@@ -1392,6 +1473,116 @@ impl DiagnosticsCollector {
         if let Ok(mut guard) = self.contract_receipt_emitted.lock() {
             *guard = true;
         }
+    }
+
+    /// Plan 2026-08-26-1104 Unit 3: emit one
+    /// `kind=policy_receipt` row per event-level policy / origin
+    /// decision so the attribution engine (U8) and the diagnostic
+    /// reconciler can join the per-event decision stream back to
+    /// the session's `contract_receipt` row.
+    ///
+    /// **Wire shape (S3.1–S3.4)**:
+    ///
+    /// | `fields` key        | Accept | Reject | Source                          |
+    /// |---------------------|--------|--------|---------------------------------|
+    /// | `decision`          | "accept" | "reject" | `decision` arg              |
+    /// | `rule_refs`         | ✅     | ✅     | `rule_refs` arg (slice of stable rule ids) |
+    /// | `event_digest`      | ✅     | ✅     | SHA-256 hex prefix of `event_payload` (or stable hash of `(topic, hat, reason_code)` if payload absent) |
+    /// | `topic`             | ✅     | ✅     | mirrored onto `RuntimeTraceEntry.topic` |
+    /// | `hat`               | ✅     | ✅     | mirrored onto `RuntimeTraceEntry.hat` |
+    /// | `contract_digest`   | ✅     | ✅     | cache populated by [`Self::emit_contract_receipt`]; `None` when no contract receipt has been emitted yet |
+    /// | `reason_code`       | ❌     | ✅     | stable machine-readable code (e.g. `missing_required_field`, `origin:missing_field`) |
+    /// | `retry_key`         | ❌     | ✅     | `hat:topic:reason_code` to reconcile with `.ralph/recovery.jsonl` RejectionRecord rows (S3.2) |
+    ///
+    /// The row carries **no full event payload** — only digests /
+    /// truncated summaries. Per-field bytes are capped to
+    /// `MAX_SIDECAR_FIELD_BYTES` at the writer boundary (S3.4).
+    ///
+    /// Caller pattern: the unified validation pipeline emits one
+    /// `emit_policy_receipt(decision=Reject, ...)` per rejection
+    /// and one `emit_policy_receipt(decision=Accept, ...)` per
+    /// event that survives the pipeline. Origin guard rejections
+    /// route through this method too (rule_refs carries the
+    /// `origin_guard` rule id).
+    pub fn emit_policy_receipt(
+        &self,
+        decision: PolicyReceiptDecision,
+        topic: impl Into<String>,
+        hat: Option<&str>,
+        rule_refs: &[&str],
+        reason_code: Option<&str>,
+        event_payload: Option<&serde_json::Value>,
+    ) {
+        let topic = topic.into();
+        let hat_owned = hat.map(str::to_string);
+        let event_digest =
+            compute_event_digest(event_payload, &topic, hat_owned.as_deref(), reason_code);
+        let contract_digest = self
+            .cached_contract_digest
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+
+        let mut fields_map = serde_json::Map::new();
+        fields_map.insert(
+            "decision".to_string(),
+            serde_json::Value::String(decision.as_str().to_string()),
+        );
+        fields_map.insert(
+            "rule_refs".to_string(),
+            serde_json::Value::Array(
+                rule_refs
+                    .iter()
+                    .map(|s| serde_json::Value::String((*s).to_string()))
+                    .collect(),
+            ),
+        );
+        fields_map.insert(
+            "event_digest".to_string(),
+            serde_json::Value::String(event_digest),
+        );
+        fields_map.insert(
+            "topic".to_string(),
+            serde_json::Value::String(topic.clone()),
+        );
+        if let Some(hat) = hat_owned.as_deref() {
+            fields_map.insert(
+                "hat".to_string(),
+                serde_json::Value::String(hat.to_string()),
+            );
+        }
+        if let Some(digest) = contract_digest {
+            fields_map.insert(
+                "contract_digest".to_string(),
+                serde_json::Value::String(digest),
+            );
+        }
+        if let Some(code) = reason_code {
+            fields_map.insert(
+                "reason_code".to_string(),
+                serde_json::Value::String(code.to_string()),
+            );
+            // retry_key mirrors `RejectionRecord::retry_key` so the
+            // attribution engine can reconcile policy_receipt rows
+            // against `.ralph/recovery.jsonl` rows by string match
+            // (S3.2).
+            let hat_for_key = hat_owned.as_deref().unwrap_or("unknown");
+            fields_map.insert(
+                "retry_key".to_string(),
+                serde_json::Value::String(format!("{}:{}:{}", hat_for_key, topic, code)),
+            );
+        }
+
+        let mut entry = RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Decision)
+            .with_kind("policy_receipt")
+            .with_fields(serde_json::Value::Object(fields_map));
+        if !topic.is_empty() {
+            entry = entry.with_topic(topic);
+        }
+        if let Some(hat) = hat_owned {
+            entry = entry.with_hat(hat);
+        }
+        self.log_runtime_trace(entry);
     }
 
     /// Plan 2026-08-12-001 Unit 3: append a feedback lifecycle
