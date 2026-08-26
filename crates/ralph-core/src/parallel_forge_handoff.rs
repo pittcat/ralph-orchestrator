@@ -59,6 +59,11 @@ pub enum HandoffError {
         /// The configured limit.
         limit: usize,
     },
+    /// The Parallel Forge artifact contains no actual fan-out wave.
+    NoParallelWave {
+        /// Largest number of Units assigned to one execution wave.
+        max_wave_size: usize,
+    },
     /// The artifact was not valid YAML.
     ParseError {
         /// The underlying parser message.
@@ -98,6 +103,10 @@ impl std::fmt::Display for HandoffError {
             HandoffError::TooManyEdges { count, limit } => write!(
                 f,
                 "artifact declares {count} dependency edges, exceeding the limit of {limit}"
+            ),
+            HandoffError::NoParallelWave { max_wave_size } => write!(
+                f,
+                "parallel-forge execution plan must contain a wave with at least 2 Units; largest wave has {max_wave_size}"
             ),
             HandoffError::ParseError { source } => {
                 write!(f, "failed to parse artifact YAML: {source}")
@@ -341,7 +350,9 @@ fn derive_plan_handoff(
     }
 
     let mut tasks = Vec::with_capacity(plan.units.len());
+    let mut wave_sizes: HashMap<u32, usize> = HashMap::new();
     for unit in plan.units {
+        let execution_wave = unit.execution_wave;
         let depends_on_task_keys = unit
             .depends_on
             .iter()
@@ -362,9 +373,14 @@ fn derive_plan_handoff(
             task_key: task_keys[&unit.id].clone(),
             title: unit.title,
             depends_on_task_keys,
-            execution_wave: unit.execution_wave,
+            execution_wave,
             integration_order: unit.integration_order,
         });
+        *wave_sizes.entry(execution_wave).or_default() += 1;
+    }
+    let max_wave_size = wave_sizes.values().copied().max().unwrap_or(0);
+    if max_wave_size < 2 {
+        return Err(HandoffError::NoParallelWave { max_wave_size });
     }
     let wave_total = tasks
         .iter()
@@ -459,6 +475,21 @@ units:
     integration_order: 1
   - id: U2
     title: Feature
+    depends_on: []
+    execution_wave: 1
+    integration_order: 2
+"#;
+
+    const SERIAL_PLAN_ARTIFACT: &[u8] = br#"version: 1
+plan_key: pf-test
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+  - id: U2
+    title: Feature
     depends_on: [U1]
     execution_wave: 2
     integration_order: 2
@@ -476,12 +507,27 @@ units:
 
         let handoff = load_plan_handoff(&payload, temp.path()).expect("valid handoff");
         assert_eq!(handoff.tasks.len(), 2);
-        assert_eq!(handoff.wave_total, 2);
+        assert_eq!(handoff.wave_total, 1);
         assert_eq!(handoff.tasks[0].task_key, "forge:pf-test:U1");
-        assert_eq!(
-            handoff.tasks[1].depends_on_task_keys,
-            vec!["forge:pf-test:U1"]
-        );
+        assert_eq!(handoff.tasks[1].depends_on_task_keys, Vec::<String>::new());
+    }
+
+    #[test]
+    fn artifact_first_handoff_rejects_serial_only_plan() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("execution-plan.yml"), SERIAL_PLAN_ARTIFACT)
+            .expect("write plan");
+        let payload = json!({
+            "execution_plan_path": "execution-plan.yml",
+            "plan_key": "pf-test",
+        });
+
+        let error = load_plan_handoff(&payload, temp.path())
+            .expect_err("parallel-forge must reject serial-only plans");
+        assert!(matches!(
+            error,
+            HandoffError::NoParallelWave { max_wave_size: 1 }
+        ));
     }
 
     #[test]
@@ -517,7 +563,7 @@ units:
             canonicalize_plan_ready_payload(&payload, temp.path()).expect("payload must normalize");
         let value: Value = serde_json::from_str(&normalized).expect("normalized JSON");
         assert_eq!(value["unit_count"], 2);
-        assert_eq!(value["wave_total"], 2);
+        assert_eq!(value["wave_total"], 1);
         assert!(
             value["plan_digest"]
                 .as_str()

@@ -22,4 +22,5 @@ units: []
   # - depends_on / execution_wave / integration_order 必须形成无环 DAG
   # - execution_wave 是 1-based 正整数（无依赖 = 1）；禁止 0
   # - forge.plan.ready 只提交本文件路径与 identity；runtime 从 units[] 派生 task DAG
+  # - parallel-forge 强制至少一个 wave 包含 2+ 个无依赖 Unit；否则 forge.plan.ready 被拒绝
   # - parallel Unit 必须满足 parallel-dev-preset.md §5 并发安全规则

@@ -16,7 +16,7 @@ depends_on: []
 
 execution_wave: 1  # 1-based 正整数；禁止 0；与 development-plan「Wave N」同号
 integration_order: 1
-execution_mode: serial  # serial | parallel
+execution_mode: parallel  # parallel-forge requires at least one multi-Unit wave
 
 parallel_with: []
   # - U02

@@ -5,7 +5,7 @@
 # forge-dispatcher fans out `exec.unit.ready` waves; executor slots publish
 # `exec.unit.done` / `exec.unit.failed`; supervisor injects
 # `exec.wave.complete` / `exec.wave.failed` (agents must NOT emit those).
-# Development concurrent via supervisor waves; integration serial; one atomic
+# Development is required to fan out via supervisor waves; integration serial; one atomic
 # commit per Unit; manager Markdown report terminal.
 #
 # Hats: 12 spec hats + forge-dispatcher + forge-failure-handler (supervisor
@@ -313,7 +313,7 @@ core:
     - "Artifact lifecycle: `.ralph/forge/<plan-key>/` owner=cleanup (cleanup forge worktrees/branches before manager report); producers write; consumers read only via trigger/projection paths."
     - "Blocked/failed: write context artifact under blocks/ or failures/ before emit; include context_artifact_path + forge_artifact_root + plan_key."
     - "One business event per isolated activation unless reporter terminal pair (forge.report.done then LOOP_COMPLETE)."
-    - "Development may be parallel; integration must be serial per execution-plan integration_order."
+    - "Development MUST be parallel: execution-plan.yml must contain at least one wave with 2+ independent Units; integration remains serial per integration_order."
     - "One worktree per Unit; one atomic commit per Unit in final linear history."
     - "Never weaken tests, skip assertions, or use `.only` to pass gates."
     - "Preset check: use `-H builtin:parallel-forge` (schema SSOT merged at embed); do not rely on raw presets/en file-path check."
@@ -415,6 +415,12 @@ hats:
       3. Validate the DAG has no cycles or shared write conflicts between
          parallel Units; set `plan_key` / `source_plan_path` /
          `development_plan_path`.
+      3a. **Mandatory fan-out:** `parallel-forge` is not allowed to degrade into
+          a serial plan. If the operator plan is linear, split independent
+          implementation slices and place at least two Units in the same
+          `execution_wave`; preserve dependency edges and keep integration
+          serial through `integration_order`. A plan with no wave containing
+          at least 2 Units is rejected by runtime before task projection.
       4. **`execution_wave` is a 1-based positive integer in YAML** (no
          dependency = 1; `wave(unit) = 1 + max(wave(dep))`). Use the same
          numbering in `development_plan.md` headings: `Wave 1..W`; never write
@@ -432,6 +438,7 @@ hats:
       - `units[]` is non-empty and every `id` is unique
       - `execution_wave` starts at 1 and is contiguous, with no 0 or gaps
       - Units in the same wave have no dependencies on one another
+      - At least one execution wave contains 2 or more independent Units
       - Every Unit fills `owned_resources`, `parallel_reason`, and `serial_reason`
       - Every shared resource has exactly one Owner; non-namespacable resources
         are split across different waves
@@ -850,7 +857,7 @@ hats:
   executor:
     name: "Executor"
     description: "Per-slot TDD implementation in an isolated worktree for one Unit."
-    concurrency: 4
+    concurrency: 8
     timeout: 3600
     idle_heartbeat_secs: 600
     idle_weak_signal_cap: 8
