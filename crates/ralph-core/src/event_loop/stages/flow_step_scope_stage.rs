@@ -23,6 +23,13 @@ use ralph_proto::Event;
 /// its terminal-alignment check.
 const VERDICT_GATE_TOPICS: &[&str] = &["LOOP_COMPLETE"];
 
+/// Built-in recovery transport. `task.resume` is emitted by the runtime to
+/// deliver a validated recovery activation to a target hat; it is not a
+/// preset business topic and therefore must not be duplicated in every
+/// `mechanism.flow.steps[*].allowed_emits` list. Schema validation, target
+/// routing, repair budget, and terminal-state checks remain authoritative.
+const RUNTIME_RECOVERY_TOPICS: &[&str] = &["task.resume"];
+
 /// 2026-06-29 plan 2026-06-29-007 U2: transition topics.
 ///
 /// These topics are emitted by the review chain while the
@@ -119,6 +126,15 @@ impl EmitStage for FlowStepScopeStage {
     fn check(&self, ctx: &mut StageContext, event: &Event) -> Result<(), StageReject> {
         // Terminal topics are owned by the verdict gate.
         if VERDICT_GATE_TOPICS.contains(&event.topic.as_str()) {
+            return Ok(());
+        }
+
+        // Recovery is a runtime control-plane path, not a business emit.
+        // Keep it independent of preset step declarations so a rejected
+        // event can always reach the runtime-selected target hat. Earlier
+        // stages still validate its payload and routing, and terminal-state
+        // protection must continue to reject recovery after closure.
+        if RUNTIME_RECOVERY_TOPICS.contains(&event.topic.as_str()) {
             return Ok(());
         }
 

@@ -67,6 +67,18 @@ fn flow_step_scope_allows_terminal_topic_through_to_verdict_gate() {
 }
 
 #[test]
+fn flow_step_scope_allows_builtin_task_resume_without_preset_declaration() {
+    // `task.resume` is runtime recovery transport, not a business emit that
+    // each preset must repeat in its step allowlist.
+    let stage = FlowStepScopeStage::new(flow());
+    let e = ev(
+        "task.resume",
+        r#"{"reason":"rejected wave boundary","target_hat":"executor","kind":"correction"}"#,
+    );
+    assert!(stage.check(&mut ctx_for("unit_loop"), &e).is_ok());
+}
+
+#[test]
 fn flow_step_scope_accepts_partial_state_event_with_matching_reason() {
     let stage = FlowStepScopeStage::new(flow());
     let e = ev(
@@ -285,12 +297,10 @@ fn u3_bypass_rejects_unrelated_hat() {
 
 #[test]
 fn u3_bypass_rejects_wrong_topic_for_bypassed_hat() {
-    // dimension-reviewer is on the bypass for review.dimension.done
-    // but emitting `task.resume` from `unit_loop` is NOT on the
-    // bypass list, AND `task.resume` is not in unit_loop's
-    // allowed_emits — so the legacy reject path fires.
+    // This test remains a guard for unrelated business topics: the runtime
+    // recovery exception is intentionally specific to `task.resume`.
     let stage = FlowStepScopeStage::new(flow());
-    let e = ev_with_source("task.resume", "{}", "dimension-reviewer");
+    let e = ev_with_source("review.complete", "{}", "dimension-reviewer");
     let err = stage.check(&mut ctx_for("unit_loop"), &e).unwrap_err();
     assert_eq!(err.reason_code, "flow_unknown_emit");
 }

@@ -884,6 +884,20 @@ pub fn clean_worktree_runtime_artifacts(
         &archive_dir,
         Path::new("current-loop-id"),
     )?;
+    // Flow authority is live runtime state, just like the events ledger.
+    // Leaving it in place across --reuse-worktree lets a new run inherit
+    // the previous run's terminal step (for example `cleanup`) and makes
+    // its first business emit fail with `flow_unknown_emit`.
+    archived_any |= archive_if_exists(
+        &ralph_dir.join("flow-authority.jsonl"),
+        &archive_dir,
+        Path::new("flow-authority.jsonl"),
+    )?;
+    archived_any |= archive_if_exists(
+        &ralph_dir.join("flow-authority.jsonl.bak"),
+        &archive_dir,
+        Path::new("flow-authority.jsonl.bak"),
+    )?;
     archived_any |=
         archive_if_exists(&ralph_dir.join("review"), &archive_dir, Path::new("review"))?;
 
@@ -1931,6 +1945,16 @@ branch refs/heads/ralph/loop-1
         fs::write(ralph_dir.join("diagnostics/log.jsonl"), "{\"d\":1}\n").unwrap();
         fs::write(ralph_dir.join("urgent-steer.json"), "{}").unwrap();
         fs::write(ralph_dir.join("current-loop-id"), "clean-test-loop\n").unwrap();
+        fs::write(
+            ralph_dir.join("flow-authority.jsonl"),
+            "{\"loop_id\":\"clean-test-loop\",\"step\":\"cleanup\",\"topic\":\"forge.plan.blocked\"}\n",
+        )
+        .unwrap();
+        fs::write(
+            ralph_dir.join("flow-authority.jsonl.bak"),
+            "{\"loop_id\":\"clean-test-loop\",\"step\":\"report\",\"topic\":\"forge.cleanup.done\"}\n",
+        )
+        .unwrap();
         fs::write(agent_dir.join("scratchpad.md"), "# scratch\n").unwrap();
         fs::write(
             agent_dir.join("scratchpad-clean-test-loop.md"),
@@ -1974,6 +1998,8 @@ branch refs/heads/ralph/loop-1
         assert!(!ralph_dir.join("diagnostics").exists());
         assert!(!ralph_dir.join("urgent-steer.json").exists());
         assert!(!ralph_dir.join("current-loop-id").exists());
+        assert!(!ralph_dir.join("flow-authority.jsonl").exists());
+        assert!(!ralph_dir.join("flow-authority.jsonl.bak").exists());
         assert!(!agent_dir.join("scratchpad.md").exists());
         assert!(!agent_dir.join("scratchpad-clean-test-loop.md").exists());
         assert!(!agent_dir.join("tasks.jsonl").exists());
@@ -1985,6 +2011,14 @@ branch refs/heads/ralph/loop-1
         assert_eq!(
             fs::read_to_string(archive.join("events.jsonl")).unwrap(),
             "{\"x\":1}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(archive.join("flow-authority.jsonl")).unwrap(),
+            "{\"loop_id\":\"clean-test-loop\",\"step\":\"cleanup\",\"topic\":\"forge.plan.blocked\"}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(archive.join("flow-authority.jsonl.bak")).unwrap(),
+            "{\"loop_id\":\"clean-test-loop\",\"step\":\"report\",\"topic\":\"forge.cleanup.done\"}\n"
         );
         assert_eq!(
             fs::read_to_string(archive.join("agent/summary.md")).unwrap(),
