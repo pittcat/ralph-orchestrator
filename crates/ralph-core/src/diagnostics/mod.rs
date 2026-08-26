@@ -330,6 +330,41 @@ impl CommitReceiptStatus {
     }
 }
 
+/// Plan 2026-08-26-1104 Unit 5: discriminator for
+/// [`DiagnosticsCollector::emit_recovery_receipt`]. Stable strings
+/// so the attribution engine (U8) and downstream dashboards can
+/// match on the literal without re-deriving from the typed enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryReceiptAction {
+    /// Precheck gate rejected within retry budget → resume the
+    /// upstream hat. The receipt row carries `attempt`,
+    /// `budget_remaining`, `target_hat`, `reason_code` so the
+    /// engine can reconstruct the precheck bookkeeping (S5.1).
+    Resume,
+    /// Precheck retry budget exhausted → escalate to
+    /// `plan.blocked{kind=precheck_exhausted}`. The receipt row
+    /// carries a `retry_key` matching the plan.blocked payload
+    /// for join-by-string-match reconciliation (S5.2).
+    Exhausted,
+    /// `LOOP_COMPLETE` correction injected into the next
+    /// prompt via `inject_completion_correction`. The receipt
+    /// row carries `rejection_digest` count mirroring the
+    /// unified ledger snapshot so the engine can detect budget
+    /// exhaustion (S5.3).
+    Correction,
+}
+
+impl RecoveryReceiptAction {
+    /// Stable string written into the receipt's `action` field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecoveryReceiptAction::Resume => "resume",
+            RecoveryReceiptAction::Exhausted => "exhausted",
+            RecoveryReceiptAction::Correction => "correction",
+        }
+    }
+}
+
 /// Plan 2026-08-26-1104 Unit 2: bundle the inputs that define the
 /// loop's effective contract into the four digest-bearing fields
 /// the `kind=contract_receipt` row carries (S2.2). The full bundle
@@ -1689,6 +1724,108 @@ impl DiagnosticsCollector {
             .with_fields(serde_json::Value::Object(fields_map));
         if !topic.is_empty() {
             entry = entry.with_topic(topic);
+        }
+        self.log_runtime_trace(entry);
+    }
+
+    /// Plan 2026-08-26-1104 Unit 5: append a
+    /// `kind=recovery_receipt` row per recovery dispatch
+    /// decision so the attribution engine (U8) can join the
+    /// precheck retry bookkeeping back to the terminal event
+    /// that consumed it (S5.1–S5.3).
+    ///
+    /// **Wire shape (S5.1–S5.3)**:
+    ///
+    /// | `fields` key             | Resume | Exhausted | Correction | Source                          |
+    /// |--------------------------|---------|-----------|------------|----------------------------------|
+    /// | `action`                 | "resume" | "exhausted" | "correction" | `action` arg                 |
+    /// | `retry_key`              | ✅      | ✅        | ✅         | caller (mirror of precheck runner / rejection envelope) |
+    /// | `attempt`                | ✅      | ✅        | ❌         | the rejection count at dispatch time |
+    /// | `budget_remaining`       | ✅      | ✅        | ❌         | retry_budget − attempt (clamped to 0) |
+    /// | `target_hat`             | ✅      | ❌        | ❌         | the upstream hat receiving the resume |
+    /// | `reason_code`            | ✅      | ✅        | ✅         | stable machine-readable reason string (bounded to `MAX_SIDECAR_FIELD_BYTES`) |
+    /// | `rejection_digest_count` | ❌      | ❌        | ✅         | count read from the unified ledger snapshot |
+    ///
+    /// The `retry_key` for `Exhausted` rows is constructed by the
+    /// caller to match the
+    /// `plan.blocked{kind=precheck_exhausted}` payload's
+    /// `(gate, topic, kind)` triple so the engine can join on
+    /// string match (S5.2). For `Correction` rows the `retry_key`
+    /// mirrors the unified ledger key so the engine can correlate
+    /// the correction budget against the terminal exhaust.
+    ///
+    /// No full event payload is copied onto the wire; per-field
+    /// bytes are capped at `MAX_SIDECAR_FIELD_BYTES` at the writer
+    /// boundary (R12). No-op when the runtime-trace writer is not
+    /// instantiated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_recovery_receipt(
+        &self,
+        action: RecoveryReceiptAction,
+        topic: impl Into<String>,
+        hat: impl Into<String>,
+        retry_key: impl Into<String>,
+        attempt: u32,
+        budget_remaining: u32,
+        target_hat: Option<&str>,
+        reason_code: Option<&str>,
+    ) {
+        let topic = topic.into();
+        let hat = hat.into();
+        let retry_key = retry_key.into();
+
+        let mut fields_map = serde_json::Map::new();
+        fields_map.insert(
+            "action".to_string(),
+            serde_json::Value::String(action.as_str().to_string()),
+        );
+        fields_map.insert(
+            "retry_key".to_string(),
+            serde_json::Value::String(retry_key),
+        );
+        match action {
+            RecoveryReceiptAction::Resume | RecoveryReceiptAction::Exhausted => {
+                fields_map.insert(
+                    "attempt".to_string(),
+                    serde_json::Value::Number(attempt.into()),
+                );
+                fields_map.insert(
+                    "budget_remaining".to_string(),
+                    serde_json::Value::Number(budget_remaining.into()),
+                );
+            }
+            RecoveryReceiptAction::Correction => {
+                // Correction receipts surface the per-key
+                // `rejection_digest` count so the engine can
+                // detect when the budget is nearing exhaustion.
+                fields_map.insert(
+                    "rejection_digest_count".to_string(),
+                    serde_json::Value::Number(attempt.into()),
+                );
+            }
+        }
+        if let Some(target) = target_hat {
+            fields_map.insert(
+                "target_hat".to_string(),
+                serde_json::Value::String(target.to_string()),
+            );
+        }
+        if let Some(code) = reason_code {
+            let bounded = cap_string_field(code, "recovery_receipt.reason_code");
+            fields_map.insert(
+                "reason_code".to_string(),
+                serde_json::Value::String(bounded),
+            );
+        }
+
+        let mut entry = RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Decision)
+            .with_kind("recovery_receipt")
+            .with_fields(serde_json::Value::Object(fields_map));
+        if !topic.is_empty() {
+            entry = entry.with_topic(topic);
+        }
+        if !hat.is_empty() {
+            entry = entry.with_hat(hat);
         }
         self.log_runtime_trace(entry);
     }
