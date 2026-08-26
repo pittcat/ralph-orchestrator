@@ -28,6 +28,13 @@ fn make_enabled_collector(temp: &TempDir) -> DiagnosticsCollector {
         trace_only: false,
         session_dir: None,
         workspace_root: None,
+        // DT3 (plan §17): explicit `causal_evidence = false` pins the
+        // "minimal-session enabled via runtime_diagnosis_artifacts" shape
+        // independently of the new field's default. Without this the
+        // helper would silently switch to the causal-evidence row when
+        // U01a's telemetry bridge flips `causal_evidence` to `true` by
+        // default.
+        causal_evidence: false,
     };
     DiagnosticsCollector::with_options(temp.path(), &opts).expect("collector")
 }

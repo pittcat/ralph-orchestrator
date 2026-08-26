@@ -37,6 +37,10 @@ fn enabled_run_writes_input_bundle() {
         trace_only: false,
         session_dir: None,
         workspace_root: None,
+        // U01b: causal_evidence defaults to `false` so the minimal
+        // session here stays byte-equivalent to the pre-U01b
+        // `runtime_diagnosis_artifacts=true` shape.
+        causal_evidence: false,
     };
     let collector = DiagnosticsCollector::with_options(base, &opts).expect("collector constructs");
     let session = collector
@@ -221,6 +225,10 @@ fn collector_update_and_finalize_round_trip() {
         trace_only: false,
         session_dir: None,
         workspace_root: None,
+        // U01b: causal_evidence defaults to `false` so the minimal
+        // session here stays byte-equivalent to the pre-U01b
+        // `runtime_diagnosis_artifacts=true` shape.
+        causal_evidence: false,
     };
     let collector = DiagnosticsCollector::with_options(base, &opts).expect("collector");
     let session = collector.session_dir().unwrap().to_path_buf();
