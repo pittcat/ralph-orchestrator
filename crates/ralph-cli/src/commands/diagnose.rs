@@ -31,9 +31,9 @@ use crate::operation_guard::read_loop_id_marker;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use ralph_core::diagnosis::{
-    DiagnosisReport, Report, ReporterError, SessionSelector, build_report,
-    render_diagnosis_report_json, render_diagnosis_report_markdown, render_json, render_markdown,
-    report_from_ledger,
+    CausalAttributionReport, DiagnosisReport, Report, ReporterError, SessionSelector,
+    analyze_session, build_report, render_diagnosis_report_json, render_diagnosis_report_markdown,
+    render_json_with_causal, render_markdown_with_causal, report_from_ledger,
 };
 use ralph_core::loop_lock::{LockStatus, LoopLock};
 use ralph_core::loop_registry::LoopEntry;
@@ -103,6 +103,17 @@ pub struct DiagnoseArgs {
     /// that never wrote the workspace-level rejection log.
     #[arg(long, conflicts_with = "from_ledger")]
     pub legacy: bool,
+
+    /// U9 (plan 2026-08-26-1104): append the deterministic
+    /// `CausalAttributionReport` (U8) to the session-view output
+    /// as a Markdown "Causal Attribution" section or a JSON
+    /// `causal` object. Requires the session view — mutually
+    /// exclusive with `--from-ledger` and `--legacy` because the
+    /// ledger view has no session to feed the engine. Legacy /
+    /// v1 sessions fall back to `status: not_evaluable` instead
+    /// of claiming an attribution (R14).
+    #[arg(long, conflicts_with_all = ["from_ledger", "legacy"])]
+    pub causal: bool,
 
     /// U11 (2026-07-03-001 fix-plan): open `.ralph/supervisor.db`
     /// (when the `supervisor-db` feature is enabled) and print a
@@ -195,6 +206,20 @@ pub fn diagnose_command(color_mode: ColorMode, args: DiagnoseArgs) -> Result<()>
     }
 }
 
+/// U9 (plan 2026-08-26-1104): build the
+/// `CausalAttributionReport` from the resolved session
+/// directory + workspace root. The session directory is what
+/// `try_legacy` already loaded (the
+/// `<session>/diagnosis-input.json` + `runtime-trace.jsonl`
+/// sidecars live there), so passing it directly into
+/// `analyze_session` keeps the engine's contract — the session
+/// is the canonical evidence source and the workspace supplies
+/// the matching `.ralph/recovery.jsonl` /
+/// `ledger.jsonl` / `agent/accepted-transitions.jsonl`.
+fn build_causal_attribution(session_path: &Path, workspace_root: &Path) -> CausalAttributionReport {
+    analyze_session(session_path, workspace_root)
+}
+
 /// Test-friendly entry point: returns the [`DiagnoseExit`] instead
 /// of calling `std::process::exit`. Used by `diagnose_command` and
 /// by integration / unit tests.
@@ -214,9 +239,25 @@ pub fn try_diagnose(
     // "prefer ledger, fall back to legacy when the rejection
     // log is empty".  `--from-ledger` forces ledger-only;
     // `--legacy` forces legacy-only.
-    let report_kind = pick_report_kind(&args);
+    //
+    // U9: `--causal` forces the session view (legacy path)
+    // regardless of the default mode — the ledger view has no
+    // session sidecars to feed the attribution engine. The
+    // clap `conflicts_with_all` already blocks
+    // `--causal --from-ledger` and `--causal --legacy`, so the
+    // only remaining case is "default mode + --causal".
+    let report_kind = if args.causal {
+        ReportKind::LegacyOnly
+    } else {
+        pick_report_kind(&args)
+    };
     match report_kind {
         ReportKind::LedgerOnly => {
+            // U9 unreachable in practice: clap rejects
+            // `--causal --from-ledger`. Keep the branch so a
+            // future operator who builds `DiagnoseArgs`
+            // programmatically still surfaces the existing
+            // error path.
             let workspace = workspace_for_report(&diagnostics_root, &workspace_root);
             let result = try_ledger_only(use_colors, &args, workspace, &workspace_root);
             // U11: surface the supervisor section after the main
@@ -227,7 +268,7 @@ pub fn try_diagnose(
             result
         }
         ReportKind::LegacyOnly => {
-            let result = try_legacy(use_colors, &args, &diagnostics_root);
+            let result = try_legacy(use_colors, &args, &diagnostics_root, args.causal);
             if result.is_ok() {
                 emit_supervisor_section(&args, &workspace_root);
             }
@@ -237,6 +278,19 @@ pub fn try_diagnose(
             // 1) Try ledger first. If it yields at least one
             //    rejection record or commit log entry, render it.
             // 2) Otherwise fall back to legacy session view.
+            //
+            // U9: `--causal` is incompatible with the ledger
+            // view (no session sidecars), and clap already
+            // rejected the case where `--from-ledger` is also
+            // set. If we somehow land here with `--causal`,
+            // fall through to legacy-only semantics.
+            if args.causal {
+                let result = try_legacy(use_colors, &args, &diagnostics_root, true);
+                if result.is_ok() {
+                    emit_supervisor_section(&args, &workspace_root);
+                }
+                return result;
+            }
             let workspace = workspace_for_report(&diagnostics_root, &workspace_root);
             let ledger_report = report_from_ledger(&workspace).ok();
             let ledger_used = ledger_report.as_ref().is_some_and(|r| r.used_ledger);
@@ -248,7 +302,7 @@ pub fn try_diagnose(
                 return result;
             }
             // Fall back to legacy.
-            let result = try_legacy(use_colors, &args, &diagnostics_root);
+            let result = try_legacy(use_colors, &args, &diagnostics_root, false);
             if result.is_ok() {
                 emit_supervisor_section(&args, &workspace_root);
             }
@@ -332,10 +386,18 @@ fn try_ledger_only(
 
 /// U8: render a legacy session-level report (the original U7 flow).
 /// Kept verbatim so existing operator scripts keep working.
+///
+/// U9: when `causal_enabled` is `true`, additionally compute
+/// `analyze_session` and thread the resulting
+/// `CausalAttributionReport` through `emit_report` so the
+/// markdown output gains a "Causal Attribution" section and the
+/// JSON output gains a `causal` object. When `false`, the
+/// function emits the byte-identical U7/U8 output.
 fn try_legacy(
     use_colors: bool,
     args: &DiagnoseArgs,
     diagnostics_root: &Path,
+    causal_enabled: bool,
 ) -> std::result::Result<(), DiagnoseExit> {
     let selector = if args.session.eq_ignore_ascii_case("latest") || args.session.is_empty() {
         SessionSelector::Latest
@@ -374,7 +436,36 @@ fn try_legacy(
             }
         },
     };
-    emit_report(&report, args, use_colors).map_err(|e| {
+    // U9: build the causal attribution alongside the session
+    // report. The session directory is the engine's canonical
+    // input (`diagnosis-input.json` + `runtime-trace.jsonl`
+    // sidecars); the workspace root supplies the matching
+    // `.ralph/recovery.jsonl` / `ledger.jsonl` /
+    // `agent/accepted-transitions.jsonl`. We resolve the
+    // workspace by walking up from `report.session_path` —
+    // sessions live at `<workspace>/.ralph/diagnostics/<id>/`,
+    // so two parents up is the workspace root.
+    let causal_report = if causal_enabled {
+        let workspace_for_causal = report
+            .session_path
+            .ancestors()
+            .find(|p| {
+                // walk past `.ralph/diagnostics/<session>` → workspace
+                p.parent()
+                    .and_then(|pp| pp.file_name())
+                    .is_some_and(|n| n == ".ralph")
+                    && p.file_name().is_some_and(|n| n == "diagnostics")
+            })
+            .and_then(|p| p.parent().and_then(|pp| pp.parent()))
+            .unwrap_or(diagnostics_root);
+        Some(build_causal_attribution(
+            &report.session_path,
+            workspace_for_causal,
+        ))
+    } else {
+        None
+    };
+    emit_report(&report, args, use_colors, causal_report.as_ref()).map_err(|e| {
         DiagnoseExit::Io(
             report.session_path.clone(),
             std::io::Error::other(e.to_string()),
@@ -526,11 +617,21 @@ fn print_unknown_source(name: &str, use_colors: bool) {
     }
 }
 
-fn emit_report(report: &Report, args: &DiagnoseArgs, use_colors: bool) -> Result<()> {
+/// Render and emit a session-view report. When `causal` is
+/// `Some`, the markdown output appends a "Causal Attribution"
+/// section and the JSON output gains a `causal` object; when
+/// `None`, the output is byte-identical to the U7/U8 baseline
+/// (no flag path).
+fn emit_report(
+    report: &Report,
+    args: &DiagnoseArgs,
+    use_colors: bool,
+    causal: Option<&CausalAttributionReport>,
+) -> Result<()> {
     let body = match args.format {
-        DiagnoseFormat::Markdown => render_markdown(report),
+        DiagnoseFormat::Markdown => render_markdown_with_causal(report, causal),
         DiagnoseFormat::Json => {
-            let value = render_json(report);
+            let value = render_json_with_causal(report, causal);
             serde_json::to_string_pretty(&value)
                 .context("failed to serialize diagnose report to JSON")?
         }
@@ -1046,6 +1147,7 @@ mod tests {
             from_ledger: false,
             legacy: false,
             supervisor: SupervisorFormat::Off,
+            causal: false,
         }
     }
 
@@ -1060,6 +1162,7 @@ mod tests {
             from_ledger: false,
             legacy: false,
             supervisor: SupervisorFormat::Off,
+            causal: false,
         };
         assert!(validate_args(&args).is_err());
         args.output = None;
@@ -1108,6 +1211,7 @@ mod tests {
             from_ledger: false,
             legacy: false,
             supervisor: SupervisorFormat::Off,
+            causal: false,
         };
         try_diagnose(ColorMode::Never, args).expect("try_diagnose should succeed");
         assert!(out.exists(), "output file should be created");
@@ -1131,6 +1235,7 @@ mod tests {
             from_ledger: false,
             legacy: false,
             supervisor: SupervisorFormat::Off,
+            causal: false,
         };
         try_diagnose(ColorMode::Never, args).expect("try_diagnose should succeed");
         let content = std::fs::read_to_string(&out).unwrap();
@@ -1155,6 +1260,7 @@ mod tests {
             from_ledger: false,
             legacy: false,
             supervisor: SupervisorFormat::Off,
+            causal: false,
         };
         let result = try_diagnose(ColorMode::Never, args);
         assert!(matches!(result, Err(DiagnoseExit::InvalidSession(_))));
@@ -1186,6 +1292,7 @@ mod tests {
             from_ledger: false,
             legacy: false,
             supervisor: SupervisorFormat::Off,
+            causal: false,
         };
         assert_eq!(pick_report_kind(&args), ReportKind::LedgerOrLegacy);
     }
@@ -1201,6 +1308,7 @@ mod tests {
             from_ledger: false,
             legacy: true,
             supervisor: SupervisorFormat::Off,
+            causal: false,
         };
         assert_eq!(pick_report_kind(&args), ReportKind::LegacyOnly);
     }
@@ -1216,6 +1324,7 @@ mod tests {
             from_ledger: true,
             legacy: false,
             supervisor: SupervisorFormat::Off,
+            causal: false,
         };
         assert_eq!(pick_report_kind(&args), ReportKind::LedgerOnly);
     }
@@ -1259,6 +1368,7 @@ mod tests {
             from_ledger: true,
             legacy: false,
             supervisor: SupervisorFormat::Off,
+            causal: false,
         };
         let result = try_diagnose(ColorMode::Never, args);
         match result {
@@ -1288,6 +1398,7 @@ mod tests {
             from_ledger: true,
             legacy: false,
             supervisor: SupervisorFormat::Off,
+            causal: false,
         };
         try_diagnose(ColorMode::Never, args).expect("u8 from-ledger should succeed");
     }
@@ -1313,6 +1424,7 @@ mod tests {
             from_ledger: false,
             legacy: true,
             supervisor: SupervisorFormat::Off,
+            causal: false,
         };
         let result = try_diagnose(ColorMode::Never, args);
         // Legacy view: no session → NoSession (not the ledger
@@ -1379,6 +1491,7 @@ mod tests {
             from_ledger: true,
             legacy: false,
             supervisor: SupervisorFormat::Off,
+            causal: false,
         };
         try_diagnose(ColorMode::Never, args).expect("ledger report should still render");
         let content = std::fs::read_to_string(&out).unwrap();
@@ -1408,6 +1521,7 @@ mod tests {
             from_ledger: true,
             legacy: false,
             supervisor: SupervisorFormat::Off,
+            causal: false,
         };
         // Note: workspace_for_report walks up from `diag` only
         // when `diag` ends with `diagnostics` AND the parent is
@@ -2061,6 +2175,7 @@ mod tests {
             from_ledger: false,
             legacy: false,
             supervisor: SupervisorFormat::Off,
+            causal: false,
         };
         // The function is a no-op when the flag is `Off`. We
         // assert the contract by checking the branch lands in

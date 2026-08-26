@@ -444,9 +444,14 @@ pub fn log_activation_outcome_with_diagnostics(
             })),
         },
         vec![],
-    )
-    {
-        warn!(
+    ) {
+        // U9 fix: use `tracing::warn!` explicitly. The bare `warn!`
+        // is shadowed by the `#[warn]` lint attribute when nested
+        // inside a let-chain `&& let Err(err) = ...` (rustc 1.95 +
+        // edition 2024 parser quirk). Without the fully-qualified
+        // path the binary fails to compile, which blocks any
+        // `ralph-cli` integration test that spawns the binary.
+        tracing::warn!(
             target: "ralph_cli::loop_runner",
             iteration = iteration,
             error = %err,
