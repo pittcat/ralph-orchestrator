@@ -660,6 +660,7 @@ impl EventLoop {
                     missing
                 );
                 if let Some(stuck) = Self::inject_completion_correction(
+                    &self.diagnostics,
                     &mut self.state,
                     "missing_required_events",
                     &free_form,
@@ -773,6 +774,7 @@ impl EventLoop {
                     reason = reason,
                 );
                 if let Some(stuck) = Self::inject_completion_correction(
+                    &self.diagnostics,
                     &mut self.state,
                     "completion_payload_mismatch",
                     &free_form,
@@ -811,6 +813,7 @@ impl EventLoop {
             // correction.  Replaces the legacy `task.resume`
             // injection.
             if let Some(stuck) = Self::inject_completion_correction(
+                &self.diagnostics,
                 &mut self.state,
                 "workflow_guard_incomplete",
                 &free_form,
@@ -853,6 +856,7 @@ impl EventLoop {
                  path or use loop.cancel to abort."
             );
             if let Some(stuck) = Self::inject_completion_correction(
+                &self.diagnostics,
                 &mut self.state,
                 "completion_artifact_invalid",
                 &free_form,
@@ -1146,6 +1150,7 @@ impl EventLoop {
     /// `CompletionStuck(StructuralRejection)` so a structural
     /// failure never silently burns the recoverable budget.
     pub(super) fn inject_completion_correction(
+        diagnostics: &crate::diagnostics::DiagnosticsCollector,
         state: &mut LoopState,
         reason_hint: &str,
         free_form: &str,
@@ -1214,6 +1219,22 @@ impl EventLoop {
             retry_count,
             None,
             &mut state.prompt_context,
+        );
+
+        // Plan 2026-08-26-1104 Unit 5 / S5.3: append a
+        // `kind=recovery_receipt, action=correction` row so the
+        // attribution engine (U8) can correlate the correction
+        // budget against the unified ledger snapshot and detect
+        // when `retry_count` is nearing `U2_REJECTION_RETRY_LIMIT`.
+        diagnostics.emit_recovery_receipt(
+            crate::diagnostics::RecoveryReceiptAction::Correction,
+            ralph_proto::LOOP_COMPLETE,
+            "completion_correction",
+            retry_key.clone(),
+            retry_count,
+            0,
+            None,
+            Some(reason_hint),
         );
 
         // Surface the reason hint in tracing so operators can

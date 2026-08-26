@@ -3175,6 +3175,7 @@ impl EventLoop {
                          event will not transition loop to terminal"
                     );
                     let _ = Self::inject_completion_correction(
+                        &self.diagnostics,
                         &mut self.state,
                         "missing_required_events",
                         &free_form,
