@@ -35,6 +35,8 @@ fn make_enabled_collector(temp: &TempDir) -> DiagnosticsCollector {
         // U01a's telemetry bridge flips `causal_evidence` to `true` by
         // default.
         causal_evidence: false,
+
+        causal_evidence_window_capacity: None,
     };
     DiagnosticsCollector::with_options(temp.path(), &opts).expect("collector")
 }

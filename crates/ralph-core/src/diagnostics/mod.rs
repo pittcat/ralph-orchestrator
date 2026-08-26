@@ -27,6 +27,7 @@ mod drift;
 mod errors;
 mod feedback;
 mod hook_runs;
+pub mod evidence_window;
 pub mod input_bundle;
 mod log_rotation;
 mod orchestration;
@@ -43,6 +44,10 @@ mod integration_tests;
 pub use agent_output::{AgentOutputContent, AgentOutputEntry, AgentOutputLogger};
 pub use drift::{DriftLogger, MAX_DRIFT_MESSAGE_CHARS};
 pub use errors::{DiagnosticError, ErrorLogger};
+pub use evidence_window::{
+    AnomalyDescriptor, DEFAULT_WINDOW_CAPACITY, EvidenceWindowWriter, EVIDENCE_WINDOW_SCHEMA_VERSION,
+    trigger_kinds,
+};
 pub use feedback::{FEEDBACK_SCHEMA_VERSION, FeedbackEntry, FeedbackLogger, FeedbackPhase};
 pub use hook_runs::{HookDisposition, HookRunLogger, HookRunTelemetryEntry};
 pub use input_bundle::{
@@ -502,6 +507,15 @@ pub struct DiagnosticsOptions {
     /// so once both units are integrated the collector activates on
     /// a stock `ralph.yml` without `RALPH_DIAGNOSTICS=1`.
     pub causal_evidence: bool,
+
+    /// Plan 2026-08-26-1104 Unit 6: ring buffer capacity for the
+    /// bounded frozen evidence window. Defaults to
+    /// [`evidence_window::DEFAULT_WINDOW_CAPACITY`] (200) when
+    /// unset; the telemetry bridge in `config/telemetry.rs`
+    /// fills this from `telemetry.causal_evidence.window_capacity`
+    /// (U01a). The collector clamps to at least 1 so a misconfigured
+    /// zero does not silently disable the ring buffer.
+    pub causal_evidence_window_capacity: Option<usize>,
 }
 
 impl DiagnosticsOptions {
@@ -538,6 +552,7 @@ impl DiagnosticsOptions {
             // `false`. Activating it from `RALPH_DIAGNOSTICS=1` would
             // bypass the operator's opt-in toggle in `ralph.yml`.
             causal_evidence: false,
+            causal_evidence_window_capacity: None,
         }
     }
 
@@ -570,7 +585,22 @@ impl DiagnosticsOptions {
             // activation without the bridge must build
             // `DiagnosticsOptions` explicitly.
             causal_evidence: false,
+            causal_evidence_window_capacity: None,
         }
+    }
+
+    /// Resolves the ring buffer capacity for the frozen evidence
+    /// window. Falls back to [`evidence_window::DEFAULT_WINDOW_CAPACITY`]
+    /// when the caller did not set
+    /// [`causal_evidence_window_capacity`]. A zero or unset value
+    /// is clamped to 1 so the ring buffer cannot accidentally
+    /// become a no-op buffer of zero width (which would
+    /// cause `flush` to silently drop every pre-trigger line).
+    pub fn causal_evidence_window_capacity(&self) -> usize {
+        let capacity = self.causal_evidence_window_capacity.unwrap_or(
+            evidence_window::DEFAULT_WINDOW_CAPACITY,
+        );
+        capacity.max(1)
     }
 }
 
@@ -610,6 +640,18 @@ pub struct DiagnosticsCollector {
     /// by `feedback_id == diagnosis_id` (with `retry_key`
     /// fallback for envelopes that lack a diagnosis_id).
     feedback_logger: Option<Arc<Mutex<feedback::FeedbackLogger>>>,
+    /// Plan 2026-08-26-1104 Unit 6: bounded frozen evidence
+    /// window writer (`evidence-window.jsonl`). Wired into the
+    /// collector under the same activation rule as the
+    /// runtime-trace logger (full or minimal session); the
+    /// loop runner pushes candidate lines into the ring buffer
+    /// and calls `flush_evidence_window` at one of the five
+    /// anomaly trigger kinds (watchdog timeout / non-zero exit
+    /// / precheck exhausted / recovery exhausted / abnormal
+    /// activation outcome). Created lazily for `trace_only`
+    /// sessions because that mode owns no loop events to
+    /// record.
+    evidence_window_writer: Option<Arc<Mutex<evidence_window::EvidenceWindowWriter>>>,
     /// Plan 2026-08-26-1104 Unit 2: correlation identity stamped
     /// onto every `log_runtime_trace` row that did not bring its
     /// own `causal` value. Set by `set_causal_context` from the
@@ -888,6 +930,35 @@ impl DiagnosticsCollector {
             None
         };
 
+        // Plan 2026-08-26-1104 Unit 6: bounded frozen evidence
+        // window writer. Same activation rule as the runtime
+        // trace logger (full or minimal session); the ring
+        // buffer capacity is the configured value from
+        // `telemetry.causal_evidence.window_capacity` with the
+        // crate-level default as a fallback. Construction is
+        // best-effort: a failure to open the file flips the
+        // slot to None and emits a `tracing::warn!`, mirroring
+        // the runtime-trace logger above.
+        let evidence_window_writer = if effective_full || effective_runtime {
+            match evidence_window::EvidenceWindowWriter::new(
+                &session_dir,
+                options.causal_evidence_window_capacity(),
+            ) {
+                Ok(logger) => Some(Arc::new(Mutex::new(logger))),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "ralph_core::diagnostics",
+                        session_dir = %session_dir.display(),
+                        error = %err,
+                        "failed to create evidence-window writer; frozen sidecar disabled for this session",
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             enabled: true,
             full_diagnostics: effective_full,
@@ -906,6 +977,7 @@ impl DiagnosticsCollector {
             causal_context: Arc::new(Mutex::new(None)),
             contract_receipt_emitted: Arc::new(Mutex::new(false)),
             cached_contract_digest: Arc::new(Mutex::new(None)),
+            evidence_window_writer,
         })
     }
 
@@ -929,6 +1001,7 @@ impl DiagnosticsCollector {
             causal_context: Arc::new(Mutex::new(None)),
             contract_receipt_emitted: Arc::new(Mutex::new(false)),
             cached_contract_digest: Arc::new(Mutex::new(None)),
+            evidence_window_writer: None,
         }
     }
 
@@ -1486,6 +1559,68 @@ impl DiagnosticsCollector {
                 );
             }
         }
+    }
+
+    /// Plan 2026-08-26-1104 Unit 6: push a candidate line into
+    /// the bounded frozen evidence window ring buffer. Lines are
+    /// retained in arrival order; once it holds
+    /// [`DiagnosticsOptions::causal_evidence_window_capacity`]
+    /// entries the oldest line is dropped silently. When the
+    /// collector is disabled or the sidecar failed to open, this
+    /// method is a no-op — the loop runner can call it without a
+    /// feature flag. Used by the loop runner on every receipt
+    /// row (`contract_receipt` / `policy_receipt` /
+    /// `commit_receipt` / `recovery_receipt`) so the frozen
+    /// window always reflects the most recent evidence.
+    pub fn push_evidence_window_line(&self, line: serde_json::Value) {
+        let Some(writer) = self.evidence_window_writer.as_ref() else {
+            return;
+        };
+        match writer.lock() {
+            Ok(mut guard) => {
+                guard.push(line);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    error = %err,
+                    "evidence-window writer mutex poisoned; line dropped",
+                );
+            }
+        }
+    }
+
+    /// Plan 2026-08-26-1104 Unit 6: flush the frozen evidence
+    /// window to `evidence-window.jsonl`. Called by the loop
+    /// runner at one of the five anomaly trigger kinds
+    /// (`watchdog_timeout` / `non_zero_exit` /
+    /// `precheck_exhausted` / `recovery_exhausted` /
+    /// `abnormal_activation_outcome`). The frozen file holds:
+    ///
+    /// 1. the [`AnomalyDescriptor`] as the first row;
+    /// 2. the buffered candidate rows in arrival order (at most
+    ///    `capacity` entries, oldest dropped on overflow);
+    /// 3. `post_trigger_lines` in caller-supplied order.
+    ///
+    /// When the collector is disabled or the sidecar failed to
+    /// open, this method is a no-op (returns `Ok(())`). I/O
+    /// failures degrade the writer (subsequent flushes become
+    /// silent no-ops) and emit one `tracing::warn!` naming the
+    /// failure — the orchestration main path is never affected.
+    pub fn flush_evidence_window(
+        &self,
+        anomaly: AnomalyDescriptor,
+        post_trigger_lines: Vec<serde_json::Value>,
+    ) -> std::io::Result<()> {
+        let Some(writer) = self.evidence_window_writer.as_ref() else {
+            return Ok(());
+        };
+        let mut guard = writer.lock().map_err(|err| {
+            std::io::Error::other(format!(
+                "evidence-window writer mutex poisoned: {err}"
+            ))
+        })?;
+        guard.flush(anomaly, post_trigger_lines)
     }
 
     /// Plan 2026-08-26-1104 Unit 2: emit the **single**
@@ -2404,6 +2539,7 @@ mod tests {
             // trace_only row stays pinned to its historical shape
             // (no loop-level loggers, session dir only).
             causal_evidence: false,
+            causal_evidence_window_capacity: None,
         };
         let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
         assert!(collector.is_trace_only());

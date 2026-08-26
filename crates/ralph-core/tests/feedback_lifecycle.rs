@@ -67,6 +67,8 @@ fn enabled_collector_creates_feedback_file() {
         // literal stays equivalent to the pre-U01b minimal-session
         // shape (assertions below pin the historical logger set).
         causal_evidence: false,
+
+        causal_evidence_window_capacity: None,
     };
     let collector = DiagnosticsCollector::with_options(tmp.path(), &opts).expect("collector");
     collector.log_feedback(

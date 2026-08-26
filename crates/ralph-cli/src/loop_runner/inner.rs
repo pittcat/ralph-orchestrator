@@ -3534,6 +3534,33 @@ pub(super) async fn run_loop_impl_inner(
                     "partial_output": !outcome.output.is_empty(),
                 })),
             );
+            // Plan 2026-08-26-1104 U06: flush the bounded frozen
+            // evidence window when the watchdog fires. The file
+            // is the per-anomaly artifact consumed by the
+            // boundary-coverage reader (U7) and the deterministic
+            // attribution engine (U8). The flush is best-effort:
+            // a writer failure emits one `tracing::warn!` and the
+            // loop continues.
+            if let Err(err) = event_loop.diagnostics().flush_evidence_window(
+                ralph_core::diagnostics::AnomalyDescriptor {
+                    trigger_kind: ralph_core::diagnostics::trigger_kinds::WATCHDOG_TIMEOUT
+                        .to_string(),
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    iteration: iteration as u64,
+                    details: Some(serde_json::json!({
+                        "backend": backend_name_for_timeout,
+                        "partial_output": !outcome.output.is_empty(),
+                        "hat": display_hat.to_string(),
+                    })),
+                },
+                vec![],
+            ) {
+                warn!(
+                    iteration = iteration,
+                    error = %err,
+                    "failed to flush evidence-window on watchdog timeout; loop continues",
+                );
+            }
             warn!(
                 iteration = iteration,
                 hat = %display_hat.as_str(),
@@ -3550,6 +3577,36 @@ pub(super) async fn run_loop_impl_inner(
             .termination
             .as_ref()
             .map(|reason| format!("{reason:?}"));
+
+        // Plan 2026-08-26-1104 U06: flush the bounded frozen
+        // evidence window on non-zero backend exit. The watchdog
+        // branch above already flushed (its own trigger kind); we
+        // guard with `!outcome.watchdog_timeout` so a single
+        // anomaly never produces two frozen files in one
+        // iteration.
+        if let Some(exit_code) = outcome.backend_exit_code
+            && !outcome.watchdog_timeout
+            && exit_code != 0
+            && let Err(err) = event_loop.diagnostics().flush_evidence_window(
+                ralph_core::diagnostics::AnomalyDescriptor {
+                    trigger_kind: ralph_core::diagnostics::trigger_kinds::NON_ZERO_EXIT
+                        .to_string(),
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    iteration: iteration as u64,
+                    details: Some(serde_json::json!({
+                        "exit_code": exit_code,
+                        "hat": display_hat.to_string(),
+                    })),
+                },
+                vec![],
+            )
+        {
+            warn!(
+                iteration = iteration,
+                error = %err,
+                "failed to flush evidence-window on non-zero backend exit; loop continues",
+            );
+        }
 
         if let Some(reason) = outcome.termination {
             // Backend termination exits before the regular event-processing
