@@ -398,7 +398,7 @@ fn finalize_recovery_diagnosis(
         .collect();
         event_loop
             .diagnostics()
-            .finalize_input_bundle(artifacts, vec!["runner".to_string()]);
+            .finalize_input_bundle(artifacts, execution_capabilities(event_loop.config()));
     }
 
     // D1 (2026-06-16, plan 002 Unit 5): refresh the session pointer on
@@ -418,6 +418,35 @@ fn finalize_recovery_diagnosis(
     // diagnostic report pipeline (U7) wants to introspect the hint
     // structure directly.
     let _ = std::marker::PhantomData::<TerminationHint>;
+}
+
+/// Return the execution capabilities that were actually available to this
+/// loop. Keep this in one place so the initial bundle identity and its final
+/// snapshot cannot disagree about supervisor/wave execution.
+fn execution_capabilities(config: &ralph_core::RalphConfig) -> Vec<String> {
+    let supervisor = config.event_loop.supervisor.enabled;
+    let wave = config.hats.values().any(|hat| {
+        let extra = hat.extra_instructions.iter().map(String::as_str);
+        std::iter::once(hat.instructions.as_str())
+            .chain(extra)
+            .any(|text| {
+                text.contains("ralph wave emit")
+                    || text.contains("ralph wave verify")
+                    || text.contains("## WAVE CONTEXT")
+            })
+    });
+
+    let mut capabilities = Vec::with_capacity(2);
+    if supervisor {
+        capabilities.push("supervisor".to_string());
+    }
+    if wave {
+        capabilities.push("wave".to_string());
+    }
+    if capabilities.is_empty() {
+        capabilities.push("single-chain".to_string());
+    }
+    capabilities
 }
 
 /// D1 (2026-06-16, plan 002 Unit 5): rewrite the session pointer at
@@ -658,14 +687,11 @@ pub(super) async fn run_loop_impl_inner(
     // EventLoop is constructed. This is best-effort and never changes the
     // business path.
     if let Some(diagnostics) = prebuilt_diagnostics.as_ref() {
-        let execution_capability = if config.event_loop.supervisor.enabled {
-            "supervisor"
-        } else if config.event_loop.execution_mode == ralph_core::config::HatExecutionMode::Isolated
-        {
-            "isolated"
-        } else {
-            "single-chain"
-        };
+        let capabilities = execution_capabilities(&config);
+        let execution_capability = capabilities
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "single-chain".to_string());
         let code_baseline = ralph_core::diagnostics::CodeBaseline {
             head_sha: get_head_sha(ctx.workspace()).ok(),
             worktree: !ctx.is_primary(),
@@ -680,7 +706,7 @@ pub(super) async fn run_loop_impl_inner(
                 .map(|path| path.display().to_string()),
             Some(config.event_loop.prompt_file.clone()),
             code_baseline.head_sha.clone(),
-            Some(execution_capability.to_string()),
+            Some(execution_capability),
             code_baseline,
         );
 

@@ -1,14 +1,14 @@
 # Parallel Forge artifact-first task materialization. The real EventLoop reads
-# execution-plan.yml, verifies the handoff, and atomically creates a two-task
+# execution-plan.yml, verifies the handoff, and atomically creates a three-task
 # DAG without planner-supplied `unit_tasks`.
 #
-# Assertions pin the live task ledger to the artifact DAG and prove U2 remains
+# Assertions pin the live task ledger to the artifact DAG and prove U3 remains
 # blocked by U1. The final LOOP_COMPLETE attempt is intentionally rejected
 # while projected tasks remain open; settlement/terminal closure is covered by
 # the dedicated two-wave scenarios.
 
 name: pf_task_dispatch_runtime
-description: 'parallel-forge artifact authority path: forge.plan.ready derives a two-task DAG from execution-plan.yml and preserves dependency readiness'
+description: 'parallel-forge artifact authority path: forge.plan.ready derives a three-task DAG from execution-plan.yml and preserves dependency readiness'
 
 config:
   prompt_file: PROMPT.md
@@ -88,10 +88,15 @@ fixture_files:
           execution_wave: 1
           integration_order: 1
         - id: U2
+          title: Parallel foundation
+          depends_on: []
+          execution_wave: 1
+          integration_order: 2
+        - id: U3
           title: Feature
           depends_on: [U1]
           execution_wave: 2
-          integration_order: 2
+          integration_order: 3
 
 mock_responses:
   - text: |
@@ -139,8 +144,8 @@ mock_responses:
       <event topic="exec.unit.ready">
       wave_id: "pf-td-wave-2"
       slot_index: 0
-      task_id: "task-bd-pf-td-p-u2"
-      unit_id: "U2"
+      task_id: "task-bd-pf-td-p-u3"
+      unit_id: "U3"
       plan_key: "pf-td-p"
       </event>
     hat: pf-dispatcher
@@ -149,7 +154,7 @@ mock_responses:
       wave_id: "pf-td-wave-2"
       slot_index: 0
       content_hash: "pf-td-h2"
-      unit_id: "U2"
+      unit_id: "U3"
       plan_key: "pf-td-p"
       </event>
     hat: pf-executor
@@ -183,6 +188,10 @@ expected:
       blocked_by_keys: []
     - task_key: forge:pf-td-p:U2
       status: open
+      blocked_by_keys: []
+    - task_key: forge:pf-td-p:U3
+      status: open
       blocked_by_keys: [forge:pf-td-p:U1]
   ready_task_keys:
     - forge:pf-td-p:U1
+    - forge:pf-td-p:U2

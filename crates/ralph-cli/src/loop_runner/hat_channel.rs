@@ -404,7 +404,15 @@ fn walk_collect_orphans(
         let path = entry.path();
         // Skip if this entry is exactly in `skip_paths` or contained
         // within one (avoid recursing).
-        if skip_paths.iter().any(|skip| path.starts_with(skip)) {
+        if skip_paths.iter().any(|skip| path.starts_with(skip))
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::Normal(name)
+                        if name == std::ffi::OsStr::new("crates")
+                )
+            })
+        {
             continue;
         }
         let file_type = match entry.file_type() {
@@ -813,6 +821,14 @@ mod tests {
         std::fs::create_dir_all(&crate_ralph).unwrap();
         std::fs::write(
             crate_ralph.join("events.jsonl"),
+            "{\"topic\":\"LOOP_COMPLETE\"}\n",
+        )
+        .unwrap();
+
+        let nested_crate_ralph = tmp.path().join("U01a/crates/ralph-core/.ralph");
+        std::fs::create_dir_all(&nested_crate_ralph).unwrap();
+        std::fs::write(
+            nested_crate_ralph.join("events.jsonl"),
             "{\"topic\":\"LOOP_COMPLETE\"}\n",
         )
         .unwrap();
