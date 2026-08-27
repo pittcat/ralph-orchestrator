@@ -35,6 +35,10 @@ const WIDTH_MINIMAL: u16 = 40; // Hide idle countdown
 /// to ensure critical information (iteration, mode) remains visible.
 pub fn render(state: &TuiState, width: u16) -> Paragraph<'static> {
     let mut left_spans = vec![];
+    let active_wave = state
+        .wave_active_iteration_idx
+        .filter(|&wave_iter| wave_iter == state.current_view)
+        .and(state.wave_active.as_ref());
 
     // Priority 1: Iteration counter or status indicator - ALWAYS shown
     if state.wave_view_active {
@@ -73,7 +77,7 @@ pub fn render(state: &TuiState, width: u16) -> Paragraph<'static> {
 
     // Priority 4: Elapsed time (iteration or wave) - hidden at WIDTH_COMPRESS and below
     if width > WIDTH_COMPRESS {
-        let elapsed = if let Some(ref wave) = state.wave_active {
+        let elapsed = if let Some(wave) = active_wave {
             // Live wave timer replaces the iteration timer
             Some(wave.started_at.elapsed())
         } else {
@@ -110,7 +114,7 @@ pub fn render(state: &TuiState, width: u16) -> Paragraph<'static> {
     if width > WIDTH_COMPRESS {
         // Full hat display: "🔨 Builder"
         // When a wave is active, show the wave hat name instead and append [wave N/M]
-        if let Some(ref wave) = state.wave_active {
+        if let Some(wave) = active_wave {
             left_spans.push(Span::raw(format!("{} ", wave.hat_name)));
             left_spans.push(Span::styled(
                 format!("[wave {}/{}]", wave.completed, wave.total),
@@ -561,6 +565,29 @@ mod tests {
         assert!(
             !text.contains("Correctness"),
             "user is reviewing iter 1, header must not show iter 2's hat, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn header_does_not_show_active_wave_for_historical_iteration() {
+        let mut state = TuiState::new();
+        state.start_new_iteration_with_metadata(Some("📋 Planner".to_string()), None);
+        state.start_new_iteration_with_metadata(Some("⚙ Executor".to_string()), None);
+
+        state.wave_active = Some(crate::state::WaveInfo::new("Executor".to_string(), 1));
+        state.wave_active_iteration_idx = Some(1);
+        state.navigate_prev();
+
+        let text = render_to_string(&state);
+        assert!(
+            text.contains("Planner"),
+            "historical iteration should keep its own hat, got: {}",
+            text
+        );
+        assert!(
+            !text.contains("Executor") && !text.contains("[wave"),
+            "historical iteration must not show the active wave, got: {}",
             text
         );
     }
