@@ -104,6 +104,13 @@ pub(crate) fn run_supervisor_fan_in(
 ) -> SupervisorFanInOutcome {
     use ralph_core::supervisor::{SupervisorBridge as _, WaveKind};
 
+    // `CompletedWave` is produced by the local tracker, while the
+    // supervisor store uses an internal `w-*` row id.  Keep store access
+    // on the latter, but make every business coordination payload use the
+    // public id from the detected trigger wave.
+    let mut coordination_completed = completed.clone();
+    coordination_completed.wave_id = detected.wave_id.clone();
+
     // Worker execution may overlap across independent waves, but fan-in
     // appends to one event stream and commits one delivery state at a time.
     let fan_in_lock = bridge.fan_in_lock();
@@ -268,7 +275,7 @@ pub(crate) fn run_supervisor_fan_in(
             // still commits so fail_wave's gate can open).
             if let Err(err) = merge_completed_exec_fix_slots_to_main(
                 main_events_file,
-                completed,
+                &coordination_completed,
                 bridge,
                 &store_wave_id,
             ) {
@@ -348,7 +355,7 @@ pub(crate) fn run_supervisor_fan_in(
             // loop after three iterations with no events emitted.
             let payload = build_wave_complete_payload(
                 wave_kind,
-                completed,
+                &coordination_completed,
                 &store_wave_id,
                 bridge,
                 aggregate_timeout_secs,
@@ -371,7 +378,7 @@ pub(crate) fn run_supervisor_fan_in(
         } => emit_injected_failed_coord(
             bridge,
             wave_kind,
-            completed,
+            &coordination_completed,
             &store_wave_id,
             main_events_file,
             &topic,
@@ -394,14 +401,14 @@ pub(crate) fn run_supervisor_fan_in(
             let salvage_outcome = if matches!(wave_kind, ralph_core::supervisor::WaveKind::Review) {
                 merge_completed_review_slots_to_main(
                     main_events_file,
-                    completed,
+                    &coordination_completed,
                     bridge,
                     &store_wave_id,
                 )
             } else {
                 merge_completed_exec_fix_slots_to_main(
                     main_events_file,
-                    completed,
+                    &coordination_completed,
                     bridge,
                     &store_wave_id,
                 )
@@ -446,7 +453,7 @@ pub(crate) fn run_supervisor_fan_in(
                 } => emit_injected_failed_coord(
                     bridge,
                     wave_kind,
-                    completed,
+                    &coordination_completed,
                     &store_wave_id,
                     main_events_file,
                     &topic,
@@ -457,7 +464,7 @@ pub(crate) fn run_supervisor_fan_in(
                 ralph_core::supervisor::CoordinatorAction::InjectedComplete { topic, .. } => {
                     let payload = build_wave_complete_payload(
                         wave_kind,
-                        completed,
+                        &coordination_completed,
                         &store_wave_id,
                         bridge,
                         aggregate_timeout_secs,
@@ -507,14 +514,14 @@ pub(crate) fn run_supervisor_fan_in(
                 let salvage = if matches!(wave_kind, ralph_core::supervisor::WaveKind::Review) {
                     merge_completed_review_slots_to_main(
                         main_events_file,
-                        completed,
+                        &coordination_completed,
                         bridge,
                         &store_wave_id,
                     )
                 } else {
                     merge_completed_exec_fix_slots_to_main(
                         main_events_file,
-                        completed,
+                        &coordination_completed,
                         bridge,
                         &store_wave_id,
                     )
@@ -556,7 +563,7 @@ pub(crate) fn run_supervisor_fan_in(
                     } => emit_injected_failed_coord(
                         bridge,
                         wave_kind,
-                        completed,
+                        &coordination_completed,
                         &store_wave_id,
                         main_events_file,
                         &topic,
@@ -569,7 +576,7 @@ pub(crate) fn run_supervisor_fan_in(
                     } => {
                         let payload = build_wave_complete_payload(
                             wave_kind,
-                            completed,
+                            &coordination_completed,
                             &store_wave_id,
                             bridge,
                             aggregate_timeout_secs,
@@ -634,7 +641,7 @@ pub(crate) fn run_supervisor_fan_in(
                     }) => {
                         let payload = build_wave_complete_payload(
                             wave_kind,
-                            completed,
+                            &coordination_completed,
                             &store_wave_id,
                             bridge,
                             aggregate_timeout_secs,
@@ -659,7 +666,7 @@ pub(crate) fn run_supervisor_fan_in(
                     }) => emit_injected_failed_coord(
                         bridge,
                         wave_kind,
-                        completed,
+                        &coordination_completed,
                         &store_wave_id,
                         main_events_file,
                         &topic,

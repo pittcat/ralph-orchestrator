@@ -38,6 +38,40 @@ fn attempt_history_is_safe_to_reuse(history: &ralph_core::supervisor::SlotAttemp
     })
 }
 
+fn slot_binding_for_worktree(
+    slot_index: u32,
+    kind: WaveKind,
+    worktree_path: std::path::PathBuf,
+    branch: String,
+) -> SlotBinding {
+    let mut env = std::collections::HashMap::new();
+    env.insert(
+        ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_WORKER.to_string(),
+        "1".to_string(),
+    );
+    env.insert(
+        ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_WORKTREE_PATH.to_string(),
+        worktree_path.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_WORKTREE_BRANCH.to_string(),
+        branch,
+    );
+    env.insert(
+        ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_INDEX.to_string(),
+        slot_index.to_string(),
+    );
+    env.insert(
+        ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_KIND.to_string(),
+        kind.to_string(),
+    );
+    SlotBinding {
+        slot_index,
+        env,
+        worktree_path: Some(worktree_path),
+    }
+}
+
 use ralph_core::supervisor::PhaseInputs;
 use ralph_core::supervisor::worktree_bind::WorktreeFactory;
 use ralph_core::supervisor::{
@@ -428,27 +462,11 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
                 )
             {
                 let worktree_path = std::path::PathBuf::from(parent_path);
-                let mut env = std::collections::HashMap::new();
-                env.insert(
-                    ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_WORKER.to_string(),
-                    "1".to_string(),
-                );
-                env.insert(
-                    ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_WORKTREE_PATH.to_string(),
-                    worktree_path.to_string_lossy().into_owned(),
-                );
-                env.insert(
-                    ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_WORKTREE_BRANCH
-                        .to_string(),
+                let binding = slot_binding_for_worktree(
+                    slot_index,
+                    kind,
+                    worktree_path.clone(),
                     parent_branch.unwrap_or("").to_string(),
-                );
-                env.insert(
-                    ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_INDEX.to_string(),
-                    slot_index.to_string(),
-                );
-                env.insert(
-                    ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_KIND.to_string(),
-                    kind.to_string(),
                 );
                 let resource = ralph_core::supervisor::SlotResource {
                     slot_index,
@@ -461,12 +479,42 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
                 self.store
                     .bind_worktree(wave_id, slot_index, resource)
                     .map_err(|err| BridgeError::Store(err.to_string()))?;
-                return Ok(Some(SlotBinding {
-                    slot_index,
-                    env,
-                    worktree_path: Some(worktree_path),
-                }));
+                return Ok(Some(binding));
             }
+        }
+
+        // A repeated dispatch of the same wave/slot must be idempotent.
+        // The deterministic path may already be persisted even when the
+        // previous bind completed just before a process interruption.
+        if let Some(resource) = self
+            .store
+            .get_slot_resource(wave_id, slot_index)
+            .map_err(|err| BridgeError::Store(err.to_string()))?
+            && let (Some(path), Some(branch)) = (resource.worktree_path, resource.branch)
+            && attempt_history_is_safe_to_reuse(&ralph_core::supervisor::SlotAttemptHistory {
+                attempts: self
+                    .store
+                    .list_slot_attempts(wave_id, slot_index, None)
+                    .map_err(|err| BridgeError::Store(err.to_string()))?,
+            })
+            && ralph_core::worktree::is_existing_worktree_binding_reusable(
+                &ctx.repo_root,
+                std::path::Path::new(&path),
+                Some(&branch),
+            )
+        {
+            tracing::info!(
+                wave_id,
+                slot_index,
+                path = %path,
+                "reusing persisted supervisor slot worktree"
+            );
+            return Ok(Some(slot_binding_for_worktree(
+                slot_index,
+                kind,
+                std::path::PathBuf::from(path),
+                branch,
+            )));
         }
 
         // U4: build the per-slot binding via the helper so the
@@ -479,24 +527,40 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         // yields a `Worktree { path, branch }`, failure yields
         // `BridgeError::Store`.
         let branch = format!("{}-{}-{}-{}", ctx.loop_id, kind, wave_id, slot_index);
+        let expected_path = ralph_core::worktree::WorktreeConfig::default()
+            .worktree_path(&ctx.repo_root)
+            .join(&branch);
+        if ralph_core::worktree::is_existing_worktree_binding_reusable(
+            &ctx.repo_root,
+            &expected_path,
+            Some(&branch),
+        ) {
+            tracing::warn!(
+                wave_id,
+                slot_index,
+                path = %expected_path.display(),
+                "reusing matching supervisor worktree left by an interrupted bind"
+            );
+            let resource = ralph_core::supervisor::SlotResource {
+                slot_index,
+                worktree_path: Some(expected_path.to_string_lossy().into_owned()),
+                branch: Some(branch.clone()),
+            };
+            self.store
+                .bind_worktree(wave_id, slot_index, resource)
+                .map_err(|err| BridgeError::Store(err.to_string()))?;
+            return Ok(Some(slot_binding_for_worktree(
+                slot_index,
+                kind,
+                expected_path,
+                branch,
+            )));
+        }
         let wt = self
             .factory
             .create(ctx.repo_root.clone(), branch.clone())
             .map_err(|err| BridgeError::Store(err.to_string()))?;
         let worktree_path = wt.path.clone();
-        let mut env = std::collections::HashMap::new();
-        env.insert(
-            ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_WORKER.to_string(),
-            "1".to_string(),
-        );
-        env.insert(
-            ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_WORKTREE_PATH.to_string(),
-            worktree_path.to_string_lossy().into_owned(),
-        );
-        env.insert(
-            ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_WORKTREE_BRANCH.to_string(),
-            branch.clone(),
-        );
         // 2026-07-26-002 plan U8 (R8): do NOT write RALPH_WAVE_ID
         // here. The dispatcher already injects the public wave id
         // (the operator- and agent-visible string) into the
@@ -506,18 +570,10 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         // state and MUST NOT leak into the spawned worker. The
         // dispatcher's exclude-list for binding-env merges is
         // preserved as a defense-in-depth assertion.
-        env.insert(
-            ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_INDEX.to_string(),
-            slot_index.to_string(),
-        );
-        env.insert(
-            ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_KIND.to_string(),
-            kind.to_string(),
-        );
         let resource = ralph_core::supervisor::SlotResource {
             slot_index,
             worktree_path: Some(worktree_path.to_string_lossy().into_owned()),
-            branch: Some(branch),
+            branch: Some(branch.clone()),
         };
 
         // Persist the `SlotResource` in the store so fan-in
@@ -526,11 +582,12 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
             .bind_worktree(wave_id, slot_index, resource)
             .map_err(|err| BridgeError::Store(err.to_string()))?;
 
-        Ok(Some(SlotBinding {
+        Ok(Some(slot_binding_for_worktree(
             slot_index,
-            env,
-            worktree_path: Some(worktree_path),
-        }))
+            kind,
+            worktree_path,
+            branch,
+        )))
     }
 
     fn recover(&self) -> Result<Vec<WaveSnapshot>, BridgeError> {

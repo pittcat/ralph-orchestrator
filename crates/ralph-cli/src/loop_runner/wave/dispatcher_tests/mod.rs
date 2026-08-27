@@ -4496,12 +4496,14 @@ fn u4_run_supervisor_fan_in_injected_failed_writes_workspace_diagnostics() {
         .unwrap();
 
     let completed = ralph_core::CompletedWave {
+        // The local tracker may carry the supervisor's internal id;
+        // fan-in must publish the detected business id instead.
         wave_id: "w-u4-fan-in".to_string(),
         wave_total: 2,
         ..ralph_core::CompletedWave::default()
     };
     let detected = ralph_core::DetectedWave {
-        wave_id: "w-u4-fan-in".to_string(),
+        wave_id: "wave-u4-public".to_string(),
         target_hat: HatId::new("u4-hat"),
         hat_config: HatConfig {
             name: "u4-hat".to_string(),
@@ -4533,7 +4535,7 @@ fn u4_run_supervisor_fan_in_injected_failed_writes_workspace_diagnostics() {
         .path()
         .join(".ralph")
         .join("diagnostics")
-        .join("wave-w-u4-fan-in-slots.json");
+        .join("wave-wave-u4-public-slots.json");
     assert!(
         diag_path.exists(),
         "InjectedFailed arm must write diagnostics at {diag_path:?}"
@@ -4541,7 +4543,7 @@ fn u4_run_supervisor_fan_in_injected_failed_writes_workspace_diagnostics() {
     let bytes = std::fs::read(&diag_path).expect("read diagnostics");
     let payload: serde_json::Value =
         serde_json::from_slice(&bytes).expect("diagnostics must be valid JSON");
-    assert_eq!(payload["wave_id"], "w-u4-fan-in");
+    assert_eq!(payload["wave_id"], "wave-u4-public");
     assert_eq!(payload["generated_at_kind"], "injected_failed");
     let slots = payload["slots"].as_array().expect("slots must be an array");
     assert_eq!(slots.len(), 2);
@@ -4554,6 +4556,20 @@ fn u4_run_supervisor_fan_in_injected_failed_writes_workspace_diagnostics() {
         .expect("slot 1 must exist");
     assert_eq!(s1["status"], "failed");
     assert_eq!(s1["reason"], "worker_timeout");
+
+    let ledger = std::fs::read_to_string(&main_events_file).expect("read coordination ledger");
+    let failed = ledger
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid event"))
+        .find(|event| event["topic"] == "exec.wave.failed")
+        .expect("failed coordination event must be present");
+    let failed_payload = match &failed["payload"] {
+        serde_json::Value::String(payload) => {
+            serde_json::from_str(payload).expect("failed payload string must be JSON")
+        }
+        payload => payload.clone(),
+    };
+    assert_eq!(failed_payload["wave_id"], "wave-u4-public");
 }
 
 /// U1 Red #1 (plan 2026-07-26-004, S2 / R2): production

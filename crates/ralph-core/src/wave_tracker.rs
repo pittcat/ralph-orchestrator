@@ -45,14 +45,14 @@ pub(crate) struct WaveState {
 pub const MAX_DIMENSION_RETRIES_PER_SLOT: u32 = 1;
 
 /// A successful result from a wave instance.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WaveResult {
     pub index: u32,
     pub events: Vec<Event>,
 }
 
 /// A failure from a wave instance.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WaveFailure {
     pub index: u32,
     pub error: String,
@@ -121,7 +121,7 @@ impl WaveFailure {
 }
 
 /// A completed wave with all results and failures.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CompletedWave {
     pub wave_id: String,
     /// Total number of workers the dispatcher expected (R8: every
