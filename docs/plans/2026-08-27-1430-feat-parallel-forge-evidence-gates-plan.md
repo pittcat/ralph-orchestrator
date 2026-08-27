@@ -8,22 +8,22 @@ origin: docs/brainstorms/2026-08-12-003-feat-evidence-driven-orchestration-state
 product_contract_source: ce-brainstorm
 plan_depth: deep
 plan_status: READY
-baseline_commit: e7f42144f491decc17a88db63fc1aefc3b90baa4
+baseline_commit: e94c07822bce7eacbf9b05cc4920fd4ed0aa4316
 ---
 
 # feat: 为 parallel-forge 增加关键阶段证据门禁
 
-> Executor 按 `Unit 1 → … → Unit 11` 严格串行执行。禁止写生产代码以外的架构再设计。禁止扩展 payload consistency DSL。禁止给 `exec.unit.done` 加 guard。
+> Executor 必须按下方 DAG 的 Ready Set 最大并发执行；不得按 Unit 编号或 Wave 形成全局 Barrier。禁止写生产代码以外的架构再设计。禁止扩展 payload consistency DSL。禁止给 `exec.unit.done` 加 guard。
 
 ---
 
 ## 0. 计划状态
 
 * **状态：`READY`**
-* **基线：** `e7f42144f491decc17a88db63fc1aefc3b90baa4`（`feat: 同步多 wave 并发能力到 operator skills`）
+* **基线：** `e94c07822bce7eacbf9b05cc4920fd4ed0aa4316`（`fix(parallel-forge): 修复 worktree 恢复并强制 DAG 并发`）
 * **调查范围：** `presets/en/parallel-forge.yml`、`presets/schemas/parallel-forge.yml`、`presets/scenarios/parallel-forge-*.yml`、`crates/ralph-core/src/config/{precheck,ralph_config}.rs`、`crates/ralph-core/src/event_policy/validation.rs`、`crates/ralph-core/src/event_policy_payload_consistency.rs`、`crates/ralph-core/src/event_loop/precheck_gate_runner.rs`、`crates/ralph-cli/src/{presets.rs,commands/emit/command_impl.rs}`、`crates/ralph-core/tests/scenarios/parallel_forge_*.yml`、`ce-executor-pipeline` 对照实现
-* **已执行验证：** 读源码与测试；`git rev-parse HEAD`；`cargo nextest --version` → `0.9.140`
-* **尚未执行（留给 Executor 的 Red/Green，不是计划阻塞）：** 本计划不要求 Planner 先把新测试跑红
+* **已执行验证：** 读源码、测试与 Git diff；`git rev-parse HEAD`；`git show e94c0782`；`cargo nextest --version` → `0.9.140`
+* **尚未执行（留给 Executor 的 Red/Green，不是计划阻塞）：** 新增证据门禁尚未实现，因此本计划内 S1–S22 的目标 Red/Green 尚未执行；最终全量 `./scripts/run-tests.sh` 也尚未执行。
 * **阻塞项：** 无。所有实施决策置信度 ≥ 0.85
 
 ---
@@ -32,13 +32,15 @@ baseline_commit: e7f42144f491decc17a88db63fc1aefc3b90baa4
 
 * **业务目标：** 只有证据完整、payload 自洽、目标 worktree 身份稳定的 `parallel-forge` 关键 handoff 才能推进状态或执行最终 `git merge --ff-only`。
 * **用户/调用方：** builtin `parallel-forge` 的 producer hats（尤其 `worktree` / `reviewer` / `integrator` / `tester` / `auditor` / `forge-failure-handler`）、runtime EventLoop、`ralph preset check` / `ralph preset verify`、最终消费 merge 结果的 operator。
-* **当前行为（基线，E1–E12）：**
+* **当前行为（基线，E1–E17）：**
   * `event_loop.precheck` **不存在**；只有 3 条 `payload_consistency`（三个 topic 的 `verified_base_commit eq ""`）。
   * `forge.worktrees.ready` 无 `target_start_sha` / `target_status_fingerprint`；instructions 已要求 `target_branch = RALPH_CURRENT_BRANCH`，但 schema `field_docs` 仍写 `git worktree list` 第一项。
   * `forge.wave.settled` 被 `CloseTaskBatch` 消费；`.proposed` 不存在，故当前任何 accepted `forge.wave.settled` 都会关 task。
   * `forge.audit.done` 无论 `verdict` 为何都触发 `finalizer`，随后真实 FF merge。
   * `work.failed` **publishers：** `forge-failure-handler`（真路径）、`integrator` / `verifier`（publishes 有、instructions 禁止）、**`tester`（publishes + instructions 第 6 步直接 emit）**。
   * **不存在** topic `forge.full.verification.failed`（仅出现在已归档计划文档，当前 YAML/schema 无此键）。
+  * `parallel_forge_handoff::derive_plan_handoff` 已忽略 artifact 的 `execution_wave` 作为硬排序，按 `depends_on` 计算最早安全 wave；未知依赖和环会在 handoff 阶段报错。
+  * `parallel_forge_resume::validate_manifest` 已允许 `plan_path` 在 parent/child TUI 边界发生 absolute/relative 表示变化，但其它 manifest identity 字段仍精确比较。
 * **目标行为：** 见 §4 Scenarios。双 guard topic 在 producer emit 路径上先被确定性 consistency 拒绝（挂在 `<T>.proposed`），再进 LLM precheck；通过后才出现 accepted `<T>`。`work.failed` 只有 failure-handler 能发。最终 merge 只被 accepted 且 ACCEPTED 的 `forge.audit.done` 激活。
 * **行为差异：** 非法/空/矛盾/证据不足的关键事件从「prompt 自律后仍推进」变为「reject_with_resume → 单 owner 修复；3 次耗尽 → runtime 注入 `forge.plan.blocked`」。
 * **本次范围：** 只改 builtin `parallel-forge` 的 preset/schema/projection/hat instructions/ownership、对应 BDD 与 `presets/scenarios/`、author notes、规定下游同步清单（无改动则记录 no-op）。
@@ -54,7 +56,7 @@ baseline_commit: e7f42144f491decc17a88db63fc1aefc3b90baa4
   * consistency `when` 只支持 `eq/ne/gt/gte/exists/non_empty`；`non_empty` **忽略布尔值**，空数组要用 `{eq: []}` 才能 Hit。
   * `gte: 90` 在 Hit=拒绝 的极性下会拒绝合法高分，**禁止**用 consistency 表达「confidence≥90」；该阈值只放 precheck。
   * `on_exhausted` 字符串解析为 topic+reason；parallel-forge 清理链订阅的是 `forge.plan.blocked` 不是 `plan.blocked`。
-* **已确认假设：** 复用现有 desugar / consistency / `reject_with_resume`；`RALPH_CURRENT_BRANCH` / `RALPH_WORKSPACE_ROOT` 由 `loop_runner/execution.rs` 注入。
+* **已确认假设：** 复用现有 desugar / consistency / `reject_with_resume`；`RALPH_CURRENT_BRANCH` / `RALPH_WORKSPACE_ROOT` 由 `loop_runner/execution.rs` 注入；独立 Unit 可从同一基线开发，`integration_order` 只用于 deterministic merge。
 * **待验证假设：** 无（全部已用代码证据关闭或标为确定决策）。
 
 ---
@@ -90,6 +92,9 @@ baseline_commit: e7f42144f491decc17a88db63fc1aefc3b90baa4
 | E14 | `crates/ralph-cli/src/{preflight,config_resolution}.rs` `PRESET_OPT_IN*` 已含 `"precheck"` | 加 `event_loop.precheck` 不会被 operator omit 静默丢掉 | U11 对这两处记 no-op | 高 |
 | E15 | `ce-executor-pipeline.yml:92-172` + `ce_executor_pipeline_fail_gate_*.yml` | 对照：precheck YAML 形状、`on_fail.target`、耗尽 BDD、gate 转发 verbatim | 复制该形状，不要发明第二套 gate 机制 | 高 |
 | E16 | `crates/ralph-core/src/config/precheck.rs:178-221` | desugar 为 `.proposed` 继承 guarded 的 `payload`+`required_fields`；`.rejected` 要求 `failed_checks`,`reason` | 不必手写 `.proposed` schema，除非 consistency 要在 normalize 前 lint 该 topic——本计划 lint 走 parse_yaml（含 desugar），故可把 rule.topic 设为 `.proposed` | 高 |
+| E17 | `crates/ralph-core/src/parallel_forge_handoff.rs:353-460, 598-626`；`crates/ralph-core/src/parallel_forge_resume.rs:670-708, 1497-1514`；`git show e94c0782` | 当前基线已按 `depends_on` 重算最早安全 wave、拒绝未知依赖/环，并允许 resume 的 `plan_path` 绝对/相对表示变化 | 证据门禁计划不得再把 `execution_wave` 当硬串行边；新增或回归场景必须保留独立 Unit 并发和 parent/child resume 行为 | 高 |
+| E18 | `presets/en/parallel-forge.yml:313-321, 415-505`；`crates/ralph-core/data/ralph-tools-wave.md:109-122`；`skills/ralph-preset-{author,review}/references/{patterns,finding-rubric}.md` | 当前 preset、注入 skill 与 author/review rubric 已明确「depends_on 决定 worker admission，integration_order 只决定 merge」 | 计划下游同步由“no-op”改为已落地基线确认；不得让后续 Unit 恢复人工串行语义 | 高 |
+| E19 | `cargo nextest run -p ralph-core --lib artifact_first_handoff_rewrites_serial_layout_for_independent_units`；`cargo nextest run -p ralph-core --lib identity_accepts_parent_child_absolute_plan_path_representation`；`ralph preset check --help`；`bash scripts/check-cli-doc-drift.sh --strict` | 两项 e94c0782 回归测试通过；`preset check` 支持 `-H/--strict/--format json`；CLI 文档 drift 检查通过 | 更新后的 Unit gate 可复用这些真实命令；全量验证仍留给执行阶段 | 高 |
 
 ### 2.3 受影响范围（已确认路径）
 
@@ -122,6 +127,8 @@ baseline_commit: e7f42144f491decc17a88db63fc1aefc3b90baa4
 | D13 | `event_loop.precheck` 框架合并 | 改 opt-in 列表 / 不改 | **不改** | E14 | 列表已有 `precheck` | 0.95 |
 | D14 | auditor 非 ACCEPTED | 仍发 `forge.audit.done` 靠 gate 拒 / 直接 `forge.plan.blocked` | **instructions：仅 ACCEPTED 才 emit `forge.audit.done`；否则 `forge.plan.blocked`。consistency 仍拒绝 `verdict ne ACCEPTED` 作第二道** | E8 | 只靠 prompt 会回到现状 | 0.88 |
 | D15 | 测试落点 | 改 builtin 全量 fixture / 迷你 EventLoop YAML + 结构测试钉死 builtin | **builtin 用 `RalphConfig::parse_yaml(get_preset("parallel-forge").content)` 结构断言；行为用迷你 YAML（规则从 preset 复制，注释要求同步）+ `run_workflow_guard_scenario`** | E13、E15 | 把 12+ hat 全量塞进每个 BDD 不可维护 | 0.90 |
+| D16 | Unit 调度依据 | 按 topic/文件顺序串行 / 按真实接口与写集合并发 | **U1/U2/U3 先从同一基线并发；U4 关闭 precheck 基础后，U5/U6/U7/U8/U9/U10 按各自直接依赖 ASAP 并发；U11 仅在最终 schema/拓扑汇合后执行** | E17、E18；当前 runtime 已按 `depends_on` 重算 wave | 旧线性图没有真实因果证据；同一 YAML 的不同语义区域可 deterministic merge | 0.93 |
+| D17 | 当前基线变更归属 | 把 e94c0782 重新纳入本计划 / 将其视为已验证前置能力 | **视为已验证前置能力，不在本计划重复实现；新增回归覆盖 DAG 重算、环/未知依赖拒绝与 resume path 表示变化** | E17 | 该能力已经存在并有直接单测；重复实现会扩大范围 | 0.96 |
 
 指纹计算伪代码（Executor 必须写进 worktree/auditor/precheck prompt，禁止另发明）：
 
@@ -306,47 +313,70 @@ Feature: parallel-forge 关键阶段证据门禁
 
 ---
 
-## 7. 严格串行开发单元
+## 7. 最大并发开发单元
+
+以下 Unit 编号仅用于引用，不表示执行顺序。每个 Unit 都在独立 worktree/branch
+中完成完整的 Acceptance Red → Unit Red → Green → Refactor → Integration →
+Regression → Close；只有表中 `depends_on` 的 Release Gate 会释放后继 Unit。
 
 ```text
-Unit 1 表征当前无 precheck + 写 author notes
-  ↓
-Unit 2 work.failed 单 writer + 新增 forge.full.verification.failed
-  ↓
-Unit 3 扇出身份字段进入 schema/投影/instructions
-  ↓
-Unit 4 forge.worktrees.ready 双 guard
-  ↓
-Unit 5 forge.wave.worktrees.ready 双 guard（保留已有 empty-base 规则）
-  ↓
-Unit 6 forge.wave.reviewed 双 guard
-  ↓
-Unit 7 forge.wave.settled 双 guard
-  ↓
-Unit 8 work.failed 字段 + 双 guard
-  ↓
-Unit 9 forge.audit.done 双 guard（阻止 merge）
-  ↓
-Unit 10 四个收据 topic 仅 consistency
-  ↓
-Unit 11 动态 verify 场景 + 下游同步 + 全量门禁
+Validated Baseline e94c0782
+  ├──────────────┬──────────────┬──────────────┐
+  ↓              ↓              ↓              ↓
+ U1 notes     U2 writer     U3 identity   U10 receipts
+                 │              │             │
+                 └──────┬───────┘             │
+                        ↓                     │
+                       U4 precheck base       │
+                 ┌──────┼──────┬──────┬──────┐ │
+                 ↓      ↓      ↓      ↓      ↓ │
+                U5     U6     U7     U8     U9 │
+                 └──────┴──────┴──────┴──────┴─┘
+                                      ↓
+                                     U11
 ```
+
+`U1`, `U2`, `U3`、`U10` 从当前基线立即并发。`U4` 只等待 U3 的字段契约；U2
+没有真实数据依赖，不能阻塞 U4。U5–U9 在 U4 的基础 precheck Release Gate
+完成后立即并发；U11 才是真正的 Fan-In。U5–U9 之间不得因同一 preset 文件而
+人为串行：它们写入不同的 schema/preset 语义区域，合并时按 YAML key 做
+deterministic conflict review。
+
+### Unit 并发执行元数据
+
+| Unit | Wave ID | depends_on | ready_when / release_condition | blocks | can_run_parallel_with | worktree / branch | 预计写集合 | 验证资源 | 合并约束 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| U1 | P0 | [] | 基线 checkout 完成；Close=notes 与 DAG characterization 回归通过 | 无 | U2,U3,U10 | `../pf-u1` / `plan/pf-u1` | author notes；`parallel_forge_handoff.rs` 独立测试符号（如需补边界） | cargo nextest；可并发 | 不与 U2/U3 重叠同一测试符号 |
+| U2 | P0 | [] | 基线 checkout 完成；Close=typed failure 拓扑/BDD/strict lint 通过 | U11 | U1,U3,U10 | `../pf-u2` / `plan/pf-u2` | tester/failure-handler YAML 区域；新 failure schema；typed-failure scenario；独立结构测试 | cargo nextest；可并发 | 与 U3 仅在不同 YAML key 合并 |
+| U3 | P0 | [] | 基线 checkout 完成；Close=required fields、projection、fixture 回归通过 | U4 | U1,U2,U10 | `../pf-u3` / `plan/pf-u3` | `forge.worktrees.ready` schema、projection、worktree instructions、相关 fixture | cargo nextest；可并发 | U4 只能消费 U3 commit 后的字段 |
+| U4 | P1 | [U3] | U3 Release Gate；precheck 基础与 initial fan-out gate 测试通过 | U5,U6,U7,U8,U9 | U10 | `../pf-u4` / `plan/pf-u4` | event_loop.precheck 基础、`forge.worktrees.ready` guard、对应 scenario | cargo nextest；LLM mock 可并发 | 先合入 U3，再合入其余 gate Unit |
+| U5 | P2 | [U4] | U4 Release Gate；lazy wave gate 通过 | U11 | U6,U7,U8,U9,U10 | `../pf-u5` / `plan/pf-u5` | wave worktree schema/rules/instructions/scenario | cargo nextest；可并发 | 与 U6–U9 按 YAML key 合并 |
+| U6 | P2 | [U4] | U4 Release Gate；review gate 通过 | U11 | U5,U7,U8,U9,U10 | `../pf-u6` / `plan/pf-u6` | reviewed rules/instructions/scenario | cargo nextest；可并发 | 同上 |
+| U7 | P2 | [U4] | U4 Release Gate；settled gate + TaskStore 回归通过 | U11 | U5,U6,U8,U9,U10 | `../pf-u7` / `plan/pf-u7` | settled rules/instructions/scenario | cargo nextest；TaskStore fixture 独立 | 同上；不得改 U3 projection 区域 |
+| U8 | P2 | [U2,U4] | U2 writer 与 U4 precheck Gate 均通过；failure gate 通过 | U11 | U5,U6,U7,U9,U10 | `../pf-u8` / `plan/pf-u8` | work.failed schema/rules/instructions/scenario | cargo nextest；可并发 | 消费 U2 新 failure topic，不改 U2 writer 语义 |
+| U9 | P2 | [U3,U4] | identity 与 precheck Gate 均通过；audit gate 通过 | U11 | U5,U6,U7,U8,U10 | `../pf-u9` / `plan/pf-u9` | audit schema/rules/instructions/scenario | cargo nextest；merge mock/临时 repo 隔离 | finalizer 仅接受 accepted topic |
+| U10 | P0 | [] | 基线 checkout 完成；receipt consistency 结构/BDD 通过 | U11 | U1,U2,U3,U4,U5,U6,U7,U8,U9 | `../pf-u10` / `plan/pf-u10` | 四个 receipt rule、相关 instructions、scenario、结构测试 | cargo nextest；可并发 | 不得触碰 precheck 或 exec.unit.done |
+| U11 | P3 | [U1,U2,U3,U4,U5,U6,U7,U8,U9,U10] | 全部直接前驱 Release Gate；动态 verify 与下游审计完成 | 最终质量门禁 | 无 | `../pf-u11` / `plan/pf-u11` | dynamic scenarios、solution doc、必要下游文档 | verify/strict lint；最终资源队列 | deterministic merge 后才跑全量 |
+
+所有 Unit 的基线 commit 均为 `e94c07822bce7eacbf9b05cc4920fd4ed0aa4316`。
+预计写集合之外的文件只允许读取；发现需要修改共享区域时必须停止并更新本计划，
+不能在 worktree 中临时扩大范围。
 
 ---
 
-### Unit 1：冻结作者契约并表征「无 precheck」基线
+### Unit 1：冻结作者契约并保留 DAG 并发回归
 
 #### 1. Unit 目标
-让 `parallel-forge` 的 Gate Scope / key-stage 矩阵可评审，并用测试钉死 **当前**「`precheck=None`、仅 3 条 empty-base consistency、无 `precheck-*` hat」。
+让 `parallel-forge` 的 Gate Scope / key-stage 矩阵可评审，并保留当前已验证的 `depends_on` 并发语义；不得把 `execution_wave` 或 prose 的“串行执行”当作 worker admission 依据。
 
 #### 2. 对应需求与 Scenario
-R9 的契约前置；无运行时 Scenario（S21 的前置表征）。Decision D1–D3。Evidence E1。
+R9 的契约前置；S10/S21 的并发回归前置。Decision D1–D3,D16–D17。Evidence E17,E18。
 
 #### 3. 外部可观察结果
 仓库出现 `presets/en/parallel-forge-preset-author-notes.md`；`cargo nextest` 中新结构测试通过。
 
 #### 4. 当前行为基线
-E1：无 precheck。对照 notes：`presets/en/ce-executor-pipeline-preset-author-notes.md`。
+E17：当前 handoff 已按 DAG 重算 wave，并已有独立 Unit 被重新并发的回归测试。对照 notes：`presets/en/ce-executor-pipeline-preset-author-notes.md`。
 
 #### 5. 输入与输出
 输入：无运行时输入。输出：notes 文件 + 表征测试。无状态副作用。
@@ -355,20 +385,18 @@ E1：无 precheck。对照 notes：`presets/en/ce-executor-pipeline-preset-autho
 | 位置 | 职责 | 为何改 | 边界 |
 | --- | --- | --- | --- |
 | `presets/en/parallel-forge-preset-author-notes.md` **新增** | AAF Intent + Gate Scope hard + 完整 key-stage 表 | review skill 0e 要求 | 不改 YAML 行为 |
-| `crates/ralph-cli/src/presets.rs` 测试模块 | 已有 `test_parallel_forge_*` | 追加表征测试 | 不改 PRESETS 数组 |
+| `crates/ralph-core/src/parallel_forge_handoff.rs` 测试模块 | 已有 DAG 重算回归测试 | 如缺少边界覆盖，补 unknown dependency/cycle 的最小 characterization；不重复实现 e94c0782 | 不改生产 handoff 逻辑 |
 
-表征测试（名称锁定）：`parallel_forge_baseline_has_no_precheck_and_three_empty_base_rules`  
-断言 `config.event_loop.precheck.as_ref().map(|p| p.enabled) != Some(true)` 或 `is_none()`；consistency rule id 集合 == `{parallel-forge-prepare-empty-base, parallel-forge-worktrees-ready-empty-base, parallel-forge-settled-empty-base}`；`config.hats` 无 key 以 `precheck-` 开头。  
-**后续 Unit 在添加 precheck 的同一 PR/提交内必须把该测试改名为 baseline 已不成立，并换成正向断言。禁止 skip。**
+已有回归测试 `artifact_first_handoff_rewrites_serial_layout_for_independent_units` 必须继续通过；若 Unit 1 增加边界覆盖，测试必须验证未知依赖或环被拒绝，不能锁定 prompt 文本。禁止新增「无 precheck」表征断言，因为当前基线已为未来 gate Unit 预留 `precheck` 变更方向。
 
 #### 7–8. 可依赖 / 禁止依赖
 可依赖 `get_preset("parallel-forge")` + `RalphConfig::parse_yaml`。禁止实现任何 gate YAML。
 
 #### 9–12. 验收 / Red / 单测顺序
-1. 先写表征测试 → Red：测试文件不存在或断言未写。  
-2. 确认 parse 后 precheck 为空（Green 表征）。  
+1. 先运行现有 DAG 回归测试，确认 e94c0782 基线为 Green；如需补 unknown dependency/cycle characterization，先验证新增测试在当前实现上 Green，不得伪造缺陷 Red。
+2. 写 notes 并通过 author/review anchor 校验；notes 缺失或矩阵不完整时才是本 Unit 的有效 Red。
 3. 写 notes（字段必须含 execution_model: **supervisor+wave**，与 YAML `supervisor.enabled: true` + wave emit 一致）。  
-4. `cargo nextest run -p ralph-cli --bin ralph -- parallel_forge_baseline_has_no_precheck`
+4. `cargo nextest run -p ralph-core --lib artifact_first_handoff_rewrites_serial_layout_for_independent_units`
 
 #### 13. 最小实现
 只新增 notes + 测试。notes 中矩阵必须与本计划 §Key-stage 表逐行一致（见下）。
@@ -390,7 +418,7 @@ Key-stage 表（抄进 notes，confirmation_status=confirmed）：
 | slot done | exec.unit.done | neither | false | null | false | null |
 
 #### 14–20
-集成：`ralph preset check -H builtin:parallel-forge --strict` 仍通过。回归：上述 check。完成：notes 存在且测试绿。停止：若 parse 后其实已有 precheck，与 E1 冲突，停。
+集成：`ralph preset check -H builtin:parallel-forge --strict --format json` 通过。回归：DAG 测试与 preset check。完成：notes 存在且测试绿。停止：若 handoff 仍按静态 `execution_wave` 串行化独立 Unit，或未知依赖/环未拒绝，停并更新 D16/D17。
 
 ---
 
@@ -406,7 +434,7 @@ R4；S11,S12；D5；E5,E6。
 `RalphConfig::parse_yaml` 后：仅 `forge-failure-handler` 的 `publishes` 含 `work.failed`（合成 `precheck-work.failed` 尚未存在）。tester `publishes` 含 `forge.full.verification.failed` 不含 `work.failed`。`topic_deny_rules` 含 tester/integrator/verifier/dispatcher × `work.failed`。
 
 #### 4. 基线
-E5。先把 Unit 1 表征里「tester publishes work.failed」换成本 Unit 正向断言。
+E5。U2 自己新增 writer 结构断言；不得修改 U1 的 DAG characterization 或等待 U1 Close。
 
 #### 5. IO
 新 topic required_fields（锁死）：`plan_key`, `verification_report_path`, `failure_fingerprint`, `context_artifact_path`, `forge_artifact_root`, `reason`。  
@@ -747,7 +775,7 @@ R7–R9；S22。
 * 更新 `parallel-forge-blocked.yml` 仅当 schema 需要（inspector blocked 路径不应被新 required 打断）。  
 * `docs/solutions/workflow-orchestration/parallel-forge-evidence-gates.md` **新增**（实现后的教训，禁止 commit `.ralph/review/**`）。  
 * 下游审计表写入该 solution（见下）。  
-* 若未改 CLI/finding/注入 skill：**skills 与 `ralph-tools-*.md` 明确 no-op**。
+* CLI/finding/注入 skill 的 DAG 语义已在基线 e94c0782 同步；Executor 只需审计是否有证据门禁变更造成新的文档 drift，不得回退为串行语义。
 
 下游清单（Executor 逐项打开确认，无改动写「no-op + 原因」）：
 
@@ -761,33 +789,63 @@ R7–R9；S22。
 | `presets/manifest.yml` `index.json` | no-op |
 | `CLAUDE.md`/`AGENTS.md` parallel-forge 一句：可补「关键 handoff 双 guard」 | 若改 CLAUDE 必须 `cp CLAUDE.md AGENTS.md` |
 | `.cursor/rules` / zsh plugin | no-op（未改 preset 名） |
-| `crates/ralph-core/data/*.md` | no-op 除非 emit/recovery 通用语义变了（本计划不变） |
-| author/review skill | no-op；跑 `skills/ralph-preset-review/tests/test_skill_anchors.py` |
+| `crates/ralph-core/data/*.md` | 已由基线 e94c0782 更新 `ralph-tools-wave.md` 的 DAG/资源边界；本计划不重复改，仍须回归 drift 检查 |
+| author/review skill | 已由基线 e94c0782 同步 `patterns.md`/`finding-rubric.md` 的 DAG 语义；本计划不重复改，仍须跑 anchor 测试 |
 
 验证命令见 §9。动态 verify **必须**断言 JSON `passed` / `accepted_events` / `failure_kind`，禁止只看 exit 0。
 
 ---
 
-## 8. Unit 串行依赖图
+## 8. Unit 最大并发依赖图
 
 ```text
-U1 → U2 → U3 → U4 → U5 → U6 → U7 → U8 → U9 → U10 → U11
+Validated Baseline
+  ├──────────────┬──────────────┬──────────────┐
+  ↓              ↓              ↓              ↓
+ U1             U2             U3             U10
+                                ↓
+                                U4
+                  ┌─────────────┼─────────────┬─────────────┬─────────────┐
+                  ↓             ↓             ↓             ↓             ↓
+                 U5            U6            U7            U8            U9
+                  └─────────────┴─────────────┴─────────────┴─────────────┴──→ U11
 ```
 
-| 边 | 后者使用前者的已验证能力 | 不可交换原因 | 如何避免提前实现后者 |
-| --- | --- | --- | --- |
-| U1→U2 | notes 矩阵已冻结 writer 意图 | U2 改 YAML 会破坏 U1 表征，必须先留下 notes 与改测试的约定 | U1 不加 deny rule |
-| U2→U3 | 失败拓扑稳定后再收紧成功 payload | 身份字段与 tester topic 无关但 U3 grep fixture 会碰到 U2 已改文件 | U2 不添加 identity 字段 |
-| U3→U4 | required_fields 已存在，consistency 才能 lint 到字段 | 无字段则 unknown_field | U3 不写 precheck |
-| U4→U5 | precheck.enabled 总开关已打开 | U5 假设 desugar 运行 | U4 不改 wave.worktrees.ready topic 的 empty-base id |
-| U5→U6 | 扇出已 gated，review 才有可信 unit 集 | 无 | U5 不改 reviewer publishes |
-| U6→U7 | 未通过 review 的 wave 不应 settle | CloseTaskBatch 只应在审查后 | U6 不绑 CloseTaskBatch |
-| U7→U8 | 成功路径 settle 已 gated，再做失败终态 | 无强数据依赖；仍串行以免同时改 failure-handler 过宽 | U7 不扩展 work.failed schema |
-| U8→U9 | 失败不再误报完成后，再授权 merge | 无 | U8 不改 auditor |
-| U9→U10 | merge 已挡住，收据 consistency 不承担 merge 安全 | 无 | U9 不给 finalized 加 precheck |
-| U10→U11 | 全部规则 id 稳定后才能写 verify fixture | fixture 依赖最终 schema | U10 不新增 scenarios/ 文件 |
+### Serial Edge Ledger
 
-无并行。U5 与 U6 无数据环但仍规定 U5 先于 U6。
+| Edge | 为什么必须串行 | Evidence | 是否尝试拆分/隔离 | 为什么仍不能并发 | 置信度 |
+| --- | --- | --- | --- | --- | --- |
+| U3→U4 | U4 的 consistency/precheck 规则引用 U3 新增的 required fields，字段不存在时 `unknown_field` 会使 Red 失真 | E2,E9,E16 | 已将 U3 限定为字段/schema/projection，U4 限定为 gate | U4 必须消费 U3 Release Gate 后的稳定字段契约 | 0.94 |
+| U4→U5 | U5 依赖已启用并可运行的 precheck desugar/gate 基础 | E9,E15,E16 | U5 使用独立 topic、独立 fixture | 没有 U4 的基础，U5 的失败无法归因于 wave gate | 0.91 |
+| U4→U6 | 同上，review gate 必须消费 precheck 基础 | E9,E15,E16 | U6 与 U5 写集合分离 | 仅共享框架能力，不依赖 U5 的 review 前置业务结果 | 0.91 |
+| U4→U7 | settled gate 必须在 precheck 基础上运行且投影只消费 accepted topic | E7,E9,E16 | U7 不改 projection | U7 可在 U4 后独立实现，不等待 U5/U6 | 0.92 |
+| U4→U9 | audit gate 同样依赖 accepted/proposed rewrite | E8,E9,E16 | finalizer 不改 merge 实现 | U9 只消费 U4 与 U3，不依赖 review/settlement Unit 的代码 | 0.92 |
+| U2→U8 | U8 的 failure-handler trigger 必须消费 U2 新增的 typed failure topic | E5,E6 | 已把 U2 限为 writer/topic，U8 限为证据字段/gate | 新 topic 未经 U2 Release Gate 时，U8 无法验证真实 failure 路径 | 0.92 |
+| U1,U2,U3,U4,U5,U6,U7,U8,U9,U10→U11 | 动态 verify success/recovery 必须使用最终 schema、拓扑和所有 rule | E13,E15,E16 | U11 不实现新规则，只汇合验证 fixture | 这是唯一真实 Fan-In；U11 不应提前锁定会被前驱改变的 payload | 0.90 |
+
+以上之外没有串行边。U5/U6/U7/U8/U9 之间没有真实因果依赖；同一
+`parallel-forge.yml` 的不同 YAML key 区域可以独立编辑，合并时若出现同一
+符号/语义区域冲突必须停止并回到计划修订，不得由 Merger 猜测语义。
+
+### Parallelism Summary
+
+| 指标 | 值 | 说明 |
+| --- | --- | --- |
+| Total Units | 11 | U1–U11 |
+| DAG Depth | 4 | P0 → P1 → P2 → P3 |
+| Critical Path | U3 → U4 → U9 → U11 | 真实字段、gate 基础、merge 授权、最终动态验证 |
+| Initial Ready Set | U1,U2,U3,U10 | 全部从 e94c0782 独立启动 |
+| Max Planned Concurrency | 5 | U5–U9 可同时执行；资源不足时只队列化验证，不改变 DAG |
+| Serial Edges | 8 | 全部见 Serial Edge Ledger |
+| Avoidable Serialization | 0 | 已移除旧 U1→…→U11 人工排序及 U5→U6 假依赖 |
+| Global Barrier Count | 0 | U11 是真实 Fan-In，不是无关 Unit 的 Wave Barrier |
+
+### ASAP Release
+
+* U3 Close 后立即启动 U4；不等待 U1、U2、U10。
+* U2 Close 后，若 U4 已通过则立即启动 U8；否则 U8 只等待 U4，不等待 U5/U6/U7/U9。
+* U4 Close 后立即同时启动 U5/U6/U7/U9；U8 在 U2 也已关闭时同时启动。
+* 任一 U5–U10 Close 后只更新 U11 的依赖计数；U11 必须等全部直接前驱通过，不能提前消费部分最终 schema。
 
 ---
 
@@ -820,7 +878,9 @@ U1 → U2 → U3 → U4 → U5 → U6 → U7 → U8 → U9 → U10 → U11
 * 无未解释 snapshot  
 * 无 BLOCKED 决策  
 * 无超范围 Rust DSL  
-* 每个 Unit 有完整 TDD 闭环且按序提交  
+* 每个 Unit 有完整 TDD 闭环且按自身依赖提交；无编号或 Wave 人工排序
+* Initial Ready Set 的 U1/U2/U3/U10 全部从同一基线启动；U4/U5–U9/U11 按 Release Gate ASAP 释放
+* Avoidable Serialization = 0；Global Barrier Count = 0；所有保留串行边均在 §8 ledger 中有证据
 * 未提交 `.ralph/review/**/{scratch,residuals*,draft}`
 
 ---
@@ -830,8 +890,8 @@ U1 → U2 → U3 → U4 → U5 → U6 → U7 → U8 → U9 → U10 → U11
 | 检查项 | 结果 | 证据或说明 |
 | --- | --- | --- |
 | 这是实施计划而不是 Roadmap 吗 | 是 | Unit 指向具体 YAML 键、rule id、测试函数名 |
-| Executor 是否仍需做关键设计决策 | 否 | D1–D15 已锁 topic 名、on_exhausted、`.proposed`、fingerprint |
-| 所有文件和接口是否有代码库证据 | 是 | E1–E16；新增文件均标「计划新增」 |
+| Executor 是否仍需做关键设计决策 | 否 | D1–D17 已锁 topic 名、on_exhausted、`.proposed`、fingerprint、DAG 调度 |
+| 所有文件和接口是否有代码库证据 | 是 | E1–E19；新增文件均标「计划新增」 |
 | 所有关键决策置信度是否 ≥ 0.85 | 是 | 最低 D8/D14=0.88 |
 | 是否存在未处理的低置信度假设 | 否 | 无 |
 | 每个 Unit 是否只有一个可观察行为 | 是 | U1 契约表征；U2 writer；U3 字段；U4–U9 各一个 topic 门；U10 收据类；U11 验证同步 |
@@ -842,7 +902,17 @@ U1 → U2 → U3 → U4 → U5 → U6 → U7 → U8 → U9 → U10 → U11
 | 是否存在泛化任务描述 | 否 | 无「完善逻辑」 |
 | 所有 Scenario 是否可追踪到测试和 Unit | 是 | §5–§7 |
 | 所有关键决策是否有 Evidence | 是 | 表内 E* |
-| 计划是否可以严格串行执行 | 是 | §8 |
+| Unit 依赖 DAG 是否明确 | 是 | §7/§8 已列 depends_on、ready_when、Release Gate |
+| Initial Ready Set 是否完整列出 | 是 | U1、U2、U3、U10 |
+| 所有无真实依赖 Unit 是否已最大量并发 | 是 | U1/U2/U3/U10；U5–U9 均无彼此依赖 |
+| 依赖解除后后继 Unit 是否 ASAP 启动 | 是 | §8 ASAP Release |
+| 每条串行边是否都有 Evidence | 是 | §8 Serial Edge Ledger |
+| Avoidable Serialization 是否为 0 | 是 | 旧线性链已移除 |
+| 是否不存在不必要的全局 Wave Barrier | 是 | 仅 U11 真实 Fan-In |
+| 可并发 Unit 是否有独立 worktree 边界 | 是 | §7 元数据表 |
+| 并发 Unit 是否不存在未处理的语义写冲突/共享资源冲突 | 是 | 写集合按 YAML key/测试符号隔离；冲突即停 |
+| 稀缺验证资源是否仅限制验证而非整个开发 Unit | 是 | §7 资源列；验证可队列化 |
+| 必要的 Fan-In / Merge Gate 是否定义 Integration / Regression | 是 | U11 与最终门禁 |
 
 ---
 
