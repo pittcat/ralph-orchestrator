@@ -307,6 +307,38 @@ rm -rf "$tmp_dir"
 注明「key-stage event gate 项：review-only，不进 lint JSON」。命中按
 review-only ID + default severity + default confidence 入主表。
 
+## 11. Multi-wave concurrency fixture (2026-08-27)
+
+`multi-wave-concurrency-negative-fixture.yml`
+覆盖 plan 2026-08-27 的 multi-wave concurrency finding_id：
+
+| Axis | What the YAML contains | Expected finding | Source |
+|---|---|---|---|
+| Ready-set (a) | planner declares `execution_wave` as strict serial sequence (wave 1 → wave 2 → wave 3), not DAG dependency | `preset.wave_ready_set_not_dag` | review-only |
+| Dispatch (b) | dispatcher mixes multiple waves into one `ralph wave emit` batch (single payloads.jsonl for all waves) | `preset.wave_dispatch_budget_exceeded` | review-only |
+| Integration (c) | integrator merges by completion time, not `integration_order` | `preset.wave_integration_turn_violated` | review-only |
+| Resource (d) | guardian approves concurrency without auditing cross-wave resource conflicts (ports, databases, containers, caches, generated files) | `preset.wave_resource_conflict_unaudited` | review-only |
+| Failure (e) | single wave failure causes dispatcher to re-drive ALL waves from beginning | `preset.wave_failure_cross_contamination` | review-only |
+
+fixture 顶部注释明示其 anti-pattern 轴、expected finding_id、与本段对照命中。
+fixture 故意保持 preset-neutral（不复制任何 builtin preset）。
+
+**Acceptance gates:**
+
+```bash
+# CLI 冒烟 — 不要求 strict 模式吐出新 finding（review-only 不进 lint）；
+# 仅验证 fixture 可被加载 + 结构化 lint 不崩。
+ralph preset check -H skills/ralph-preset-review/fixtures/multi-wave-concurrency-negative-fixture.yml --strict --format json
+
+# 软性 AAF (multi-wave concurrency) 是 review-only, 通过阅读 fixture 配合
+# references/finding-rubric.md 「Multi-wave concurrency audit」段对照命中。
+```
+
+**Review-only finding 必须显式人工审**：本 fixture 的 expected finding
+**不会**由 `ralph preset check` 自动吐出；Mechanical Lint Results 段需显式
+注明「multi-wave concurrency 项：review-only，不进 lint JSON」。命中按
+review-only ID + default severity + default confidence 入主表。
+
 ## Report output
 
 Default: `.ralph/reviews/<fixture-basename>-<date>.md`

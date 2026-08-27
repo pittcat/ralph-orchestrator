@@ -480,3 +480,33 @@ attempt 的代码、提交与报告，新进程 `cwd` 不变，且 prompt 末尾
 
 **聚合期限**：启用重试后 wave 的聚合期限会按预算内的多次尝试自动放宽，
 preset 作者**不需要**手动把 `aggregate_timeout_secs` 乘以尝试次数。
+
+## Multi-wave concurrency pattern（supervisor+wave）
+
+适用于 `execution_model: supervisor+wave` 且执行计划中存在多个互不依赖 wave 的 preset。runtime 支持同一批次接收多个独立 wave、并行执行 worker，同时串行保护 fan-in 合并与主账本提交（参考 `presets/en/parallel-forge.yml` 的当前实现，但不复制其拓扑）。
+
+**核心语义：**
+
+- **`execution_wave` 是 DAG 依赖标记，不是串行序号**。planner 在 `execution-plan.yml` 中声明每个 Unit 的 `depends_on` / `execution_wave` / `integration_order`；dispatcher 只选择依赖已满足（前置 wave 已 settled）的 wave 启动，可并发的 wave 同时处于 Dispatch / Collect 阶段。
+- **dispatch budget**：dispatcher 每次 activation 最多 dispatch 3 个 ready wave。每个 wave 必须独立 payload 文件、独立 `ralph wave verify` → `ralph wave emit`；禁止把不同 `execution_wave` 合并到同一批次（一个 `wave emit` 调用只创建一个 `wave_id`）。
+- **integration turn**：所有 active wave 共享 `max_concurrent_workers` 全局上限；integration branch 的 merge、fast-forward、`forge.wave.settled` 和 verified base 更新必须按 `integration_order` 串行化，不能按完成时间抢 merge。
+- **资源命名空间隔离**：跨 wave 的端口、数据库、容器、缓存、生成文件必须按 `plan_key + wave_id + slot_index` 命名空间隔离；guardian 在 admission 前审计资源冲突。
+- **恢复边界**：任一 wave 失败只影响该 wave 的 correction/failure 路径；只有无法保证后继 wave base 或全局一致性时，才阻断整个计划。进程重启后 supervisor store 恢复全部 active waves，而不是只恢复一个当前 wave。
+
+**关键区分：**
+
+| 字段 | 语义 | 谁决定 |
+|---|---|---|
+| `execution_wave` | DAG 依赖就绪后可并发启动的波次编号 | planner（SSOT） |
+| `integration_order` | 串行 merge 到 integration branch 的顺序 | planner（SSOT） |
+| `wave_id` | runtime 每次 `wave emit` 返回的唯一标识 | runtime（dispatcher 不可手写） |
+
+**反模式：**
+
+- ❌ 把 `execution_wave` 当作串行序号（wave 1 → wave 2 → wave 3 必须顺序执行）
+- ❌ dispatcher 混组两个 wave 的 payload 到同一 `wave emit` 调用
+- ❌ integrator 按完成时间抢 merge，不按 `integration_order`
+- ❌ guardian 未审计跨 wave 资源冲突就放行
+- ❌ 单 wave 失败导致其它 active wave 被错误重放或阻断
+
+**预留能力**：`max_concurrent_waves` 当前未在 runtime 实现（`SupervisorConfig` 无此字段）；多 wave 并发上限由 dispatcher instructions 约定控制。若未来 runtime 实现该字段，preset 应显式配置 `event_loop.supervisor.max_concurrent_waves` 并同步更新本段。

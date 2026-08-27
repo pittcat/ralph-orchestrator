@@ -264,6 +264,22 @@
 
 任一问 ✗ → 必须改写或显式说明为何 supervisor 无法表达。完整 finding 默认 severity / confidence / aaf_question 见 `finding-rubric.md`「Supervisor capability audit」段。
 
+## Hard questions — multi-wave concurrency
+
+> **触发条件**：`execution_model ∈ {supervisor+wave}`；或 `event_loop.supervisor.enabled: true` 且 dispatcher hat `instructions:` 含 `ralph wave emit` / `ralph wave verify`。**capability-triggered**，禁止按 preset 名称门控。
+> **未触发**：author 把本段记为 N/A（按「Hard questions — N/A 规则」段写法），不假装已答。
+> **目的**：把多 wave 并发下 hat 能 Observe / 调用的边界先钉死；supervisor 内部 ledger / 队列 / slot 调度由 runtime 管控，hat 不得越界。
+
+1. **ready-set 定义**：`execution_wave` 字段是否表达 DAG 依赖（哪些 wave 可并发启动），而非串行序号？✓ / ✗ + 列出 `execution_wave` 字段语义说明
+2. **dispatch budget**：dispatcher 是否声明每次 activation 最多 dispatch N 个 ready wave（N ≤ 3），且每个 wave 独立 payload 文件、独立 `wave verify` → `wave emit`？✓ / ✗ + 列出 dispatcher instructions 中的上限声明与 payload 隔离证据
+3. **integration turn**：integrator 是否按 `integration_order` 串行 merge，而非按完成时间抢 merge？✓ / ✗ + 列出 integrator instructions 中的串行化证据
+4. **资源审计**：guardian 是否审计跨 wave 资源冲突（端口、数据库、容器、缓存、生成文件），并定义资源命名空间隔离规则？✓ / ✗ + 列出 guardian instructions 中的资源审计证据
+5. **恢复语义**：多 active wave 中任一 wave 失败是否只影响该 wave 的 correction/failure 路径，不阻断其它 wave？✓ / ✗ + 列出失败边界说明
+
+任一问 ✗ → 必须改写或显式说明为何 multi-wave 无法表达。完整 finding 默认 severity / confidence / aaf_question 见 `finding-rubric.md`「Multi-wave concurrency audit」段。
+
+> **预留能力**：`max_concurrent_waves` 当前未在 runtime 实现（`SupervisorConfig` 无此字段），多 wave 并发上限由 dispatcher instructions 约定控制。若未来 runtime 实现该字段，author 需同步检查 `event_loop.supervisor.max_concurrent_waves` 的 YAML 配置。
+
 ## Hard questions — N/A 规则（执行模型分支）
 
 | `execution_model` | 「Hard questions — single-chain-first」 | 「Hard questions — wave fan-out」 | 「Hard questions — supervisor orchestration」 |

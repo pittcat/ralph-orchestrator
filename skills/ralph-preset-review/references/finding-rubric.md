@@ -240,6 +240,22 @@ review 命中时按上表 `finding_id` + `default_severity` + 默认 confidence 
 
 命中按上表入主表；`preset.execution_model_intent_mismatch` 是 U4 新增 review-only 软性 finding，与既有 lint id `preset.supervisor_requires_isolated` / `preset.supervisor_hat_publishes_coord_topic` / `preset.artifact_uses_internal_ledger` 复用底层问题，但触发条件是 **capability + Intent 一致性**而非 preset 名。`presets/en/parallel-forge.yml` 等既有 supervisor-enabled builtin 仍受既有 lint 约束，不在本表新触发条件内。
 
+### Multi-wave concurrency audit (2026-08-27)
+
+> **触发条件**：`execution_model ∈ {supervisor+wave}`；或 `event_loop.supervisor.enabled: true` 且 dispatcher hat `instructions:` 含 `ralph wave emit` / `ralph wave verify`。**capability-triggered**，禁止按 preset 名称门控。
+> **未触发**：review 把本段记为 N/A，不假装已审。
+> **全部 review-only**：以下 finding 不进 `ralph preset check` JSON；命中按 `default_severity` + `default_confidence` 入主表（confidence ≥ 60 门槛仍适用）。
+
+| 缺口 | Severity | category | aaf_question | finding_id |
+|---|---|---|---|---|
+| `execution_wave` 字段被当作串行序号（可并发的 wave 被串行化），planner 未声明 DAG 依赖 | P0 | topology | Q4 | `preset.wave_ready_set_not_dag` |
+| dispatcher 一次 activation dispatch 超过声明上限的 wave，或混组多个 wave 的 payload 到同一 `wave emit` | P0 | feasibility | Q3 / Q4 | `preset.wave_dispatch_budget_exceeded` |
+| integrator 未按 `integration_order` 串行 merge，而是按完成时间抢 merge | P0 | topology | Q4 / Q5 | `preset.wave_integration_turn_violated` |
+| guardian 未审计跨 wave 资源冲突（端口、数据库、容器、缓存、生成文件） | P1 | feasibility | Q2 / Q3 | `preset.wave_resource_conflict_unaudited` |
+| 单 wave 失败导致其它 active wave 被错误重放、阻断或污染 | P0 | topology | Q4 / Q5 | `preset.wave_failure_cross_contamination` |
+
+> **预留能力**：`max_concurrent_waves` 当前未在 runtime 实现（`SupervisorConfig` 无此字段），多 wave 并发上限由 dispatcher instructions 约定控制。若未来 runtime 实现该字段，review 需同步检查 `event_loop.supervisor.max_concurrent_waves` 的 YAML 配置。
+
 ### Agent skill audit（review-only，由 review SKILL Workflow 0a 弹窗默认跳过、选审触发）
 
 按 `references/agent-skill-audit.md` 的规程，对注入给 agent 的 skill 文档（`crates/ralph-core/data/*.md` / 外仓二进制内嵌）做内容级审计。**默认不审**，review SKILL 第 0a 步必须弹出交互选择菜单，默认选项是「仅审查 preset YAML（推荐）」。命中按上表 `default_severity` + `default_confidence` 入主表（与 `ralph preset check --strict` 输出的 lint ID 分开——本表 ID 不带 `lint.` 前缀，也**不**出现在 `ralph preset check` JSON）。

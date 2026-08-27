@@ -35,6 +35,18 @@
 | `ralph-tools-emit.md` 未说明 `--unsafe-no-policy-check` 不能绕过 scope handoff guard | `agent_skill.leaks_internals` | P0 | 95 | skill 文档未说明关键约束，导致 agent 可能误用 |
 | `ralph-tools-emit.md` 未说明 `scope_digest` 是排除自身字段的 SHA-256 | `agent_skill.unreadable` | P1 | 85 | 关键算法描述缺失 |
 | `ralph-tools-emit.md` 未说明 threshold gate（`overall_confidence >= 90` + `critical_unknown_count == 0` + `proceed == true`） | `agent_skill.unreadable` | P1 | 85 | 关键成功条件描述缺失 |
+
+## Multi-wave concurrency skill audit（选审时检查）
+
+当 reviewer 选择「同时审查注入 skill 文档」且 preset 触发 `supervisor+wave` capability 时，按以下四条检查 `crates/ralph-core/data/ralph-tools-wave.md` 的多 wave 并发段：
+
+| 检查项 | finding_id | default_severity | default_confidence | 含义 |
+|---|---|---|---|---|
+| `ralph-tools-wave.md` 缺少「多个并发 wave」章节（ready-set / dispatch budget / integration turn / 资源隔离） | `agent_skill.unreadable` | P1 | 85 | skill 文档缺少关键多 wave 并发约束 |
+| `ralph-tools-wave.md` 未说明 dispatcher 每次 activation 最多 dispatch N 个 wave 的上限约定 | `agent_skill.unreadable` | P1 | 85 | 关键并发上限描述缺失 |
+| `ralph-tools-wave.md` 未说明每个 wave 必须独立 payload 文件、独立 `wave verify` → `wave emit` | `agent_skill.unreadable` | P1 | 85 | payload 隔离约束描述缺失 |
+| `ralph-tools-wave.md` 未说明 integrator 按 `integration_order` 串行 merge 而非按完成时间抢 merge | `agent_skill.unreadable` | P1 | 85 | integration turn 约束描述缺失 |
+
 ## 4. 与其它 finding_id 的边界
 
 - **不去替代** `preset.instructions_opac_skill_reference_missing` 等既有 finding——后者是 lint 抓的 shape 缺失；本表是 review-only 的「内容口径」层。

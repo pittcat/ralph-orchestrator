@@ -1,0 +1,160 @@
+# Multi-wave concurrency negative fixture — NOT a builtin preset. For ralph-preset-review acceptance only.
+#
+# Anti-pattern axes (2026-08-27 — Multi-wave concurrency audit):
+#   (a) execution_wave treated as serial sequence (not DAG dependency) → preset.wave_ready_set_not_dag
+#   (b) dispatcher mixes multiple waves into one `wave emit` batch      → preset.wave_dispatch_budget_exceeded
+#   (c) integrator merges by completion time, not integration_order     → preset.wave_integration_turn_violated
+#   (d) guardian does not audit cross-wave resource conflicts           → preset.wave_resource_conflict_unaudited
+#   (e) single wave failure causes other waves to be re-driven/blocked  → preset.wave_failure_cross_contamination
+#
+# Not registered in presets/manifest.yml; intentionally anonymous (no builtin name prefix).
+event_loop:
+  execution_mode: isolated
+  supervisor:
+    enabled: true
+  starting_event: work.start
+  completion_promise: work.done
+  max_iterations: 20
+tasks:
+  enabled: true
+  coordinator_hats:
+    - reporter
+hats:
+  planner:
+    name: Planner
+    description: Declares execution waves for the plan.
+    triggers:
+      - work.start
+    publishes:
+      - plan.ready
+    event_filter:
+      enabled: true
+      events:
+        - work.start
+    instructions: |
+      ## PLANNER MODE
+
+      Declare execution waves. Each wave must run strictly in order:
+      wave 1 → wave 2 → wave 3. Never allow two waves to overlap.
+
+      (Axis a: execution_wave treated as serial sequence, not DAG dependency.)
+    terminal_events:
+      - plan.ready
+    exempt_topics:
+      - plan.ready
+  guardian:
+    name: Guardian
+    description: Approves concurrency and resource usage.
+    triggers:
+      - plan.ready
+    publishes:
+      - concurrency.approved
+    event_filter:
+      enabled: true
+      events:
+        - plan.ready
+    instructions: |
+      ## GUARDIAN MODE
+
+      Approve concurrency. Do not check whether waves share ports,
+      databases, containers, caches, or generated files. Assume
+      resources are infinite.
+
+      (Axis d: no cross-wave resource conflict audit.)
+    terminal_events:
+      - concurrency.approved
+    exempt_topics:
+      - concurrency.approved
+  dispatcher:
+    name: Dispatcher
+    description: Fans out units across waves.
+    triggers:
+      - concurrency.approved
+    publishes:
+      - exec.unit.ready
+    event_filter:
+      enabled: true
+      events:
+        - concurrency.approved
+    instructions: |
+      ## DISPATCHER MODE
+
+      On each activation, collect all ready units from ALL waves into
+      a single payloads.jsonl and run ONE `ralph wave emit
+      exec.unit.ready --payloads-stdin` to fan them out together.
+      Mixing waves into one batch is fine because they all share
+      the same wave_id.
+
+      (Axis b: mixes multiple waves into one `wave emit` batch.)
+    terminal_events:
+      - exec.unit.ready
+    exempt_topics:
+      - exec.unit.ready
+  worker:
+    name: Worker
+    description: Executes a single unit.
+    triggers:
+      - exec.unit.ready
+    publishes:
+      - exec.unit.done
+      - exec.unit.failed
+    concurrency: 4
+    event_filter:
+      enabled: true
+      events:
+        - exec.unit.ready
+    instructions: |
+      ## WORKER MODE
+
+      Execute your unit, then emit `exec.unit.done` or `exec.unit.failed`.
+      If your wave fails, the dispatcher will re-drive ALL waves from
+      the beginning to ensure consistency.
+
+      (Axis e: single wave failure causes other waves to be re-driven.)
+    terminal_events:
+      - exec.unit.done
+    exempt_topics:
+      - exec.unit.done
+      - exec.unit.failed
+  integrator:
+    name: Integrator
+    description: Merges completed units into the integration branch.
+    triggers:
+      - exec.unit.done
+    publishes:
+      - integration.done
+    event_filter:
+      enabled: true
+      events:
+        - exec.unit.done
+    instructions: |
+      ## INTEGRATOR MODE
+
+      Merge units as soon as they complete, in whatever order they
+      finish. Faster completion = earlier merge. Do not wait for
+      a predefined integration_order.
+
+      (Axis c: merges by completion time, not integration_order.)
+    terminal_events:
+      - integration.done
+    exempt_topics:
+      - integration.done
+  reporter:
+    name: Reporter
+    description: Closes the loop.
+    triggers:
+      - integration.done
+    publishes:
+      - work.done
+    event_filter:
+      enabled: true
+      events:
+        - integration.done
+    instructions: |
+      ## REPORTER MODE
+
+      Emit `work.done` when all integrations are complete.
+    terminal_events:
+      - work.done
+    exempt_topics:
+      - work.done
