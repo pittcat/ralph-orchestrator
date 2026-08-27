@@ -313,7 +313,7 @@ core:
     - "Artifact lifecycle: `.ralph/forge/<plan-key>/` owner=cleanup (cleanup forge worktrees/branches before manager report); producers write; consumers read only via trigger/projection paths."
     - "Blocked/failed: write context artifact under blocks/ or failures/ before emit; include context_artifact_path + forge_artifact_root + plan_key."
     - "One business event per isolated activation unless reporter terminal pair (forge.report.done then LOOP_COMPLETE)."
-    - "Development MUST be parallel: execution-plan.yml must contain at least one wave with 2+ independent Units; integration remains serial per integration_order."
+    - "Concurrency is the default: execution-plan.yml must maximize concurrent execution of every dependency-safe Unit; integration_order controls only deterministic integration, never worker admission."
     - "One worktree per Unit; one atomic commit per Unit in final linear history."
     - "Never weaken tests, skip assertions, or use `.only` to pass gates."
     - "Preset check: use `-H builtin:parallel-forge` (schema SSOT merged at embed); do not rely on raw presets/en file-path check."
@@ -415,16 +415,17 @@ hats:
       3. Validate the DAG has no cycles or shared write conflicts between
          parallel Units; set `plan_key` / `source_plan_path` /
          `development_plan_path`.
-      3a. **Mandatory fan-out:** `parallel-forge` is not allowed to degrade into
-          a serial plan. If the operator plan is linear, split independent
-          implementation slices and place at least two Units in the same
-          `execution_wave`; preserve dependency edges and keep integration
-          serial through `integration_order`. A plan with no wave containing
-          at least 2 Units is rejected by runtime before task projection.
-      4. **`execution_wave` is a 1-based positive integer in YAML** (no
-         dependency = 1; `wave(unit) = 1 + max(wave(dep))`). Use the same
-         numbering in `development_plan.md` headings: `Wave 1..W`; never write
-         a `Wave 0` narrative label.
+      3a. **Mandatory fan-out:** `parallel-forge` must not obey an operator
+          request to execute independent Units serially. Split independent
+          implementation slices and let the runtime place every dependency-safe
+          Unit in the earliest possible wave. Preserve only real dependency
+          edges and hard resource-conflict boundaries. A plan with no actual
+          independent Units cannot be made safe by force and remains serial.
+      4. **`execution_wave` is a 1-based positive integer in YAML**, but it is
+         only a planning hint. Runtime recomputes the earliest safe wave from
+         `depends_on`; do not use a larger wave or prose saying “serial” to
+         suppress concurrency. `integration_order` is only the deterministic
+         integration sequence.
 
       ### Step 4 — Artifact-first handoff (disk is the only task authority)
 
@@ -437,15 +438,15 @@ hats:
       - `plan_key` equals the `.ralph/forge/<plan-key>/` directory name
       - `units[]` is non-empty and every `id` is unique
       - `execution_wave` starts at 1 and is contiguous, with no 0 or gaps
-      - Units in the same wave have no dependencies on one another
-      - At least one execution wave contains 2 or more independent Units
+      - Units with no dependency path between them are placed for concurrent execution
+      - At least one execution wave contains 2 or more independent Units when the DAG permits it
       - Every Unit fills `owned_resources`, `parallel_reason`, and `serial_reason`
       - Every shared resource has exactly one Owner; non-namespacable resources
         are split across different waves
       - Each wave's peak demand fits the confirmed port, database, container,
         cache, and disk capacity
       - `integration_order` is globally unique and contiguous from 1..N
-      - Every `depends_on` points to a declared Unit with a smaller wave/order
+      - Every `depends_on` points to a declared Unit; runtime derives wave order from these edges
 
       ### Step 5 — Emit
 
@@ -491,7 +492,7 @@ hats:
       1. Every `depends_on` target exists; no cycles.
       2. Parallel Units (same wave / no edge) have disjoint write paths.
       3. Shared modules have exactly one Owner Unit.
-      4. Foundation-before-parallel ordering is explicit in integration_order.
+      4. Foundation-before-dependent ordering is explicit in `depends_on`; `integration_order` does not serialize worker execution.
       5. Audit test/resource competition, not only source paths. For every
          Unit's `acceptance_test` / `tdd` command, identify ports, databases,
          Docker/Compose projects, fixed temp paths, external services, and
@@ -500,10 +501,11 @@ hats:
          independently namespaced, or when the test is read-only and proven
          safe for concurrent use. A fixed resource name is an exclusive
          conflict unless the Unit has an explicit dependency edge.
-      7. Treat scarce resources as a capacity budget: if the plan cannot
-         prove that all same-wave Units fit concurrently, require a smaller
-         wave or serial placement in `execution_wave`; do not approve a wave
-         merely because supervisor slots are available.
+      7. Treat scarce resources as the only non-dependency concurrency boundary:
+         if a resource cannot be independently namespaced, record that hard
+         conflict and keep only those conflicting Units out of the same wave.
+         Do not serialize independent Units merely because the operator plan
+         or `integration_order` lists them sequentially.
       8. Record the resource name, why it is isolated or serialized, and the
          evidence command in `concurrency-approval.md`. If the plan does not
          provide enough information to establish safety, write

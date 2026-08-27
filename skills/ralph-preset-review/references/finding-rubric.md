@@ -248,7 +248,7 @@ review 命中时按上表 `finding_id` + `default_severity` + 默认 confidence 
 
 | 缺口 | Severity | category | aaf_question | finding_id |
 |---|---|---|---|---|
-| `execution_wave` 字段被当作串行序号（可并发的 wave 被串行化），planner 未声明 DAG 依赖 | P0 | topology | Q4 | `preset.wave_ready_set_not_dag` |
+| planner/runtime 把 `execution_wave` 或计划中的“串行执行”要求当作硬串行序号，导致依赖安全的 Unit 被串行化；正确依据是 `depends_on` DAG | P0 | topology | Q4 | `preset.wave_ready_set_not_dag` |
 | dispatcher 一次 activation dispatch 超过声明上限的 wave，或混组多个 wave 的 payload 到同一 `wave emit` | P0 | feasibility | Q3 / Q4 | `preset.wave_dispatch_budget_exceeded` |
 | integrator 未按 `integration_order` 串行 merge，而是按完成时间抢 merge | P0 | topology | Q4 / Q5 | `preset.wave_integration_turn_violated` |
 | guardian 未审计跨 wave 资源冲突（端口、数据库、容器、缓存、生成文件） | P1 | feasibility | Q2 / Q3 | `preset.wave_resource_conflict_unaudited` |

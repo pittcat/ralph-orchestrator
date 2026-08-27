@@ -487,7 +487,7 @@ preset 作者**不需要**手动把 `aggregate_timeout_secs` 乘以尝试次数�
 
 **核心语义：**
 
-- **`execution_wave` 是 DAG 依赖标记，不是串行序号**。planner 在 `execution-plan.yml` 中声明每个 Unit 的 `depends_on` / `execution_wave` / `integration_order`；dispatcher 只选择依赖已满足（前置 wave 已 settled）的 wave 启动，可并发的 wave 同时处于 Dispatch / Collect 阶段。
+- **`execution_wave` 是 DAG 依赖提示，不是串行序号**。planner 在 `execution-plan.yml` 中声明每个 Unit 的 `depends_on` / `execution_wave` / `integration_order`；runtime 按 `depends_on` 重算最早安全 wave，不能因计划文本或字段排布把独立 Unit 串行化。dispatcher 只选择依赖已满足（前置 wave 已 settled）的 wave 启动，可并发的 wave 同时处于 Dispatch / Collect 阶段。
 - **dispatch budget**：dispatcher 每次 activation 最多 dispatch 3 个 ready wave。每个 wave 必须独立 payload 文件、独立 `ralph wave verify` → `ralph wave emit`；禁止把不同 `execution_wave` 合并到同一批次（一个 `wave emit` 调用只创建一个 `wave_id`）。
 - **integration turn**：所有 active wave 共享 `max_concurrent_workers` 全局上限；integration branch 的 merge、fast-forward、`forge.wave.settled` 和 verified base 更新必须按 `integration_order` 串行化，不能按完成时间抢 merge。
 - **资源命名空间隔离**：跨 wave 的端口、数据库、容器、缓存、生成文件必须按 `plan_key + wave_id + slot_index` 命名空间隔离；guardian 在 admission 前审计资源冲突。
@@ -497,7 +497,7 @@ preset 作者**不需要**手动把 `aggregate_timeout_secs` 乘以尝试次数�
 
 | 字段 | 语义 | 谁决定 |
 |---|---|---|
-| `execution_wave` | DAG 依赖就绪后可并发启动的波次编号 | planner（SSOT） |
+| `execution_wave` | planner 提供的波次提示；runtime 按 DAG 重算后作为可并发启动的波次编号 | runtime（依赖 DAG） |
 | `integration_order` | 串行 merge 到 integration branch 的顺序 | planner（SSOT） |
 | `wave_id` | runtime 每次 `wave emit` 返回的唯一标识 | runtime（dispatcher 不可手写） |
 

@@ -109,6 +109,12 @@ dispatcher 可以在一次激活中提交多个已满足依赖的波次，但应
 `verified_base_commit` 未明确可用，停止派发并报告阻塞原因，不要重复启动同一
 Unit。只有前置波次已经 settled（已完成整合并登记终态）后，才可派发依赖它的波次。
 
+对 Parallel Forge，计划中的 `execution_wave` 只是 planner 提供的调度提示。
+runtime 会依据 `depends_on`（Unit 的前置依赖列表）重算每个 Unit 的最早安全波次，
+因此不得通过把独立 Unit 写进不同波次，或在计划文字中要求“串行执行”，来压制可用并发。
+只有真实依赖和无法命名空间隔离的共享资源可以阻止并发；`integration_order` 只控制
+整合顺序，不控制 worker 启动顺序。
+
 **幂等键：**
 
 - **作用**：`--idempotency-key` 让「同一批 wave 内容重入」安全。同一 `(loop_id, hat, topic, key)` 且 payload 不变时重复调用，runtime 直接返回**第一次**产生的 `wave_id` 并标 `deduplicated=true`，**不重复派发** worker、不再写新事件。键最长 256 字节、ASCII、非空非空白。

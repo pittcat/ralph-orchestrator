@@ -270,7 +270,8 @@ struct ExecutionPlanUnit {
     title: String,
     #[serde(default)]
     depends_on: Vec<String>,
-    execution_wave: u32,
+    #[serde(rename = "execution_wave")]
+    _execution_wave: u32,
     integration_order: u32,
 }
 
@@ -349,10 +350,15 @@ fn derive_plan_handoff(
         );
     }
 
+    // `execution_wave` is an authoring hint, not an authority over
+    // concurrency. Recompute the earliest safe wave from the dependency DAG
+    // so a plan that lists independent Units in serial waves still fans them
+    // out. `integration_order` remains the separate deterministic merge order.
+    let execution_waves = derive_execution_waves(&plan.units)?;
     let mut tasks = Vec::with_capacity(plan.units.len());
     let mut wave_sizes: HashMap<u32, usize> = HashMap::new();
     for unit in plan.units {
-        let execution_wave = unit.execution_wave;
+        let execution_wave = execution_waves[&unit.id];
         let depends_on_task_keys = unit
             .depends_on
             .iter()
@@ -394,6 +400,53 @@ fn derive_plan_handoff(
         tasks,
         wave_total,
     })
+}
+
+/// Compute the earliest safe execution wave from dependency edges.
+///
+/// This deliberately ignores the artifact's declared `execution_wave` value:
+/// the DAG is the hard ordering contract, while the declared value is only a
+/// planning hint and must not suppress available parallelism.
+fn derive_execution_waves(
+    units: &[ExecutionPlanUnit],
+) -> Result<HashMap<String, u32>, HandoffError> {
+    let known_ids: HashSet<&str> = units.iter().map(|unit| unit.id.as_str()).collect();
+    for unit in units {
+        for dependency in &unit.depends_on {
+            if !known_ids.contains(dependency.as_str()) {
+                return Err(HandoffError::ParseError {
+                    source: format!("unit '{}' depends on unknown unit '{dependency}'", unit.id),
+                });
+            }
+        }
+    }
+
+    let mut waves = HashMap::with_capacity(units.len());
+    while waves.len() < units.len() {
+        let mut progressed = false;
+        for unit in units {
+            if waves.contains_key(&unit.id) {
+                continue;
+            }
+            let Some(max_dependency_wave) = unit
+                .depends_on
+                .iter()
+                .map(|dependency| waves.get(dependency).copied())
+                .collect::<Option<Vec<_>>>()
+                .map(|dependency_waves| dependency_waves.into_iter().max().unwrap_or(0))
+            else {
+                continue;
+            };
+            waves.insert(unit.id.clone(), max_dependency_wave + 1);
+            progressed = true;
+        }
+        if !progressed {
+            return Err(HandoffError::ParseError {
+                source: "execution plan dependency graph contains a cycle".to_string(),
+            });
+        }
+    }
+    Ok(waves)
 }
 
 /// Normalize a `forge.plan.ready` payload into the runtime-owned summary.
@@ -495,6 +548,21 @@ units:
     integration_order: 2
 "#;
 
+    const SERIAL_LAYOUT_ARTIFACT: &[u8] = br#"version: 1
+plan_key: pf-test
+units:
+  - id: U1
+    title: Feature A
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+  - id: U2
+    title: Feature B
+    depends_on: []
+    execution_wave: 2
+    integration_order: 2
+"#;
+
     #[test]
     fn artifact_first_handoff_derives_tasks_and_schedule() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -528,6 +596,32 @@ units:
             error,
             HandoffError::NoParallelWave { max_wave_size: 1 }
         ));
+    }
+
+    #[test]
+    fn artifact_first_handoff_rewrites_serial_layout_for_independent_units() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("execution-plan.yml"),
+            SERIAL_LAYOUT_ARTIFACT,
+        )
+        .expect("write plan");
+        let payload = json!({
+            "execution_plan_path": "execution-plan.yml",
+            "plan_key": "pf-test",
+        });
+
+        let handoff = load_plan_handoff(&payload, temp.path())
+            .expect("independent Units must be parallelized");
+        assert_eq!(handoff.wave_total, 1);
+        assert_eq!(
+            handoff
+                .tasks
+                .iter()
+                .map(|task| task.execution_wave)
+                .collect::<Vec<_>>(),
+            vec![1, 1]
+        );
     }
 
     #[test]

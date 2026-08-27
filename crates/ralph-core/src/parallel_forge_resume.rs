@@ -670,13 +670,38 @@ pub fn validate_manifest(
         ),
     ]
     .into_iter()
-    .filter(|(_, recorded, current)| recorded != current)
+    .filter(|(name, recorded, current)| {
+        if *name == "plan_path" {
+            !identity_paths_match(recorded, current)
+        } else {
+            recorded != current
+        }
+    })
     .map(|(name, _, _)| name.to_string())
     .collect();
     if !drifted.is_empty() {
         return Err(ResumeManifestError::IdentityDrift { fields: drifted });
     }
     Ok(())
+}
+
+/// Resume identity paths may cross the parent/child TUI boundary, where a
+/// relative operator path is intentionally forwarded as an absolute path so
+/// the child can read it from the worktree. Compare the path components while
+/// accepting that representation change; all other identity fields remain
+/// exact comparisons.
+fn identity_paths_match(recorded: &str, expected: &str) -> bool {
+    if recorded == expected {
+        return true;
+    }
+
+    let recorded = Path::new(recorded);
+    let expected = Path::new(expected);
+    match (recorded.is_absolute(), expected.is_absolute()) {
+        (true, false) => recorded.ends_with(expected),
+        (false, true) => expected.ends_with(recorded),
+        _ => false,
+    }
 }
 
 /// Read the newest archived manifest that can support a resume.
@@ -1470,6 +1495,22 @@ mod tests {
             validate_manifest(&manifest, &drifted),
             Err(ResumeManifestError::IdentityDrift { .. })
         ));
+    }
+
+    #[test]
+    fn identity_accepts_parent_child_absolute_plan_path_representation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        seed_runtime(dir.path());
+        let payload = "{\"plan_key\":\"pf-1\"}";
+        append_event(dir.path(), &forge_plan_ready_line(payload));
+        append_outbox(dir.path(), "forge.plan.ready", payload, "planner");
+
+        let inputs = base_inputs();
+        let manifest = capture_manifest(dir.path(), &inputs);
+        let mut child_inputs = inputs.clone();
+        child_inputs.plan_path = "/repo/docs/plans/my-plan.md".to_string();
+
+        assert!(validate_manifest(&manifest, &child_inputs).is_ok());
     }
 
     #[test]
