@@ -1482,6 +1482,10 @@ pub async fn execute_wave_structured(
             &mut worker_backend,
             wave.target_hat.as_str(),
             loop_id,
+            main_events_file
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or(Path::new(".")),
             &worker_events_file,
             None,
             hats_source_label,
@@ -1917,6 +1921,10 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
             &mut worker_backend,
             wave.target_hat.as_str(),
             loop_id,
+            main_events_file
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or(Path::new(".")),
             &worker_events_file,
             None,
             hats_source_label,

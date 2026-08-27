@@ -599,13 +599,21 @@ hats:
       runtime record is archived to the worktree's
       `.ralph/reuse-history/` first, matching the
       `--worktree --reuse-worktree` rule.
-      1. Read `execution_plan_path` from trigger; derive `plan_key`; run from main repo root (`git worktree list` first entry).
+      1. Read `execution_plan_path` from trigger; derive `plan_key`; run forge
+         resource commands from the repository root, but identify the current
+         Ralph loop's checkout from `RALPH_WORKSPACE_ROOT` and
+         `RALPH_CURRENT_BRANCH`. These runner-injected values refer to the
+         outer `--worktree` checkout when one is active.
       2. Create integration branch; record `base_commit` after Foundation units land.
       3. For each parallel Unit: `git worktree add` + dedicated branch (one worktree per Unit).
       4. Write `.ralph/forge/<plan-key>/worktree-map.yml` (unit → branch → path).
-      5. Identify the branch checked out by the first (main) worktree as
-         `target_branch`. This is the branch the finalizer must fast-forward;
-         never guess `main`, `master`, or the integration branch.
+      5. Set `target_branch` to the exact non-empty value of
+         `RALPH_CURRENT_BRANCH`, and set `target_worktree` to
+         `RALPH_WORKSPACE_ROOT`. These identify the checkout that launched
+         this Ralph loop. Do not derive the target from the first entry of
+         `git worktree list`, and never guess `main`, `master`, or the
+         integration branch. If either value is missing, write
+         `blocks/worktree-blocked.md` and emit `forge.plan.blocked`.
       6. Precheck then emit `forge.worktrees.ready` including `plan_key`,
          `worktree_map_path`, `execution_plan_path`, `integration_branch`,
          `target_branch`, and `base_commit`.
@@ -1278,9 +1286,11 @@ hats:
       then run `--policy-check` with the exact finalization payload.
 
       1. Read `integration_branch`, `target_branch`, `worktree_map_path`,
-         `audit_report_path`, and `plan_key` from the trigger/projection.
-         `target_branch` is the first main-repository worktree branch recorded
-         by Worktree; never infer it from a preset name.
+         `audit_report_path`, and `plan_key` from the trigger/projection;
+         read `target_worktree` from `RALPH_WORKSPACE_ROOT`.
+         `target_branch` and `target_worktree` are the runner-injected
+         identity of the checkout that launched this loop; never infer them
+         from a preset name or from the first `git worktree list` entry.
       2. Verify the target worktree is clean and that target and integration
          are different real branches. Run
          `git merge-base --is-ancestor <target HEAD> <integration HEAD>`.
@@ -1296,7 +1306,7 @@ hats:
          corresponding main-repository path and verify it with `test -f`.
       4. Write `finalization.md` containing target branch, integration branch,
          pre-merge target SHA, integration SHA, and resulting target SHA.
-      5. From the target worktree run `git merge --ff-only <integration_branch>`.
+      5. From `target_worktree` run `git merge --ff-only <integration_branch>`.
          A non-fast-forward result is a hard block, not a retry with reset or
          force merge. Record the resulting target SHA in `finalization.md`.
       6. Only after the merge and all artifact checks pass, emit

@@ -3346,6 +3346,7 @@ pub(super) async fn run_loop_impl_inner(
             &mut effective_backend,
             display_hat.as_str(),
             &loop_id,
+            ctx.workspace(),
             &events_path,
             triggered_hat.as_deref(),
             hats_source_label.as_deref(),

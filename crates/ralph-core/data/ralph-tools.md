@@ -20,6 +20,8 @@ metadata:
 | `RALPH_CURRENT_HAT` | 当前激活的 hat id，例如 `worker`、`reviewer` | 非 loop 场景下直接调用 `ralph emit` 时 |
 | `RALPH_CURRENT_LOOP_ID` | 当前 loop id | 同上 |
 | `RALPH_EVENTS_FILE` | 当前 loop 的事件文件路径 | 同上 |
+| `RALPH_WORKSPACE_ROOT` | 当前 loop 实际执行的 workspace 路径；`--worktree` 时是 outer worktree | 非 loop 场景下直接调用命令时 |
+| `RALPH_CURRENT_BRANCH` | 当前 loop workspace checkout 的 Git branch；用于需要确认目标分支的操作 | detached HEAD 或非 loop 场景下 |
 | `RALPH_TRIGGERED_HAT` | `ralph emit` 时默认的目标 hat 回退值 | isolated 模式下 runner 不再注入；普通 handoff 不要显式补 `--triggered`，多消费者/无明确下游 topic 时也可能为空 |
 | `RALPH_HATS_SOURCE` | hats 来源标签，例如 `builtin:<preset-name>` | 无预设时 |
 

@@ -489,6 +489,7 @@ fn test_inject_hat_execution_env_sets_reserved_and_preserves_user_vars() {
         &mut backend,
         "reviewer",
         "loop-42",
+        std::path::Path::new("/tmp/worktree"),
         std::path::Path::new("/tmp/events.jsonl"),
         Some("synthesizer"),
         None,
@@ -499,8 +500,70 @@ fn test_inject_hat_execution_env_sets_reserved_and_preserves_user_vars() {
     assert_eq!(map.get("RALPH_CURRENT_HAT").unwrap(), "reviewer");
     assert_eq!(map.get("RALPH_CURRENT_LOOP_ID").unwrap(), "loop-42");
     assert_eq!(map.get("RALPH_EVENTS_FILE").unwrap(), "/tmp/events.jsonl");
+    assert!(!map.contains_key("RALPH_CURRENT_BRANCH"));
     assert_eq!(map.get("RALPH_TRIGGERED_HAT").unwrap(), "synthesizer");
     assert_eq!(map.get("RALPH_CONFIG").unwrap(), "/tmp/custom.yml");
+}
+
+#[test]
+fn test_inject_hat_execution_env_exposes_outer_worktree_branch() {
+    let temp = tempfile::tempdir().unwrap();
+    for args in [
+        ["init", "-b", "outer-worktree"],
+        ["config", "user.email", "test@example.com"],
+        ["config", "user.name", "Ralph Test"],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    std::fs::write(temp.path().join("README.md"), "fixture\n").unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(temp.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new("git")
+            .args(["commit", "-m", "fixture"])
+            .current_dir(temp.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let mut backend = CliBackend {
+        command: "echo".into(),
+        args: vec![],
+        prompt_mode: ralph_adapters::PromptMode::Arg,
+        prompt_flag: None,
+        output_format: BackendOutputFormat::Text,
+        env_vars: vec![],
+    };
+    inject_hat_execution_env(
+        &mut backend,
+        "worktree",
+        "loop-outer",
+        temp.path(),
+        &temp.path().join("events.jsonl"),
+        None,
+        None,
+        None,
+    );
+
+    let map: std::collections::HashMap<_, _> = backend.env_vars.into_iter().collect();
+    assert_eq!(
+        map.get("RALPH_CURRENT_BRANCH"),
+        Some(&"outer-worktree".to_string())
+    );
 }
 
 #[test]
@@ -517,6 +580,7 @@ fn test_inject_hat_execution_env_omits_triggered_when_none() {
         &mut backend,
         "ralph",
         "loop-1",
+        std::path::Path::new("/tmp/worktree"),
         std::path::Path::new(".ralph/events.jsonl"),
         None,
         None,

@@ -103,6 +103,9 @@ pub(crate) fn execution_outcome_from_cli_result(
 }
 /// Injects Ralph hat execution context environment variables into a backend.
 /// Overwrites any existing Ralph reserved variables.
+/// `workspace` is the current loop checkout; its branch is exposed as
+/// `RALPH_CURRENT_BRANCH` so nested orchestration can target the outer loop
+/// worktree instead of guessing from the repository's worktree list.
 ///
 /// `hats_source_label` carries the preset label (e.g. `builtin:ce-executor-pipeline`)
 /// that the loop was started with. We propagate it as `RALPH_HATS_SOURCE` so that
@@ -127,6 +130,7 @@ pub fn inject_hat_execution_env(
     backend: &mut CliBackend,
     current_hat: &str,
     loop_id: &str,
+    workspace: &std::path::Path,
     events_file: &std::path::Path,
     triggered_hat: Option<&str>,
     hats_source_label: Option<&str>,
@@ -147,6 +151,7 @@ pub fn inject_hat_execution_env(
             "RALPH_CURRENT_HAT"
                 | "RALPH_CURRENT_LOOP_ID"
                 | "RALPH_EVENTS_FILE"
+                | "RALPH_CURRENT_BRANCH"
                 | "RALPH_TRIGGERED_HAT"
                 | "RALPH_HATS_SOURCE"
                 | "RALPH_CONFIG"
@@ -162,6 +167,11 @@ pub fn inject_hat_execution_env(
         "RALPH_EVENTS_FILE".into(),
         events_file.display().to_string(),
     ));
+    if let Ok(branch) = ralph_core::get_current_branch(workspace) {
+        backend
+            .env_vars
+            .push(("RALPH_CURRENT_BRANCH".into(), branch));
+    }
     if let Some(triggered) = triggered_hat {
         backend
             .env_vars
