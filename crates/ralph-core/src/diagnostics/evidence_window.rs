@@ -217,9 +217,16 @@ impl EvidenceWindowWriter {
         }
         let writer = self.writer.as_mut().expect("writer opened above");
         let anomaly_row = build_anomaly_row(&anomaly)?;
-        let pre_trigger = self.buffer.iter().cloned().map(cap_window_value).collect::<Vec<_>>();
+        let pre_trigger = self
+            .buffer
+            .iter()
+            .cloned()
+            .map(cap_window_value)
+            .collect::<Vec<_>>();
+        let remaining = self.capacity.saturating_sub(pre_trigger.len());
         let post_trigger = post_trigger_lines
             .into_iter()
+            .take(remaining)
             .map(cap_window_value)
             .collect::<Vec<_>>();
 
@@ -281,13 +288,19 @@ fn build_anomaly_row(anomaly: &AnomalyDescriptor) -> std::io::Result<Value> {
         "schema_version".to_string(),
         Value::String(EVIDENCE_WINDOW_SCHEMA_VERSION.to_string()),
     );
-    row.insert("kind".to_string(), Value::String(ANOMALY_ROW_KIND.to_string()));
+    row.insert(
+        "kind".to_string(),
+        Value::String(ANOMALY_ROW_KIND.to_string()),
+    );
     row.insert(
         "trigger_kind".to_string(),
         Value::String(anomaly.trigger_kind.clone()),
     );
     row.insert("ts".to_string(), Value::String(anomaly.ts.clone()));
-    row.insert("iteration".to_string(), Value::Number(anomaly.iteration.into()));
+    row.insert(
+        "iteration".to_string(),
+        Value::Number(anomaly.iteration.into()),
+    );
     if anomaly.details.is_some() {
         row.insert("details".to_string(), details);
     }
@@ -307,27 +320,45 @@ fn cap_window_value(value: Value) -> Value {
     // 8 KiB after per-field capping — that behavior would erase
     // the very evidence the truncated string was meant to
     // preserve. Instead we cap every string leaf in isolation
-    // and trust the per-leaf cap to bound the overall row size:
-    // a row with N string fields can grow to N * 8 KiB at worst,
-    // which the caller controls by limiting the number of fields
-    // they push. The runtime-trace logger applies the same
-    // per-field cap without an aggregate cap, so this matches
-    // the established sidecar contract (S6.4).
-    fn cap(value: Value) -> Value {
+    // and apply the same bounded-row contract used by other
+    // diagnostic sidecars. Callers must not be able to grow a
+    // frozen window through arbitrarily large nested values.
+    const MAX_COLLECTION_ITEMS: usize = 32;
+    const MAX_WINDOW_VALUE_BYTES: usize = 64 * 1024;
+    const MAX_NESTING_DEPTH: usize = 4;
+
+    fn cap(value: Value, depth: usize) -> Value {
+        if depth >= MAX_NESTING_DEPTH {
+            return Value::Null;
+        }
         match value {
             Value::String(s) => Value::String(super::cap_string_field(&s, "evidence_window")),
-            Value::Array(items) => Value::Array(items.into_iter().map(cap).collect()),
+            Value::Array(items) => Value::Array(
+                items
+                    .into_iter()
+                    .take(MAX_COLLECTION_ITEMS)
+                    .map(|item| cap(item, depth + 1))
+                    .collect(),
+            ),
             Value::Object(map) => {
-                let mut out = serde_json::Map::with_capacity(map.len());
-                for (k, v) in map {
-                    out.insert(k, cap(v));
+                let mut out = serde_json::Map::with_capacity(map.len().min(MAX_COLLECTION_ITEMS));
+                for (k, v) in map.into_iter().take(MAX_COLLECTION_ITEMS) {
+                    out.insert(k, cap(v, depth + 1));
                 }
                 Value::Object(out)
             }
             other => other,
         }
     }
-    cap(value)
+    let capped = cap(value, 0);
+    match serde_json::to_vec(&capped) {
+        Ok(bytes) if bytes.len() <= MAX_WINDOW_VALUE_BYTES => capped,
+        Ok(bytes) => serde_json::json!({
+            "truncated": true,
+            "original_bytes": bytes.len(),
+        }),
+        Err(_) => serde_json::json!({"truncated": true}),
+    }
 }
 
 #[cfg(test)]

@@ -2370,7 +2370,8 @@ pub fn render_causal_markdown(report: &super::causal::CausalAttributionReport) -
     out.push_str("## Causal Attribution\n\n");
     out.push_str(&format!(
         "- contract_version: `{}`\n- status: `{}`\n",
-        report.contract_version, status_str
+        truncate_md(&report.contract_version, 128),
+        truncate_md(&status_str, 64)
     ));
 
     match report.status {
@@ -2380,7 +2381,7 @@ pub fn render_causal_markdown(report: &super::causal::CausalAttributionReport) -
             // confidence above the 85 gate (R14).
             if !report.coverage_gaps.is_empty() {
                 out.push_str("- reason: ");
-                out.push_str(&report.coverage_gaps[0].reason);
+                out.push_str(&truncate_md(&report.coverage_gaps[0].reason, 512));
                 out.push('\n');
             } else {
                 out.push_str(
@@ -2406,9 +2407,9 @@ pub fn render_causal_markdown(report: &super::causal::CausalAttributionReport) -
         let (category, target, evidence, summary) = fix_point_fields(fp);
         out.push_str("- fix_point:\n");
         out.push_str(&format!("  - category: `{category}`\n"));
-        out.push_str(&format!("  - target: `{target}`\n"));
-        out.push_str(&format!("  - evidence: `{evidence}`\n"));
-        out.push_str(&format!("  - summary: {summary}\n"));
+        out.push_str(&format!("  - target: `{}`\n", truncate_md(target, 512)));
+        out.push_str(&format!("  - evidence: `{}`\n", truncate_md(evidence, 512)));
+        out.push_str(&format!("  - summary: {}\n", truncate_md(summary, 1024)));
     }
     // DT7 confidence breakdown — five components plus the total.
     // `complete` requires `total > 85` (strict gate); `incomplete`
@@ -2434,20 +2435,28 @@ pub fn render_causal_markdown(report: &super::causal::CausalAttributionReport) -
         out.push_str("- rejected_hypotheses:\n");
         for h in &report.rejected_hypotheses {
             out.push_str(&format!("  - domain: `{}`\n", h.domain.as_str()));
-            out.push_str(&format!("    refutation: {}\n", h.refutation));
+            out.push_str(&format!(
+                "    refutation: {}\n",
+                truncate_md(&h.refutation, 512)
+            ));
         }
     }
     if !report.coverage_gaps.is_empty() {
         out.push_str("- coverage_gaps:\n");
         for g in &report.coverage_gaps {
             out.push_str(&format!("  - boundary: `{}`\n", g.boundary));
-            out.push_str(&format!("    reason: {}\n", g.reason));
+            out.push_str(&format!("    reason: {}\n", truncate_md(&g.reason, 512)));
         }
     }
     if !report.evidence_refs.is_empty() {
         out.push_str("- evidence_refs:\n");
         for e in &report.evidence_refs {
-            out.push_str(&format!("  - `{}` @ `{}`: {}\n", e.kind, e.locator, e.note));
+            out.push_str(&format!(
+                "  - `{}` @ `{}`: {}\n",
+                truncate_md(&e.kind, 128),
+                truncate_md(&e.locator, 256),
+                truncate_md(&e.note, 512)
+            ));
         }
     }
     out

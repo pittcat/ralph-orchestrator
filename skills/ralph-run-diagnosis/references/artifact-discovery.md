@@ -72,11 +72,13 @@ fi
 echo "diagnostics_mode=$MODE"
 ```
 
-FULL/MINIMAL 时列出 session 内文件存在性（orchestration、agent-output、recovery、drift、diagnosis-summary、**diagnosis-input.json**、**runtime-trace.jsonl**、**feedback.jsonl**）。
+FULL/MINIMAL 时列出 session 内文件存在性（orchestration、agent-output、recovery、drift、diagnosis-summary、**diagnosis-input.json**、**runtime-trace.jsonl**、**feedback.jsonl**、**evidence-window.jsonl**）。其中 `diagnosis-input.json` 的 v2 manifest 是 causal 诊断的入口；只有 manifest 的 8 个 boundary 均可验证时，才允许进入可归因评分。
 
 > **Bundle-first（plan 2026-08-12-001）**：`diagnosis-input.json` 是新 bundle 的入口；`runtime-trace.jsonl` 与 `feedback.jsonl` 是它的 sidecar。三者均按 §0.2 顺序读取；缺失则回退 legacy Tier 路径。
 
 > **Activation outcome（plan 2026-08-15-1823）**：`runtime-trace.jsonl` 内 `phase=activation` / `kind=hat_activation_outcome` 行按 session 对应盘点；缺行集时报告 §0 标 `activation_outcomes: missing`（FULL/MINIMAL 时）或 `legacy`（缺 bundle 时）；**不**列为 P0——activation outcome 是 additive sidecar，老 session / 非 isolated run 自然缺。盘点时一并统计 `empty` / `merged` / `merge_failed` / `interrupted` / `missing` / `unreadable` 计数与首个非 merged 行（若有）的 `hat` / `status` / `source_ref`。
+
+> **Causal evidence**：异常运行还应检查 `evidence-window.jsonl`。该文件只包含 anomaly 首行和受容量限制的上下文；缺失或无法按当前 `loop_id` 关联的 runtime receipt 必须降低 causal confidence，不得作为当前运行的证据。
 
 ---
 

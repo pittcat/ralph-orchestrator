@@ -71,6 +71,8 @@ pub struct EvidenceCorpus {
     pub verdict: ManifestVerdict,
     pub manifest_present: bool,
     pub manifest_schema_version: Option<String>,
+    /// Stable identity of the run that produced the manifest.
+    pub manifest_loop_id: Option<String>,
     /// `execution_capabilities[]` from the manifest, sorted
     /// ascending. The R8 chain uses this list to project
     /// the "preset" fingerprint (terminal_topics not
@@ -128,6 +130,8 @@ impl EvidenceCorpus {
                 corpus.manifest_present = true;
                 corpus.manifest_schema_version = Some(m.schema_version.clone());
                 corpus.capabilities = m.capabilities.clone();
+                corpus.manifest_loop_id = m.loop_id.clone();
+                let valid_boundary_set = m.has_valid_boundary_set();
                 let boundary_rows = m.boundary_coverage_sorted();
                 corpus.boundary_coverage = boundary_rows;
                 corpus.coverage_gaps = corpus
@@ -140,17 +144,11 @@ impl EvidenceCorpus {
                         locator: Some(format!("boundary_coverage[{}]", r.boundary)),
                     })
                     .collect();
-                corpus.verdict =
-                    if corpus.coverage_gaps.is_empty() && corpus.boundary_coverage.len() == 8 {
-                        ManifestVerdict::Evaluable
-                    } else {
-                        // Partial coverage still counts as
-                        // `evaluable` — the scorer uses the
-                        // coverage count to project DT7. We only
-                        // step down to `not_evaluable` when the
-                        // manifest itself is unusable.
-                        ManifestVerdict::Evaluable
-                    };
+                corpus.verdict = if valid_boundary_set {
+                    ManifestVerdict::Evaluable
+                } else {
+                    ManifestVerdict::NotEvaluable
+                };
             }
             Some(_) => {
                 // v1 or unknown higher → not evaluable.
@@ -174,12 +172,32 @@ impl EvidenceCorpus {
         corpus.recovery = read_recovery(workspace_root);
         corpus.ledger = read_ledger(workspace_root);
         corpus.accepted_transitions = read_accepted_transitions(workspace_root);
+        let manifest_loop_id = corpus.manifest_loop_id.clone();
+        filter_workspace_rows(&mut corpus, manifest_loop_id.as_deref());
 
         // ── Counters (must follow all loaders) ───────────
         corpus.counters = CorpusCounters::from_corpus(&corpus);
 
         corpus
     }
+}
+
+fn filter_workspace_rows(corpus: &mut EvidenceCorpus, loop_id: Option<&str>) {
+    let Some(loop_id) = loop_id else { return };
+    let belongs_to_run = |row: &Value| {
+        let tagged_id = row
+            .get("causal")
+            .and_then(Value::as_object)
+            .and_then(|causal| causal.get("loop_id"))
+            .and_then(Value::as_str)
+            .or_else(|| row.get("loop_id").and_then(Value::as_str));
+        tagged_id.is_none() || tagged_id == Some(loop_id)
+    };
+    corpus.recovery.retain(belongs_to_run);
+    corpus.ledger.retain(belongs_to_run);
+    corpus
+        .accepted_transitions
+        .retain(|row| belongs_to_run(&row.raw));
 }
 
 /// One row of `boundary_coverage[]` from the v2 manifest.
@@ -353,16 +371,27 @@ impl CorpusCounters {
             .filter(|r| r.kind.is_some())
             .count() as u64;
 
-        // correlated rows: rows whose `causal.loop_id /
-        // iteration` matches the manifest (we treat any row
-        // with a positive sequence as correlated when the
-        // manifest has a loop_id — the integration test
-        // pins this exact projection).
-        if corpus.manifest_schema_version.is_some() {
+        // Correlation is valid only when the producer stamped the
+        // exact run identity and iteration onto the row.
+        if let Some(loop_id) = corpus.manifest_loop_id.as_deref() {
             counters.correlated_rows = corpus
                 .runtime_trace
                 .iter()
-                .filter(|row| row.sequence > 0 || row.iteration > 0)
+                .filter(|row| {
+                    row.raw
+                        .get("causal")
+                        .and_then(Value::as_object)
+                        .and_then(|causal| causal.get("loop_id"))
+                        .and_then(Value::as_str)
+                        == Some(loop_id)
+                        && row
+                            .raw
+                            .get("causal")
+                            .and_then(Value::as_object)
+                            .and_then(|causal| causal.get("iteration"))
+                            .and_then(Value::as_u64)
+                            == Some(row.iteration)
+                })
                 .count() as u64;
         }
 
@@ -374,9 +403,21 @@ impl CorpusCounters {
 
 struct ManifestProjection {
     schema_version: String,
+    loop_id: Option<String>,
     boundary_coverage: Vec<BoundaryCoverageRow>,
     capabilities: Vec<String>,
 }
+
+const REQUIRED_BOUNDARIES: [&str; 8] = [
+    "effective_contract",
+    "activation",
+    "backend_outcome",
+    "event_candidate",
+    "policy_decision",
+    "state_commit",
+    "recovery_action",
+    "termination",
+];
 
 impl ManifestProjection {
     fn is_v2_current(&self) -> bool {
@@ -392,6 +433,23 @@ impl ManifestProjection {
             .sort_by(|a, b| a.boundary.cmp(&b.boundary));
         self.boundary_coverage
     }
+
+    fn has_valid_boundary_set(&self) -> bool {
+        if self.boundary_coverage.len() != REQUIRED_BOUNDARIES.len()
+            || self.loop_id.as_deref().is_none_or(str::is_empty)
+        {
+            return false;
+        }
+        let mut names: Vec<&str> = self
+            .boundary_coverage
+            .iter()
+            .map(|row| row.boundary.as_str())
+            .collect();
+        names.sort_unstable();
+        let mut expected = REQUIRED_BOUNDARIES.to_vec();
+        expected.sort_unstable();
+        names == expected
+    }
 }
 
 fn read_manifest(session_dir: &Path) -> Option<ManifestProjection> {
@@ -399,6 +457,12 @@ fn read_manifest(session_dir: &Path) -> Option<ManifestProjection> {
     let body = fs::read_to_string(&path).ok()?;
     let value: Value = serde_json::from_str(&body).ok()?;
     let schema_version = value.get("schema_version")?.as_str()?.to_string();
+    let loop_id = value
+        .get("run")
+        .and_then(Value::as_object)
+        .and_then(|run| run.get("loop_id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
 
     // `boundary_coverage[]` may be absent on v1 manifests;
     // an empty `Vec` is the correct projection.
@@ -446,6 +510,7 @@ fn read_manifest(session_dir: &Path) -> Option<ManifestProjection> {
 
     Some(ManifestProjection {
         schema_version,
+        loop_id,
         boundary_coverage: rows,
         capabilities,
     })

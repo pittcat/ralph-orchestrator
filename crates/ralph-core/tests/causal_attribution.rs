@@ -175,6 +175,21 @@ fn manifest_v1_legacy() -> String {
     .unwrap()
 }
 
+#[test]
+fn partial_v2_manifest_is_not_evaluable() {
+    let scratch = Scratch::new();
+    let mut manifest: Value = serde_json::from_str(&manifest_v2_full()).unwrap();
+    manifest["boundary_coverage"].as_array_mut().unwrap().pop();
+    scratch.write_session(
+        "diagnosis-input.json",
+        &serde_json::to_string(&manifest).unwrap(),
+    );
+
+    let report = analyze_session(&scratch.session, &scratch.workspace);
+    assert_eq!(report.status, AttributionStatus::NotEvaluable);
+    assert_eq!(report.confidence.total, 0);
+}
+
 // ─── Scenario S8.1 — preset domain ────────────────────────────
 
 #[test]
@@ -191,6 +206,7 @@ fn s8_1_preset_domain() {
         "sequence": 1,
         "phase": "decision",
         "kind": "contract_receipt",
+        "causal": { "loop_id": "L-test", "iteration": 1 },
         "fields": {
             "contract_digest": "abc",
             "hats_digest": "h",

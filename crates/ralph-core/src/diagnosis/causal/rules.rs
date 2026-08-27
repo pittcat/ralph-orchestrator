@@ -443,8 +443,21 @@ fn rule_capture_contract(corpus: &EvidenceCorpus) -> Option<RuleHit> {
     Some(RuleHit {
         domain: Domain::DiagnosticCaptureContract,
         fix_point: FixPoint::CaptureContract {
-            target: gap.boundary.clone(),
-            evidence: format!("boundary={}", gap.boundary),
+            target: corpus
+                .coverage_gaps
+                .iter()
+                .map(|gap| gap.boundary.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            evidence: format!(
+                "boundaries={}",
+                corpus
+                    .coverage_gaps
+                    .iter()
+                    .map(|gap| gap.boundary.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
             summary: format!(
                 "Coverage gap on boundary `{}`; the collector should have recorded evidence here.",
                 gap.boundary

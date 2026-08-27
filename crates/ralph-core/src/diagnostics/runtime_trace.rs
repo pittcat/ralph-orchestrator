@@ -13,8 +13,9 @@
 //! # Activation
 //!
 //! The logger is created by [`crate::diagnostics::DiagnosticsCollector`]
-//! when `full_diagnostics` or `runtime_diagnosis_artifacts` is
-//! active. The collector wraps it in `Arc<Mutex<RuntimeTraceLogger>>`.
+//! when `full_diagnostics`, `runtime_diagnosis_artifacts`, or
+//! `causal_evidence` is active. The collector wraps it in
+//! `Arc<Mutex<RuntimeTraceLogger>>`.
 //!
 //! # Error handling
 //!

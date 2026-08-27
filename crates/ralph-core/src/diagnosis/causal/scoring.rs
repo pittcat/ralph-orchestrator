@@ -28,6 +28,12 @@ use super::rules::Attribution;
 /// Project the DT7 breakdown for the corpus + attribution.
 #[must_use]
 pub fn score(corpus: &EvidenceCorpus, attribution: &Attribution) -> ConfidenceBreakdown {
+    if matches!(
+        corpus.verdict,
+        super::evidence::ManifestVerdict::NotEvaluable
+    ) {
+        return empty_breakdown();
+    }
     // An empty corpus carries no evidence; every component
     // must collapse to 0 so an empty / not_evaluable run can
     // never accidentally pass the 85-gate. The corpus's
@@ -87,12 +93,9 @@ fn coverage_component(corpus: &EvidenceCorpus) -> u8 {
         .iter()
         .filter(|r| matches!(r.status, super::evidence::BoundaryStatus::Covered))
         .count() as u32;
-    // Floor to integer; the cap is the boundary count from
-    // the corpus, not a hard 8 — U07 §6 forbids inventing a
-    // ninth boundary, but the engine must not assume the
-    // corpus is complete either.
-    let cap = corpus.boundary_coverage.len().max(1) as u32;
-    let points = (covered * 30) / cap;
+    // The v2 contract has a closed set of exactly eight boundaries.
+    // Never let a partial or malformed manifest inflate its score.
+    let points = (covered * 30) / 8;
     points.min(30) as u8
 }
 
@@ -174,23 +177,13 @@ fn refutation_component(attribution: &Attribution) -> u8 {
     if attribution.primary_domain().is_none() {
         return 0;
     }
-    let primary = attribution.primary_domain();
-    let mut points: u32 = 0;
-    for d in super::domain::Domain::ALL {
-        if Some(d) == primary {
-            continue;
-        }
-        // We don't have direct access to the BTreeMap of
-        // refutations from here; we rely on the report
-        // builder's projection. The builder guarantees
-        // every non-primary domain has at least one
-        // evidence ref, so we project 5 points per
-        // non-primary domain here as well. This keeps the
-        // score aligned with the JSON shape (which is the
-        // contract U10 pins).
-        points = points.saturating_add(5);
-    }
-    points.min(20) as u8
+    attribution
+        .rejected_hypotheses()
+        .iter()
+        .filter(|hypothesis| !hypothesis.evidence.is_empty())
+        .count()
+        .min(4) as u8
+        * 5
 }
 
 // ─── Correlation (15) ────────────────────────────────────────
@@ -208,7 +201,7 @@ fn correlation_component(corpus: &EvidenceCorpus) -> u8 {
     };
 
     let loop_consistency_points: u32 = if corpus.runtime_trace.is_empty() {
-        5
+        0
     } else {
         let total = corpus.runtime_trace.len() as u32;
         let correlated = corpus.counters.correlated_rows.min(u64::from(total)) as u32;
