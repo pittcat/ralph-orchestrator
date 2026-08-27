@@ -104,6 +104,20 @@ pub(crate) fn run_supervisor_fan_in(
 ) -> SupervisorFanInOutcome {
     use ralph_core::supervisor::{SupervisorBridge as _, WaveKind};
 
+    // Worker execution may overlap across independent waves, but fan-in
+    // appends to one event stream and commits one delivery state at a time.
+    let fan_in_lock = bridge.fan_in_lock();
+    let _fan_in_guard = match fan_in_lock.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!(
+                wave_id = %completed.wave_id,
+                "supervisor fan-in lock was poisoned; continuing with recovered guard"
+            );
+            poisoned.into_inner()
+        }
+    };
+
     // Infer the wave kind from the trigger topic (mirrors
     // `execute_wave_via_supervisor_with_executor`).
     let trigger_topic = detected

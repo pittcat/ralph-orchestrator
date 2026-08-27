@@ -66,6 +66,13 @@ impl From<SupervisorStoreError> for BridgeError {
 /// production implementation lives in `ralph-cli`; the BDD
 /// `InMemoryCoordinatorBridge` lives in this crate.
 pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
+    /// Shared serialization gate for supervisor fan-in side effects.
+    /// Independent waves may execute concurrently, while merge and
+    /// coordination commits remain serialized against the main ledger.
+    fn fan_in_lock(&self) -> std::sync::Arc<std::sync::Mutex<()>> {
+        std::sync::Arc::new(std::sync::Mutex::new(()))
+    }
+
     /// Run one tick of the supervisor fan-in for `wave_id`.
     /// Returns the coordinator action so the dispatcher can
     /// decide whether to merge worker events + persist the

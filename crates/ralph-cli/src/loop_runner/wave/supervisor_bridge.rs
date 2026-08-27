@@ -127,6 +127,8 @@ pub struct CoordinatorSupervisorBridge {
     /// attempt loop reads this BEFORE the very first attempt
     /// so the loop count matches the configured budget.
     slot_retry_budget: u32,
+    /// Serializes fan-in's main-ledger merge and coordination commit.
+    fan_in_lock: Arc<std::sync::Mutex<()>>,
     /// U6: map from the caller-supplied idempotency key (the
     /// dispatcher's wave_id) to the store-assigned wave id
     /// (`w-{seq}`). `register_wave_if_absent` populates this on
@@ -160,6 +162,7 @@ impl CoordinatorSupervisorBridge {
             // (`1`) keeps them at the documented history so
             // characterization tests stay bit-for-bit unchanged.
             slot_retry_budget: 1,
+            fan_in_lock: Arc::new(std::sync::Mutex::new(())),
             registered: Default::default(),
         }
     }
@@ -213,6 +216,7 @@ impl CoordinatorSupervisorBridge {
             factory,
             max_concurrent_workers,
             slot_retry_budget,
+            fan_in_lock: Arc::new(std::sync::Mutex::new(())),
             registered: Default::default(),
         }
     }
@@ -262,6 +266,7 @@ impl CoordinatorSupervisorBridge {
             // entry point stays at the documented default (1)
             // so the pin tests do not drift.
             slot_retry_budget: 1,
+            fan_in_lock: Arc::new(std::sync::Mutex::new(())),
             registered: Default::default(),
         }
     }
@@ -321,6 +326,10 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         // `register_wave_if_absent` calls. The runner has
         // already validated it lies in `0..=2` (KTD10).
         self.slot_retry_budget
+    }
+
+    fn fan_in_lock(&self) -> Arc<std::sync::Mutex<()>> {
+        Arc::clone(&self.fan_in_lock)
     }
 
     fn repo_root(&self) -> Option<&std::path::Path> {
@@ -1051,6 +1060,20 @@ mod tests {
         assert_disabled(&bridge);
         let snaps = bridge.recover().unwrap();
         assert!(snaps.is_empty());
+    }
+
+    #[test]
+    fn production_bridge_reuses_one_fan_in_lock_across_waves() {
+        use ralph_core::supervisor::SupervisorBridge as _;
+
+        let bridge = CoordinatorSupervisorBridge::with_in_memory_store();
+        let first = bridge.fan_in_lock();
+        let second = bridge.fan_in_lock();
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "all waves in one bridge must serialize fan-in on one shared lock"
+        );
     }
 
     #[test]

@@ -83,6 +83,15 @@ hats:
     event_loop
 }
 
+/// Supervisor-enabled isolated loops admit multiple independent wave groups
+/// in one read batch. The supervisor worker cap, rather than the legacy
+/// isolated one-business-event rule, provides backpressure for this path.
+fn make_supervisor_isolated_loop(events_path: &std::path::Path) -> EventLoop {
+    let mut event_loop = make_isolated_loop(events_path);
+    event_loop.config.event_loop.supervisor.enabled = true;
+    event_loop
+}
+
 /// Collect all violation topic names published to the bus after processing.
 fn collect_violation_topics(event_loop: &EventLoop) -> Vec<String> {
     let empty = Vec::new();
@@ -144,6 +153,48 @@ fn test_wave_isolated_out_of_scope_rejected() {
         !collect_violation_topics(&event_loop).is_empty(),
         "scope violation event should be published to the bus when a wave is rejected"
     );
+}
+
+/// Supervisor-enabled isolated mode must retain every independently scoped
+/// wave in the same input batch so the dispatcher can execute them together.
+#[test]
+fn test_supervisor_isolated_allows_multiple_independent_waves() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let mut event_loop = make_supervisor_isolated_loop(&events_path);
+    event_loop.state.current_isolated_hat = Some(HatId::new("coordinator"));
+
+    write_wave_event_to_jsonl(
+        &events_path,
+        "review.file",
+        "file-A.rs",
+        "coordinator",
+        "w-Alpha",
+        0,
+        1,
+    );
+    write_wave_event_to_jsonl(
+        &events_path,
+        "review.file",
+        "file-B.rs",
+        "coordinator",
+        "w-Beta",
+        0,
+        1,
+    );
+
+    let processed = event_loop
+        .process_events_from_jsonl_with_waves()
+        .unwrap();
+    let mut wave_ids: Vec<_> = processed
+        .wave_events
+        .iter()
+        .filter_map(|event| event.wave_id.as_deref())
+        .collect();
+    wave_ids.sort_unstable();
+
+    assert_eq!(wave_ids, vec!["w-Alpha", "w-Beta"]);
+    assert!(collect_violation_topics(&event_loop).is_empty());
 }
 
 /// A1-2: a legal Wave carrying multiple events must be preserved as a

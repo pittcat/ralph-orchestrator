@@ -649,6 +649,41 @@ pub async fn handle_wave_events(
     let supervisor_bridge: Option<&Arc<dyn ralph_core::supervisor::SupervisorBridge>> =
         supervisor_bridge_owned.as_ref();
 
+    // Execute independent detected waves concurrently. The per-wave
+    // executor owns its worker lifecycle; supervisor fan-in is protected by
+    // the bridge's shared lock so the main event stream remains serialized.
+    // Keep the outcomes keyed by the public wave id so the existing
+    // deterministic reporting path below can process them in detection order.
+    let mut wave_outcomes = futures::future::join_all(waves.iter().map(|detected| {
+        let rpc_tx = out.rpc_tx.cloned();
+        let tui = out.tui.map(Arc::clone);
+        let hats_source = out.hats_source_label;
+        let config_path = out.config_path;
+        let bridge = supervisor_bridge;
+        let events_file = main_events_file.clone();
+        async move {
+            let outcome = execute_wave_structured(
+                detected,
+                backend,
+                &events_file,
+                out.show_cli,
+                out.use_colors,
+                rpc_tx,
+                tui,
+                loop_id,
+                WaveDispatchLimits { global_deadline },
+                hats_source,
+                config_path,
+                bridge,
+            )
+            .await;
+            (detected.wave_id.clone(), outcome)
+        }
+    }))
+    .await
+    .into_iter()
+    .collect::<std::collections::HashMap<_, _>>();
+
     for detected in waves {
         let wave_timeout_secs = detected.timeout_secs();
 
@@ -716,30 +751,9 @@ pub async fn handle_wave_events(
             push_to_tui_iteration(state, header_line);
         }
 
-        let wave_outcome = execute_wave_structured(
-            &detected,
-            backend,
-            &main_events_file,
-            out.show_cli,
-            out.use_colors,
-            out.rpc_tx.cloned(),
-            out.tui.map(Arc::clone),
-            loop_id,
-            // U4-C2: forward the runner-supplied global deadline
-            // (from `loop.max_runtime_seconds - state.elapsed()`)
-            // to the dispatcher so it can preempt long waves.
-            WaveDispatchLimits { global_deadline },
-            // Plan 001 §4.3 C1: forward the explicit preset label so
-            // each wave worker's `ralph emit` / `ralph wave emit`
-            // inherits the loop's `event_policy.schemas`.
-            out.hats_source_label,
-            out.config_path,
-            // 2026-07-03-001 supervisor real-wiring: forward the
-            // optional supervisor bridge so the dispatcher can take
-            // the per-slot worktree path when `supervisor.enabled: true`.
-            supervisor_bridge,
-        )
-        .await;
+        let wave_outcome = wave_outcomes
+            .remove(&detected.wave_id)
+            .expect("every detected wave must have one execution outcome");
 
         // U4-B3: classify the structured outcome BEFORE we
         // pattern-match on the carried `CompletedWave`. We need to

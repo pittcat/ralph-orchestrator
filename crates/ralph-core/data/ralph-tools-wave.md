@@ -97,6 +97,18 @@ ralph wave emit [OPTIONS] <TOPIC>
 - 不能在 wave worker 内部使用（`RALPH_WAVE_WORKER=1` 时会阻止）。
 - Wave worker 的结果应通过 `ralph emit` 返回，而非 `ralph wave emit`。
 
+### 多个并发 wave
+
+一个 `ralph wave emit` 调用只创建一个 `wave_id`。要让相互独立的
+波次同时运行，dispatcher 应为每个波次分别准备 payload 文件，并分别执行
+`wave verify` → `wave emit`；不要把不同的 `execution_wave` 合并到同一
+批次。每个批次返回的 `wave_id` 都要单独执行 `ralph wave inspect` 确认。
+
+dispatcher 可以在一次激活中提交多个已满足依赖的波次，但应遵守 preset 声明的
+波次上限和 supervisor 的全局 worker 上限。若资源容量、worktree 或
+`verified_base_commit` 未明确可用，停止派发并报告阻塞原因，不要重复启动同一
+Unit。只有前置波次已经 settled（已完成整合并登记终态）后，才可派发依赖它的波次。
+
 **幂等键：**
 
 - **作用**：`--idempotency-key` 让「同一批 wave 内容重入」安全。同一 `(loop_id, hat, topic, key)` 且 payload 不变时重复调用，runtime 直接返回**第一次**产生的 `wave_id` 并标 `deduplicated=true`，**不重复派发** worker、不再写新事件。键最长 256 字节、ASCII、非空非空白。

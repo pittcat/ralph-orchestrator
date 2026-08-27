@@ -107,7 +107,7 @@ schemas:
       wave_index:
         meaning: Static wave index from execution-plan.yml (1-based, sequential).
         source: forge-dispatcher reading execution_plan_path.
-        fill_rule: Equals the smallest wave_index whose tasks are still open.
+        fill_rule: Equals the selected ready wave's execution_wave index; its dependency edges must be satisfied by settled predecessor waves.
       wave_id:
         meaning: Stable identifier for this wave round (unique per plan).
         source: Dispatcher-generated; format wave-<plan-key>-<index>.
@@ -115,7 +115,7 @@ schemas:
       unit_ids:
         meaning: Ordered (by integration_order) Unit ids to be fanned out in this wave.
         source: execution-plan.yml wave filter.
-        fill_rule: Non-empty; subset of execution plan units.
+        fill_rule: Non-empty; subset of execution plan units whose dependencies are settled; other ready waves may run concurrently.
       verified_base_commit:
         meaning: Commit SHA the worktree base must match before fan-out.
         source: Initial draft base or last forge.wave.settled.verified_base_commit.

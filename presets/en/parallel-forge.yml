@@ -2,7 +2,8 @@
 #
 # Based on parallel-dev-preset.md v2.0. **execution_model: supervisor**
 # (`event_loop.supervisor.enabled: true`): runtime manages per-slot worktrees,
-# forge-dispatcher fans out `exec.unit.ready` waves; executor slots publish
+# forge-dispatcher fans out `exec.unit.ready` waves; up to three independent
+# waves may overlap; executor slots publish
 # `exec.unit.done` / `exec.unit.failed`; supervisor injects
 # `exec.wave.complete` / `exec.wave.failed` (agents must NOT emit those).
 # Development is required to fan out via supervisor waves; integration serial; one atomic
@@ -75,11 +76,10 @@ mechanism:
           - forge.worktrees.ready
           - forge.wave.worktrees.ready
           - forge.plan.blocked
-      # U7 (plan 2026-07-29-001): repeatable per-wave spine. The
-      # development loop runs once per static wave. Each iteration
-      # emits the wave's full handoff chain and a `forge.wave.settled`
-      # terminal that triggers the next iteration's prepare (or the
-      # final `forge.exec.development.done` once the plan is empty).
+      # U7: repeatable per-wave spine. The development loop may have
+      # several independent waves active at once. Each wave emits its
+      # full handoff chain and a `forge.wave.settled` terminal; that
+      # terminal unlocks only its dependent waves.
       # `transition_emits` controls the loop body's step ordering; the
       # outside-this-loop flow advances to `full_verify` either when
       # the last wave settles and the dispatcher emits
@@ -547,8 +547,8 @@ hats:
     instructions: |
       ## WORKTREE MODE — lazy per-wave worktrees
 
-      U4 / R8: create worktrees **only for the current wave**, never
-      for future waves. The trigger carries an explicit
+      U4 / R8: create worktrees only for a ready wave; waves whose
+      dependencies are not settled remain absent. The trigger carries an explicit
       `verified_base_commit`; only honour it after `git cat-file -t`
       proves it is a real commit. If the commit does not exist or
       the branch/path already exists with a different SHA, fail
@@ -585,12 +585,12 @@ hats:
       ### Mission
       - On `forge.concurrency.approved`: create the integration
         branch (or reuse it) and emit `forge.worktrees.ready` with
-        the **first** wave's worktree map (R5: minimum open wave
-        index from the plan).
+        the first ready wave's worktree map.
       - On each `forge.wave.prepare`: ensure the named branch /
         worktree exists at `verified_base_commit`, then emit
         `forge.wave.worktrees.ready` with the wave-scoped map.
-        Future waves are **absent** from the map.
+        Waves that are not yet ready are **absent** from the map;
+        multiple ready-wave maps may coexist for one plan.
 
       Worktrees are cleaned by the **cleanup** hat before the
       reporter runs (lifecycle owner, per the artifact lifecycle
@@ -639,7 +639,7 @@ hats:
       - forge.wave.prepare
       - forge.exec.development.done
     instructions: |
-      ## FORGE DISPATCHER MODE — Static-wave fan-out
+      ## FORGE DISPATCHER MODE — Dependency-ready multi-wave fan-out
 
       Dispatcher hat for `event_loop.supervisor.enabled: true`. The
       execution plan's **static** `execution_wave` field is the
@@ -654,9 +654,10 @@ hats:
 
       ### Role boundary — you dispatch, you do not implement
 
-      - You only **dispatch**: read the execution plan, pick the next
-        wave, and emit `ralph wave emit exec.unit.ready --payloads-stdin`
-        for the ready units. You never implement any Unit.
+      - You only **dispatch**: read the execution plan, find dependency-ready
+        waves, and emit one `ralph wave emit exec.unit.ready
+        --payloads-stdin` batch per selected wave. You never implement any
+        Unit.
       - The `<ready-tasks>` block in your prompt is **read-only** for
         you. Unit tasks are owned by `executor`; the prompt may mark
         them `[read-only]` even though you have lifecycle rights for
@@ -667,10 +668,13 @@ hats:
         topic your `publishes` allow. Do **not** "help out" by
         implementing a Unit yourself.
 
-      ### Single-shot budget
+      ### Dispatch budget
 
-      Per activation publish **at most one** of:
-      - one `ralph wave emit exec.unit.ready --payloads-stdin` batch (current wave fan-out), OR
+      Per activation dispatch up to **three** independent ready waves. Each
+      wave must use its own payload file and its own `ralph wave verify` →
+      `ralph wave emit` pair. Never combine two logical waves into one
+      `wave emit` call: one call creates one shared `wave_id`.
+      If no ready wave exists, publish at most one of:
       - `ralph emit forge.wave.prepare` (request next wave's worktree creation), OR
       - `ralph emit forge.exec.development.done` (all waves settled).
 
@@ -678,15 +682,17 @@ hats:
       The runtime injects those after slot fan-in. Your triggers
       may *receive* fan-in signals; you never write them.
 
-      ### Static wave selection
+      ### Ready-wave selection
 
-      U4 / R5: read `execution_plan_path` from the trigger. Find
-      the **smallest** `wave_index` whose Units are still open in
-      `ralph tools task list`. If no open wave exists, transition
-      to `forge.exec.development.done` (after U5 has settled
-      the previous wave). Re-entry on the same `wave_id` is
-      idempotent — never re-prepare a wave that already has
-      `forge.worktrees.ready`.
+      U4 / R5: read `execution_plan_path` from the trigger. Find every
+      wave whose Units are still open and whose dependency edges are
+      satisfied by already-settled predecessor waves. These are the
+      ready-wave candidates. Select up to three independent candidates per
+      activation, ordered by `integration_order`, and dispatch each as its
+      own wave. Independent candidates may be active concurrently because the
+      runtime/supervisor owns the global worker cap. Re-entry on the
+      same `wave_id` is idempotent — never re-prepare a wave that already
+      has `forge.worktrees.ready`.
 
       Dispatch the approved wave as-is; never compensate for scarce resources by
       opening extra worktrees, re-dispatching a busy slot, or launching a second
@@ -705,12 +711,15 @@ hats:
 
       ### Wave OPAC (HARD)
 
-      1. Build payloads.jsonl (one JSON object per ready unit).
-      2. `cat payloads.jsonl | ralph wave verify exec.unit.ready --payloads-stdin`
+      1. Build one payloads file per selected wave (one JSON object per ready
+         unit; do not mix wave indexes).
+      2. For each file, run
+         `cat wave-<index>.jsonl | ralph wave verify exec.unit.ready --payloads-stdin`
          — must succeed (ticket). **Do not skip verify.**
-      3. Same unmodified payloads:
-         `cat payloads.jsonl | ralph wave emit exec.unit.ready --payloads-stdin`
-      4. Confirm with `ralph wave inspect <wave_id>` (not events.jsonl).
+      3. For each verified file, pass the same unmodified bytes to
+         `ralph wave emit exec.unit.ready --payloads-stdin`.
+      4. Confirm every returned `wave_id` with
+         `ralph wave inspect <wave_id>` (not events.jsonl).
 
       Schema `--policy-check` alone is **not** a substitute for `wave verify`.
 
@@ -718,15 +727,17 @@ hats:
 
       1. Read `execution_plan_path`, `worktree_map_path`, `plan_key`,
          `verified_base_commit` from trigger/projection.
-      2. If `forge.wave.settled` just landed: select the next
-         static wave (smallest open wave_index) and emit
-         `forge.wave.prepare` with the new wave's Unit ids and
-         the **settled** `verified_base_commit` (the new verified
-         base that Settlement just pinned).
-      3. If `forge.wave.worktrees.ready` just landed: ready set
-         = that wave's Unit ids; sort by `integration_order`; verify
-         → wave emit.
-      4. If every static wave is settled and no open tasks remain:
+      2. If `forge.wave.settled` just landed: recompute all ready-wave
+         candidates. If a candidate lacks a worktree, emit
+         `forge.wave.prepare` for the lowest such candidate; otherwise
+         dispatch up to three candidates whose bases are valid. The
+         `verified_base_commit` must be the settled commit for each
+         prepared wave.
+      3. If `forge.wave.worktrees.ready` just landed: include that wave in
+         the ready set, then continue dispatching other independent ready
+         waves whose worktrees are already available; verify → wave emit once
+         per wave.
+      4. If every wave is settled and no open tasks remain:
          emit `forge.exec.development.done` (`execution_plan_path`,
          counts, `plan_key`).
 

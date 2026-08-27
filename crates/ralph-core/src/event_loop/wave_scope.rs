@@ -142,7 +142,10 @@ impl EventLoop {
     ///     not, the whole group is dropped as
     ///     `WaveRejection::IsolatedScopeViolation`;
     ///   * any subsequent distinct `wave_id` is dropped as
-    ///     `WaveRejection::IsolatedMultipleBusinessEmissions`.
+    ///     `WaveRejection::IsolatedMultipleBusinessEmissions`, unless the
+    ///     supervisor is enabled. Supervisor wave dispatch deliberately admits
+    ///     multiple independent wave groups; the supervisor's worker cap is
+    ///     the backpressure boundary for that mode.
     ///
     /// Each rejection publishes a `*.scope_violation` event to the bus
     /// and constructs a `WaveRejection` value so that the caller's
@@ -186,12 +189,13 @@ impl EventLoop {
         );
 
         let mut kept: Vec<crate::event_reader::Event> = Vec::new();
-        // Tracks whether ANY distinct `wave_id` has been observed in
-        // this read batch, regardless of whether that wave was kept or
-        // dropped. KTD-U4-2: a single isolated activation allows at
-        // most one distinct `wave_id`; any further distinct wave_id is
-        // typed as `IsolatedMultipleBusinessEmissions`, even if the
-        // first wave itself was rejected for scope.
+        // Legacy isolated activations retain the one-wave budget. Supervisor
+        // mode is the explicit multi-wave exception: independent wave groups
+        // are admitted here and the supervisor's global worker cap provides
+        // the resource backpressure.
+        let supervisor_multi_wave = self.config.event_loop.supervisor.enabled;
+        // Tracks whether ANY distinct `wave_id` has been observed in this
+        // read batch for the legacy one-wave rule.
         let mut wave_observed: bool = false;
 
         for wave_id in order {
@@ -200,7 +204,7 @@ impl EventLoop {
                 continue;
             }
 
-            if wave_observed {
+            if wave_observed && !supervisor_multi_wave {
                 // Subsequent distinct wave_id in the same read batch:
                 // typed as `IsolatedMultipleBusinessEmissions`.
                 let rejection = WaveRejection::IsolatedMultipleBusinessEmissions {

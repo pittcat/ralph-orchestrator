@@ -154,3 +154,4 @@ LEAN-CTX.md
 .mcp.json
 execution.target
 logs/
+.plan-manifests/
