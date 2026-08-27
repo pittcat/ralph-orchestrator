@@ -445,6 +445,78 @@ impl DispatchContext {
     }
 }
 
+/// Publish the wave-start state before any worker future is polled.
+///
+/// Worker output is emitted while `execute_wave_structured` is awaiting the
+/// backends. Initializing the TUI/RPC state here keeps the live wave visible
+/// during that wait instead of only after the wave has completed.
+fn announce_wave_start(detected: &ralph_core::DetectedWave, out: &WaveOutputs<'_>) {
+    let wave_timeout_secs = detected.timeout_secs();
+
+    info!(
+        wave_id = %detected.wave_id,
+        total = detected.total,
+        hat = %detected.target_hat,
+        concurrency = detected.hat_config.concurrency,
+        "Wave detected, executing parallel workers"
+    );
+
+    if out.show_cli {
+        print_wave_header(
+            &detected.hat_config.name,
+            detected.total as usize,
+            wave_timeout_secs,
+            out.use_colors,
+        );
+    }
+    if let Some(tx) = out.rpc_tx {
+        let _ = tx.try_send(RpcEvent::WaveStarted {
+            hat_name: detected.hat_config.name.clone(),
+            worker_count: detected.total,
+            timeout_secs: wave_timeout_secs,
+        });
+    }
+    if let Some(state) = out.tui {
+        if let Ok(mut s) = state.lock() {
+            info!(
+                hat = %detected.hat_config.name,
+                workers = detected.total,
+                "Setting wave_active on TUI state"
+            );
+            s.wave_active = Some(ralph_tui::state::WaveInfo::new(
+                detected.hat_config.name.clone(),
+                detected.total,
+            ));
+            s.wave_active_iteration_idx = Some(s.iterations.len().saturating_sub(1));
+            if let Some(ref wave) = s.wave_active {
+                for (i, buffer) in wave.worker_buffers.iter().enumerate() {
+                    if let Ok(mut buf_lines) = buffer.lines_handle().lock() {
+                        buf_lines.push(Line::from(Span::styled(
+                            format!("Worker {}/{}: launching...", i + 1, detected.total),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                }
+            }
+        }
+        let header_line = Line::from(vec![
+            Span::styled("── WAVE: ", Style::default().fg(Color::Magenta)),
+            Span::styled(
+                format!(
+                    "{} | {} workers | timeout {}s",
+                    detected.hat_config.name, detected.total, wave_timeout_secs
+                ),
+                Style::default().fg(Color::Magenta),
+            ),
+            Span::styled(
+                " ──────────────────────",
+                Style::default().fg(Color::Magenta),
+            ),
+        ]);
+        push_to_tui_iteration(state, header_line);
+    }
+}
+
 /// Handle wave events: detect, execute, merge results, and update UI.
 ///
 /// Orchestrates the full wave lifecycle — detection, parallel execution,
@@ -649,6 +721,15 @@ pub async fn handle_wave_events(
     let supervisor_bridge: Option<&Arc<dyn ralph_core::supervisor::SupervisorBridge>> =
         supervisor_bridge_owned.as_ref();
 
+    // Announce every wave before starting its workers. This must happen
+    // before the concurrent `join_all` below: workers can emit progress as
+    // soon as they start, and the TUI needs `wave_active` initialized before
+    // those deltas arrive (otherwise the user sees a silent wait and `w`
+    // cannot enter Wave View).
+    for detected in &waves {
+        announce_wave_start(detected, &out);
+    }
+
     // Execute independent detected waves concurrently. The per-wave
     // executor owns its worker lifecycle; supervisor fan-in is protected by
     // the bridge's shared lock so the main event stream remains serialized.
@@ -685,72 +766,6 @@ pub async fn handle_wave_events(
     .collect::<std::collections::HashMap<_, _>>();
 
     for detected in waves {
-        let wave_timeout_secs = detected.timeout_secs();
-
-        info!(
-            wave_id = %detected.wave_id,
-            total = detected.total,
-            hat = %detected.target_hat,
-            concurrency = detected.hat_config.concurrency,
-            "Wave detected, executing parallel workers"
-        );
-
-        // Announce wave start to CLI / RPC / TUI
-        if out.show_cli {
-            print_wave_header(
-                &detected.hat_config.name,
-                detected.total as usize,
-                wave_timeout_secs,
-                out.use_colors,
-            );
-        }
-        if let Some(tx) = out.rpc_tx {
-            let _ = tx.try_send(RpcEvent::WaveStarted {
-                hat_name: detected.hat_config.name.clone(),
-                worker_count: detected.total,
-                timeout_secs: wave_timeout_secs,
-            });
-        }
-        if let Some(state) = out.tui {
-            if let Ok(mut s) = state.lock() {
-                info!(
-                    hat = %detected.hat_config.name,
-                    workers = detected.total,
-                    "Setting wave_active on TUI state"
-                );
-                s.wave_active = Some(ralph_tui::state::WaveInfo::new(
-                    detected.hat_config.name.clone(),
-                    detected.total,
-                ));
-                s.wave_active_iteration_idx = Some(s.iterations.len().saturating_sub(1));
-                if let Some(ref wave) = s.wave_active {
-                    for (i, buffer) in wave.worker_buffers.iter().enumerate() {
-                        if let Ok(mut buf_lines) = buffer.lines_handle().lock() {
-                            buf_lines.push(Line::from(Span::styled(
-                                format!("Worker {}/{}: launching...", i + 1, detected.total),
-                                Style::default().fg(Color::DarkGray),
-                            )));
-                        }
-                    }
-                }
-            }
-            let header_line = Line::from(vec![
-                Span::styled("── WAVE: ", Style::default().fg(Color::Magenta)),
-                Span::styled(
-                    format!(
-                        "{} | {} workers | timeout {}s",
-                        detected.hat_config.name, detected.total, wave_timeout_secs
-                    ),
-                    Style::default().fg(Color::Magenta),
-                ),
-                Span::styled(
-                    " ──────────────────────",
-                    Style::default().fg(Color::Magenta),
-                ),
-            ]);
-            push_to_tui_iteration(state, header_line);
-        }
-
         let wave_outcome = wave_outcomes
             .remove(&detected.wave_id)
             .expect("every detected wave must have one execution outcome");
