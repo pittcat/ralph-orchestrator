@@ -145,6 +145,24 @@ impl RpcCommand {
 // Events (Ralph → stdout)
 // ============================================================================
 
+/// Describes how the current loop process was bootstrapped.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LoopBootstrap {
+    /// A new workflow started from its configured starting event.
+    #[default]
+    Fresh,
+    /// An existing loop was continued with `--continue`.
+    Continue,
+    /// A reused worktree resumed from a validated workflow boundary.
+    ManifestResume {
+        /// Hat selected to consume the reconstructed trigger.
+        target_hat: String,
+        /// Original business topic reconstructed by the resume manifest.
+        original_trigger_topic: String,
+    },
+}
+
 /// Events emitted by Ralph via stdout.
 ///
 /// Each event is a single JSON line. Events are emitted in real-time as the
@@ -162,6 +180,8 @@ pub enum RpcEvent {
         backend: String,
         /// Unix timestamp (milliseconds) when the loop started.
         started_at: u64,
+        /// Whether this process is fresh or resumed from prior state.
+        bootstrap: LoopBootstrap,
     },
 
     /// A new iteration is beginning.
@@ -650,6 +670,24 @@ mod tests {
             max_iterations: Some(10),
             backend: "claude".to_string(),
             started_at: 1_700_000_000_000,
+            bootstrap: LoopBootstrap::Fresh,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: RpcEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, parsed);
+    }
+
+    #[test]
+    fn test_manifest_resume_loop_started_event_roundtrip() {
+        let event = RpcEvent::LoopStarted {
+            prompt: "test prompt".to_string(),
+            max_iterations: Some(120),
+            backend: "claude".to_string(),
+            started_at: 1_700_000_000_000,
+            bootstrap: LoopBootstrap::ManifestResume {
+                target_hat: "forge-dispatcher".to_string(),
+                original_trigger_topic: "forge.worktrees.ready".to_string(),
+            },
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: RpcEvent = serde_json::from_str(&json).unwrap();

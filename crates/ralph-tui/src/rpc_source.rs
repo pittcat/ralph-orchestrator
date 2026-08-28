@@ -229,9 +229,11 @@ fn apply_rpc_event(event: &RpcEvent, state: &Arc<Mutex<TuiState>>, acc: &mut Tex
         RpcEvent::LoopStarted {
             max_iterations,
             backend,
+            bootstrap,
             ..
         } => {
             s.loop_started = Some(Instant::now());
+            s.loop_bootstrap = bootstrap.clone();
             s.max_iterations = *max_iterations;
             s.pending_backend = Some(backend.clone());
         }
@@ -600,12 +602,35 @@ mod tests {
             max_iterations: Some(10),
             backend: "claude".to_string(),
             started_at: 0,
+            bootstrap: ralph_proto::json_rpc::LoopBootstrap::Fresh,
         };
         apply_rpc_event(&event, &state, &mut acc);
 
         let s = state.lock().unwrap();
         assert!(s.loop_started.is_some());
         assert_eq!(s.max_iterations, Some(10));
+    }
+
+    #[test]
+    fn test_loop_started_records_manifest_resume_bootstrap() {
+        let state = make_state();
+        let mut acc = make_acc();
+        let bootstrap = ralph_proto::json_rpc::LoopBootstrap::ManifestResume {
+            target_hat: "forge-dispatcher".to_string(),
+            original_trigger_topic: "forge.worktrees.ready".to_string(),
+        };
+        let event = RpcEvent::LoopStarted {
+            prompt: "test".to_string(),
+            max_iterations: Some(120),
+            backend: "claude".to_string(),
+            started_at: 0,
+            bootstrap: bootstrap.clone(),
+        };
+
+        apply_rpc_event(&event, &state, &mut acc);
+
+        let s = state.lock().unwrap();
+        assert_eq!(s.loop_bootstrap, bootstrap);
     }
 
     #[test]
@@ -1133,6 +1158,7 @@ mod tests {
             max_iterations: Some(10),
             backend: "claude".to_string(),
             started_at: 0,
+            bootstrap: ralph_proto::json_rpc::LoopBootstrap::Fresh,
         };
         let line = format!("{}\n", serde_json::to_string(&event).unwrap());
         let state = make_state();

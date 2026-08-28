@@ -16,10 +16,15 @@ use super::entry::persist_starting_event_to_events_file;
 use super::run_impl::build_supervisor_bridge;
 use super::runner::RpcSharedState;
 use super::runner::resolve_loop_id;
+use super::rpc_bootstrap::loop_bootstrap;
 use super::sync_timeout::SyncRunError;
 use super::sync_timeout::adapter_timeout_duration;
 use super::sync_timeout::run_sync_with_timeout;
 use super::sync_timeout::write_startup_timeout_envelope;
+use super::termination_diagnostics_support::{
+    collect_idempotent_counts, diagnostic_artifact_integrity, execution_capabilities,
+    finalize_session_pointer,
+};
 // `super::*` does not bring in items that were `use`d (privately) at
 // the parent module level. Pull in the names `run_loop_impl_inner`
 // itself references and that mod.rs only `use`s, not re-exports.
@@ -44,8 +49,8 @@ use ralph_core::{
 use ralph_proto::HatId;
 use ralph_tui::Tui;
 use std::fs::{self, File};
-use std::io::{IsTerminal, Read, stdout};
-use std::path::{Path, PathBuf};
+use std::io::{IsTerminal, stdout};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -75,93 +80,6 @@ pub fn agent_wrote_any_valid_or_rejected(
     regular || !wave_policy_rejections.is_empty()
 }
 
-/// Snapshot one diagnostics artifact after all termination-side rows have
-/// been flushed. Hashing is streamed so a large agent-output sidecar cannot
-/// be loaded wholesale just to finalize the manifest.
-fn diagnostic_artifact_integrity(
-    session_dir: &Path,
-    name: &str,
-) -> ralph_core::diagnostics::ArtifactIntegrity {
-    use sha2::Digest as _;
-
-    let path = session_dir.join(name);
-    let metadata = fs::metadata(&path).ok();
-    let hash_self_referential_manifest = name == "diagnosis-input.json";
-    let mut sha256 = None;
-    if !hash_self_referential_manifest
-        && metadata.as_ref().is_some_and(std::fs::Metadata::is_file)
-        && let Ok(mut file) = File::open(&path)
-    {
-        let mut hasher = sha2::Sha256::new();
-        let mut buffer = [0_u8; 64 * 1024];
-        let mut readable = true;
-        loop {
-            match file.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(count) => hasher.update(&buffer[..count]),
-                Err(_) => {
-                    readable = false;
-                    break;
-                }
-            }
-        }
-        if readable {
-            let digest = hasher.finalize();
-            sha256 = Some(
-                digest
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>(),
-            );
-        }
-    }
-    let status = match metadata.as_ref() {
-        None => ralph_core::diagnostics::ArtifactStatus::Missing,
-        Some(metadata) if !metadata.is_file() => ralph_core::diagnostics::ArtifactStatus::Degraded,
-        Some(_) if hash_self_referential_manifest || sha256.is_some() => {
-            ralph_core::diagnostics::ArtifactStatus::Present
-        }
-        Some(_) => ralph_core::diagnostics::ArtifactStatus::Degraded,
-    };
-    ralph_core::diagnostics::ArtifactIntegrity {
-        path: name.to_string(),
-        status,
-        sha256,
-        size_bytes: metadata.as_ref().map(std::fs::Metadata::len),
-        last_modified: metadata
-            .and_then(|value| value.modified().ok())
-            .map(|value| chrono::DateTime::<chrono::Utc>::from(value).to_rfc3339()),
-    }
-}
-
-fn collect_idempotent_counts(
-    event_loop: &ralph_core::EventLoop,
-) -> (
-    usize, /* recovery_count */
-    usize, /* drift_finding_count */
-    usize, /* task_count (informational only) */
-) {
-    let log_mutex = event_loop.idempotent_log();
-    let mut guard = match log_mutex.lock() {
-        Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    // `replay` rebuilds the in-memory index from disk; the
-    // SC-5 measurement command
-    // (`grep -c '"_final":true' .ralph/recovery.jsonl`)
-    // expects the count to mirror what's persisted, not what
-    // happened to be in process-local state.
-    let _ = guard.replay();
-    let finals = guard.final_records();
-    let counts =
-        ralph_core::event_loop::idempotent_wiring::DiagnosisSummary::from_final_records(&finals);
-    drop(guard);
-    (
-        counts.recovery_count,
-        counts.drift_finding_count,
-        counts.task_count,
-    )
-}
 pub(crate) fn build_termination_diagnostics(
     event_loop: &ralph_core::EventLoop,
     payload_violation_report_relpath: Option<&str>,
@@ -418,78 +336,6 @@ fn finalize_recovery_diagnosis(
     // diagnostic report pipeline (U7) wants to introspect the hint
     // structure directly.
     let _ = std::marker::PhantomData::<TerminationHint>;
-}
-
-/// Return the execution capabilities that were actually available to this
-/// loop. Keep this in one place so the initial bundle identity and its final
-/// snapshot cannot disagree about supervisor/wave execution.
-fn execution_capabilities(config: &ralph_core::RalphConfig) -> Vec<String> {
-    let supervisor = config.event_loop.supervisor.enabled;
-    let wave = config.hats.values().any(|hat| {
-        let extra = hat.extra_instructions.iter().map(String::as_str);
-        std::iter::once(hat.instructions.as_str())
-            .chain(extra)
-            .any(|text| {
-                text.contains("ralph wave emit")
-                    || text.contains("ralph wave verify")
-                    || text.contains("## WAVE CONTEXT")
-            })
-    });
-
-    let mut capabilities = Vec::with_capacity(2);
-    if supervisor {
-        capabilities.push("supervisor".to_string());
-    }
-    if wave {
-        capabilities.push("wave".to_string());
-    }
-    if capabilities.is_empty() {
-        capabilities.push("single-chain".to_string());
-    }
-    capabilities
-}
-
-/// D1 (2026-06-16, plan 002 Unit 5): rewrite the session pointer at
-/// loop termination so `ralph diagnose` can find the worktree's
-/// diagnostics root after the loop ends and `loops.json` no longer
-/// carries an alive entry. Mirrors the startup-time pointer write at
-/// [`run_loop_impl`] (line ~488): best-effort, never blocks the loop
-/// runner's normal return. No-op for primary sessions (the pointer
-/// file format and the main-repo diagnostic root are unchanged for
-fn finalize_session_pointer(
-    diagnostics: &ralph_core::diagnostics::DiagnosticsCollector,
-    ctx: Option<&ralph_core::LoopContext>,
-) {
-    let Some(ctx) = ctx else {
-        return;
-    };
-    if ctx.is_primary() {
-        return;
-    }
-    if !diagnostics.is_enabled() {
-        return;
-    }
-    match diagnostics.write_session_pointer(ctx.repo_root(), ctx.workspace()) {
-        Ok(true) => {
-            debug!(
-                target: "ralph_cli::loop_runner",
-                main_repo = %ctx.repo_root().display(),
-                "refreshed session pointer on loop termination",
-            );
-        }
-        Ok(false) => {
-            // Session dir is not inside workspace; nothing to do.
-        }
-        Err(err) => {
-            tracing::warn!(
-                target: "ralph_cli::loop_runner",
-                main_repo = %ctx.repo_root().display(),
-                error = %err,
-                "failed to refresh session pointer on loop termination; \
-                 ralph diagnose may not find this worktree session after the loop ends",
-            );
-        }
-    }
 }
 
 pub(super) async fn run_loop_impl_inner(
@@ -777,6 +623,7 @@ pub(super) async fn run_loop_impl_inner(
                 }
             })
         };
+    let loop_bootstrap = loop_bootstrap(resume, manifest_recovery.as_ref());
 
     // For fresh runs (not resume), generate a unique timestamped events file
     // This prevents stale events from previous runs polluting new runs (issue #82)
@@ -1729,6 +1576,7 @@ pub(super) async fn run_loop_impl_inner(
                 max_iterations: Some(config.event_loop.max_iterations),
                 backend: config.cli.backend.clone(),
                 started_at: rpc_state_started_at,
+                bootstrap: loop_bootstrap.clone(),
             };
             let _ = tx.try_send(started_event);
         }

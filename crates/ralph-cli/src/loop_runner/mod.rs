@@ -59,8 +59,10 @@ mod entry;
 mod inner;
 mod run_impl;
 mod runner;
+mod rpc_bootstrap;
 mod suspend;
 mod sync_timeout;
+mod termination_diagnostics_support;
 #[cfg(test)]
 mod sync_timeout_tests;
 pub mod wave;

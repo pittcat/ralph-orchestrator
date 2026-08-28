@@ -1,6 +1,6 @@
 //! State management for the TUI.
 
-use ralph_proto::{Event, HatId};
+use ralph_proto::{Event, HatId, json_rpc::LoopBootstrap};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -184,6 +184,8 @@ pub struct TuiState {
     pub prev_iteration: u32,
     /// When loop began.
     pub loop_started: Option<Instant>,
+    /// Whether this process started fresh or resumed existing workflow state.
+    pub loop_bootstrap: LoopBootstrap,
     /// When current iteration began.
     pub iteration_started: Option<Instant>,
     /// Most recent event topic.
@@ -311,6 +313,7 @@ impl TuiState {
             iteration: 0,
             prev_iteration: 0,
             loop_started: Some(Instant::now()),
+            loop_bootstrap: LoopBootstrap::Fresh,
             iteration_started: None,
             last_event: None,
             last_event_at: None,
@@ -416,6 +419,7 @@ impl TuiState {
                 // Save state we want to preserve across reset
                 let saved_hat_map = std::mem::take(&mut self.hat_map);
                 let saved_loop_started = self.loop_started; // Preserve timer from TUI init
+                let saved_loop_bootstrap = self.loop_bootstrap.clone();
                 let saved_max_iterations = self.max_iterations;
                 // Preserve iteration buffers so TUI history survives across task restarts
                 let saved_iterations = std::mem::take(&mut self.iterations);
@@ -430,6 +434,7 @@ impl TuiState {
                 *self = Self::new();
                 self.hat_map = saved_hat_map;
                 self.loop_started = saved_loop_started; // Keep original timer
+                self.loop_bootstrap = saved_loop_bootstrap;
                 self.max_iterations = saved_max_iterations;
                 self.iterations = saved_iterations;
                 self.current_view = saved_current_view;
@@ -1889,6 +1894,20 @@ mod tests {
             !state.following_latest,
             "task.start should preserve following_latest state"
         );
+    }
+
+    #[test]
+    fn task_start_preserves_loop_bootstrap() {
+        let mut state = TuiState::new();
+        let bootstrap = LoopBootstrap::ManifestResume {
+            target_hat: "forge-dispatcher".to_string(),
+            original_trigger_topic: "forge.worktrees.ready".to_string(),
+        };
+        state.loop_bootstrap = bootstrap.clone();
+
+        state.update(&Event::new("task.start", ""));
+
+        assert_eq!(state.loop_bootstrap, bootstrap);
     }
 
     #[test]

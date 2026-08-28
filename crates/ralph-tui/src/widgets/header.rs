@@ -1,5 +1,6 @@
 use crate::state::{TuiState, UpdateStatus};
 use ralph_core::truncate_with_ellipsis;
+use ralph_proto::json_rpc::LoopBootstrap;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -71,7 +72,16 @@ pub fn render(state: &TuiState, width: u16) -> Paragraph<'static> {
             .unwrap_or_else(|| (state.current_view + 1) as u32);
         let total_iterations = state.total_iterations() as u32;
         let total_display = state.max_iterations.unwrap_or(total_iterations);
-        let iter_display = format!("[iter {}/{}]", current, total_display);
+        let bootstrap_label = if state.current_view == 0 {
+            match &state.loop_bootstrap {
+                LoopBootstrap::Fresh => "iter",
+                LoopBootstrap::Continue => "continue",
+                LoopBootstrap::ManifestResume { .. } => "resume",
+            }
+        } else {
+            "iter"
+        };
+        let iter_display = format!("[{bootstrap_label} {current}/{total_display}]");
         left_spans.push(Span::raw(iter_display));
     }
 
@@ -121,12 +131,27 @@ pub fn render(state: &TuiState, width: u16) -> Paragraph<'static> {
                 Style::default().fg(Color::Magenta),
             ));
         } else {
+            if state.current_view == 0
+                && matches!(&state.loop_bootstrap, LoopBootstrap::ManifestResume { .. })
+            {
+                left_spans.push(Span::raw("↻ "));
+            }
             left_spans.push(Span::raw(hat_with_backend));
         }
     } else {
         // Compressed: emoji only (first character cluster)
         let emoji = hat_display.chars().next().unwrap_or('?');
         left_spans.push(Span::raw(emoji.to_string()));
+    }
+
+    if state.current_view == 0
+        && width >= WIDTH_FULL
+        && let LoopBootstrap::ManifestResume {
+            original_trigger_topic,
+            ..
+        } = &state.loop_bootstrap
+    {
+        left_spans.push(Span::raw(format!(" | from {original_trigger_topic}")));
     }
 
     // Priority 5: Idle countdown - hidden at WIDTH_MINIMAL and below
@@ -956,6 +981,84 @@ mod tests {
             text.contains("Builder"),
             "should preserve hat display, got: {}",
             text
+        );
+    }
+
+    #[test]
+    fn header_identifies_manifest_resume_bootstrap() {
+        let mut state = TuiState::new();
+        state.loop_bootstrap = ralph_proto::json_rpc::LoopBootstrap::ManifestResume {
+            target_hat: "forge-dispatcher".to_string(),
+            original_trigger_topic: "forge.worktrees.ready".to_string(),
+        };
+        state.start_new_iteration_with_metadata(
+            Some("Forge Dispatcher".to_string()),
+            Some("claude".to_string()),
+        );
+        state.max_iterations = Some(120);
+
+        let text = render_to_string_with_width(&state, 120);
+
+        assert!(
+            text.contains("[resume 1/120]"),
+            "manifest bootstrap should not look like a fresh iteration: {text}"
+        );
+        assert!(
+            text.contains("↻ Forge Dispatcher"),
+            "resumed target hat should be identified: {text}"
+        );
+        assert!(
+            text.contains("from forge.worktrees.ready"),
+            "resume origin should be visible: {text}"
+        );
+    }
+
+    #[test]
+    fn header_keeps_fresh_bootstrap_format() {
+        let mut state = TuiState::new();
+        state.start_new_iteration_with_metadata(
+            Some("Inspector".to_string()),
+            Some("claude".to_string()),
+        );
+        state.max_iterations = Some(120);
+
+        let text = render_to_string_with_width(&state, 120);
+
+        assert!(
+            text.contains("[iter 1/120]"),
+            "fresh header changed: {text}"
+        );
+        assert!(!text.contains("↻"), "fresh header looks resumed: {text}");
+    }
+
+    #[test]
+    fn header_limits_manifest_resume_marker_to_bootstrap_iteration() {
+        let mut state = TuiState::new();
+        state.loop_bootstrap = LoopBootstrap::ManifestResume {
+            target_hat: "forge-dispatcher".to_string(),
+            original_trigger_topic: "forge.worktrees.ready".to_string(),
+        };
+        state.start_new_iteration_with_metadata(
+            Some("Forge Dispatcher".to_string()),
+            Some("claude".to_string()),
+        );
+        state.start_new_iteration_with_metadata(
+            Some("Executor".to_string()),
+            Some("claude".to_string()),
+        );
+        state.max_iterations = Some(120);
+        state.current_view = 1;
+
+        let text = render_to_string_with_width(&state, 120);
+
+        assert!(
+            text.contains("[iter 2/120]"),
+            "later iteration mislabeled: {text}"
+        );
+        assert!(!text.contains("↻"), "resume marker leaked forward: {text}");
+        assert!(
+            !text.contains("from forge.worktrees.ready"),
+            "resume origin leaked forward: {text}"
         );
     }
 

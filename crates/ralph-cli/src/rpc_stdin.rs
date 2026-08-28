@@ -715,6 +715,7 @@ mod tests {
                 max_iterations: Some(1),
                 backend: "claude".into(),
                 started_at: 0,
+                bootstrap: ralph_proto::json_rpc::LoopBootstrap::Fresh,
             }),
             "loop_started"
         );
