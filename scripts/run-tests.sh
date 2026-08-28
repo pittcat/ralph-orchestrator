@@ -84,8 +84,17 @@ acquire_full_test_lock() {
   while ! mkdir "$FULL_TEST_LOCK_DIR" 2>/dev/null; do
     owner_pid=$(cat "$FULL_TEST_LOCK_OWNER" 2>/dev/null || true)
     if [[ -z "$owner_pid" ]]; then
-      # 锁目录刚创建、owner 文件尚未写完；避免误删活锁。
-      sleep 1
+      # worktree 文件存在但 pid 已丢失 → Ctrl+C 在 acquire 后中断、
+      # release 还没清理 worktree 就退出了。活锁场景下 acquire 先写
+      # pid 再写 worktree,所以 worktree 残留意味着 owner 已死,直接清。
+      if [[ -f "$FULL_TEST_LOCK_DIR/worktree" ]]; then
+        echo "🧹 清理 Ctrl+C 残留的 stale 全量测试锁(worktree 残留,无 pid)..." >&2
+        rm -f "$FULL_TEST_LOCK_DIR/worktree"
+        rmdir "$FULL_TEST_LOCK_DIR" 2>/dev/null || true
+      else
+        # 空 lock dir:可能是活锁刚 mkdir,短暂等 owner 写 pid
+        sleep 1
+      fi
       continue
     fi
     if kill -0 "$owner_pid" 2>/dev/null; then
