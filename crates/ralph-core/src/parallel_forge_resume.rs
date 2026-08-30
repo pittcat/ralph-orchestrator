@@ -827,7 +827,11 @@ fn capture_tasks(tasks_path: &Path, reasons: &mut Vec<String>) -> Vec<TaskMappin
 
 /// Artifact references from `*_path` payload fields of accepted
 /// boundary events. Paths must be bounded; missing / oversized /
-/// unreadable artifacts are recorded as reasons.
+/// unreadable artifacts are recorded as reasons. Absolute paths that
+/// provably live inside the worktree are normalized to their relative
+/// form first (agents legitimately emit those) instead of being
+/// flagged as escapes; absolute paths outside the worktree stay
+/// rejections.
 fn capture_artifacts(
     worktree_path: &Path,
     matched_events: &[crate::Event],
@@ -855,19 +859,33 @@ fn capture_artifacts(
             if raw.trim().is_empty() {
                 continue;
             }
-            if let Err(e) = validate_bounded_path(raw) {
+            let rel: String = if Path::new(raw).is_absolute() {
+                match relativize_artifact_path(raw, worktree_path) {
+                    Some(rel) => rel,
+                    None => {
+                        let e = ResumeManifestError::UnboundedPath {
+                            path: raw.to_string(),
+                        };
+                        reasons.push(format!("declared artifact path escapes worktree: {e}"));
+                        continue;
+                    }
+                }
+            } else {
+                raw.to_string()
+            };
+            if let Err(e) = validate_bounded_path(&rel) {
                 reasons.push(format!("declared artifact path escapes worktree: {e}"));
                 continue;
             }
-            if artifacts.contains_key(raw) {
+            if artifacts.contains_key(&rel) {
                 continue;
             }
-            let absolute = worktree_path.join(normalize_relative(raw));
+            let absolute = worktree_path.join(normalize_relative(&rel));
             match std::fs::metadata(&absolute) {
                 Ok(meta) if meta.is_file() => {
                     if meta.len() > MAX_ARTIFACT_DIGEST_BYTES {
                         reasons.push(format!(
-                            "declared artifact {raw} exceeds the {}-byte digest limit",
+                            "declared artifact {rel} exceeds the {}-byte digest limit",
                             MAX_ARTIFACT_DIGEST_BYTES
                         ));
                         continue;
@@ -875,23 +893,53 @@ fn capture_artifacts(
                     match std::fs::read(&absolute) {
                         Ok(bytes) => {
                             artifacts.insert(
-                                raw.to_string(),
+                                rel.clone(),
                                 ArtifactRef {
-                                    path: raw.to_string(),
+                                    path: rel.clone(),
                                     digest: sha256_hex(&bytes),
                                 },
                             );
                         }
                         Err(e) => {
-                            reasons.push(format!("declared artifact {raw} unreadable: {e}"));
+                            reasons.push(format!("declared artifact {rel} unreadable: {e}"));
                         }
                     }
                 }
-                _ => reasons.push(format!("declared artifact missing: {raw}")),
+                _ => reasons.push(format!("declared artifact missing: {rel}")),
             }
         }
     }
     artifacts.into_values().collect()
+}
+
+/// Resolve an absolute declared artifact path to its worktree-relative
+/// form. Returns `Some(rel)` only when the path provably lives inside
+/// `worktree_path`; `None` means it escapes (or cannot be proven to be
+/// inside) and the caller must keep rejecting it.
+///
+/// The canonicalized comparison is tried first: it resolves symlinked
+/// prefixes (e.g. `/tmp` on macOS) so a genuinely in-worktree path is
+/// not a false escape. When the file does not exist (canonicalize
+/// fails) a lexical prefix match still lets the caller report the
+/// in-worktree artifact as missing instead of escaping. `..`
+/// components that survive the lexical fallback are rejected by the
+/// caller's bounded-path validation.
+fn relativize_artifact_path(raw: &str, worktree_path: &Path) -> Option<String> {
+    let path = Path::new(raw);
+    let canonical_worktree =
+        std::fs::canonicalize(worktree_path).unwrap_or_else(|_| worktree_path.to_path_buf());
+    if let Ok(canonical_raw) = std::fs::canonicalize(path) {
+        return canonical_raw
+            .strip_prefix(&canonical_worktree)
+            .ok()
+            .map(|rel| rel.to_string_lossy().into_owned());
+    }
+    for prefix in [&canonical_worktree, worktree_path] {
+        if let Ok(rel) = path.strip_prefix(prefix) {
+            return Some(rel.to_string_lossy().into_owned());
+        }
+    }
+    None
 }
 
 /// Normalize a relative path by dropping `./` components.
@@ -1591,6 +1639,75 @@ mod tests {
             "{:?}",
             manifest.incomplete_reasons
         );
+    }
+
+    /// An absolute `*_path` payload field that provably lives inside
+    /// the worktree is normalized to its relative form instead of
+    /// being flagged as an escape (executor hats legitimately emit
+    /// absolute paths for their own artifacts).
+    #[test]
+    fn absolute_in_worktree_artifact_path_is_normalized_not_flagged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        seed_runtime(dir.path());
+        let artifact_rel = ".ralph/forge/plan/units/U10-completion.md";
+        let artifact_abs = dir.path().join(artifact_rel);
+        fs::create_dir_all(artifact_abs.parent().unwrap()).unwrap();
+        fs::write(&artifact_abs, "U10 done\n").unwrap();
+        let payload = serde_json::json!({
+            "plan_key": "pf-1",
+            "completion_path": artifact_abs.display().to_string(),
+        })
+        .to_string();
+        append_event(dir.path(), &forge_plan_ready_line(&payload));
+        append_outbox(dir.path(), "forge.plan.ready", &payload, "planner");
+
+        let manifest = capture_manifest(dir.path(), &base_inputs());
+
+        assert!(
+            manifest
+                .incomplete_reasons
+                .iter()
+                .all(|r| !r.contains("escapes")),
+            "an in-worktree absolute path must not be flagged as an escape: {:?}",
+            manifest.incomplete_reasons
+        );
+        assert_eq!(manifest.artifacts.len(), 1);
+        assert_eq!(
+            manifest.artifacts[0].path,
+            artifact_rel.replace('\\', "/"),
+            "the manifest must store the normalized relative path"
+        );
+        assert_eq!(manifest.artifacts[0].digest, sha256_hex(b"U10 done\n"));
+    }
+
+    /// An absolute `*_path` payload field that points OUTSIDE the
+    /// worktree is still rejected fail-closed.
+    #[test]
+    fn absolute_outside_worktree_artifact_path_still_flagged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        seed_runtime(dir.path());
+        let outside_file = outside.path().join("secret.txt");
+        fs::write(&outside_file, "outside\n").unwrap();
+        let payload = serde_json::json!({
+            "plan_key": "pf-1",
+            "report_path": outside_file.display().to_string(),
+        })
+        .to_string();
+        append_event(dir.path(), &forge_plan_ready_line(&payload));
+        append_outbox(dir.path(), "forge.plan.ready", &payload, "planner");
+
+        let manifest = capture_manifest(dir.path(), &base_inputs());
+
+        assert!(
+            manifest
+                .incomplete_reasons
+                .iter()
+                .any(|r| r.contains("escapes worktree")),
+            "an out-of-worktree absolute path must still be flagged: {:?}",
+            manifest.incomplete_reasons
+        );
+        assert!(manifest.artifacts.is_empty());
     }
 
     #[test]
