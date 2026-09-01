@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::loop_runner::wave::SupervisorBridge;
-use ralph_core::supervisor::{InMemorySupervisorStore, SupervisorStore};
+use ralph_core::supervisor::{InMemoryCoordinatorBridge, InMemorySupervisorStore, SupervisorStore};
 
 use super::fixtures::*;
 
@@ -881,5 +881,170 @@ fn test_u5_record_outcome_partial_timeout_stays_result() {
         completed.failures.len(),
         0,
         "U5/003: partial-timeout must NOT be a failure; got {completed:?}"
+    );
+}
+
+// 2026-09-01-001 plan U2 (R2 / S2.1 / T2.1): a wave whose Completed
+// slot had its events persisted by U1's `record_slot_event_payloads`
+// but never reached the main ledger (the loop died between worker
+// exit and fan-in) must, on the next startup, replay those events
+// through the salvage seam. The redelivery pass reads back the
+// payload rows and asserts the events land in the main ledger.
+#[test]
+fn u2_2026_09_01_redelivery_replays_persisted_payload_to_main() {
+    use crate::loop_runner::wave::recovery_redelivery;
+    use ralph_core::supervisor::WaveKind;
+    use std::sync::Arc;
+
+    let workspace = tempfile::TempDir::new().expect("temp workspace");
+    let ralph_dir = workspace.path().join(".ralph");
+    std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+    let main_events_file = ralph_dir.join("events.jsonl");
+
+    let store = Arc::new(InMemorySupervisorStore::new());
+    let bridge = Arc::new(InMemoryCoordinatorBridge::from_store(
+        store.clone() as Arc<dyn SupervisorStore>
+    ));
+    let wave = store
+        .register_wave("u2-replay-2026-09-01", WaveKind::Exec, 2, 1)
+        .expect("register");
+    let events = vec![
+        ralph_core::Event {
+            topic: "exec.unit.done".to_string(),
+            payload: Some(r#"{"slot_index":0,"seq":0}"#.to_string()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: Some("exec-worker".to_string()),
+            wave_id: Some(wave.clone()),
+            wave_index: Some(0),
+            wave_total: Some(2),
+            system_injected: Some(false),
+        },
+        ralph_core::Event {
+            topic: "exec.progress".to_string(),
+            payload: Some(r#"{"step":"build"}"#.to_string()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: Some("exec-worker".to_string()),
+            wave_id: Some(wave.clone()),
+            wave_index: Some(0),
+            wave_total: Some(2),
+            system_injected: Some(false),
+        },
+    ];
+    store
+        .record_slot_event_payloads(&wave, 0, 1, &events)
+        .expect("persist slot 0 events");
+    let events_slot1 = vec![ralph_core::Event {
+        topic: "exec.unit.done".to_string(),
+        payload: Some(r#"{"slot_index":1,"seq":0}"#.to_string()),
+        ts: String::new(),
+        hat: None,
+        triggered: None,
+        source: Some("exec-worker".to_string()),
+        wave_id: Some(wave.clone()),
+        wave_index: Some(1),
+        wave_total: Some(2),
+        system_injected: Some(false),
+    }];
+    store
+        .record_slot_event_payloads(&wave, 1, 1, &events_slot1)
+        .expect("persist slot 1 events");
+
+    let report = recovery_redelivery::redeliver_persisted_slot_events(
+        store.clone(),
+        bridge,
+        &main_events_file,
+    );
+
+    assert!(
+        report.warnings.is_empty(),
+        "U2: redelivery pass must not warn on a healthy persisted payload; got {:?}",
+        report.warnings
+    );
+    assert_eq!(
+        report.redelivered,
+        vec![wave.clone()],
+        "U2: the wave must land in `redelivered`; got {:?}",
+        report.redelivered
+    );
+
+    let main_ledger = std::fs::read_to_string(&main_events_file).expect("read main");
+    assert!(
+        main_ledger.contains(r#""topic":"exec.unit.done""#),
+        "U2: main ledger must carry the slot 0 unit-done; got {main_ledger}"
+    );
+    assert!(
+        main_ledger.contains(r#""topic":"exec.progress""#),
+        "U2: main ledger must carry the slot 0 progress; got {main_ledger}"
+    );
+    assert!(
+        main_ledger.contains(r#"\"slot_index\":1"#),
+        "U2: main ledger must carry the slot 1 unit-done; got {main_ledger}"
+    );
+
+    // S1.2 / S2.3: payload rows must be cleaned after a successful
+    // redelivery so the store does not accumulate dead rows.
+    assert!(
+        store
+            .load_slot_event_payloads(&wave)
+            .expect("load")
+            .is_empty(),
+        "U2: persisted payload rows must be deleted after redelivery"
+    );
+}
+
+// 2026-09-01-001 plan U2 (R2 / S2.4 / T2.3): a pre-U1 crash
+// remnant (Completed slot but no payload rows) must NOT panic
+// and must surface as a warning so operators can grep for
+// legacy crash windows. No events are written.
+#[test]
+fn u2_2026_09_01_redelivery_handles_legacy_remnant_with_warning() {
+    use crate::loop_runner::wave::recovery_redelivery;
+    use ralph_core::supervisor::WaveKind;
+    use std::sync::Arc;
+
+    let workspace = tempfile::TempDir::new().expect("temp workspace");
+    let ralph_dir = workspace.path().join(".ralph");
+    std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+    let main_events_file = ralph_dir.join("events.jsonl");
+
+    let store = Arc::new(InMemorySupervisorStore::new());
+    let bridge = Arc::new(InMemoryCoordinatorBridge::from_store(
+        store.clone() as Arc<dyn SupervisorStore>
+    ));
+    // Register a wave but DO NOT record any slot_event_payloads.
+    let wave = store
+        .register_wave("u2-remnant-2026-09-01", WaveKind::Exec, 1, 1)
+        .expect("register");
+    // Force the snapshot's `completed_count` above zero by
+    // recording a slot result. The recovery module only warns
+    // when a wave has Completed slots but no payload rows.
+    store
+        .record_slot_result(&wave, 0, "fingerprint", 1)
+        .expect("record slot result");
+
+    let report = recovery_redelivery::redeliver_persisted_slot_events(
+        store.clone(),
+        bridge,
+        &main_events_file,
+    );
+
+    assert!(
+        report.redelivered.is_empty(),
+        "U2: legacy remnant must not be redelivered (no payload rows); got {:?}",
+        report.redelivered
+    );
+    assert!(
+        report.warnings.iter().any(|w| w.contains("pre-U1")),
+        "U2: legacy remnant must surface a pre-U1 warning; got {:?}",
+        report.warnings
+    );
+    // Main ledger must be empty — no events were ever persisted.
+    assert!(
+        !main_events_file.exists() || main_events_file.metadata().map(|m| m.len()).unwrap_or(0) == 0,
+        "U2: legacy remnant must not write to the main ledger"
     );
 }

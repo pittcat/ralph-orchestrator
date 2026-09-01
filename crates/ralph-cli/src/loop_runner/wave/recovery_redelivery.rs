@@ -304,7 +304,20 @@ mod tests {
         // Exec-biased. The salvage seam filters by topic and
         // the idempotent projection receipt absorbs any
         // mis-routing on re-runs.
-        let snapshot = WaveSnapshot::default();
+        let snapshot = WaveSnapshot {
+            wave_id: "u2-test".to_string(),
+            kind: WaveKind::Exec,
+            phase: ralph_core::supervisor::WavePhase::Dispatch,
+            expected_total: 1,
+            completed_count: 0,
+            failed_count: 0,
+            pending_count: 0,
+            in_flight_count: 0,
+            cancel_requested: false,
+            delivery_state: WaveDeliveryState::Pending,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            slots: Vec::new(),
+        };
         assert_eq!(infer_wave_kind(&snapshot), WaveKind::Exec);
     }
 }
