@@ -1132,3 +1132,132 @@ fn u3_2026_09_01_empty_injection_list_is_no_op() {
         "U3: empty injection list must NOT touch the main ledger"
     );
 }
+
+// 2026-09-01-001 plan U3 S3.1 / KTD2: salvage redelivery must
+// land before the timeout `exec.wave.failed` injection.
+#[test]
+fn s31_2026_09_01_salvage_precedes_timed_out_failed_inject() {
+    use crate::loop_runner::wave::recovery_redelivery;
+    use ralph_core::supervisor::WaveKind;
+    use std::sync::Arc;
+
+    let workspace = tempfile::TempDir::new().expect("temp workspace");
+    let ralph_dir = workspace.path().join(".ralph");
+    std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+    let main_events_file = ralph_dir.join("events.jsonl");
+
+    let store = Arc::new(InMemorySupervisorStore::new());
+    let bridge = Arc::new(InMemoryCoordinatorBridge::from_store(
+        store.clone() as Arc<dyn SupervisorStore>
+    ));
+    let wave = store
+        .register_wave("s31-salvage-then-fail", WaveKind::Exec, 2, 1)
+        .expect("register");
+    let events = vec![ralph_core::Event {
+        topic: "exec.unit.done".to_string(),
+        payload: Some(r#"{"slot_index":0}"#.to_string()),
+        ts: String::new(),
+        hat: None,
+        triggered: None,
+        source: Some("exec-worker".to_string()),
+        wave_id: Some(wave.clone()),
+        wave_index: Some(0),
+        wave_total: Some(2),
+        system_injected: Some(false),
+    }];
+    store
+        .record_slot_event_payloads(&wave, 0, 1, &events)
+        .expect("persist slot 0");
+
+    let report = recovery_redelivery::redeliver_persisted_slot_events(
+        store.clone(),
+        bridge,
+        &main_events_file,
+    );
+    assert_eq!(report.redelivered, vec![wave.clone()]);
+
+    let injected = recovery_redelivery::inject_timed_out_failed_coord(
+        &[wave.clone()],
+        store.clone(),
+        &main_events_file,
+    );
+    assert_eq!(injected, vec![wave.clone()]);
+
+    let main_ledger = std::fs::read_to_string(&main_events_file).expect("read main");
+    let unit_pos = main_ledger
+        .find(r#""topic":"exec.unit.done""#)
+        .expect("salvage unit.done");
+    let failed_pos = main_ledger
+        .find(r#""topic":"exec.wave.failed""#)
+        .expect("timeout exec.wave.failed");
+    assert!(
+        unit_pos < failed_pos,
+        "S3.1: salvage row must precede exec.wave.failed; ledger={main_ledger}"
+    );
+}
+
+// 2026-09-01-001 plan S2.1: a fully completed salvaged wave
+// must inject `exec.wave.complete` so a later dispatcher
+// restart does not fan-in an empty in-memory set as failure.
+#[test]
+fn s21_2026_09_01_completed_salvage_injects_wave_complete() {
+    use crate::loop_runner::wave::recovery_redelivery;
+    use ralph_core::supervisor::WaveKind;
+    use std::sync::Arc;
+
+    let workspace = tempfile::TempDir::new().expect("temp workspace");
+    let ralph_dir = workspace.path().join(".ralph");
+    std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+    let main_events_file = ralph_dir.join("events.jsonl");
+
+    let store = Arc::new(InMemorySupervisorStore::new());
+    let bridge = Arc::new(InMemoryCoordinatorBridge::from_store(
+        store.clone() as Arc<dyn SupervisorStore>
+    ));
+    let wave = store
+        .register_wave("s21-complete-salvage", WaveKind::Exec, 1, 1)
+        .expect("register");
+    store
+        .record_slot_result(&wave, 0, "fingerprint", 1)
+        .expect("mark slot completed");
+    let events = vec![ralph_core::Event {
+        topic: "exec.unit.done".to_string(),
+        payload: Some(r#"{"slot_index":0}"#.to_string()),
+        ts: String::new(),
+        hat: None,
+        triggered: None,
+        source: Some("exec-worker".to_string()),
+        wave_id: Some(wave.clone()),
+        wave_index: Some(0),
+        wave_total: Some(1),
+        system_injected: Some(false),
+    }];
+    store
+        .record_slot_event_payloads(&wave, 0, 1, &events)
+        .expect("persist");
+
+    let report = recovery_redelivery::redeliver_persisted_slot_events(
+        store.clone(),
+        bridge,
+        &main_events_file,
+    );
+    assert_eq!(report.redelivered, vec![wave.clone()]);
+    assert!(
+        report.warnings.is_empty(),
+        "S2.1: complete injection must not warn; got {:?}",
+        report.warnings
+    );
+
+    let main_ledger = std::fs::read_to_string(&main_events_file).expect("read main");
+    assert!(
+        main_ledger.contains(r#""topic":"exec.wave.complete""#),
+        "S2.1: fully salvaged wave must inject exec.wave.complete; got {main_ledger}"
+    );
+    let snap = store.fan_in_status(&wave).expect("fan_in");
+    assert!(
+        snap.delivery_state
+            .at_least(ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted),
+        "S2.1: delivery_state must reach CoordinationCommitted; got {:?}",
+        snap.delivery_state
+    );
+}

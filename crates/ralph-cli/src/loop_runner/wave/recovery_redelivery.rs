@@ -35,8 +35,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ralph_core::supervisor::{
-    CoordinatorAction, EventMergeSink, FileEventMergeSink, SlotStatus, SupervisorBridge,
-    SupervisorStore, WaveDeliveryState, WaveKind, WaveSnapshot,
+    EventMergeSink, FileEventMergeSink, SlotStatus, SupervisorBridge, SupervisorStore,
+    WaveDeliveryState, WaveKind, WaveSnapshot,
 };
 use ralph_core::wave_tracker::{CompletedWave, WaveFailure, WaveResult};
 
@@ -173,6 +173,24 @@ fn process_snapshot(
     match salvage_result {
         Ok(_) => {
             report.redelivered.push(snapshot.wave_id.clone());
+            if snapshot.failed_count == 0
+                && snapshot.in_flight_count == 0
+                && snapshot.completed_count == snapshot.expected_total
+                && snapshot.expected_total > 0
+            {
+                if let Err(err) = inject_completed_coord(snapshot, &completed, store, bridge, main_events_file)
+                {
+                    tracing::warn!(
+                        wave_id = %snapshot.wave_id,
+                        error = %err,
+                        "U2: salvaged slot events but failed to inject wave.complete"
+                    );
+                    report.warnings.push(format!(
+                        "{}: wave.complete injection failed: {err}",
+                        snapshot.wave_id
+                    ));
+                }
+            }
             if let Err(err) = store.delete_slot_event_payloads(&snapshot.wave_id) {
                 tracing::warn!(
                     wave_id = %snapshot.wave_id,
@@ -344,37 +362,69 @@ fn build_completed_wave(
     }
 }
 
-/// Recovered waves do not carry the trigger topic, so we have
-/// to pick the salvage seam based on the wave's expected slot
-/// count rather than the dispatcher's `WaveKind` inference. The
-/// in-memory and rusqlite stores do not currently expose
-/// `WaveKind` from the snapshot; we pick `Review` when any
-/// persisted payload carries the `review.unit.done` topic,
-/// otherwise `Exec`. Fix kind is unreachable from recovery
-/// because Fix waves are always child of an Exec wave and the
-/// parent wave's redelivery drives them.
 fn infer_wave_kind(snapshot: &WaveSnapshot) -> WaveKind {
-    // The snapshot has `expected_total` only; the
-    // discriminating signal for review vs exec is the event
-    // topic. The recovery module never sees the trigger
-    // topic directly, so we use the wave id prefix as a
-    // heuristic — review waves always go through the
-    // `review.*` topic space and have a clearly different
-    // batch fingerprint. The plan / U2 contract tolerates
-    // picking the wrong seam because the seam itself
-    // filters by topic and returns the same idempotent
-    // projection receipt on either path.
-    if snapshot.expected_total > 0 {
-        // Default to Exec — review waves have their own
-        // dedicated dispatch path (the executor never sees
-        // a review kind). If a review wave ends up here it
-        // is because the snapshot came back through the
-        // supervisor scan; the seam picks the right events
-        // either way.
-        WaveKind::Exec
-    } else {
-        WaveKind::Exec
+    snapshot.kind
+}
+
+fn inject_completed_coord(
+    snapshot: &WaveSnapshot,
+    completed: &CompletedWave,
+    store: &Arc<dyn SupervisorStore>,
+    bridge: &Arc<dyn SupervisorBridge>,
+    main_events_file: &Path,
+) -> Result<(), String> {
+    if snapshot
+        .delivery_state
+        .at_least(WaveDeliveryState::CoordinationCommitted)
+    {
+        return Ok(());
     }
+    let topic = match snapshot.kind {
+        WaveKind::Exec => "exec.wave.complete",
+        WaveKind::Fix => "fix.wave.complete",
+        WaveKind::Review => "review.wave.complete",
+    };
+    let payload = super::dispatcher::coordination::build_wave_complete_payload(
+        snapshot.kind,
+        completed,
+        &snapshot.wave_id,
+        bridge,
+        0,
+    );
+    let event = ralph_core::Event {
+        topic: topic.to_string(),
+        payload: Some(payload.to_string()),
+        ts: String::new(),
+        hat: None,
+        triggered: None,
+        source: Some("supervisor-recovery".to_string()),
+        wave_id: Some(snapshot.wave_id.clone()),
+        wave_index: None,
+        wave_total: None,
+        system_injected: Some(true),
+    };
+    FileEventMergeSink::new(main_events_file)
+        .append_events(vec![event.into()])
+        .map_err(|err| format!("FileEventMergeSink::append_events: {err:?}"))?;
+    let summary = ralph_core::supervisor::CoordinationReceiptSummary {
+        topic: topic.to_string(),
+        idempotency_key: format!("coord:recover-complete:{}", snapshot.wave_id),
+        payload_fingerprint: String::new(),
+        write_count: 1,
+        already_present_count: 0,
+        committed_at_unix_secs: super::dispatcher::coordination::unix_now_secs(),
+    };
+    store
+        .record_coordination_written(&snapshot.wave_id, &summary)
+        .map_err(|err| format!("record_coordination_written: {err}"))?;
+    store
+        .commit_coordination_event(
+            &snapshot.wave_id,
+            &summary,
+            ralph_core::supervisor::WavePhase::Done,
+        )
+        .map_err(|err| format!("commit_coordination_event: {err}"))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -389,16 +439,10 @@ mod tests {
         assert!(report.warnings.is_empty());
     }
 
-    #[test]
-    fn infer_wave_kind_defaults_to_exec() {
-        // The recovery scan does not have access to the
-        // trigger topic, so the inference is intentionally
-        // Exec-biased. The salvage seam filters by topic and
-        // the idempotent projection receipt absorbs any
-        // mis-routing on re-runs.
-        let snapshot = WaveSnapshot {
+    fn snapshot_with_kind(kind: WaveKind) -> WaveSnapshot {
+        WaveSnapshot {
             wave_id: "u2-test".to_string(),
-            kind: WaveKind::Exec,
+            kind,
             phase: ralph_core::supervisor::WavePhase::Dispatch,
             expected_total: 1,
             completed_count: 0,
@@ -409,7 +453,22 @@ mod tests {
             delivery_state: WaveDeliveryState::Pending,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots: Vec::new(),
-        };
-        assert_eq!(infer_wave_kind(&snapshot), WaveKind::Exec);
+        }
+    }
+
+    #[test]
+    fn infer_wave_kind_uses_snapshot_kind() {
+        assert_eq!(
+            infer_wave_kind(&snapshot_with_kind(WaveKind::Exec)),
+            WaveKind::Exec
+        );
+        assert_eq!(
+            infer_wave_kind(&snapshot_with_kind(WaveKind::Review)),
+            WaveKind::Review
+        );
+        assert_eq!(
+            infer_wave_kind(&snapshot_with_kind(WaveKind::Fix)),
+            WaveKind::Fix
+        );
     }
 }
