@@ -1258,6 +1258,14 @@ mod tests {
             ws(&tmp).join(".ralph").join("wave-w-atom-0.jsonl"),
         )];
         for _ in 0..5 {
+            // S1.3: the worker channel is dispatcher-owned. Emulate
+            // the dispatcher's persist-then-remove lifecycle
+            // (see wave/dispatcher/dispatch.rs:3008) so the next
+            // prepare() does not hit RegistryExistsMismatch on the
+            // create_new() path.
+            for binding in &bindings {
+                let _ = std::fs::remove_file(&binding.channel_path);
+            }
             let _g = WaveChannelRegistry::prepare(ws(&tmp), "loop-atom", "wave-atom", &bindings)
                 .expect("prepare must succeed");
             let raw =
