@@ -563,6 +563,36 @@ units:
     integration_order: 2
 "#;
 
+    const UNKNOWN_DEPENDENCY_ARTIFACT: &[u8] = br#"version: 1
+plan_key: pf-test
+units:
+  - id: U1
+    title: Feature A
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+  - id: U2
+    title: Feature B
+    depends_on: [U9]
+    execution_wave: 2
+    integration_order: 2
+"#;
+
+    const DEPENDENCY_CYCLE_ARTIFACT: &[u8] = br#"version: 1
+plan_key: pf-test
+units:
+  - id: U1
+    title: Feature A
+    depends_on: [U2]
+    execution_wave: 1
+    integration_order: 1
+  - id: U2
+    title: Feature B
+    depends_on: [U1]
+    execution_wave: 2
+    integration_order: 2
+"#;
+
     #[test]
     fn artifact_first_handoff_derives_tasks_and_schedule() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -726,5 +756,49 @@ units:
             ),
             "unexpected error: {err:?}"
         );
+    }
+
+    #[test]
+    fn artifact_first_handoff_rejects_unknown_dependency() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("execution-plan.yml"),
+            UNKNOWN_DEPENDENCY_ARTIFACT,
+        )
+        .expect("write plan");
+        let payload = json!({
+            "execution_plan_path": "execution-plan.yml",
+            "plan_key": "pf-test",
+        });
+
+        let error = load_plan_handoff(&payload, temp.path())
+            .expect_err("a dependency on an unknown unit must be rejected");
+        assert!(
+            matches!(&error, HandoffError::ParseError { .. }),
+            "unexpected error: {error:?}"
+        );
+        assert!(error.to_string().contains("unknown unit"));
+    }
+
+    #[test]
+    fn artifact_first_handoff_rejects_dependency_cycle() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("execution-plan.yml"),
+            DEPENDENCY_CYCLE_ARTIFACT,
+        )
+        .expect("write plan");
+        let payload = json!({
+            "execution_plan_path": "execution-plan.yml",
+            "plan_key": "pf-test",
+        });
+
+        let error = load_plan_handoff(&payload, temp.path())
+            .expect_err("a dependency cycle must be rejected");
+        assert!(
+            matches!(&error, HandoffError::ParseError { .. }),
+            "unexpected error: {error:?}"
+        );
+        assert!(error.to_string().contains("cycle"));
     }
 }
