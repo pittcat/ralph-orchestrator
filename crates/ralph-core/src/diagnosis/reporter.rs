@@ -740,6 +740,21 @@ fn suggested_remediation_for(stage: &str, reason_class: &str) -> String {
         ("missing_event", _) => {
             "the hat had a publish obligation but emitted nothing; add the missing emit".to_string()
         }
+        ("merge_failed", _) | ("", "merge_failed") => {
+            "hat-channel merge failed after retry; inspect `.ralph/diagnostics/failed-activations/` \
+             and restore the target events file permissions/disk, then re-run the activation"
+                .to_string()
+        }
+        ("backend_died", _) | ("", "backend_died") => {
+            "the worker process died or timed out before emit; inspect backend logs / watchdog \
+             and retry the activation rather than treating this as a missing publish"
+                .to_string()
+        }
+        ("never_emitted", _) | ("", "never_emitted") => {
+            "the hat exited cleanly with an empty channel; add the required emit before the \
+             activation ends"
+                .to_string()
+        }
         ("emit_claimed_but_not_written", _) => {
             "the agent mentioned `ralph emit` but no event was written; retry with an explicit \
              `ralph emit` line"
@@ -3637,6 +3652,24 @@ mod tests {
         assert_eq!(causes[0].frequency, 3);
         assert_eq!(causes[1].reason_code, "execution_contract:type_mismatch");
         assert_eq!(causes[1].frequency, 1);
+    }
+
+    #[test]
+    fn u8_silent_activation_reasons_have_specific_remediation() {
+        for (code, needle) in [
+            ("merge_failed", "failed-activations"),
+            ("backend_died", "watchdog"),
+            ("never_emitted", "empty channel"),
+        ] {
+            let rec = rejection("executor", "work.done", code, 1, "2026-09-01T00:00:00Z");
+            let (causes, _) = aggregate_rejection_records(&[rec]);
+            assert_eq!(causes.len(), 1, "reason {code}");
+            assert!(
+                causes[0].suggested_remediation.contains(needle),
+                "reason {code} remediation {:?} must mention {needle}",
+                causes[0].suggested_remediation
+            );
+        }
     }
 
     #[test]

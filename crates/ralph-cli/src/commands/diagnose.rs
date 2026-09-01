@@ -1027,6 +1027,49 @@ pub struct SupervisorStateSummary {
     /// `SupervisorConfig::db_path`. Field exists so CI
     /// scripts can verify which DB the figures came from.
     pub db_path: String,
+    /// Live worker PIDs recorded via `record_slot_pid`
+    /// (`dispatch_records.pid`). Empty when no slots have
+    /// been dispatched yet.
+    pub slot_pids: Vec<SlotPidEntry>,
+}
+
+/// One `(wave, slot) → pid` row for the diagnose supervisor
+/// section (S5.2).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SlotPidEntry {
+    pub wave_id: String,
+    pub slot_index: u32,
+    pub pid: u32,
+}
+
+#[cfg(feature = "supervisor-db")]
+fn collect_slot_pids(store: &dyn ralph_core::supervisor::SupervisorStore) -> Vec<SlotPidEntry> {
+    let mut out = Vec::new();
+    let ids = match store.list_wave_ids() {
+        Ok(ids) => ids,
+        Err(_) => return out,
+    };
+    for wave_id in ids {
+        let snapshot = match store.fan_in_status(&wave_id) {
+            Ok(snapshot) => snapshot,
+            Err(_) => continue,
+        };
+        for (slot_index, _) in snapshot.slots {
+            if let Ok(Some(pid)) = store.pid_for_slot(&wave_id, slot_index) {
+                out.push(SlotPidEntry {
+                    wave_id: wave_id.clone(),
+                    slot_index,
+                    pid,
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        a.wave_id
+            .cmp(&b.wave_id)
+            .then(a.slot_index.cmp(&b.slot_index))
+    });
+    out
 }
 
 /// Compute the supervisor state summary. Reads the
@@ -1054,16 +1097,13 @@ pub fn compute_supervisor_state(workspace_root: &Path) -> SupervisorStateSummary
                     .recover_active_waves()
                     .map(|w| w.len() as u32)
                     .unwrap_or(0);
-                // Best-effort: derive queue depth from active waves
-                // whose phase is `Dispatch` AND no slots have been
-                // dispatched yet. Until U7's `record_slot_pid` lands
-                // we approximate by counting `Pending`-only waves.
-                let queue = active;
+                let slot_pids = collect_slot_pids(&store);
                 SupervisorStateSummary {
                     active_waves: active,
-                    queue_depth: queue,
+                    queue_depth: active,
                     dedup_hits: 0,
                     db_path: db_path_str,
+                    slot_pids,
                 }
             }
             Err(_) => {
@@ -1075,6 +1115,7 @@ pub fn compute_supervisor_state(workspace_root: &Path) -> SupervisorStateSummary
                     queue_depth: 0,
                     dedup_hits: 0,
                     db_path: db_path_str,
+                    slot_pids: Vec::new(),
                 }
             }
         }
@@ -1092,6 +1133,7 @@ pub fn compute_supervisor_state(workspace_root: &Path) -> SupervisorStateSummary
             queue_depth: 0,
             dedup_hits: 0,
             db_path: db_path_str,
+            slot_pids: Vec::new(),
         }
     }
 }
@@ -1110,8 +1152,21 @@ pub fn render_supervisor_section_json(workspace_root: &Path) -> String {
 pub fn render_supervisor_section_human(workspace_root: &Path) -> String {
     let summary = compute_supervisor_state(workspace_root);
     format!(
-        "## Supervisor State\n\n- **active_waves**: {}\n- **queue_depth**: {}\n- **dedup_hits**: {}\n- **db_path**: {}\n",
-        summary.active_waves, summary.queue_depth, summary.dedup_hits, summary.db_path,
+        "## Supervisor State\n\n- **active_waves**: {}\n- **queue_depth**: {}\n- **dedup_hits**: {}\n- **db_path**: {}\n- **slot_pids**: {}\n",
+        summary.active_waves,
+        summary.queue_depth,
+        summary.dedup_hits,
+        summary.db_path,
+        if summary.slot_pids.is_empty() {
+            "(none)".to_string()
+        } else {
+            summary
+                .slot_pids
+                .iter()
+                .map(|e| format!("{}#{}={}", e.wave_id, e.slot_index, e.pid))
+                .collect::<Vec<_>>()
+                .join(", ")
+        },
     )
 }
 
@@ -2099,6 +2154,10 @@ mod tests {
             rendered.contains("\"db_path\""),
             "JSON output must include db_path; got: {rendered}"
         );
+        assert!(
+            rendered.contains("\"slot_pids\""),
+            "JSON output must include slot_pids; got: {rendered}"
+        );
     }
 
     /// U11 human shape: the human renderer produces a
@@ -2111,6 +2170,7 @@ mod tests {
         assert!(rendered.contains("queue_depth"));
         assert!(rendered.contains("dedup_hits"));
         assert!(rendered.contains("db_path"));
+        assert!(rendered.contains("slot_pids"));
     }
 
     /// U11 empty-DB seeded pin (F-011 / SC-6 AE3): when the
@@ -2153,11 +2213,46 @@ mod tests {
             assert_eq!(value["active_waves"], serde_json::json!(0));
             assert_eq!(value["queue_depth"], serde_json::json!(0));
             assert_eq!(value["dedup_hits"], serde_json::json!(0));
+            assert_eq!(value["slot_pids"], serde_json::json!([]));
             assert_eq!(
                 value["db_path"],
                 serde_json::json!(db_path.display().to_string())
             );
         }
+    }
+
+    /// 2026-09-01-001 plan S5.2: diagnose JSON must surface the
+    /// PID written by `record_slot_pid`, not a placeholder.
+    #[cfg(feature = "supervisor-db")]
+    #[test]
+    fn s52_diagnose_json_includes_recorded_slot_pid() {
+        use ralph_core::supervisor::{RusqliteSupervisorStore, SupervisorStore, WaveKind};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ralph_dir = tmp.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).unwrap();
+        let db_path = ralph_dir.join("supervisor.db");
+        let store = RusqliteSupervisorStore::open(&db_path).expect("open supervisor DB");
+        let wave_id = store
+            .register_wave("s52-pid-wave", WaveKind::Exec, 1, 1)
+            .expect("register");
+        store
+            .record_slot_pid(&wave_id, 0, 4242)
+            .expect("record pid");
+        drop(store);
+
+        let json = render_supervisor_section_json(tmp.path());
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("supervisor JSON must parse");
+        let pids = value["slot_pids"].as_array().expect("slot_pids array");
+        assert_eq!(pids.len(), 1, "expected one recorded pid; got {json}");
+        assert_eq!(pids[0]["wave_id"], serde_json::json!(wave_id));
+        assert_eq!(pids[0]["slot_index"], serde_json::json!(0));
+        assert_eq!(pids[0]["pid"], serde_json::json!(4242));
+        assert!(
+            json.contains("4242"),
+            "S5.2: diagnose JSON must include the live pid; got {json}"
+        );
     }
 
     /// U11 dispatch control: `SupervisorFormat::Off` (the
