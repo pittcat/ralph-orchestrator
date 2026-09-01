@@ -97,13 +97,17 @@ baseline_commit: 59c0dcf06634bd9fc2b8c5dd3495e24f317fe5d3
 | E18 | `presets/en/parallel-forge.yml:313-321, 415-505`；`crates/ralph-core/data/ralph-tools-wave.md:109-122`；`skills/ralph-preset-{author,review}/references/{patterns,finding-rubric}.md` | 当前 preset、注入 skill 与 author/review rubric 已明确「depends_on 决定 worker admission，integration_order 只决定 merge」 | 计划下游同步由“no-op”改为已落地基线确认；不得让后续 Unit 恢复人工串行语义 | 高 |
 | E19 | `cargo nextest run -p ralph-core --lib artifact_first_handoff_rewrites_serial_layout_for_independent_units`；`cargo nextest run -p ralph-core --lib identity_accepts_parent_child_absolute_plan_path_representation`；`cargo nextest run -p ralph-core --lib absolute_in_worktree_artifact_path_is_normalized_not_flagged`；`cargo nextest run -p ralph-core --lib absolute_outside_worktree_artifact_path_still_flagged`；`ralph preset check --help`；`bash scripts/check-cli-doc-drift.sh --strict` | e94c0782 两项与 59c0dcf0 两项回归测试均通过；`preset check` 支持 `-H/--strict/--format json`；CLI 文档 drift 检查通过 | 更新后的 Unit gate 可复用这些真实命令；全量验证仍留给执行阶段 | 高 |
 | E20 | `git show 34996b7b`；`git show 59c0dcf0`；`docs/report/2026-08-29-parallel-forge-2026-08-27-1430-feat-parallel-forge-evidence-gates-plan-diagnosis.md` | 基线后新增能力：slot worktree 中断后复用已验证绑定、supervisor store ID 与业务 wave ID 分离、`scripts/run-tests.sh` 清理 wave 身份环境变量；resume 绝对路径归一化（修复诊断 DEV-4）。首次 plan 执行在 Wave 3 stall（诊断 DEV-1/9：executor 完成但 `exec.unit.done` 未落主 events），该根因不在本计划范围 | Unit 写集合不得触碰 wave dispatcher / supervisor bridge / resume 生产代码；重跑若再现同类 stall 立即停并回报 | 高 |
+| E21 | `crates/ralph-cli/src/commands/emit/command_impl.rs` 的 `resolve_precheck_emit_topic` 调用；`crates/ralph-core/src/preset_verify.rs::run_scenario` / `write_events_to_jsonl` | 真实 `ralph emit forge.worktrees.ready` 会按当前 hat 把 guarded topic 重写为 `.proposed`；verifier 直接解析模型输出并写 JSONL，当前既不调用该共享重写函数，也不写 `hat` 元数据 | U11 必须补 verifier ingress parity；scenario 仍写 producer 可见的 bare topic，不能靠手写 `.proposed` 掩盖缺口 | 高 |
+| E22 | `crates/ralph-core/tests/scenarios.rs` 的 JSONL writer 与 `2026-07-02-precheck-gate-pass.yml` | BDD runner 会把 response 的 `hat` 写入 JSONL，并通过真 EventLoop 验证 precheck；preset verifier 的 writer 没有相同来源元数据 | U11 Red 必须证明 producer → proposed → gate → accepted 的来源链；修复要复用 runtime 配置，不发明 verifier 专用 allowlist | 高 |
+| E23 | `crates/ralph-core/src/preset_verify.rs::DriverWorkspace::new` 与 `presets/scenarios/parallel-forge-{success,evidence-recovery}.yml` | verifier 已创建临时 Git 仓库，但场景仍硬编码 `aaaa…` / `bbbb…` / `main`，这些值不是 workspace 的真实 branch、HEAD 与 status fingerprint | U11 引入有限的 Git fixture token，并在每次 scenario 启动后从临时 repo 解析；未知 token fail-closed | 高 |
+| E24 | `crates/ralph-core/tests/scenarios.rs::run_bdd_supervisor_fan_in`；`crates/ralph-cli/src/loop_runner/wave/dispatcher/fan_in.rs`；U5–U9 BDD | supervisor fan-in 已有真 coordinator 路径和独立测试；把 worker/store/fan-in 再复制进 `preset_verify` 会形成第三套 harness，而 U11 的 S22 只要求 CLI 动态报告契约 | U11 不新增 supervisor simulator；动态 success 用 bounded receipt shortcut，wave gate 正确性由 U5–U9 的真 EventLoop BDD 负责 | 高 |
 
 ### 2.3 受影响范围（已确认路径）
 
-* **生产：** `presets/en/parallel-forge.yml`、`presets/schemas/parallel-forge.yml`
+* **生产：** `presets/en/parallel-forge.yml`、`presets/schemas/parallel-forge.yml`；U11 另改 `crates/ralph-core/src/preset_verify.rs` 的 verifier-only ingress/fixture adapter
 * **新增文档：** `presets/en/parallel-forge-preset-author-notes.md`（计划新增）、`docs/solutions/workflow-orchestration/parallel-forge-evidence-gates.md`（U11 新增）
-* **测试：** `crates/ralph-core/tests/scenarios.rs`、新增 `parallel_forge_*gate*_runtime.yml`、`crates/ralph-cli/src/presets.rs` 结构断言、`presets/scenarios/parallel-forge-success.yml` 与 `parallel-forge-evidence-recovery.yml`（计划新增）
-* **配置：** `event_loop.precheck`（preset 内 opt-in；框架 strip 列表已包含，不改 Rust）
+* **测试：** `crates/ralph-core/tests/scenarios.rs`、新增 `parallel_forge_*gate*_runtime.yml`、`crates/ralph-core/tests/preset_verify_driver.rs`、`crates/ralph-cli/tests/integration_preset_verify.rs`、`crates/ralph-cli/src/presets.rs` 结构断言、`presets/scenarios/parallel-forge-success.yml` 与 `parallel-forge-evidence-recovery.yml`（计划新增）
+* **配置：** `event_loop.precheck`（preset 内 opt-in；框架 strip 列表已包含）；U11 只修改 verifier ingress adapter，不修改 precheck、supervisor 或 dispatcher 生产语义
 * **API/CLI/UI：** 无新子命令。使用已有 `ralph preset check` / `verify` / `inspect prompt` / `emit --policy-check`
 * **调用方：** dispatcher（等 accepted worktrees.ready）、integrator（等 accepted reviewed）、CloseTaskBatch、finalizer、cleanup/reporter
 * **构建：** `ralph-cli` embed（`include_str!` OUT_DIR presets）；改 yml 后走现有 `build.rs`，不改 `PRESETS` 数组名字
@@ -125,12 +129,15 @@ baseline_commit: 59c0dcf06634bd9fc2b8c5dd3495e24f317fe5d3
 | D9 | 耗尽 emit 哪个 topic | `plan.blocked` / `forge.plan.blocked` | **`on_exhausted: "forge.plan.blocked(reason=precheck_failed)"`** | E12；cleanup `triggers` 含 `forge.plan.blocked` | `plan.blocked` 不会激活 cleanup/reporter | 0.93 |
 | D10 | 双 guard 时 consistency 的 `rule.topic` | 写 `<T>` / 写 `<T>.proposed` | **必须写 `<T>.proposed`** | E10、E16 | 写 `<T>` 会在 LLM 之后打在 gate 转发上 | 0.92 |
 | D11 | 空数组怎么拒绝 | `non_empty:false` / `eq: []` | **`{field: settled_task_ids, eq: []}`**（`settled_unit_ids` 同） | E11 | `non_empty` 忽略 false | 0.95 |
-| D12 | 是否改 Rust | 改 matcher 自动 strip `.proposed` / 纯配置 | **纯 preset/schema/测试**；不改 consistency matcher、不改 `build_exhausted_payload` | 现有配置已能表达 | 无证据证明配置不够 | 0.90 |
+| D12 | 门禁生产语义是否改 Rust | 改 matcher 自动 strip `.proposed` / 纯配置 | **门禁生产语义保持纯 preset/schema**；不改 consistency matcher、不改 `build_exhausted_payload`。U11 只修 verifier 对既有 emit 语义的适配 | 现有配置已能表达；E21 证明剩余缺口在 verifier ingress | 自动 strip 会改变生产 gate 语义，不能解决 verifier 绕过 emit 的问题 | 0.93 |
 | D13 | `event_loop.precheck` 框架合并 | 改 opt-in 列表 / 不改 | **不改** | E14 | 列表已有 `precheck` | 0.95 |
 | D14 | auditor 非 ACCEPTED | 仍发 `forge.audit.done` 靠 gate 拒 / 直接 `forge.plan.blocked` | **instructions：仅 ACCEPTED 才 emit `forge.audit.done`；否则 `forge.plan.blocked`。consistency 仍拒绝 `verdict ne ACCEPTED` 作第二道** | E8 | 只靠 prompt 会回到现状 | 0.88 |
 | D15 | 测试落点 | 改 builtin 全量 fixture / 迷你 EventLoop YAML + 结构测试钉死 builtin | **builtin 用 `RalphConfig::parse_yaml(get_preset("parallel-forge").content)` 结构断言；行为用迷你 YAML（规则从 preset 复制，注释要求同步）+ `run_workflow_guard_scenario`** | E13、E15 | 把 12+ hat 全量塞进每个 BDD 不可维护 | 0.90 |
 | D16 | Unit 调度依据 | 按 topic/文件顺序串行 / 按真实接口与写集合并发 | **U1/U2/U3 先从同一基线并发；U4 关闭 precheck 基础后，U5/U6/U7/U8/U9/U10 按各自直接依赖 ASAP 并发；U11 仅在最终 schema/拓扑汇合后执行** | E17、E18；当前 runtime 已按 `depends_on` 重算 wave | 旧线性图没有真实因果证据；同一 YAML 的不同语义区域可 deterministic merge | 0.93 |
 | D17 | 基线变更归属 | 把 e94c0782 / 34996b7b / 59c0dcf0 重新纳入本计划 / 视为已验证前置能力 | **三个 commit 均视为已验证前置能力，不在本计划重复实现；新增回归覆盖 DAG 重算、环/未知依赖拒绝、resume path 表示变化与绝对路径归一化** | E17,E19,E20 | 这些能力已存在并有直接单测；重复实现会扩大范围 | 0.96 |
+| D18 | verifier 如何进入 precheck | 场景手写 `.proposed` / 复制 rewrite 条件 / 调共享 resolver | **按 runtime 选出的当前 hat 调 `resolve_precheck_emit_topic`，再把该 hat 写入 JSONL 元数据** | E21,E22 | 手写后缀会让测试绕过用户可见契约；复制条件会与 CLI drift | 0.96 |
+| D19 | 动态 success 是否模拟完整 supervisor | 新增 supervisor simulator / 复用 bounded receipt shortcut | **不新增 simulator**。动态场景验证 CLI/verifier 与首尾不可逆 gate；wave fan-in 与中间 gate 继续由 U5–U9 真 EventLoop BDD 和 loop-runner supervisor 测试证明 | E20,E24 | 新 simulator 扩大 U11、复制 store/fan-in 语义，且不能替代真实 worker 测试 | 0.92 |
+| D20 | Git 身份 fixture | 硬编码伪 SHA / 任意模板 / allowlisted runtime token | **仅支持 `{{git.branch}}`、`{{git.head_sha}}`、`{{git.status_fingerprint}}` 三个 token；scenario 启动后解析，未知或未解析 token 为 input/runtime error** | E23；D7,D8 | 伪值不能证明 evidence payload；任意模板扩大输入面并损害可复现性 | 0.91 |
 
 指纹计算伪代码（Executor 必须写进 worktree/auditor/precheck prompt，禁止另发明）：
 
@@ -291,7 +298,8 @@ Feature: parallel-forge 关键阶段证据门禁
 | S16–S18 | finalizer mock 不跑真 merge：断言 **不出现** finalizer hat 激活 / 或 mock 记录 merge 调用次数=0\|1 | `parallel_forge_audit_gate_runtime.yml` | 集成 | 不在 BDD 里对真实用户仓库 merge | 否 |
 | S19,S20 | consistency Hit | 可与 U10 同一文件多 mock | 集成 | 无 | 否 |
 | S21 | parse 后 hats 无 `precheck-exec.unit.done` | `presets.rs` | 结构 | 无 | 否 |
-| S22 | CLI verify JSON | `ralph preset verify --scenario presets/scenarios/parallel-forge-no-output.yml` | CLI 动态 | 无 | 否 |
+| S22a–S22d | CLI verify JSON：success / recovery / blocked / no-output | `presets/scenarios/parallel-forge-{success,evidence-recovery,blocked,no-output}.yml` + `crates/ralph-cli/tests/integration_preset_verify.rs` | CLI 动态 | 逐条断言 `passed` / `accepted_events` / `failure_kind` / exit code；不得只看 exit 0 | 否 |
+| S22e,S22f | verifier provenance 与 Git token fail-closed | `crates/ralph-core/tests/preset_verify_driver.rs` | core 集成 | compiled contract + 真 EventLoop；未知 token / pinned hat mismatch | 否 |
 
 **断言约定：** `expected.events` 列 accepted 业务 topic；`absent_events` 列不应出现的 topic；耗尽场景断言 `forge.plan.blocked` 且 payload 含 `"kind":"precheck_exhausted"`。  
 **运行：** `cargo nextest run -p ralph-core --test scenarios -- <name>`。  
@@ -311,7 +319,7 @@ Feature: parallel-forge 关键阶段证据门禁
 | R6 | 收据结构矛盾 | S19,S20 | consistency YAML | lint unknown_field | 是 | 否 | E11 |
 | R7 | 独立 budget 3 + 耗尽 blocked | S5,S15 | exhaust YAML | desugar max_activations=budget+1 | 是 | 否 | E9,E12 |
 | R8 | 不串行 Unit | S10,S21 | 既有 two-wave + 结构断言 | presets.rs | 是 | 否 | E1 |
-| R9 | 下游同步 | U11 清单 | strict lint + run-tests.sh | presets/skills anchors | 是 | 否 | E14 |
+| R9 | 下游同步与动态 verifier parity | U11 清单；S22a–S22f | strict lint + core verifier + CLI JSON + run-tests.sh | presets/skills anchors + preset_verify | 是 | 否 | E14,E21–E24 |
 
 ---
 
@@ -358,7 +366,7 @@ deterministic conflict review。
 | U8 | P2 | [U2,U4] | U2 writer 与 U4 precheck Gate 均通过；failure gate 通过 | U11 | U5,U6,U7,U9,U10 | `../pf-u8` / `plan/pf-u8` | work.failed schema/rules/instructions/scenario | cargo nextest；可并发 | 消费 U2 新 failure topic，不改 U2 writer 语义 |
 | U9 | P2 | [U3,U4] | identity 与 precheck Gate 均通过；audit gate 通过 | U11 | U5,U6,U7,U8,U10 | `../pf-u9` / `plan/pf-u9` | audit schema/rules/instructions/scenario | cargo nextest；merge mock/临时 repo 隔离 | finalizer 仅接受 accepted topic |
 | U10 | P0 | [] | 基线 checkout 完成；receipt consistency 结构/BDD 通过 | U11 | U1,U2,U3,U4,U5,U6,U7,U8,U9 | `../pf-u10` / `plan/pf-u10` | 四个 receipt rule、相关 instructions、scenario、结构测试 | cargo nextest；可并发 | 不得触碰 precheck 或 exec.unit.done |
-| U11 | P3 | [U1,U2,U3,U4,U5,U6,U7,U8,U9,U10] | 全部直接前驱 Release Gate；动态 verify 与下游审计完成 | 最终质量门禁 | 无 | `../pf-u11` / `plan/pf-u11` | dynamic scenarios、solution doc、必要下游文档 | verify/strict lint；最终资源队列 | deterministic merge 后才跑全量 |
+| U11 | P3 | [U1,U2,U3,U4,U5,U6,U7,U8,U9,U10] | 全部直接前驱 Release Gate；动态 verify 与下游审计完成 | 最终质量门禁 | 无 | `../pf-u11` / `plan/pf-u11` | `preset_verify.rs` verifier adapter；core/CLI verifier tests；dynamic scenarios；solution/必要下游文档 | verify/strict lint；最终资源队列 | deterministic merge 后才跑全量 |
 
 所有 Unit 的基线 commit 均为 `59c0dcf06634bd9fc2b8c5dd3495e24f317fe5d3`。
 预计写集合之外的文件只允许读取；发现需要修改共享区域时必须停止并更新本计划，
@@ -766,18 +774,74 @@ tester/dispatcher/finalizer/reporter instructions：false 时不要发 success t
 ### Unit 11：动态 verify 与下游同步
 
 #### 1. 目标
-CLI `ralph preset verify` 覆盖 success / 拒绝后修复 / 仍 blocked / no-output；下游清单有证据。
+CLI `ralph preset verify` 对 builtin `parallel-forge` 覆盖 success、拒绝后修复、业务 blocked 和 no-output，并让 verifier ingress 与真实 `ralph emit` 的 precheck rewrite / provenance 语义一致。下游清单必须留下 no-op 或修改证据。
 
 #### 2. 对应
 R7–R9；S22。
 
-#### 6. 修改
-* **新增** `presets/scenarios/parallel-forge-success.yml`：有界 mock 走到 `LOOP_COMPLETE`，payload 满足全部新 required_fields 与 consistency miss。  
-* **新增** `presets/scenarios/parallel-forge-evidence-recovery.yml`：一次 `.rejected` 后修复再 accepted。  
-* 更新 `parallel-forge-blocked.yml` 仅当 schema 需要（inspector blocked 路径不应被新 required 打断）。  
-* `docs/solutions/workflow-orchestration/parallel-forge-evidence-gates.md` **新增**（实现后的教训，禁止 commit `.ralph/review/**`）。  
-* 下游审计表写入该 solution（见下）。  
-* CLI/finding/注入 skill 的 DAG 语义已在基线同步（`e94c0782` 起，当前 `59c0dcf0` 仍成立）；Executor 只需审计是否有证据门禁变更造成新的文档 drift，不得回退为串行语义。
+#### 3. 当前缺口与完成边界
+
+* `run_scenario` 会 `normalize()` 并 compile 真 `EventLoop`，但模型输出随后直接写入 verifier JSONL。该路径绕过 CLI `ralph emit` 的 `resolve_precheck_emit_topic`，所以 producer 写 bare guarded topic 时不会自动变成 `.proposed`。
+* verifier JSONL writer 未写当前 runtime hat；BDD writer 会写。缺 provenance 时，isolated scope / origin guard 与真实运行不等价。
+* success/recovery 场景已有 `fixture_files`，但 Git 身份仍是伪 SHA 与硬编码 branch，不能作为 D7/D8 的可信动态样例。
+* U11 **不**实现 supervisor worker、worktree command 或 fan-in simulator。动态场景可用 `forge.exec.development.done` 的 bounded receipt shortcut 收敛到 full verify；U5–U9 的 EventLoop BDD 与现有 loop-runner supervisor 测试继续拥有 wave fan-in、review、settlement 与 task-close 证明。
+
+#### 4. 输入与输出
+
+* **输入：** version 1 scenario、runtime 选出的 `hat_id`、normalize 后的 `RalphConfig`、每 scenario 独立的临时 Git workspace。
+* **输出：** 与 CLI emit 相同的 resolved topic；带 `hat` 的 JSONL；解析后的真实 Git token；JSON report 的 `passed`、scenario `accepted_events`、scenario/top-level `failure_kind`。
+* **稳定 token：** 只允许 `{{git.branch}}`、`{{git.head_sha}}`、`{{git.status_fingerprint}}`。Token 仅可出现在 `responses[].output` 和必要的 `expect.payload_fields` 字符串值；不做任意环境变量或 shell 插值。
+* **错误：** Git 查询失败、未知 token、替换后仍含 `{{...}}`、fixture 越界、JSONL 写入失败均返回 typed `input_error` 或 `runtime_exception`，不得 panic 或继续使用伪值。
+
+#### 5. 修改位置
+
+* `crates/ralph-core/src/preset_verify.rs`
+  * `normalize()` 后保留 `normalized_config`；用其 clone compile `ResolvedExecutionContract`，原值在每次事件写入前按 runtime 实际选中的 hat 调共享 `config::resolve_precheck_emit_topic`。禁止从 compiled contract 反向拼装另一份配置。
+  * JSONL entry 写 `hat`，并保留 parser 产生的 topic/payload；显式 `.proposed` 必须幂等。
+  * 在 fixture 落盘后构建 allowlisted Git token context；status fingerprint 严格复用 D8 算法。
+  * 若 token 解析使 driver 职责继续膨胀，可拆到 `crates/ralph-core/src/preset_verify/fixture_context.rs`；禁止把 supervisor harness 塞入该模块。
+* `crates/ralph-core/tests/preset_verify_driver.rs`
+  * 新增 compiled-contract precheck ingress characterization 与 token fail-closed 测试。
+* `crates/ralph-cli/tests/integration_preset_verify.rs`
+  * 用真实 `ralph` binary 跑四个 builtin scenario，并解析 JSON；所有子进程继续 scrub agent runtime env。
+* `presets/scenarios/parallel-forge-success.yml`
+  * producer 保持 bare `forge.worktrees.ready` / `forge.audit.done`；gate response 仍发 accepted bare topic。
+  * 替换伪 branch/SHA/fingerprint 为 allowlisted Git token。
+  * `expect.accepted_events` 明确包含 `.proposed` → accepted 的顺序子序列，证明 gate 没被绕过。
+* `presets/scenarios/parallel-forge-evidence-recovery.yml`
+  * 第一次 producer bare emit 经 rewrite 成 `.proposed`；gate 发 `.rejected`；runtime resume 到 worktree；第二次 producer 重发 bare topic，再经 `.proposed` 后由 gate accepted。
+  * `expect.accepted_events` 断言 proposed / rejected / proposed / accepted 的有序子序列；允许 runtime 插入 typed `task.resume`。
+* `presets/scenarios/parallel-forge-blocked.yml`、`parallel-forge-no-output.yml`
+  * 默认不改；只有真实 schema/report 断言需要时才调整。Blocked 是“业务按预期 blocked 后正常闭环”，verify 本身应通过；no-output 是 verifier 失败，必须分类为 `no_progress`。
+* `docs/solutions/workflow-orchestration/parallel-forge-evidence-gates.md`
+  * 补充 verifier ingress parity、Git token、动态 verify 分层边界和下游审计表。
+
+#### 6. 实现顺序（同一 U11 commit 内）
+
+1. 先在 `crates/ralph-core/tests/preset_verify_driver.rs` 写 Red：producer 输出 bare guarded topic 时，期望 trace 先接纳 `.proposed`，下一 hat 是 synthesized gate，gate accepted 后下游才收到 bare topic。Red 必须因 verifier 缺 rewrite/provenance 失败，不得以 fixture YAML 或编译错误代替。
+2. 增加 JSONL ingress parity：`normalized_config` 保留到 driver 循环结束；每个 parsed event 的 topic 只通过共享 resolver 解析一次；source hat 使用 `next_hat()` 的权威结果，不信任 scenario 中另一个字符串；writer 写出 `hat`。
+3. 写 token Red/Green：三个 token 正确替换；同一 workspace 内结果稳定；未知 token 和残留 token fail-closed；绝对路径和 `..` fixture 规则保持原样。
+4. 更新 success/recovery 场景，先跑 core driver 测试，再跑真实 CLI JSON 集成。不得用 `RALPH_PRECHECK_MODE=off`、手写 producer `.proposed` 或删掉 pinned hat 让场景变绿。
+5. 增加四条 CLI 验收：success、recovery、blocked 退出 0；no-output 退出非 0。逐条断言 JSON，而不是只看进程状态。
+6. 完成下游逐项审计与 solution 更新，最后执行 strict lint、warning gate、全量测试。
+
+#### 7. 详细验收场景
+
+* **S22a success：** `passed=true`；`static.passed=true`；scenario `failure_kind=null`；`accepted_events` 按序包含 `forge.worktrees.ready.proposed`、`forge.worktrees.ready`、`forge.audit.done.proposed`、`forge.audit.done`、`LOOP_COMPLETE`；不含任何 `.rejected`、`forge.plan.blocked` 或 `work.failed`。
+* **S22b recovery：** `passed=true`；scenario `failure_kind=null`；同一 guarded topic 出现两次 `.proposed`，中间出现一次 `.rejected`，随后 accepted bare topic；rejection 不得提前唤醒 dispatcher。
+* **S22c blocked：** `passed=true`；业务事件按序为 `forge.plan.blocked`、`forge.cleanup.done`、`forge.report.done`、`LOOP_COMPLETE`；report status 为 `BLOCKED`；verifier `failure_kind=null`。
+* **S22d no-output：** 退出非 0；`passed=false`；top-level 与 scenario `failure_kind=no_progress`；`accepted_events=[]`；无 `LOOP_COMPLETE`。不得把 `terminal:none` 误判为 silent success。
+* **S22e provenance：** bare guarded topic 必须在 trace 中先成为 `.proposed`，证明共享 rewrite 与当前 hat provenance 同时生效；response pinned hat 与 `next_hat()` 不一致时仍为 `scenario_failure`，且在事件写入前停止。
+* **S22f token safety：** 未知 token、Git 命令失败或残留 token 均稳定失败；错误报告不泄漏临时 workspace 绝对路径到 trace digest。
+
+#### 8. Warning 与回归要求
+
+* `cargo clippy --all-targets --all-features -- -D warnings` 必须零 warning；不允许 `#[allow]` 掩盖 U11 新 warning，除非仓库已有同类窄例外且 solution 说明原因。
+* builtin verify 的 `static.errors` 必须为 0；若 `static.warnings > 0`，必须逐条归因并清零本计划引入的 warning，不能只以 `static.passed=true` 放行。
+* 保留 `trace_digest` 可复现性：digest 不得包含 tempdir 绝对路径、Git 命令 stderr 中的随机路径或 wall-clock timestamp。
+* 回归 `preset_verify` parser/report、parallel-forge BDD、strict preset lint、CLI doc drift 和全 workspace nextest。
+
+#### 9. 下游审计清单
 
 下游清单（Executor 逐项打开确认，无改动写「no-op + 原因」）：
 
@@ -793,6 +857,13 @@ R7–R9；S22。
 | `.cursor/rules` / zsh plugin | no-op（未改 preset 名） |
 | `crates/ralph-core/data/*.md` | 已由基线（`e94c0782` 起，`59c0dcf0` 复核成立）更新 `ralph-tools-wave.md` 的 DAG/资源边界；本计划不重复改，仍须回归 drift 检查 |
 | author/review skill | 已由基线（同上）同步 `patterns.md`/`finding-rubric.md` 的 DAG 语义；本计划不重复改，仍须跑 anchor 测试 |
+
+#### 10. 完成标准与提交边界
+
+* 四个 scenario 的 CLI JSON 断言全部满足 S22a–S22d；S22e/S22f core 测试通过。
+* U5–U10 的 21 个 parallel-forge 行为场景仍绿；没有新增 supervisor simulator 或修改 wave dispatcher / store / worker 代码。
+* solution 中有下游 no-op/修改证据；未修改 `.ralph/`，未提交临时 report、scratch 或生成的 verifier workspace。
+* U11 以一个原子 Unit commit 提交：只包含 verifier parity、dynamic scenarios、对应测试和 solution/计划同步；若为清除全仓既有 warning 而触及无关模块，必须拆成独立 warning cleanup commit，不能混入 U11。
 
 验证命令见 §9。动态 verify **必须**断言 JSON `passed` / `accepted_events` / `failure_kind`，禁止只看 exit 0。
 
@@ -861,10 +932,12 @@ Validated Baseline
 | 每 Unit 后 | `ralph preset check -H builtin:parallel-forge --strict --format json` | embed 合并 schema | `"passed"` 类无 error | 否 |
 | U4 起 prompt | `ralph inspect prompt -H builtin:parallel-forge --hat worktree --format json`（及 reviewer/integrator/auditor/forge-failure-handler） | 确认能看见投影字段 | JSON 含 instructions/skills | 否（缺字段则停） |
 | U2–U10 回归 | `cargo nextest run -p ralph-core --test scenarios -- parallel_forge` | 旧 BDD | 全绿 | 否 |
-| U11 | `ralph preset verify -H builtin:parallel-forge --scenario presets/scenarios/parallel-forge-success.yml --format json`（及 recovery/blocked/no-output） | 动态 | JSON 字段符合场景 expect | 否 |
+| U11 core | `cargo nextest run -p ralph-core --test preset_verify_driver` | verifier ingress/token | `.proposed` rewrite、hat provenance、token safety 全绿 | 否 |
+| U11 CLI | `cargo nextest run -p ralph-cli --test integration_preset_verify -- parallel_forge` | 四条动态 JSON | success/recovery/blocked 通过；no-output 稳定 `no_progress` | 否 |
+| U11 manual | `cargo run -p ralph-cli -- -H builtin:parallel-forge preset verify --scenario presets/scenarios/parallel-forge-success.yml --format json`（及 recovery/blocked/no-output） | embed 后人工复核 | JSON 字段符合 S22a–S22d；exit code 与 `passed` 一致 | 否 |
 | U11 | `scripts/check-cli-doc-drift.sh --strict` | skill/CLI | 0 | 否 |
 | 最终 | `./scripts/run-tests.sh` | 全量 | 0 | 否 |
-| 最终 | `cargo clippy` / `cargo fmt --check` / `cargo build` | lint/type/build | 0 | 否 |
+| 最终 | `cargo clippy --all-targets --all-features -- -D warnings` / `cargo fmt --check` / `cargo build` | warning/type/build | 0 warning、0 error | 否 |
 
 禁止：`cargo test -p ralph-cli` 无 nextest。禁止 `RALPH_PRECHECK_MODE=off` 来让测试变绿。
 
@@ -892,8 +965,8 @@ Validated Baseline
 | 检查项 | 结果 | 证据或说明 |
 | --- | --- | --- |
 | 这是实施计划而不是 Roadmap 吗 | 是 | Unit 指向具体 YAML 键、rule id、测试函数名 |
-| Executor 是否仍需做关键设计决策 | 否 | D1–D17 已锁 topic 名、on_exhausted、`.proposed`、fingerprint、DAG 调度 |
-| 所有文件和接口是否有代码库证据 | 是 | E1–E20；新增文件均标「计划新增」 |
+| Executor 是否仍需做关键设计决策 | 否 | D1–D20 已锁 topic 名、on_exhausted、`.proposed`、fingerprint、verifier parity 与 DAG 调度 |
+| 所有文件和接口是否有代码库证据 | 是 | E1–E24；新增文件均标「计划新增」 |
 | 所有关键决策置信度是否 ≥ 0.85 | 是 | 最低 D8/D14=0.88 |
 | 是否存在未处理的低置信度假设 | 否 | 无 |
 | 每个 Unit 是否只有一个可观察行为 | 是 | U1 契约表征；U2 writer；U3 字段；U4–U9 各一个 topic 门；U10 收据类；U11 验证同步 |

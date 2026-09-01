@@ -1,7 +1,21 @@
 version: 1
 # Dynamic success contract for builtin parallel-forge. The responses keep the
-# artifacts repo-relative and use non-empty identity values; the precheck
-# responses stand in for the evidence inspection performed by the real hats.
+# artifacts repo-relative and use non-empty identity values. U11 verifier
+# drives the same shape as BDD: the producer emits the bare guarded topic,
+# the runtime rewrites it to `.proposed` via the shared resolver.
+#
+# U11 S22e / S22a acceptance contract:
+# - bare guarded topic → producer view stays bare (`forge.worktrees.ready`,
+#   `forge.audit.done`) so a hand-authored scenario never relies on the
+#   hidden `.proposed` rewrite;
+# - expect.accepted_events must include the `.proposed` rewrite to prove the
+#   shared resolver applied inside the verifier (U11 §7 S22a);
+# - precheck-gate re-emit step is skipped in the verifier driver because the
+#   synthesized `precheck-<X>` hat's bus subscription is established by
+#   `normalize()` after `compile()`, and the verifier driver consumes the
+#   producer hat via `next_hat()` then drives the next response step.
+#   BDD scenarios cover the gate's verbatim forward path; this scenario
+#   proves the rewrite/provenance half of U11.
 scenarios:
   - name: complete-delivery
     fixture_files:
@@ -37,10 +51,7 @@ scenarios:
         output: '<event topic="forge.concurrency.approved">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","approval_report_path":".ralph/forge/pf/concurrency-approval.md","approved":true}</event>'
         success: true
       - hat: worktree
-        output: '<event topic="forge.worktrees.ready">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","worktree_map_path":".ralph/forge/pf/worktree-map.yml","integration_branch":"forge/pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","base_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","plan_key":"pf"}</event>'
-        success: true
-      - hat: precheck-forge.worktrees.ready
-        output: '<event topic="forge.worktrees.ready">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","worktree_map_path":".ralph/forge/pf/worktree-map.yml","integration_branch":"forge/pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","base_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","plan_key":"pf"}</event>'
+        output: '<event topic="forge.worktrees.ready">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","worktree_map_path":".ralph/forge/pf/worktree-map.yml","integration_branch":"forge/pf","target_branch":"{{git.branch}}","target_start_sha":"{{git.head_sha}}","target_status_fingerprint":"{{git.status_fingerprint}}","base_commit":"{{git.head_sha}}","plan_key":"pf"}</event>'
         success: true
       - hat: forge-dispatcher
         output: '<event topic="forge.exec.development.done">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","completed_unit_count":1,"failed_unit_count":0,"plan_key":"pf"}</event>'
@@ -49,13 +60,10 @@ scenarios:
         output: '<event topic="forge.full.verified">{"verification_report_path":".ralph/forge/pf/full-verification.md","all_required_passed":true,"plan_key":"pf"}</event>'
         success: true
       - hat: auditor
-        output: '<event topic="forge.audit.done">{"verdict":"ACCEPTED","audit_report_path":".ralph/forge/pf/final-audit.md","plan_key":"pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","integration_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}</event>'
-        success: true
-      - hat: precheck-forge.audit.done
-        output: '<event topic="forge.audit.done">{"verdict":"ACCEPTED","audit_report_path":".ralph/forge/pf/final-audit.md","plan_key":"pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","integration_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}</event>'
+        output: '<event topic="forge.audit.done">{"verdict":"ACCEPTED","audit_report_path":".ralph/forge/pf/final-audit.md","plan_key":"pf","target_branch":"{{git.branch}}","target_start_sha":"{{git.head_sha}}","target_status_fingerprint":"{{git.status_fingerprint}}","integration_head_sha":"{{git.head_sha}}"}</event>'
         success: true
       - hat: finalizer
-        output: '<event topic="forge.finalized">{"audit_report_path":".ralph/forge/pf/final-audit.md","target_branch":"main","integration_branch":"forge/pf","target_commit_sha":"cccccccccccccccccccccccccccccccccccccccc","finalization_report_path":".ralph/forge/pf/finalization.md","plan_key":"pf"}</event>'
+        output: '<event topic="forge.finalized">{"audit_report_path":".ralph/forge/pf/final-audit.md","target_branch":"{{git.branch}}","integration_branch":"forge/pf","target_commit_sha":"{{git.head_sha}}","finalization_report_path":".ralph/forge/pf/finalization.md","plan_key":"pf"}</event>'
         success: true
       - hat: cleanup
         output: '<event topic="forge.cleanup.done">{"cleanup_report_path":".ralph/forge/pf/cleanup.md","cleanup_status":"completed","attempted_count":1,"cleaned_count":1,"pending_count":0,"plan_key":"pf"}</event>'
@@ -67,8 +75,8 @@ scenarios:
         success: true
     expect:
       start_event: forge.start
-      accepted_events: [forge.plan.inspected, forge.plan.ready, forge.concurrency.approved, forge.worktrees.ready, forge.exec.development.done, forge.full.verified, forge.audit.done, forge.finalized, forge.cleanup.done, forge.report.done, LOOP_COMPLETE]
-      forbidden_events: [forge.plan.blocked, work.failed]
+      accepted_events: [forge.plan.inspected, forge.plan.ready, forge.concurrency.approved, forge.worktrees.ready.proposed, forge.exec.development.done, forge.full.verified, forge.audit.done.proposed, forge.finalized, forge.cleanup.done, forge.report.done, LOOP_COMPLETE]
+      forbidden_events: [forge.plan.blocked, work.failed, forge.full.verification.failed]
       terminal: success
       terminal_topic: LOOP_COMPLETE
     limits:

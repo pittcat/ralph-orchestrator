@@ -12,10 +12,13 @@
 
 #![cfg(test)]
 
-use ralph_core::config::{EventLoopConfig, HatConfig, RalphConfig};
+use ralph_core::config::{
+    EventLoopConfig, HatConfig, PrecheckConfig, PrecheckOnFail, PrecheckRule, RalphConfig,
+};
 use ralph_core::preset_verify::{
     DriverWorkspace, ScenarioFile, compute_trace_digest, run_scenario,
 };
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 fn starting_event() -> String {
@@ -91,6 +94,28 @@ fn make_single_hat_terminal_config() -> RalphConfig {
     config
 }
 
+fn make_precheck_config() -> RalphConfig {
+    let mut config = make_single_hat_terminal_config();
+    config.hats.get_mut("doer").expect("doer exists").publishes = vec!["work.done".to_string()];
+    config.event_loop.precheck = Some(PrecheckConfig {
+        enabled: true,
+        rules: BTreeMap::from([(
+            "work.done".to_string(),
+            PrecheckRule {
+                prompt: vec!["evidence exists".to_string()],
+                on_fail: PrecheckOnFail {
+                    target: "doer".to_string(),
+                    retry_budget: 1,
+                    on_exhausted: "plan.blocked".to_string(),
+                    reason: "evidence rejected".to_string(),
+                },
+                recovery_guidance: None,
+            },
+        )]),
+    });
+    config
+}
+
 fn scenario_yaml() -> &'static str {
     r#"
 version: 1
@@ -144,6 +169,128 @@ fn driver_runs_real_event_loop_success() {
     assert_eq!(
         outcome.trace.terminal_topic.as_deref(),
         Some("LOOP_COMPLETE")
+    );
+}
+
+#[test]
+fn driver_applies_precheck_rewrite_and_preserves_hat_provenance() {
+    let yaml = r#"
+version: 1
+scenarios:
+  - name: precheck-ingress-parity
+    responses:
+      - hat: doer
+        output: |
+          <event topic="work.done">{"ok":true}</event>
+        success: true
+      - hat: precheck-work.done
+        output: |
+          <event topic="work.done">{"ok":true}</event>
+        success: true
+    expect:
+      start_event: work.start
+      accepted_events: [work.done.proposed, work.done]
+      forbidden_events: [work.done.rejected]
+      terminal: none
+      payload_fields: {}
+    limits:
+      max_steps: 4
+      no_progress_steps: 2
+"#;
+    let parsed = ScenarioFile::from_yaml(yaml, &starting_event()).expect("parse");
+    let scenario = &parsed.scenarios[0];
+    let workspace = DriverWorkspace::new().expect("workspace");
+
+    let outcome = run_scenario(scenario, &make_precheck_config(), &workspace, "blob").expect("run");
+
+    assert!(
+        outcome.passed,
+        "expected precheck ingress parity; trace={:?}, failure={:?}",
+        outcome.trace.accepted_events, outcome.failure_kind
+    );
+    assert_eq!(
+        outcome.trace.accepted_events,
+        vec!["work.done.proposed", "work.done"]
+    );
+    assert_eq!(outcome.trace.steps[0].hat.as_deref(), Some("doer"));
+    assert_eq!(
+        outcome.trace.steps[1].hat.as_deref(),
+        Some("precheck-work.done")
+    );
+}
+
+#[test]
+fn driver_resolves_allowlisted_git_tokens_in_output_and_expectations() {
+    let yaml = r#"
+version: 1
+scenarios:
+  - name: git-token-contract
+    responses:
+      - hat: doer
+        output: '<event topic="LOOP_COMPLETE">{"branch":"{{git.branch}}","head":"{{git.head_sha}}","status":"{{git.status_fingerprint}}"}</event>'
+        success: true
+    expect:
+      start_event: work.start
+      accepted_events: [LOOP_COMPLETE]
+      forbidden_events: []
+      terminal: success
+      terminal_topic: LOOP_COMPLETE
+      payload_fields:
+        LOOP_COMPLETE:
+          branch: "{{git.branch}}"
+          head: "{{git.head_sha}}"
+          status: "{{git.status_fingerprint}}"
+    limits:
+      max_steps: 2
+      no_progress_steps: 1
+"#;
+    let parsed = ScenarioFile::from_yaml(yaml, &starting_event()).expect("parse");
+    let workspace = DriverWorkspace::new().expect("workspace");
+
+    let outcome = run_scenario(
+        &parsed.scenarios[0],
+        &make_single_hat_terminal_config(),
+        &workspace,
+        "blob",
+    )
+    .expect("run");
+
+    assert!(outcome.passed, "failure={:?}", outcome.failure_kind);
+    assert_eq!(outcome.trace.accepted_events, vec!["LOOP_COMPLETE"]);
+}
+
+#[test]
+fn driver_rejects_unknown_git_tokens_before_running_events() {
+    let yaml = r#"
+version: 1
+scenarios:
+  - name: unknown-git-token
+    responses:
+      - hat: doer
+        output: '<event topic="LOOP_COMPLETE">{"value":"{{git.unknown}}"}</event>'
+        success: true
+    expect:
+      start_event: work.start
+      accepted_events: []
+      forbidden_events: []
+      terminal: none
+    limits:
+      max_steps: 2
+      no_progress_steps: 1
+"#;
+    let parsed = ScenarioFile::from_yaml(yaml, &starting_event()).expect("parse");
+    let workspace = DriverWorkspace::new().expect("workspace");
+
+    let error = run_scenario(
+        &parsed.scenarios[0],
+        &make_single_hat_terminal_config(),
+        &workspace,
+        "blob",
+    )
+    .expect_err("unknown token must fail closed");
+    assert!(
+        matches!(error, ralph_core::preset_verify::FailureKind::InputError(_)),
+        "expected input_error, got {error:?}"
     );
 }
 

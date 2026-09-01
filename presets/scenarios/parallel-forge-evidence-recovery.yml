@@ -36,16 +36,16 @@ scenarios:
         output: '<event topic="forge.concurrency.approved">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","approval_report_path":".ralph/forge/pf/concurrency-approval.md","approved":true}</event>'
         success: true
       - hat: worktree
-        output: '<event topic="forge.worktrees.ready">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","worktree_map_path":".ralph/forge/pf/worktree-map.yml","integration_branch":"forge/pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","base_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","plan_key":"pf"}</event>'
+        output: '<event topic="forge.worktrees.ready">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","worktree_map_path":".ralph/forge/pf/worktree-map.yml","integration_branch":"forge/pf","target_branch":"{{git.branch}}","target_start_sha":"{{git.head_sha}}","target_status_fingerprint":"{{git.status_fingerprint}}","base_commit":"{{git.head_sha}}","plan_key":"pf"}</event>'
         success: true
       - hat: precheck-forge.worktrees.ready
         output: '<event topic="forge.worktrees.ready.rejected">{"failed_checks":["target_status_fingerprint_mismatch"],"reason":"recompute the target fingerprint","synthetic":false}</event>'
         success: true
       - hat: worktree
-        output: '<event topic="forge.worktrees.ready.proposed">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","worktree_map_path":".ralph/forge/pf/worktree-map.yml","integration_branch":"forge/pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","base_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","plan_key":"pf"}</event>'
+        output: '<event topic="forge.worktrees.ready">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","worktree_map_path":".ralph/forge/pf/worktree-map.yml","integration_branch":"forge/pf","target_branch":"{{git.branch}}","target_start_sha":"{{git.head_sha}}","target_status_fingerprint":"{{git.status_fingerprint}}","base_commit":"{{git.head_sha}}","plan_key":"pf"}</event>'
         success: true
       - hat: precheck-forge.worktrees.ready
-        output: '<event topic="forge.worktrees.ready">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","worktree_map_path":".ralph/forge/pf/worktree-map.yml","integration_branch":"forge/pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","base_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","plan_key":"pf"}</event>'
+        output: '<event topic="forge.worktrees.ready">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","worktree_map_path":".ralph/forge/pf/worktree-map.yml","integration_branch":"forge/pf","target_branch":"{{git.branch}}","target_start_sha":"{{git.head_sha}}","target_status_fingerprint":"{{git.status_fingerprint}}","base_commit":"{{git.head_sha}}","plan_key":"pf"}</event>'
         success: true
       - hat: forge-dispatcher
         output: '<event topic="forge.exec.development.done">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","completed_unit_count":1,"failed_unit_count":0,"plan_key":"pf"}</event>'
@@ -54,13 +54,13 @@ scenarios:
         output: '<event topic="forge.full.verified">{"verification_report_path":".ralph/forge/pf/full-verification.md","all_required_passed":true,"plan_key":"pf"}</event>'
         success: true
       - hat: auditor
-        output: '<event topic="forge.audit.done">{"verdict":"ACCEPTED","audit_report_path":".ralph/forge/pf/final-audit.md","plan_key":"pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","integration_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}</event>'
+        output: '<event topic="forge.audit.done">{"verdict":"ACCEPTED","audit_report_path":".ralph/forge/pf/final-audit.md","plan_key":"pf","target_branch":"{{git.branch}}","target_start_sha":"{{git.head_sha}}","target_status_fingerprint":"{{git.status_fingerprint}}","integration_head_sha":"{{git.head_sha}}"}</event>'
         success: true
       - hat: precheck-forge.audit.done
-        output: '<event topic="forge.audit.done">{"verdict":"ACCEPTED","audit_report_path":".ralph/forge/pf/final-audit.md","plan_key":"pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","integration_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}</event>'
+        output: '<event topic="forge.audit.done">{"verdict":"ACCEPTED","audit_report_path":".ralph/forge/pf/final-audit.md","plan_key":"pf","target_branch":"{{git.branch}}","target_start_sha":"{{git.head_sha}}","target_status_fingerprint":"{{git.status_fingerprint}}","integration_head_sha":"{{git.head_sha}}"}</event>'
         success: true
       - hat: finalizer
-        output: '<event topic="forge.finalized">{"audit_report_path":".ralph/forge/pf/final-audit.md","target_branch":"main","integration_branch":"forge/pf","target_commit_sha":"cccccccccccccccccccccccccccccccccccccccc","finalization_report_path":".ralph/forge/pf/finalization.md","plan_key":"pf"}</event>'
+        output: '<event topic="forge.finalized">{"audit_report_path":".ralph/forge/pf/final-audit.md","target_branch":"{{git.branch}}","integration_branch":"forge/pf","target_commit_sha":"{{git.head_sha}}","finalization_report_path":".ralph/forge/pf/finalization.md","plan_key":"pf"}</event>'
         success: true
       - hat: cleanup
         output: '<event topic="forge.cleanup.done">{"cleanup_report_path":".ralph/forge/pf/cleanup.md","cleanup_status":"completed","attempted_count":1,"cleaned_count":1,"pending_count":0,"plan_key":"pf"}</event>'

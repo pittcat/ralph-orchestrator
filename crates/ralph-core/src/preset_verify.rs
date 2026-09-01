@@ -9,6 +9,7 @@
 //! backend — those concerns live in the `ralph-cli` and skill layers.
 
 use std::collections::BTreeMap;
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -818,6 +819,8 @@ pub fn run_scenario(
         })?;
     }
 
+    let scenario = resolve_scenario_tokens(scenario, workspace.temp_dir.path())?;
+
     let mut config = config.clone();
     // The CLI normally normalizes during config loading, but keep the
     // verifier self-contained: callers may provide an otherwise valid raw
@@ -832,6 +835,7 @@ pub fn run_scenario(
 
     let context = LoopContext::primary(workspace.temp_dir.path().to_path_buf());
 
+    let normalized_config = config.clone();
     let resolved = execution_contract::compile(config).map_err(|e| {
         FailureKind::StaticContractFailure(format!("contract compile failed: {e:?}"))
     })?;
@@ -840,7 +844,7 @@ pub fn run_scenario(
     event_loop.initialize("Verify");
 
     let parser = crate::event_parser::EventParser::new();
-    let mut tracer = ScenarioTracer::new(scenario);
+    let mut tracer = ScenarioTracer::new(&scenario);
 
     for (idx, response) in scenario.responses.iter().enumerate() {
         tracer.step_count = tracer.step_count.saturating_add(1);
@@ -907,9 +911,17 @@ pub fn run_scenario(
 
         // Parse the scripted output and append events to JSONL so
         // process_events_from_jsonl can route them through the real runtime.
-        let parsed = parser.parse(&response.output);
+        let mut parsed = parser.parse(&response.output);
+        for event in &mut parsed {
+            let resolved_topic = crate::config::resolve_precheck_emit_topic(
+                &normalized_config,
+                Some(hat_id.as_str()),
+                event.topic.as_str(),
+            );
+            event.topic = ralph_proto::Topic::new(resolved_topic);
+        }
         let events_path = workspace.events_path();
-        write_events_to_jsonl(&events_path, &parsed, idx).map_err(|e| {
+        write_events_to_jsonl(&events_path, &parsed, idx, Some(hat_id.as_str())).map_err(|e| {
             FailureKind::RuntimeException(format!("write events.jsonl failed: {e}"))
         })?;
 
@@ -974,10 +986,119 @@ pub fn run_scenario(
     })
 }
 
+const GIT_BRANCH_TOKEN: &str = "{{git.branch}}";
+const GIT_HEAD_SHA_TOKEN: &str = "{{git.head_sha}}";
+const GIT_STATUS_FINGERPRINT_TOKEN: &str = "{{git.status_fingerprint}}";
+
+#[derive(Debug, Clone)]
+struct GitTokenContext {
+    branch: String,
+    head_sha: String,
+    status_fingerprint: String,
+}
+
+fn resolve_scenario_tokens(scenario: &Scenario, workspace: &Path) -> Result<Scenario, FailureKind> {
+    let context = GitTokenContext::from_workspace(workspace).map_err(|error| {
+        FailureKind::RuntimeException(format!("resolve verifier Git context failed: {error}"))
+    })?;
+    let mut resolved = scenario.clone();
+
+    for response in &mut resolved.responses {
+        response.output = context.replace_tokens(&response.output)?;
+    }
+    for fields in resolved.expect.payload_fields.values_mut() {
+        for value in fields.values_mut() {
+            replace_json_string_tokens(value, &context)?;
+        }
+    }
+
+    Ok(resolved)
+}
+
+impl GitTokenContext {
+    fn from_workspace(workspace: &Path) -> std::io::Result<Self> {
+        let branch = git_output(workspace, &["branch", "--show-current"])?;
+        let head_sha = git_output(workspace, &["rev-parse", "HEAD"])?;
+        let status = git_output(
+            workspace,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        )?;
+        let canonical = status
+            .lines()
+            .filter_map(canonical_status_path)
+            .filter(|path| !path.starts_with(".ralph/"))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let canonical = if canonical.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", canonical.join("\n"))
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(canonical.as_bytes());
+        let status_fingerprint = format!("{:x}", hasher.finalize());
+
+        Ok(Self {
+            branch,
+            head_sha,
+            status_fingerprint,
+        })
+    }
+
+    fn replace_tokens(&self, input: &str) -> Result<String, FailureKind> {
+        let output = input
+            .replace(GIT_BRANCH_TOKEN, &self.branch)
+            .replace(GIT_HEAD_SHA_TOKEN, &self.head_sha)
+            .replace(GIT_STATUS_FINGERPRINT_TOKEN, &self.status_fingerprint);
+        if output.contains("{{") || output.contains("}}") {
+            return Err(FailureKind::InputError(
+                "scenario contains an unknown or unresolved Git token".into(),
+            ));
+        }
+        Ok(output)
+    }
+}
+
+fn replace_json_string_tokens(
+    value: &mut serde_json::Value,
+    context: &GitTokenContext,
+) -> Result<(), FailureKind> {
+    if let Some(string) = value.as_str() {
+        *value = serde_json::Value::String(context.replace_tokens(string)?);
+    }
+    Ok(())
+}
+
+fn git_output(workspace: &Path, args: &[&str]) -> std::io::Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "git {} failed with status {}: {}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn canonical_status_path(line: &str) -> Option<&str> {
+    let path = line.get(3..)?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    path.rsplit_once(" -> ")
+        .map_or(Some(path), |(_, renamed)| Some(renamed))
+}
+
 fn write_events_to_jsonl(
     path: &Path,
     events: &[Event],
     response_index: usize,
+    hat: Option<&str>,
 ) -> std::io::Result<()> {
     if events.is_empty() {
         return Ok(());
@@ -986,11 +1107,23 @@ fn write_events_to_jsonl(
         .create(true)
         .append(true)
         .open(path)?;
+    // Only stamp the event's `hat` provenance when the source is a real
+    // registered business hat. The fallback `ralph` pseudo-hat is the
+    // runtime's "no active hat" sentinel — when next_hat() returns it the
+    // driver is replaying model output through a path the runtime never
+    // observed, so writing hat="ralph" here would falsely label the event
+    // as having come from a control-only emitter and trigger the
+    // `event.isolation.boundary_violation` origin guard (R6/U2).
+    let stamped_hat = match hat {
+        Some(id) if id != "ralph" => Some(id),
+        _ => None,
+    };
     for event in events {
         let entry = serde_json::json!({
             "topic": event.topic,
             "payload": event.payload,
             "response_index": response_index,
+            "hat": stamped_hat,
         });
         writeln!(file, "{entry}")?;
     }
