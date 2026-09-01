@@ -645,7 +645,6 @@ fn g3_cancel_closure_cancelled_slot_has_never_started_reason() {
 async fn test_u3_emit_to_wave_channel_records_slot_completed() {
     use crate::loop_runner::wave::read_worker_events;
     use crate::loop_runner::wave::{WaveWorkerExecutor, WorkerRequest};
-    use std::sync::Arc;
     use std::time::Duration;
 
     /// Executor that emits a terminal `exec.unit.done` into the
@@ -857,7 +856,6 @@ fn task_close_then_next_ready_two_wave_supervisor_path() {
 async fn test_u1_2026_09_01_dispatcher_persists_slot_event_payloads() {
     use crate::loop_runner::wave::read_worker_events;
     use crate::loop_runner::wave::{WaveWorkerExecutor, WorkerRequest};
-    use std::sync::Arc;
     use std::time::Duration;
 
     struct ChannelEmittingExecutor(std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>);
@@ -956,5 +954,96 @@ async fn test_u1_2026_09_01_dispatcher_persists_slot_event_payloads() {
         "U1: channel file must be deleted after successful persistence; \
          still present at {:?}",
         captured_paths[0]
+    );
+}
+
+// 2026-09-01-001 plan U1 (R1 / S1.3 / T1.5): a store write
+// failure must leave the live channel file in place so a crash
+// in the fan-in window can still recover events from disk.
+#[tokio::test]
+async fn test_u1_2026_09_01_persist_failure_leaves_channel_file() {
+    use crate::loop_runner::wave::read_worker_events;
+    use crate::loop_runner::wave::{WaveWorkerExecutor, WorkerRequest};
+    use std::time::Duration;
+
+    struct ChannelEmittingExecutor(std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>);
+    impl WaveWorkerExecutor for ChannelEmittingExecutor {
+        fn execute(
+            &self,
+            request: WorkerRequest,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (u32, WaveWorkerOutcome)> + Send>>
+        {
+            let captured = self.0.clone();
+            Box::pin(async move {
+                let index = request.index;
+                let events_path = request.worker_events_path.clone();
+                let line = serde_json::to_string(&ralph_core::Event {
+                    topic: "exec.unit.done".to_string(),
+                    payload: Some(format!("{{\"slot\":{index},\"seq\":0}}")),
+                    ts: String::new(),
+                    hat: None,
+                    triggered: None,
+                    source: Some("u1-persist-fail".to_string()),
+                    wave_id: None,
+                    wave_index: Some(index),
+                    wave_total: Some(1),
+                    system_injected: Some(false),
+                })
+                .expect("serialize event");
+                if let Some(parent) = events_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::fs::write(&events_path, format!("{line}\n")).expect("write channel file");
+                let events = read_worker_events(&events_path);
+                captured.lock().unwrap().push(events_path);
+                (index, Ok((events, Duration::from_millis(5), true, None)))
+            })
+        }
+    }
+
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    store.set_fail_slot_payload_writes(true);
+    store
+        .record_slot_event_payloads("preflight", 0, 1, &[])
+        .expect_err("typed store must reject payload writes after set_fail");
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>);
+    bridge
+        .store
+        .record_slot_event_payloads("preflight-dyn", 0, 1, &[])
+        .expect_err("dyn store must reject payload writes after set_fail");
+    let wave = make_u3_wave("u1-persist-fail-2026-09-01", 1, 1);
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let executor = ChannelEmittingExecutor(captured.clone());
+    let outcome = run_u3_dispatch_wave(bridge.clone(), wave, executor).await;
+    assert!(
+        matches!(
+            outcome,
+            WaveDispatchOutcome::Completed(_) | WaveDispatchOutcome::Partial(_)
+        ),
+        "T1.5: persist failure must not abort in-memory fan-in, got {outcome:?}"
+    );
+
+    let captured_paths = captured.lock().unwrap().clone();
+    assert_eq!(captured_paths.len(), 1);
+    assert!(
+        captured_paths[0].exists(),
+        "T1.5: channel file must remain after persist failure; missing {:?}",
+        captured_paths[0]
+    );
+    let loaded = store
+        .load_slot_event_payloads(
+            &bridge
+                .store
+                .recover_active_waves()
+                .expect("recover")
+                .into_iter()
+                .map(|w| w.wave_id)
+                .next()
+                .expect("wave"),
+        )
+        .expect("load");
+    assert!(
+        loaded.is_empty(),
+        "T1.5: failed persist must not leave payload rows; got {loaded:?}"
     );
 }

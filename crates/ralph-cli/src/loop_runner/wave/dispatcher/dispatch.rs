@@ -2902,18 +2902,27 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                         // the channel file in place — fan-in still
                         // runs from memory so the healthy path is
                         // unaffected.
+                        let mut persist_ok = true;
                         if let Ok((events, _, _, _)) = &outcome.1 {
-                            if let (Some(store), Some(wid), Some(seq)) = (
+                            if let (Some(store), Some(wid)) = (
                                 slot_attempt_store.as_ref(),
                                 slot_wave_id.as_ref(),
-                                current_attempt_seq,
                             ) {
+                                let seq = current_attempt_seq.unwrap_or(1);
+                                if current_attempt_seq.is_none() {
+                                    tracing::warn!(
+                                        wave_id = %wid,
+                                        slot_index = slot_index_local,
+                                        "U1: missing attempt_seq; persisting with seq=1"
+                                    );
+                                }
                                 if let Err(error) = store.record_slot_event_payloads(
                                     wid,
                                     slot_index_local,
                                     seq,
                                     events,
                                 ) {
+                                    persist_ok = false;
                                     tracing::warn!(
                                         wave_id = %wid,
                                         slot_index = slot_index_local,
@@ -2922,6 +2931,28 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                                         "U1: supervisor record_slot_event_payloads failed; \
                                          leaving channel file in place"
                                     );
+                                } else if !events.is_empty() {
+                                    // S1.3: a no-op/default store impl can
+                                    // return Ok without writing. Only
+                                    // delete the live channel when the
+                                    // payload is actually readable back.
+                                    let wrote = store
+                                        .load_slot_event_payloads(wid)
+                                        .ok()
+                                        .is_some_and(|rows| {
+                                            rows.iter().any(|(slot, _, ev)| {
+                                                *slot == slot_index_local && !ev.is_empty()
+                                            })
+                                        });
+                                    if !wrote {
+                                        persist_ok = false;
+                                        tracing::warn!(
+                                            wave_id = %wid,
+                                            slot_index = slot_index_local,
+                                            "U1: payload persist reported Ok but store has no \
+                                             events for this slot; leaving channel file in place"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -2944,6 +2975,14 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                         // is always cleaned up (the "channel must
                         // leave the live dir" invariant is preserved
                         // without blocking dispatch).
+                        //
+                        // S1.3: a store write failure must leave the
+                        // live channel path untouched so a crash in
+                        // the fan-in window can still recover events
+                        // from disk.
+                        if !persist_ok {
+                            break outcome;
+                        }
                         let classified = classify_slot_attempt(&outcome.1, slot_wave_kind);
                         let keep_for_postmortem = matches!(
                             classified.outcome,
@@ -2964,15 +3003,17 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                                 );
                                 let _ = std::fs::remove_file(&current_request.worker_events_path);
                             }
-                        } else if let Err(err) =
-                            std::fs::remove_file(&current_request.worker_events_path)
-                        {
-                            tracing::debug!(
-                                slot_index = slot_index_local,
-                                path = %current_request.worker_events_path.display(),
-                                error = %err,
-                                "U6: failed to remove channel file after persistence (likely already absent)"
-                            );
+                        } else if persist_ok {
+                            if let Err(err) =
+                                std::fs::remove_file(&current_request.worker_events_path)
+                            {
+                                tracing::debug!(
+                                    slot_index = slot_index_local,
+                                    path = %current_request.worker_events_path.display(),
+                                    error = %err,
+                                    "U6: failed to remove channel file after persistence (likely already absent)"
+                                );
+                            }
                         }
                         break outcome;
                     }

@@ -13,6 +13,7 @@
 //! snapshot state without touching the live locks.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -93,9 +94,19 @@ struct SlotRow {
 /// inside the `std::sync::Mutex`. Lock poisoning bubbles up as
 /// `SupervisorStoreError::Storage` so the runtime can fail
 /// closed without panicking across loop iterations.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct InMemorySupervisorStore {
     inner: Mutex<Inner>,
+    fail_slot_payload_writes: AtomicBool,
+}
+
+impl Default for InMemorySupervisorStore {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(Inner::default()),
+            fail_slot_payload_writes: AtomicBool::new(false),
+        }
+    }
 }
 
 impl Clone for InMemorySupervisorStore {
@@ -111,6 +122,9 @@ impl Clone for InMemorySupervisorStore {
             .clone();
         Self {
             inner: Mutex::new(inner),
+            fail_slot_payload_writes: AtomicBool::new(
+                self.fail_slot_payload_writes.load(Ordering::SeqCst),
+            ),
         }
     }
 }
@@ -281,6 +295,13 @@ impl InMemorySupervisorStore {
     /// counterpart arrives in U5.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Test seam (T1.5 / S1.3): fail the next
+    /// `record_slot_event_payloads` writes. Safe to call from
+    /// integration crates; a no-op in production if never used.
+    pub fn set_fail_slot_payload_writes(&self, fail: bool) {
+        self.fail_slot_payload_writes.store(fail, Ordering::SeqCst);
     }
 
     /// Acquire the inner mutex. Lock poisoning is rewritten as
@@ -2201,6 +2222,11 @@ impl SupervisorStore for InMemorySupervisorStore {
         attempt_seq: u32,
         events: &[crate::Event],
     ) -> SupervisorStoreResult<()> {
+        if self.fail_slot_payload_writes.load(Ordering::SeqCst) {
+            return Err(SupervisorStoreError::Storage(
+                "injected slot_event_payloads write failure".to_string(),
+            ));
+        }
         let mut inner = self.lock()?;
         // Re-writing the SAME (wave, slot, attempt) is a no-op:
         // recovery replays may invoke this with the same seq, and
@@ -3233,6 +3259,30 @@ mod tests {
     // no-op when the payload length matches (recovery replays the
     // same boundary) and replaces when it differs (a later attempt
     // produced a different number of events).
+    #[test]
+    fn u1_fail_slot_payload_writes_returns_storage_error() {
+        let s = store();
+        let wave = s
+            .register_wave("u1-fail-write", WaveKind::Exec, 1, 1)
+            .unwrap();
+        s.set_fail_slot_payload_writes(true);
+        let events = vec![crate::Event {
+            topic: "exec.unit.done".to_string(),
+            payload: Some("{}".to_string()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+            system_injected: None,
+        }];
+        s.record_slot_event_payloads(&wave, 0, 1, &events)
+            .expect_err("injected persist failure");
+        assert!(s.load_slot_event_payloads(&wave).unwrap().is_empty());
+    }
+
     #[test]
     fn u1_record_slot_event_payloads_overwrites_same_attempt() {
         let s = store();

@@ -43,10 +43,13 @@
 // * Any I/O / JSON / schema mismatch inside `prepare(...)` is
 //   surfaced as `Err(_)` and `prepare` MUST NOT spawn any worker
 //   when called from the dispatcher path (U3 fail-close).
-// * Drop best-effort removes the registry file. Explicit
-//   `cleanup()` returns the result so the dispatcher can capture
-//   the failure for diagnostics without losing the already-
-//   committed deliverable state.
+// * Drop best-effort removes the registry file only. Worker
+//   channel files are owned by the dispatcher (persist-before-
+//   delete / quarantine); registry cleanup must not delete them
+//   or a persist failure would lose the crash-recovery window.
+// * Explicit `cleanup()` returns the result so the dispatcher
+//   can capture the failure for diagnostics without losing the
+//   already-committed deliverable state.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -975,33 +978,20 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
 }
 
 fn remove_registry_files(guard: &WaveChannelRegistryGuard) -> CleanupOutcome {
-    let mut removed_any = false;
-    for path in &guard.bound_paths {
-        match std::fs::remove_file(path) {
-            Ok(()) => removed_any = true,
-            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-            Err(source) => {
-                eprintln!("wave_channel_registry: failed to remove channel {path:?}: {source}");
-            }
-        }
-    }
+    // S1.3: the dispatcher owns worker channel files
+    // (persist-before-delete / quarantine). Registry cleanup only
+    // removes the registry JSON so a persist failure can leave the
+    // live channel in place for crash recovery before fan-in.
     match std::fs::remove_file(&guard.registry_path) {
-        Ok(()) => removed_any = true,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+        Ok(()) => CleanupOutcome::Removed,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => CleanupOutcome::NotPresent,
         Err(source) => {
             eprintln!(
                 "wave_channel_registry: failed to remove registry {:?}: {source}",
                 guard.registry_path
             );
+            CleanupOutcome::NotPresent
         }
-    }
-    if let Some(dir) = guard.registry_path.parent() {
-        let _ = std::fs::remove_dir(dir);
-    }
-    if removed_any {
-        CleanupOutcome::Removed
-    } else {
-        CleanupOutcome::NotPresent
     }
 }
 
@@ -1278,7 +1268,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_removes_registry_and_channel_files() {
+    fn cleanup_removes_registry_not_channel_files() {
         let tmp = tempfile::TempDir::new().unwrap();
         fs::create_dir_all(ws(&tmp).join(".ralph")).unwrap();
         let bindings = vec![
@@ -1293,12 +1283,15 @@ mod tests {
         for path in guard.bound_paths() {
             assert!(path.is_file());
         }
-        // Cleanup removes all of them.
+        // Cleanup removes the registry JSON only (S1.3).
         let outcome = guard.cleanup();
         assert_eq!(outcome, CleanupOutcome::Removed);
         assert!(!guard.registry_path().exists(), "registry must be removed");
         for path in guard.bound_paths() {
-            assert!(!path.exists(), "channel {path:?} must be removed");
+            assert!(
+                path.exists(),
+                "S1.3: worker channel {path:?} is owned by the dispatcher, not registry cleanup"
+            );
         }
         // Idempotent: second cleanup is a NotPresent.
         let outcome2 = guard.cleanup();
