@@ -2154,6 +2154,17 @@ fn test_parallel_forge_correction_runtime() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// Plan 2026-08-27-1430 U2 (S11 / D5): tester typed failure. The tester
+/// must NOT land `work.failed` directly (deny rule + origin guard); the
+/// rejected attempt resumes the tester, which then emits
+/// `forge.full.verification.failed`, and the forge-failure-handler — the
+/// single business writer — lands the run's only `work.failed`.
+#[test]
+fn test_parallel_forge_tester_typed_failure_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_tester_typed_failure_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// Plan 2026-07-29-005 U7 / S11 (#2): `forge.final.correction.settled`
 /// must only be accepted at `correction_round: 3` (the budget-exhausted
 /// final round). The runtime gate is the schema's `allowed_values: {3}`
@@ -2163,6 +2174,46 @@ fn test_parallel_forge_correction_runtime() {
 #[test]
 fn test_parallel_forge_round_exhaustion_gate_runtime() {
     let yaml = load_scenario("tests/scenarios/parallel_forge_round_exhaustion_gate_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// Plan 2026-08-27-1430 U10 (S19 / S20 / R6 / D3): the four receipt
+/// topics (`forge.exec.development.done`, `forge.full.verified`,
+/// `forge.finalized`, `forge.report.done`) carry bare-topic
+/// `payload_consistency` rules — no precheck, no `.proposed` rewrite —
+/// so false-success and empty-field receipts are rejected at emit time
+/// with zero LLM cost. Each producer emits one bad payload per rule
+/// (each violating exactly one rule so a missing rule is attributable),
+/// is resumed, and then emits the legal payload that advances the
+/// chain. `event_topic_counts` pins every receipt topic to exactly one
+/// accepted event. The rules in the YAML are verbatim copies of the
+/// builtin preset rules (see the file header for the sync contract);
+/// the structural lock for the builtin lives in
+/// `crates/ralph-cli/src/presets.rs::test_parallel_forge_receipt_consistency_rules`.
+#[test]
+fn test_parallel_forge_receipt_consistency_runtime() {
+    let yaml =
+        load_scenario("tests/scenarios/parallel_forge_receipt_consistency_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// Plan 2026-08-27-1430 U4 (S1/S3/S4/S5; R1/R7; D2/D9/D10): the
+/// `forge.worktrees.ready` dual guard. An empty `target_start_sha` is
+/// rejected by the deterministic consistency rule on the PROPOSED topic
+/// before the LLM gate activates; a branch/fingerprint mismatch passes
+/// consistency but is rejected by the synthesized precheck gate; three
+/// rejections exhaust the retry budget and the runtime injects
+/// `forge.plan.blocked{kind=precheck_exhausted}`; only the verbatim
+/// forward lands as an accepted `forge.worktrees.ready` and wakes the
+/// dispatcher exactly once. The consistency rules and the precheck rule
+/// in the YAML are verbatim copies of the builtin preset (see the file
+/// header for the sync contract); the structural lock for the builtin
+/// lives in
+/// `crates/ralph-cli/src/presets.rs::parallel_forge_worktrees_ready_dual_guard`.
+#[test]
+fn test_parallel_forge_worktrees_ready_gate_runtime() {
+    let yaml =
+        load_scenario("tests/scenarios/parallel_forge_worktrees_ready_gate_runtime.yml");
     run_workflow_guard_scenario(yaml);
 }
 

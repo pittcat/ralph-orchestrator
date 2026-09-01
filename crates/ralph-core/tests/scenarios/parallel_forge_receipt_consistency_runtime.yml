@@ -1,0 +1,320 @@
+# Plan 2026-08-27-1430 U10 (S19 / S20 / R6 / D3): the four parallel-forge
+# RECEIPT topics carry deterministic `payload_consistency` rules on their
+# BARE topic names (these topics have no precheck and therefore no
+# `.proposed` rewrite) so a false-success or empty-field receipt is
+# rejected at emit time with zero LLM cost.
+#
+# Topology (abstract fixture mirroring the builtin chain):
+#   forge-dispatcher --(forge.exec.development.done)--> tester
+#   tester           --(forge.full.verified)-->        finalizer
+#   finalizer        --(forge.finalized)-->            reporter
+#   reporter         --(forge.report.done)-->          finisher --(LOOP_COMPLETE)
+#
+# Each producer first emits one bad payload per rule (each bad payload
+# violates exactly ONE rule so a missing rule is attributable), the gate
+# rejects it (reject_with_resume), then emits the legal payload that
+# advances the chain. `event_topic_counts` pins every receipt topic to
+# exactly 1 accepted event; a missing rule lets the bad payload through
+# and the count becomes 2.
+#
+# SYNC CONTRACT (D15): every rule under `payload_consistency.rules`
+# below is a VERBATIM copy of the rule with the same id in
+# `presets/en/parallel-forge.yml` (event_loop.event_policy.payload
+# _consistency), and the four topic schemas mirror
+# `presets/schemas/parallel-forge.yml` required_fields. When the preset
+# changes these rules or required fields, update this file in the same
+# commit. The structural lock for the builtin preset lives in
+# `crates/ralph-cli/src/presets.rs::test_parallel_forge_receipt_consistency_rules`.
+
+name: pf_receipt_consistency_runtime
+description: receipt topics (dev.done / full.verified / finalized / report.done) reject false-success and empty-field payloads via bare-topic payload_consistency rules
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 14
+  hats:
+    forge-dispatcher:
+      subscribes_to:
+        - forge.start
+        - task.resume
+      publishes:
+        - forge.exec.development.done
+      default_publishes: forge.exec.development.done
+    tester:
+      subscribes_to:
+        - forge.exec.development.done
+        - task.resume
+      publishes:
+        - forge.full.verified
+      default_publishes: forge.full.verified
+    finalizer:
+      subscribes_to:
+        - forge.full.verified
+        - task.resume
+      publishes:
+        - forge.finalized
+      default_publishes: forge.finalized
+    reporter:
+      subscribes_to:
+        - forge.finalized
+        - task.resume
+      publishes:
+        - forge.report.done
+      default_publishes: forge.report.done
+    finisher:
+      subscribes_to:
+        - forge.report.done
+      publishes:
+        - LOOP_COMPLETE
+      default_publishes: LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "forge.start"
+    completion_promise: "LOOP_COMPLETE"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      # Schemas mirror presets/schemas/parallel-forge.yml required_fields
+      # so bad payloads are rejected by the consistency gate, never by a
+      # missing-field schema violation.
+      schemas:
+        forge.exec.development.done:
+          required_fields:
+            - execution_plan_path
+            - completed_unit_count
+            - failed_unit_count
+            - plan_key
+          payload: json_object
+        forge.full.verified:
+          required_fields:
+            - verification_report_path
+            - all_required_passed
+            - plan_key
+          payload: json_object
+        forge.finalized:
+          required_fields:
+            - audit_report_path
+            - target_branch
+            - integration_branch
+            - target_commit_sha
+            - finalization_report_path
+            - plan_key
+          payload: json_object
+        forge.report.done:
+          required_fields:
+            - report_path
+            - status
+            - final_audit
+            - plan_key
+          payload: json_object
+      payload_consistency:
+        enabled: true
+        rules:
+          - id: parallel-forge-dev-done-empty-plan
+            topic: forge.exec.development.done
+            when: {field: execution_plan_path, eq: ""}
+            message: "execution_plan_path must be a non-empty path; an empty plan path is a false development-done receipt."
+          - id: parallel-forge-dev-done-nonzero-failed
+            topic: forge.exec.development.done
+            when: {field: failed_unit_count, gt: 0}
+            message: "failed_unit_count must be 0 on forge.exec.development.done; units that reached exec.unit.failed must not be reported as development complete."
+          - id: parallel-forge-full-verified-false
+            topic: forge.full.verified
+            when: {field: all_required_passed, eq: false}
+            message: "all_required_passed=false contradicts the forge.full.verified success receipt; take the failure path instead of emitting a success topic."
+          - id: parallel-forge-full-verified-empty-report
+            topic: forge.full.verified
+            when: {field: verification_report_path, eq: ""}
+            message: "verification_report_path must be a non-empty path to the full-verification report."
+          - id: parallel-forge-finalized-empty-sha
+            topic: forge.finalized
+            when: {field: target_commit_sha, eq: ""}
+            message: "target_commit_sha must be the non-empty post-merge target HEAD SHA."
+          - id: parallel-forge-finalized-empty-target-branch
+            topic: forge.finalized
+            when: {field: target_branch, eq: ""}
+            message: "target_branch must be a non-empty branch name."
+          - id: parallel-forge-finalized-empty-report
+            topic: forge.finalized
+            when: {field: finalization_report_path, eq: ""}
+            message: "finalization_report_path must be a non-empty path to the finalization report."
+          - id: parallel-forge-report-empty-path
+            topic: forge.report.done
+            when: {field: report_path, eq: ""}
+            message: "report_path must be a non-empty path to the manager report."
+          - id: parallel-forge-report-completed-without-accepted-audit
+            topic: forge.report.done
+            when:
+              all:
+                - {field: status, eq: "COMPLETED"}
+                - {field: final_audit, ne: "ACCEPTED"}
+            message: "status=COMPLETED is inconsistent with final_audit!=ACCEPTED; a completed manager report requires an accepted final audit."
+
+mock_responses:
+  # ── Stage 1: forge.exec.development.done (dispatcher) ────────────
+  # iter 1: BAD — empty execution_plan_path (violates
+  # `parallel-forge-dev-done-empty-plan` only) → rejected → resume.
+  - hat: forge-dispatcher
+    text: |
+      <event topic="forge.exec.development.done">
+      {"execution_plan_path":"","completed_unit_count":3,"failed_unit_count":0,"plan_key":"pf-rc-p"}
+      </event>
+  # iter 2: BAD — failed_unit_count=1 with a valid plan path
+  # (violates `parallel-forge-dev-done-nonzero-failed` only).
+  - hat: forge-dispatcher
+    text: |
+      <event topic="forge.exec.development.done">
+      {"execution_plan_path":".ralph/forge/pf-rc-p/execution-plan.yml","completed_unit_count":3,"failed_unit_count":1,"plan_key":"pf-rc-p"}
+      </event>
+  # iter 3: GOOD — accepted; tester wakes.
+  - hat: forge-dispatcher
+    text: |
+      <event topic="forge.exec.development.done">
+      {"execution_plan_path":".ralph/forge/pf-rc-p/execution-plan.yml","completed_unit_count":4,"failed_unit_count":0,"plan_key":"pf-rc-p"}
+      </event>
+  # ── Stage 2: forge.full.verified (tester) ────────────────────────
+  # iter 4: BAD — all_required_passed=false (JSON bool; violates
+  # `parallel-forge-full-verified-false` only) → rejected → resume.
+  - hat: tester
+    text: |
+      <event topic="forge.full.verified">
+      {"verification_report_path":".ralph/forge/pf-rc-p/full-verification.md","all_required_passed":false,"plan_key":"pf-rc-p"}
+      </event>
+  # iter 5: BAD — empty verification_report_path with
+  # all_required_passed=true (violates
+  # `parallel-forge-full-verified-empty-report` only).
+  - hat: tester
+    text: |
+      <event topic="forge.full.verified">
+      {"verification_report_path":"","all_required_passed":true,"plan_key":"pf-rc-p"}
+      </event>
+  # iter 6: GOOD — accepted; finalizer wakes.
+  - hat: tester
+    text: |
+      <event topic="forge.full.verified">
+      {"verification_report_path":".ralph/forge/pf-rc-p/full-verification.md","all_required_passed":true,"plan_key":"pf-rc-p"}
+      </event>
+  # ── Stage 3: forge.finalized (finalizer) ─────────────────────────
+  # iter 7: BAD — empty target_commit_sha (violates
+  # `parallel-forge-finalized-empty-sha` only).
+  - hat: finalizer
+    text: |
+      <event topic="forge.finalized">
+      {"audit_report_path":".ralph/forge/pf-rc-p/final-audit.md","target_branch":"main","integration_branch":"forge/pf-rc-p","target_commit_sha":"","finalization_report_path":".ralph/forge/pf-rc-p/finalization.md","plan_key":"pf-rc-p"}
+      </event>
+  # iter 8: BAD — empty target_branch (violates
+  # `parallel-forge-finalized-empty-target-branch` only).
+  - hat: finalizer
+    text: |
+      <event topic="forge.finalized">
+      {"audit_report_path":".ralph/forge/pf-rc-p/final-audit.md","target_branch":"","integration_branch":"forge/pf-rc-p","target_commit_sha":"0123456789abcdef0123456789abcdef01234567","finalization_report_path":".ralph/forge/pf-rc-p/finalization.md","plan_key":"pf-rc-p"}
+      </event>
+  # iter 9: BAD — empty finalization_report_path (violates
+  # `parallel-forge-finalized-empty-report` only).
+  - hat: finalizer
+    text: |
+      <event topic="forge.finalized">
+      {"audit_report_path":".ralph/forge/pf-rc-p/final-audit.md","target_branch":"main","integration_branch":"forge/pf-rc-p","target_commit_sha":"0123456789abcdef0123456789abcdef01234567","finalization_report_path":"","plan_key":"pf-rc-p"}
+      </event>
+  # iter 10: GOOD — accepted; reporter wakes.
+  - hat: finalizer
+    text: |
+      <event topic="forge.finalized">
+      {"audit_report_path":".ralph/forge/pf-rc-p/final-audit.md","target_branch":"main","integration_branch":"forge/pf-rc-p","target_commit_sha":"0123456789abcdef0123456789abcdef01234567","finalization_report_path":".ralph/forge/pf-rc-p/finalization.md","plan_key":"pf-rc-p"}
+      </event>
+  # ── Stage 4: forge.report.done (reporter) ────────────────────────
+  # iter 11: BAD — empty report_path (violates
+  # `parallel-forge-report-empty-path` only; final_audit=ACCEPTED
+  # keeps the audit-consistency rule at Miss).
+  - hat: reporter
+    text: |
+      <event topic="forge.report.done">
+      {"report_path":"","status":"COMPLETED","final_audit":"ACCEPTED","plan_key":"pf-rc-p"}
+      </event>
+  # iter 12: BAD — status=COMPLETED while final_audit=REJECTED
+  # (violates `parallel-forge-report-completed-without-accepted-audit`
+  # only).
+  - hat: reporter
+    text: |
+      <event topic="forge.report.done">
+      {"report_path":"docs/reports/2026-08-31-pf-rc-p-manager-report.md","status":"COMPLETED","final_audit":"REJECTED","plan_key":"pf-rc-p"}
+      </event>
+  # iter 13: GOOD — accepted; finisher wakes.
+  - hat: reporter
+    text: |
+      <event topic="forge.report.done">
+      {"report_path":"docs/reports/2026-08-31-pf-rc-p-manager-report.md","status":"COMPLETED","final_audit":"ACCEPTED","plan_key":"pf-rc-p"}
+      </event>
+  # iter 14: finisher honors the completion promise.
+  - hat: finisher
+    text: |
+      <event topic="LOOP_COMPLETE">
+      {"reason":"receipt chain consistent"}
+      </event>
+
+expected:
+  iterations: 14
+  # Exactly the four GOOD receipts are accepted; every BAD payload is
+  # rejected by its consistency rule. Like `accept_consistent_fix_done`,
+  # the terminal LOOP_COMPLETE is honored via check_completion_event
+  # (`completion: true`) and is not asserted in seen_topics.
+  events:
+    - topic: forge.exec.development.done
+    - topic: forge.full.verified
+    - topic: forge.finalized
+    - topic: forge.report.done
+  event_topic_counts:
+    - topic: forge.exec.development.done
+      count: 1
+    - topic: forge.full.verified
+      count: 1
+    - topic: forge.finalized
+      count: 1
+    - topic: forge.report.done
+      count: 1
+  absent_events:
+    - topic: work.failed
+    - topic: forge.plan.blocked
+  completion: true
+  assert_state:
+    # Every rejected receipt queues a recoverable correction block
+    # (reason_code carries the policy-stage prefix) at its own
+    # iteration; the loop resumes the producer instead of honoring
+    # the rejected event.
+    - at_iteration: 1
+      correction_block_present:
+        reason_code_prefix: "policy:"
+        needs_escalation: false
+    - at_iteration: 2
+      correction_block_present:
+        reason_code_prefix: "policy:"
+        needs_escalation: false
+    - at_iteration: 4
+      correction_block_present:
+        reason_code_prefix: "policy:"
+        needs_escalation: false
+    - at_iteration: 5
+      correction_block_present:
+        reason_code_prefix: "policy:"
+        needs_escalation: false
+    - at_iteration: 7
+      correction_block_present:
+        reason_code_prefix: "policy:"
+        needs_escalation: false
+    - at_iteration: 8
+      correction_block_present:
+        reason_code_prefix: "policy:"
+        needs_escalation: false
+    - at_iteration: 9
+      correction_block_present:
+        reason_code_prefix: "policy:"
+        needs_escalation: false
+    - at_iteration: 11
+      correction_block_present:
+        reason_code_prefix: "policy:"
+        needs_escalation: false
+    - at_iteration: 12
+      correction_block_present:
+        reason_code_prefix: "policy:"
+        needs_escalation: false

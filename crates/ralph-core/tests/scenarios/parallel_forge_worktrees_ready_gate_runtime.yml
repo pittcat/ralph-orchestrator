@@ -1,0 +1,286 @@
+# Plan 2026-08-27-1430 U4 (S1/S3/S4/S5; R1/R7; D2/D9/D10):
+# `forge.worktrees.ready` dual guard — deterministic payload_consistency
+# on the PROPOSED topic first, then the synthesized LLM precheck gate.
+#
+# Flow after normalize():
+#   worktree publishes forge.worktrees.ready.proposed (the mock writes the
+#   post-rewrite topic directly, mirroring the CLI emit rewrite) →
+#   precheck-forge.worktrees.ready gate forwards forge.worktrees.ready
+#   verbatim (pass) or emits forge.worktrees.ready.rejected (fail) →
+#   runtime task.resume targets the worktree hat on rejection → three
+#   rejections exhaust retry_budget=3 and the runtime injects
+#   forge.plan.blocked{kind=precheck_exhausted} → finisher (the cleanup
+#   analogue) consumes forge.plan.blocked and closes the loop.
+#
+# Segments:
+#   iter 1-2 : empty target_start_sha — consistency rule
+#              `parallel-forge-worktrees-ready-empty-start-sha` Hits on the
+#              proposed topic BEFORE the gate activates (activation_hats
+#              pins worktree→worktree with no gate in between).
+#   iter 2-4 : legal payload — gate forwards verbatim, accepted
+#              forge.worktrees.ready lands exactly once and the dispatcher
+#              runs exactly once (event_topic_counts).
+#   iter 6-7 : target_branch != RALPH_CURRENT_BRANCH — consistency Misses,
+#              the gate rejects with failed_checks=[target_branch_mismatch].
+#   iter 8-11: fingerprint mismatch twice more — the third rejection
+#              exhausts the budget; runtime injects forge.plan.blocked.
+#
+# SYNC CONTRACT (D15): the four rules under `payload_consistency.rules`
+# and the `precheck.rules."forge.worktrees.ready"` block below are
+# VERBATIM copies of the same entries in `presets/en/parallel-forge.yml`
+# (event_loop.event_policy.payload_consistency / event_loop.precheck),
+# and the `forge.worktrees.ready` schema mirrors
+# `presets/schemas/parallel-forge.yml` required_fields. When the preset
+# changes these rules, the precheck key config, or the required fields,
+# update this file in the same commit. The structural lock for the
+# builtin preset lives in
+# `crates/ralph-cli/src/presets.rs::parallel_forge_worktrees_ready_dual_guard`.
+
+name: pf_worktrees_ready_gate_runtime
+description: forge.worktrees.ready dual guard — consistency on .proposed first, then precheck gate; exhaust escalates to forge.plan.blocked
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 14
+  hats:
+    worktree:
+      subscribes_to:
+        - forge.start
+        - task.resume
+        - fanout.request
+      publishes:
+        - forge.worktrees.ready
+    forge-dispatcher:
+      subscribes_to:
+        - forge.worktrees.ready
+      publishes:
+        - exec.unit.ready
+    scheduler:
+      subscribes_to:
+        - exec.unit.ready
+      publishes:
+        - fanout.request
+    finisher:
+      subscribes_to:
+        - forge.plan.blocked
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "forge.start"
+    completion_promise: "LOOP_COMPLETE"
+    precheck:
+      enabled: true
+      rules:
+        forge.worktrees.ready:
+          prompt:
+            - "Step 1: open the `worktree_map_path` file referenced by the payload. Reject (forge.worktrees.ready.rejected) with failed_check `worktree_map_missing` if `test -f` fails or the file is empty/unreadable."
+            - "Step 2: read `RALPH_CURRENT_BRANCH` from the environment. Reject with failed_check `target_branch_mismatch` if payload `target_branch` does not equal it exactly."
+            - "Step 3: run `git -C \"$RALPH_WORKSPACE_ROOT\" rev-parse HEAD`. Reject with failed_check `target_start_sha_mismatch` if the result does not equal payload `target_start_sha`."
+            - "Step 4: recompute the status fingerprint in `$RALPH_WORKSPACE_ROOT` exactly as the producer did: `git status --porcelain=v1 --untracked-files=all`, drop every line whose path (for renames, the path right of \" -> \"; otherwise the path after the status code) starts with `.ralph/`, join the kept lines with \"\\n\" plus one trailing \"\\n\" when non-empty (empty string when none), then hex(SHA-256) of the UTF-8 bytes. Reject with failed_check `target_status_fingerprint_mismatch` if it does not equal payload `target_status_fingerprint`."
+            - "Step 5: hard thresholds — every check above must pass; no partial credit. If ALL checks pass, re-emit `forge.worktrees.ready` with the payload forwarded VERBATIM (every field copied exactly, no rewrites). If ANY check fails, emit `forge.worktrees.ready.rejected` with `failed_checks` (using ONLY the four names above) and `reason` (one actionable sentence naming the gap)."
+          on_fail:
+            target: "worktree"
+            retry_budget: 3
+            on_exhausted: "forge.plan.blocked(reason=precheck_failed)"
+            reason: "worktree_identity_evidence_insufficient"
+          recovery_guidance:
+            common:
+              - "open worktree_map_path and recompute target_start_sha / target_status_fingerprint from $RALPH_WORKSPACE_ROOT; do not only rewrite payload fields"
+              - "rebuild forge.worktrees.ready from the recomputed evidence and rerun ralph emit forge.worktrees.ready --policy-check before a real emit"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      # Schema mirrors presets/schemas/parallel-forge.yml required_fields
+      # so bad payloads are rejected by the consistency gate or the
+      # precheck gate, never by a missing-field schema violation.
+      schemas:
+        forge.worktrees.ready:
+          required_fields:
+            - execution_plan_path
+            - worktree_map_path
+            - integration_branch
+            - target_branch
+            - target_start_sha
+            - target_status_fingerprint
+            - base_commit
+            - plan_key
+          payload: json_object
+      # SYNC CONTRACT: verbatim copies of the four U4 rules in
+      # `presets/en/parallel-forge.yml`; the rule topic is the PROPOSED
+      # topic so the deterministic gate fires before the LLM gate (D10).
+      payload_consistency:
+        enabled: true
+        rules:
+          - id: parallel-forge-worktrees-ready-empty-target-branch
+            topic: forge.worktrees.ready.proposed
+            when: {field: target_branch, eq: ""}
+            message: "target_branch must be the non-empty value of RALPH_CURRENT_BRANCH; an empty target branch breaks the fan-out identity contract."
+          - id: parallel-forge-worktrees-ready-empty-start-sha
+            topic: forge.worktrees.ready.proposed
+            when: {field: target_start_sha, eq: ""}
+            message: "target_start_sha must be a non-empty commit SHA (`git rev-parse HEAD` in RALPH_WORKSPACE_ROOT); an empty start SHA makes target-drift detection impossible."
+          - id: parallel-forge-worktrees-ready-empty-fingerprint
+            topic: forge.worktrees.ready.proposed
+            when: {field: target_status_fingerprint, eq: ""}
+            message: "target_status_fingerprint must be a non-empty SHA-256 of the canonical status porcelain; an empty fingerprint makes target-drift detection impossible."
+          - id: parallel-forge-worktrees-ready-empty-map-path
+            topic: forge.worktrees.ready.proposed
+            when: {field: worktree_map_path, eq: ""}
+            message: "worktree_map_path must be a non-empty path to the worktree map artifact; the dispatcher and the evidence gate both read it."
+
+mock_responses:
+  # iter 1: BAD — empty target_start_sha (violates
+  # `parallel-forge-worktrees-ready-empty-start-sha` only; every other
+  # field is valid so no other rule can fire) → consistency rejects the
+  # proposed event BEFORE the gate hat activates → runtime resumes the
+  # worktree hat.
+  - hat: worktree
+    text: |
+      <event topic="forge.worktrees.ready.proposed">
+      {"plan_key":"pf-wg-p","worktree_map_path":".ralph/forge/pf-wg-p/worktree-map.yml","execution_plan_path":".ralph/forge/pf-wg-p/execution-plan.yml","integration_branch":"forge/pf-wg-p","target_branch":"main","target_start_sha":"","target_status_fingerprint":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","base_commit":"9999999988888888777777776666666655555555"}
+      </event>
+  # iter 2: GOOD — consistency Misses, the proposed event is accepted and
+  # the gate activates.
+  - hat: worktree
+    text: |
+      <event topic="forge.worktrees.ready.proposed">
+      {"plan_key":"pf-wg-p","worktree_map_path":".ralph/forge/pf-wg-p/worktree-map.yml","execution_plan_path":".ralph/forge/pf-wg-p/execution-plan.yml","integration_branch":"forge/pf-wg-p","target_branch":"main","target_start_sha":"aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee","target_status_fingerprint":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","base_commit":"9999999988888888777777776666666655555555"}
+      </event>
+  # iter 3: gate forwards the payload VERBATIM as accepted
+  # forge.worktrees.ready → the dispatcher wakes.
+  - hat: precheck-forge.worktrees.ready
+    text: |
+      <event topic="forge.worktrees.ready">
+      {"plan_key":"pf-wg-p","worktree_map_path":".ralph/forge/pf-wg-p/worktree-map.yml","execution_plan_path":".ralph/forge/pf-wg-p/execution-plan.yml","integration_branch":"forge/pf-wg-p","target_branch":"main","target_start_sha":"aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee","target_status_fingerprint":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","base_commit":"9999999988888888777777776666666655555555"}
+      </event>
+  # iter 4: dispatcher fans out the first wave exactly once.
+  - hat: forge-dispatcher
+    text: |
+      <event topic="exec.unit.ready">
+      {"wave_id":"pf-wg-wave-1","slot_index":0,"task_id":"task-pf-wg-p-u1","unit_id":"U1","plan_key":"pf-wg-p"}
+      </event>
+  # iter 5: scheduler requests the next fan-out round (stands in for the
+  # preset's lazy-wave prepare path so the worktree hat activates again).
+  - hat: scheduler
+    text: |
+      <event topic="fanout.request">
+      {"plan_key":"pf-wg-p","wave":2}
+      </event>
+  # iter 6: BAD — target_branch != RALPH_CURRENT_BRANCH. All four
+  # consistency rules Miss (branch is non-empty), so the proposed event
+  # reaches the gate.
+  - hat: worktree
+    text: |
+      <event topic="forge.worktrees.ready.proposed">
+      {"plan_key":"pf-wg-p","worktree_map_path":".ralph/forge/pf-wg-p/worktree-map.yml","execution_plan_path":".ralph/forge/pf-wg-p/execution-plan.yml","integration_branch":"forge/pf-wg-p","target_branch":"wrong-branch","target_start_sha":"aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee","target_status_fingerprint":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","base_commit":"9999999988888888777777776666666655555555"}
+      </event>
+  # iter 7: gate rejects (rejection 1 of 3) → runtime resumes worktree.
+  - hat: precheck-forge.worktrees.ready
+    text: |
+      <event topic="forge.worktrees.ready.rejected">
+      {"failed_checks":["target_branch_mismatch"],"reason":"payload target_branch wrong-branch != RALPH_CURRENT_BRANCH main","synthetic":false}
+      </event>
+  # iter 8: BAD — branch fixed, but the fingerprint no longer matches the
+  # recomputed porcelain → gate activates again.
+  - hat: worktree
+    text: |
+      <event topic="forge.worktrees.ready.proposed">
+      {"plan_key":"pf-wg-p","worktree_map_path":".ralph/forge/pf-wg-p/worktree-map.yml","execution_plan_path":".ralph/forge/pf-wg-p/execution-plan.yml","integration_branch":"forge/pf-wg-p","target_branch":"main","target_start_sha":"aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee","target_status_fingerprint":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","base_commit":"9999999988888888777777776666666655555555"}
+      </event>
+  # iter 9: gate rejects (rejection 2 of 3).
+  - hat: precheck-forge.worktrees.ready
+    text: |
+      <event topic="forge.worktrees.ready.rejected">
+      {"failed_checks":["target_status_fingerprint_mismatch"],"reason":"recomputed fingerprint differs from payload","synthetic":false}
+      </event>
+  # iter 10: BAD — fingerprint still wrong.
+  - hat: worktree
+    text: |
+      <event topic="forge.worktrees.ready.proposed">
+      {"plan_key":"pf-wg-p","worktree_map_path":".ralph/forge/pf-wg-p/worktree-map.yml","execution_plan_path":".ralph/forge/pf-wg-p/execution-plan.yml","integration_branch":"forge/pf-wg-p","target_branch":"main","target_start_sha":"aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee","target_status_fingerprint":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","base_commit":"9999999988888888777777776666666655555555"}
+      </event>
+  # iter 11: gate rejects (rejection 3 of 3) → retry budget exhausted →
+  # runtime injects forge.plan.blocked{kind=precheck_exhausted}; the
+  # finisher (cleanup analogue) wakes.
+  - hat: precheck-forge.worktrees.ready
+    text: |
+      <event topic="forge.worktrees.ready.rejected">
+      {"failed_checks":["target_status_fingerprint_mismatch"],"reason":"recomputed fingerprint still differs from payload","synthetic":false}
+      </event>
+  # iter 12: finisher honors the completion promise.
+  - hat: finisher
+    text: |
+      <event topic="LOOP_COMPLETE">
+      {"reason":"blocked reported"}
+      </event>
+
+expected:
+  iterations: 12
+  events:
+    - topic: forge.worktrees.ready
+    - topic: forge.worktrees.ready.rejected
+    - topic: forge.plan.blocked
+  event_topic_counts:
+    # Only the verbatim-forwarded legal payload lands as accepted; the
+    # empty-sha, branch-mismatch, and fingerprint-mismatch proposals never
+    # reach the accepted topic.
+    - topic: forge.worktrees.ready
+      count: 1
+    # The dispatcher runs exactly once — on the accepted event only.
+    - topic: exec.unit.ready
+      count: 1
+    # Four proposals are accepted (legal + branch-mismatch + two
+    # fingerprint mismatches); the empty-sha proposal is rejected by
+    # consistency before acceptance.
+    - topic: forge.worktrees.ready.proposed
+      count: 4
+    - topic: forge.worktrees.ready.rejected
+      count: 3
+  payload_matches:
+    # The FIRST rejection is the branch mismatch — the gate, not the
+    # consistency layer, owns identity mismatches (S3).
+    - topic: forge.worktrees.ready.rejected
+      occurrence: 1
+      fields:
+        failed_checks: ["target_branch_mismatch"]
+  activation_hats:
+    # Exactly four gate activations (== max_activations = budget 3 + 1):
+    # one verbatim forward plus three rejections. The empty-sha proposal
+    # at iteration 1 is rejected by the consistency rule and never reaches
+    # the gate — proven jointly by this list (no gate activation between
+    # the first worktree activation and the legal proposal's processing)
+    # and by event_topic_counts pinning `.proposed` to 4 (not 5).
+    # Iteration 2 has NO activation in this runner: a policy-layer
+    # rejection delivers the correction through the producer's next
+    # prompt context, not through a bus event, so `next_hat` finds no
+    # pending trigger; the runner still consumes the producer's queued
+    # mock (the legal proposal), which is what activates the gate at
+    # iteration 3. The same mechanics drive the receipt-consistency
+    # scenario's producer re-emits.
+    - worktree
+    - precheck-forge.worktrees.ready
+    - forge-dispatcher
+    - scheduler
+    - worktree
+    - precheck-forge.worktrees.ready
+    - worktree
+    - precheck-forge.worktrees.ready
+    - worktree
+    - precheck-forge.worktrees.ready
+    - finisher
+  prompt_contains:
+    # The finisher's prompt carries the injected blocked payload verbatim,
+    # proving kind=precheck_exhausted on forge.plan.blocked (S5).
+    - hat: finisher
+      substrings:
+        - "forge.plan.blocked"
+        - "precheck_exhausted"
+  recovery_contains:
+    - "precheck_exhausted"
+  absent_events:
+    # The gate stays inside its budget: 4 activations == max_activations
+    # (retry_budget 3 + 1), so no hat-exhaustion event fires.
+    - topic: precheck-forge.worktrees.ready.exhausted
+  completion: true

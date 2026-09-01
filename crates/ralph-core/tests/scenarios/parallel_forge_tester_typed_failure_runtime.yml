@@ -1,0 +1,139 @@
+# Plan 2026-08-27-1430 U2 (S11 / D5): tester typed failure — work.failed
+# single writer.
+#
+# The hat topology, topic_deny_rules and schemas below are copied from
+# `presets/en/parallel-forge.yml` + `presets/schemas/parallel-forge.yml`
+# (mini-loop mirror, per plan D15); keep them in sync with the builtin
+# preset when the failure path changes.
+#
+# Flow under test:
+#   1. pf-driver fans out `forge.exec.development.done`.
+#   2. pf-tester (activation 1) tries the legacy shortcut: emit the
+#      terminal `work.failed` directly. Under the single-writer contract
+#      this MUST be rejected (topic_deny_rules + origin guard: tester no
+#      longer declares `work.failed` in publishes) — it never lands in
+#      seen_topics, and the runtime resumes the tester.
+#   3. pf-tester (activation 2, after task.resume) emits the typed
+#      failure topic `forge.full.verification.failed`.
+#   4. pf-failure-handler consumes it and emits the one and only
+#      `work.failed` of the run.
+#   5. pf-reporter closes with LOOP_COMPLETE.
+#
+# Assertions:
+#   - `forge.full.verification.failed` is accepted exactly once.
+#   - `work.failed` is accepted exactly once, and only after the
+#     failure handler activated (activation_hats pins the order:
+#     tester, tester-resumed, handler, reporter).
+#   - the run completes.
+
+name: parallel_forge_tester_typed_failure_runtime
+description: 'tester full-gate failure routes through forge.full.verification.failed; only forge-failure-handler lands work.failed'
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    required_events:
+      - LOOP_COMPLETE
+    starting_event: forge.start
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      # Mirror of presets/en/parallel-forge.yml topic_deny_rules (U2):
+      # only forge-failure-handler may publish work.failed.
+      topic_deny_rules:
+        - {hat_id: pf-tester, topic: work.failed}
+      schemas:
+        forge.exec.development.done:
+          payload: json_object
+        # Mirror of presets/schemas/parallel-forge.yml
+        # forge.full.verification.failed (required_fields locked by U2).
+        forge.full.verification.failed:
+          required_fields:
+            - plan_key
+            - verification_report_path
+            - failure_fingerprint
+            - context_artifact_path
+            - forge_artifact_root
+            - reason
+          payload: json_object
+        work.failed:
+          required_fields:
+            - reason
+            - plan_path
+            - context_artifact_path
+            - forge_artifact_root
+            - plan_key
+          payload: json_object
+  hats:
+    pf-driver:
+      subscribes_to: [forge.start]
+      publishes: [forge.exec.development.done]
+    # Mirrors the tester hat: publishes the typed failure topic, never
+    # work.failed. task.resume re-activates the tester after the
+    # rejected direct work.failed attempt.
+    pf-tester:
+      subscribes_to: [forge.exec.development.done, task.resume]
+      publishes: [forge.full.verified, forge.full.verification.failed]
+    # Mirrors forge-failure-handler: sole business writer of work.failed.
+    pf-failure-handler:
+      subscribes_to: [forge.verification.failed, forge.full.verification.failed]
+      publishes: [forge.correction.requested, forge.final.correction.settled, forge.plan.blocked, work.failed]
+    pf-reporter:
+      subscribes_to: [work.failed]
+      publishes: [LOOP_COMPLETE]
+
+mock_responses:
+  - hat: pf-driver
+    text: |
+      <event topic="forge.exec.development.done">
+      {"plan_key":"pf-u2","execution_plan_path":".ralph/forge/pf-u2/execution-plan.yml"}
+      </event>
+  # Activation 1: the tester attempts the forbidden direct terminal emit.
+  # The deny rule / origin guard must reject it; it must NOT land.
+  - hat: pf-tester
+    text: |
+      <event topic="work.failed">
+      {"reason":"full gate failed","plan_path":"docs/plans/pf-u2.md","context_artifact_path":".ralph/forge/pf-u2/failures/tester-failed.md","forge_artifact_root":".ralph/forge/pf-u2","plan_key":"pf-u2"}
+      </event>
+  # Activation 2 (after task.resume): the tester emits the typed failure.
+  - hat: pf-tester
+    text: |
+      <event topic="forge.full.verification.failed">
+      {"plan_key":"pf-u2","verification_report_path":".ralph/forge/pf-u2/full-verification.md","failure_fingerprint":"full:cargo-nextest:exit-101","context_artifact_path":".ralph/forge/pf-u2/failures/tester-failed.md","forge_artifact_root":".ralph/forge/pf-u2","reason":"full regression failed: cargo nextest exit 101"}
+      </event>
+  - hat: pf-failure-handler
+    text: |
+      <event topic="work.failed">
+      {"reason":"full regression failed: cargo nextest exit 101","plan_path":"docs/plans/pf-u2.md","context_artifact_path":".ralph/forge/pf-u2/failures/forge-failure-handler-failed.md","forge_artifact_root":".ralph/forge/pf-u2","plan_key":"pf-u2"}
+      </event>
+  - hat: pf-reporter
+    text: |
+      <event topic="LOOP_COMPLETE">
+      </event>
+
+expected:
+  iterations: 5
+  events:
+    - topic: forge.exec.development.done
+    - topic: forge.full.verification.failed
+    - topic: work.failed
+    - topic: LOOP_COMPLETE
+  absent_events:
+    - topic: forge.plan.blocked
+    - topic: forge.correction.requested
+  event_topic_counts:
+    - topic: forge.full.verification.failed
+      count: 1
+    - topic: work.failed
+      count: 1
+  activation_hats:
+    - pf-driver
+    - pf-tester
+    - pf-tester
+    - pf-failure-handler
+    - pf-reporter
+  completion: true
