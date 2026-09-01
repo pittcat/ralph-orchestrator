@@ -1,0 +1,54 @@
+name: parallel_forge_work_failed_gate_runtime
+description: terminal failure evidence rejects an incomplete dead-end and then forwards a proven failure
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 8
+  hats:
+    handler:
+      subscribes_to: [forge.start, task.resume]
+      publishes: [work.failed]
+    finisher:
+      subscribes_to: [work.failed]
+      publishes: [LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: forge.start
+    completion_promise: LOOP_COMPLETE
+    precheck:
+      enabled: true
+      rules:
+        work.failed:
+          prompt: ["audit terminal failure evidence and scores"]
+          on_fail:
+            target: handler
+            retry_budget: 3
+            on_exhausted: "plan.blocked(reason=precheck_failed)"
+            reason: dead_end_evidence_insufficient
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        work.failed:
+          required_fields: [reason, plan_path, context_artifact_path, forge_artifact_root, plan_key, dead_end_confidence, dead_end_evidence_coverage, dead_end_evidence_file, failure_evidence_status, correction_status, dead_end_gate_passed]
+          payload: json_object
+mock_responses:
+  - hat: handler
+    text: |
+      <event topic="work.failed.proposed">{"reason":"failed","plan_path":"docs/plans/p.md","context_artifact_path":"","forge_artifact_root":".ralph/forge/pf","plan_key":"pf","dead_end_confidence":95,"dead_end_evidence_coverage":80,"dead_end_evidence_file":".ralph/forge/pf/failure.md","failure_evidence_status":"complete","correction_status":"exhausted","dead_end_gate_passed":true}</event>
+  - hat: precheck-work.failed
+    text: |
+      <event topic="work.failed.rejected">{"failed_checks":["missing_context"],"reason":"context evidence is required","synthetic":false}</event>
+  - hat: handler
+    text: |
+      <event topic="work.failed.proposed">{"reason":"failed","plan_path":"docs/plans/p.md","context_artifact_path":".ralph/forge/pf/context.md","forge_artifact_root":".ralph/forge/pf","plan_key":"pf","dead_end_confidence":95,"dead_end_evidence_coverage":80,"dead_end_evidence_file":".ralph/forge/pf/failure.md","failure_evidence_status":"complete","correction_status":"exhausted","dead_end_gate_passed":true}</event>
+  - hat: precheck-work.failed
+    text: |
+      <event topic="work.failed">{"reason":"failed","plan_path":"docs/plans/p.md","context_artifact_path":".ralph/forge/pf/context.md","forge_artifact_root":".ralph/forge/pf","plan_key":"pf","dead_end_confidence":95,"dead_end_evidence_coverage":80,"dead_end_evidence_file":".ralph/forge/pf/failure.md","failure_evidence_status":"complete","correction_status":"exhausted","dead_end_gate_passed":true}</event>
+  - hat: finisher
+    text: |
+      <event topic="LOOP_COMPLETE">{"reason":"failure accepted"}</event>
+expected:
+  iterations: 5
+  completion: true
+  events: [{topic: work.failed.rejected}, {topic: work.failed}, {topic: LOOP_COMPLETE}]

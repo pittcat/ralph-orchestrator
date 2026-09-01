@@ -1,0 +1,81 @@
+version: 1
+# Dynamic recovery contract: the initial fan-out gate rejects once, then the
+# producer re-emits corrected evidence and follows the successful handoff.
+scenarios:
+  - name: fanout-recovery
+    fixture_files:
+      - path: docs/plans/verify-pf.md
+        content: "# Verification plan\n"
+      - path: .ralph/forge/pf/development-plan.md
+        content: "# Development plan\n"
+      - path: .ralph/forge/pf/execution-plan.yml
+        content: |
+          version: 1
+          plan_key: pf
+          units:
+            - id: U1
+              title: Verification unit
+              depends_on: []
+              execution_wave: 1
+              integration_order: 1
+            - id: U2
+              title: Parallel verification unit
+              depends_on: []
+              execution_wave: 1
+              integration_order: 2
+      - path: .ralph/forge/pf/worktree-map.yml
+        content: "units: []\n"
+    responses:
+      - hat: inspector
+        output: '<event topic="forge.plan.inspected">{"plan_path":"docs/plans/verify-pf.md","inspection_report_path":".ralph/forge/pf/inspection.md","plan_usable":true,"plan_key":"pf"}</event>'
+        success: true
+      - hat: planner
+        output: '<event topic="forge.plan.ready">{"plan_path":"docs/plans/verify-pf.md","development_plan_path":".ralph/forge/pf/development-plan.md","execution_plan_path":".ralph/forge/pf/execution-plan.yml","plan_key":"pf"}</event>'
+        success: true
+      - hat: guardian
+        output: '<event topic="forge.concurrency.approved">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","approval_report_path":".ralph/forge/pf/concurrency-approval.md","approved":true}</event>'
+        success: true
+      - hat: worktree
+        output: '<event topic="forge.worktrees.ready">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","worktree_map_path":".ralph/forge/pf/worktree-map.yml","integration_branch":"forge/pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","base_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","plan_key":"pf"}</event>'
+        success: true
+      - hat: precheck-forge.worktrees.ready
+        output: '<event topic="forge.worktrees.ready.rejected">{"failed_checks":["target_status_fingerprint_mismatch"],"reason":"recompute the target fingerprint","synthetic":false}</event>'
+        success: true
+      - hat: worktree
+        output: '<event topic="forge.worktrees.ready.proposed">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","worktree_map_path":".ralph/forge/pf/worktree-map.yml","integration_branch":"forge/pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","base_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","plan_key":"pf"}</event>'
+        success: true
+      - hat: precheck-forge.worktrees.ready
+        output: '<event topic="forge.worktrees.ready">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","worktree_map_path":".ralph/forge/pf/worktree-map.yml","integration_branch":"forge/pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","base_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","plan_key":"pf"}</event>'
+        success: true
+      - hat: forge-dispatcher
+        output: '<event topic="forge.exec.development.done">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","completed_unit_count":1,"failed_unit_count":0,"plan_key":"pf"}</event>'
+        success: true
+      - hat: tester
+        output: '<event topic="forge.full.verified">{"verification_report_path":".ralph/forge/pf/full-verification.md","all_required_passed":true,"plan_key":"pf"}</event>'
+        success: true
+      - hat: auditor
+        output: '<event topic="forge.audit.done">{"verdict":"ACCEPTED","audit_report_path":".ralph/forge/pf/final-audit.md","plan_key":"pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","integration_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}</event>'
+        success: true
+      - hat: precheck-forge.audit.done
+        output: '<event topic="forge.audit.done">{"verdict":"ACCEPTED","audit_report_path":".ralph/forge/pf/final-audit.md","plan_key":"pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","integration_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}</event>'
+        success: true
+      - hat: finalizer
+        output: '<event topic="forge.finalized">{"audit_report_path":".ralph/forge/pf/final-audit.md","target_branch":"main","integration_branch":"forge/pf","target_commit_sha":"cccccccccccccccccccccccccccccccccccccccc","finalization_report_path":".ralph/forge/pf/finalization.md","plan_key":"pf"}</event>'
+        success: true
+      - hat: cleanup
+        output: '<event topic="forge.cleanup.done">{"cleanup_report_path":".ralph/forge/pf/cleanup.md","cleanup_status":"completed","attempted_count":1,"cleaned_count":1,"pending_count":0,"plan_key":"pf"}</event>'
+        success: true
+      - hat: reporter
+        output: |
+          <event topic="forge.report.done">{"report_path":"docs/reports/pf.md","status":"COMPLETED","final_audit":"ACCEPTED","plan_key":"pf"}</event>
+          <event topic="LOOP_COMPLETE">{"report_path":"docs/reports/pf.md"}</event>
+        success: true
+    expect:
+      start_event: forge.start
+      accepted_events: [forge.plan.inspected, forge.plan.ready, forge.concurrency.approved, forge.worktrees.ready, forge.worktrees.ready.rejected, forge.exec.development.done, forge.full.verified, forge.audit.done, forge.finalized, forge.cleanup.done, forge.report.done, LOOP_COMPLETE]
+      forbidden_events: [forge.plan.blocked, work.failed]
+      terminal: success
+      terminal_topic: LOOP_COMPLETE
+    limits:
+      max_steps: 18
+      no_progress_steps: 3

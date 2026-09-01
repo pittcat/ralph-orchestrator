@@ -1,0 +1,61 @@
+name: parallel_forge_wave_settled_gate_runtime
+description: settlement rejects empty task evidence before task projection and then forwards a valid batch
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 8
+  hats:
+    integrator:
+      subscribes_to: [forge.start, task.resume]
+      publishes: [forge.wave.settled]
+    finisher:
+      subscribes_to: [forge.wave.settled]
+      publishes: [LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: forge.start
+    completion_promise: LOOP_COMPLETE
+    precheck:
+      enabled: true
+      rules:
+        forge.wave.settled:
+          prompt: ["verify settlement log and live task IDs"]
+          on_fail:
+            target: integrator
+            retry_budget: 3
+            on_exhausted: "plan.blocked(reason=precheck_failed)"
+            reason: wave_settlement_evidence_insufficient
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        forge.wave.settled:
+          required_fields: [wave_id, wave_index, settled_task_ids, settled_unit_ids, verified_base_commit, plan_key, settlement_log_path]
+          field_types: {settled_task_ids: array, settled_unit_ids: array}
+          payload: json_object
+mock_responses:
+  - hat: integrator
+    text: |
+      <event topic="forge.wave.settled.proposed">
+      {"wave_id":"w1","wave_index":1,"settled_task_ids":[],"settled_unit_ids":[],"verified_base_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","plan_key":"pf","settlement_log_path":".ralph/forge/pf/waves/w1/settlement.md"}
+      </event>
+  - hat: precheck-forge.wave.settled
+    text: |
+      <event topic="forge.wave.settled.rejected">{"failed_checks":["empty_task_ids"],"reason":"task IDs are required","synthetic":false}</event>
+  - hat: integrator
+    text: |
+      <event topic="forge.wave.settled.proposed">
+      {"wave_id":"w1","wave_index":1,"settled_task_ids":["task-1"],"settled_unit_ids":["U1"],"verified_base_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","plan_key":"pf","settlement_log_path":".ralph/forge/pf/waves/w1/settlement.md"}
+      </event>
+  - hat: precheck-forge.wave.settled
+    text: |
+      <event topic="forge.wave.settled">
+      {"wave_id":"w1","wave_index":1,"settled_task_ids":["task-1"],"settled_unit_ids":["U1"],"verified_base_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","plan_key":"pf","settlement_log_path":".ralph/forge/pf/waves/w1/settlement.md"}
+      </event>
+  - hat: finisher
+    text: |
+      <event topic="LOOP_COMPLETE">{"reason":"settlement accepted"}</event>
+expected:
+  iterations: 5
+  completion: true
+  events: [{topic: forge.wave.settled.rejected}, {topic: forge.wave.settled}, {topic: LOOP_COMPLETE}]

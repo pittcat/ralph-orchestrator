@@ -228,6 +228,77 @@ event_loop:
           common:
             - "open worktree_map_path and recompute target_start_sha / target_status_fingerprint from $RALPH_WORKSPACE_ROOT; do not only rewrite payload fields"
             - "rebuild forge.worktrees.ready from the recomputed evidence and rerun ralph emit forge.worktrees.ready --policy-check before a real emit"
+      forge.wave.worktrees.ready:
+        prompt:
+          - "Step 1: open `worktree_map_path` and verify it exists, is readable, and contains only the current wave's Unit worktrees; reject with `worktree_map_missing` when it cannot be verified."
+          - "Step 2: verify `verified_base_commit` is the exact 40-character commit from the preceding `forge.wave.prepare` event and is an ancestor of every current wave worktree HEAD; reject with `verified_base_commit_mismatch` when the base cannot be proven."
+          - "Step 3: verify `wave_id`, `wave_index`, and `plan_key` match the current wave projection and that every expected Unit has a mapped worktree; reject with `wave_identity_mismatch` or `wave_unit_missing` as applicable."
+          - "Step 4: if every check passes, re-emit `forge.wave.worktrees.ready` verbatim; otherwise emit `forge.wave.worktrees.ready.rejected` with failed_checks and one actionable reason."
+        on_fail:
+          target: "worktree"
+          retry_budget: 3
+          on_exhausted: "forge.plan.blocked(reason=precheck_failed)"
+          reason: "wave_worktree_evidence_insufficient"
+        recovery_guidance:
+          common:
+            - "rebuild the wave-scoped worktree map from the current execution plan and verify every Unit's base commit; do not edit only the payload"
+            - "rerun `ralph emit forge.wave.worktrees.ready --policy-check` with the corrected evidence before the real emit"
+      forge.wave.reviewed:
+        prompt:
+          - "Step 1: open `review_report_path` and verify it is readable, non-empty, and contains one verdict for every Unit in the wave."
+          - "Step 2: independently compare `unit_verdicts` with the review report; `aggregate_verdict=ACCEPTED` is valid only when every Unit is ACCEPTED and no Unit is REJECTED."
+          - "Step 3: verify `wave_id`, `wave_index`, and `plan_key` match the current wave projection."
+          - "Step 4: if every check passes, re-emit `forge.wave.reviewed` verbatim; otherwise emit `forge.wave.reviewed.rejected` with failed_checks and one actionable reason."
+        on_fail:
+          target: "reviewer"
+          retry_budget: 3
+          on_exhausted: "forge.plan.blocked(reason=precheck_failed)"
+          reason: "wave_review_evidence_insufficient"
+        recovery_guidance:
+          common:
+            - "re-read every Unit review artifact, align unit_verdicts and aggregate_verdict, then rerun the policy check"
+      forge.wave.settled:
+        prompt:
+          - "Step 1: open `settlement_log_path` and verify it is readable, non-empty, and records review, integration, verification, and the commit map."
+          - "Step 2: read live task IDs with `ralph tools task list`; verify `settled_task_ids` and `settled_unit_ids` are non-empty arrays of equal length, contain only live IDs for this wave, and preserve the evidence order."
+          - "Step 3: verify `verified_base_commit` equals the integrated candidate HEAD and `wave_id`, `wave_index`, and `plan_key` match the current wave projection."
+          - "Step 4: if every check passes, re-emit `forge.wave.settled` verbatim; otherwise emit `forge.wave.settled.rejected` with failed_checks and one actionable reason."
+        on_fail:
+          target: "integrator"
+          retry_budget: 3
+          on_exhausted: "forge.plan.blocked(reason=precheck_failed)"
+          reason: "wave_settlement_evidence_insufficient"
+        recovery_guidance:
+          common:
+            - "rebuild both ID arrays from the live task list and settlement artifact; never call task close manually"
+      work.failed:
+        prompt:
+          - "Step 1: open `dead_end_evidence_file` and verify it is readable, non-empty, and supports the claimed terminal failure."
+          - "Step 2: independently score `dead_end_confidence` (must be at least 90) and `dead_end_evidence_coverage` (must be at least 75); reject inflated or unsupported scores."
+          - "Step 3: `dead_end_gate_passed=true` is valid only with `failure_evidence_status=complete` and `correction_status=exhausted` (or `not_applicable` for a permanent failure). Verify the context and evidence files before forwarding."
+          - "Step 4: if every check passes, re-emit `work.failed` verbatim; otherwise emit `work.failed.rejected` with failed_checks and one actionable reason."
+        on_fail:
+          target: "forge-failure-handler"
+          retry_budget: 3
+          on_exhausted: "forge.plan.blocked(reason=precheck_failed)"
+          reason: "dead_end_evidence_insufficient"
+        recovery_guidance:
+          common:
+            - "open the evidence and context artifacts, correct the underlying failure record, then recompute scores and rerun the policy check"
+      forge.audit.done:
+        prompt:
+          - "Step 1: open `audit_report_path` and verify it is readable, non-empty, and explicitly records the final verdict."
+          - "Step 2: accept only `verdict=ACCEPTED`; verify `target_branch`, `target_start_sha`, and `target_status_fingerprint` still match the fan-out projection and the current target worktree."
+          - "Step 3: verify `integration_head_sha` is a descendant of `target_start_sha` with `git merge-base --is-ancestor`; reject drift, a missing SHA, or a non-ancestor integration head."
+          - "Step 4: if every check passes, re-emit `forge.audit.done` verbatim; otherwise emit `forge.audit.done.rejected` with failed_checks and one actionable reason."
+        on_fail:
+          target: "auditor"
+          retry_budget: 3
+          on_exhausted: "forge.plan.blocked(reason=precheck_failed)"
+          reason: "final_audit_evidence_insufficient"
+        recovery_guidance:
+          common:
+            - "re-run the final audit against the current target HEAD and status fingerprint; do not rewrite only the verdict"
   event_policy:
     enabled: true
     mode: enforce
@@ -334,11 +405,11 @@ event_loop:
           when: {field: verified_base_commit, eq: ""}
           message: "verified_base_commit must be a non-empty commit SHA; an empty base breaks the lazy-worktree trust boundary."
         - id: parallel-forge-worktrees-ready-empty-base
-          topic: forge.wave.worktrees.ready
+          topic: forge.wave.worktrees.ready.proposed
           when: {field: verified_base_commit, eq: ""}
           message: "verified_base_commit must be a non-empty commit SHA; an empty base breaks the lazy-worktree trust boundary."
         - id: parallel-forge-settled-empty-base
-          topic: forge.wave.settled
+          topic: forge.wave.settled.proposed
           when: {field: verified_base_commit, eq: ""}
           message: "verified_base_commit must be a non-empty commit SHA; the next wave's worktree base is taken from this value."
         # Plan 2026-08-27-1430 U4 (S1/S3/S5; D2/D10): dual guard on the
@@ -364,6 +435,68 @@ event_loop:
           topic: forge.worktrees.ready.proposed
           when: {field: worktree_map_path, eq: ""}
           message: "worktree_map_path must be a non-empty path to the worktree map artifact; the dispatcher and the evidence gate both read it."
+        - id: parallel-forge-wave-worktrees-empty-map
+          topic: forge.wave.worktrees.ready.proposed
+          when: {field: worktree_map_path, eq: ""}
+          message: "worktree_map_path must identify the current wave worktree map."
+        - id: parallel-forge-wave-worktrees-empty-wave-id
+          topic: forge.wave.worktrees.ready.proposed
+          when: {field: wave_id, eq: ""}
+          message: "wave_id must identify the current wave."
+        - id: parallel-forge-reviewed-empty-report
+          topic: forge.wave.reviewed.proposed
+          when: {field: review_report_path, eq: ""}
+          message: "review_report_path must identify the wave review artifact."
+        - id: parallel-forge-reviewed-not-accepted
+          topic: forge.wave.reviewed.proposed
+          when: {field: aggregate_verdict, ne: "ACCEPTED"}
+          message: "only an ACCEPTED aggregate review may enter integration."
+        - id: parallel-forge-settled-empty-task-ids
+          topic: forge.wave.settled.proposed
+          when: {field: settled_task_ids, eq: []}
+          message: "settled_task_ids must be a non-empty live task ID array."
+        - id: parallel-forge-settled-empty-unit-ids
+          topic: forge.wave.settled.proposed
+          when: {field: settled_unit_ids, eq: []}
+          message: "settled_unit_ids must be a non-empty Unit ID array."
+        - id: parallel-forge-settled-empty-log
+          topic: forge.wave.settled.proposed
+          when: {field: settlement_log_path, eq: ""}
+          message: "settlement_log_path must identify the settlement evidence."
+        - id: parallel-forge-failed-empty-context
+          topic: work.failed.proposed
+          when: {field: context_artifact_path, eq: ""}
+          message: "context_artifact_path must identify the failure evidence."
+        - id: parallel-forge-failed-empty-evidence-file
+          topic: work.failed.proposed
+          when: {field: dead_end_evidence_file, eq: ""}
+          message: "dead_end_evidence_file must identify the terminal failure evidence."
+        - id: parallel-forge-failed-gate-without-complete-evidence
+          topic: work.failed.proposed
+          when:
+            all:
+              - {field: dead_end_gate_passed, eq: true}
+              - {field: failure_evidence_status, eq: incomplete}
+          message: "dead_end_gate_passed cannot be true while failure evidence is incomplete."
+        - id: parallel-forge-failed-gate-without-exhausted-correction
+          topic: work.failed.proposed
+          when:
+            all:
+              - {field: dead_end_gate_passed, eq: true}
+              - {field: correction_status, eq: not_exhausted}
+          message: "dead_end_gate_passed cannot be true before correction is exhausted."
+        - id: parallel-forge-audit-not-accepted
+          topic: forge.audit.done.proposed
+          when: {field: verdict, ne: ACCEPTED}
+          message: "only verdict=ACCEPTED authorizes the finalizer."
+        - id: parallel-forge-audit-empty-report
+          topic: forge.audit.done.proposed
+          when: {field: audit_report_path, eq: ""}
+          message: "audit_report_path must identify the final audit evidence."
+        - id: parallel-forge-audit-empty-start-sha
+          topic: forge.audit.done.proposed
+          when: {field: target_start_sha, eq: ""}
+          message: "target_start_sha must identify the fan-out target snapshot."
         # Plan 2026-08-27-1430 U10 (S19/S20; D3): the four receipt
         # topics below have no precheck and no `.proposed` rewrite, so
         # their rules target the BARE topic names. Each rule rejects a
@@ -1287,8 +1420,10 @@ hats:
          containing an array, comma-separated strings, or empty arrays. Validate with `ralph emit forge.wave.settled --schema`
          and `--policy-check`; if live ID arrays are unavailable, stop and write
          `failures/integrator-failed.md` instead of guessing or fabricating IDs.
-         Runtime atomically closes tasks through `CloseTaskBatch` when it receives
-         `forge.wave.settled`; this hat does not call `ralph tools task close`.
+      Runtime atomically closes tasks through `CloseTaskBatch` when it receives
+      `forge.wave.settled`; this hat does not call `ralph tools task close`.
+      If the runtime rejects the settlement, do not close tasks manually; rebuild
+      both arrays from the live task list and re-emit only after `--policy-check`.
       9. On failure, write the failure and merge-conflict templates, then emit
          `forge.wave.integration.failed` or `forge.plan.blocked` for missing settlement
          paths; **do not** emit `work.failed` directly.
@@ -1433,7 +1568,12 @@ hats:
       2. Cross-check requirements→scenarios→tests→commits using artifacts under `.ralph/forge/<plan_key>/` (paths from trigger/projection only).
       3. Verify linear git history, clean worktree, no skipped tests.
       4. Write `.ralph/forge/<plan_key>/final-audit.md`.
-      5. Emit `forge.audit.done` (`verdict`, `audit_report_path`, `plan_key`) or write `blocks/auditor-blocked.md` and emit `forge.plan.blocked` with context paths.
+      5. For an accepted audit, also copy `target_branch`, `target_start_sha`,
+         `target_status_fingerprint`, and `integration_head_sha` from the
+         projection and verify the integration head is a descendant of the
+         target start SHA. Emit `forge.audit.done` with all fields, or write
+         `blocks/auditor-blocked.md` and emit `forge.plan.blocked` with context paths.
+         A non-ACCEPTED verdict must never emit `forge.audit.done`.
 
       Single business event.
 

@@ -160,6 +160,15 @@ schemas:
         source: forge.wave.prepare.plan_key.
         fill_rule: Must match .ralph/forge/<plan-key>/.
 
+  forge.wave.worktrees.ready.proposed:
+    required_fields:
+      - wave_id
+      - wave_index
+      - worktree_map_path
+      - verified_base_commit
+      - plan_key
+    payload: json_object
+
   forge.wave.reviewed:
     required_fields:
       - wave_id
@@ -195,6 +204,16 @@ schemas:
         meaning: Forge plan key basename.
         source: forge.wave.prepare.plan_key.
         fill_rule: Must match .ralph/forge/<plan-key>/.
+
+  forge.wave.reviewed.proposed:
+    required_fields:
+      - wave_id
+      - wave_index
+      - unit_verdicts
+      - aggregate_verdict
+      - review_report_path
+      - plan_key
+    payload: json_object
 
   forge.wave.integrated:
     required_fields:
@@ -596,6 +615,20 @@ schemas:
         fill_rule: Must exist; contains review/integration/verification outcome + commit map.
         examples: [".ralph/<plan>/<wave>/settlement.md"]
 
+  forge.wave.settled.proposed:
+    required_fields:
+      - wave_id
+      - wave_index
+      - settled_task_ids
+      - settled_unit_ids
+      - verified_base_commit
+      - plan_key
+      - settlement_log_path
+    field_types:
+      settled_task_ids: array
+      settled_unit_ids: array
+    payload: json_object
+
   forge.exec.development.done:
     required_fields:
       - execution_plan_path
@@ -897,7 +930,13 @@ schemas:
       - verdict
       - audit_report_path
       - plan_key
+      - target_branch
+      - target_start_sha
+      - target_status_fingerprint
+      - integration_head_sha
     payload: json_object
+    allowed_values:
+      verdict: [ACCEPTED, REJECTED, BLOCKED]
     field_docs:
       verdict:
         meaning: Final delivery audit outcome.
@@ -912,6 +951,33 @@ schemas:
         meaning: Forge plan key basename.
         source: Trigger / forge artifact root.
         fill_rule: Must match directory name.
+      target_branch:
+        meaning: Target branch captured at initial fan-out.
+        source: forge.worktrees.ready.target_branch.
+        fill_rule: Must match the current target branch.
+      target_start_sha:
+        meaning: Target HEAD captured at initial fan-out.
+        source: forge.worktrees.ready.target_start_sha.
+        fill_rule: Must equal the current target HEAD.
+      target_status_fingerprint:
+        meaning: Target status captured at initial fan-out.
+        source: forge.worktrees.ready.target_status_fingerprint.
+        fill_rule: Must equal the current canonical status fingerprint.
+      integration_head_sha:
+        meaning: HEAD of the verified integration branch.
+        source: git rev-parse of the integration branch.
+        fill_rule: Must be a descendant of target_start_sha.
+
+  forge.audit.done.proposed:
+    required_fields:
+      - verdict
+      - audit_report_path
+      - plan_key
+      - target_branch
+      - target_start_sha
+      - target_status_fingerprint
+      - integration_head_sha
+    payload: json_object
 
   forge.finalized:
     required_fields:
@@ -1200,7 +1266,18 @@ schemas:
       - context_artifact_path
       - forge_artifact_root
       - plan_key
+      - dead_end_confidence
+      - dead_end_evidence_coverage
+      - dead_end_evidence_file
+      - failure_evidence_status
+      - correction_status
+      - dead_end_gate_passed
     payload: json_object
+    field_types:
+      dead_end_gate_passed: bool
+    allowed_values:
+      failure_evidence_status: [complete, incomplete]
+      correction_status: [exhausted, not_exhausted, not_applicable]
     field_docs:
       reason:
         meaning: Human-readable failure reason for the manager report.
@@ -1223,6 +1300,21 @@ schemas:
         meaning: Forge plan key basename.
         source: Basename of plan_path or prior trigger plan_key.
         fill_rule: Must match forge_artifact_root segment.
+
+  work.failed.proposed:
+    required_fields:
+      - reason
+      - plan_path
+      - context_artifact_path
+      - forge_artifact_root
+      - plan_key
+      - dead_end_confidence
+      - dead_end_evidence_coverage
+      - dead_end_evidence_file
+      - failure_evidence_status
+      - correction_status
+      - dead_end_gate_passed
+    payload: json_object
 
 state_projection:
   enabled: true

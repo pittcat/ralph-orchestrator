@@ -2192,8 +2192,7 @@ fn test_parallel_forge_round_exhaustion_gate_runtime() {
 /// `crates/ralph-cli/src/presets.rs::test_parallel_forge_receipt_consistency_rules`.
 #[test]
 fn test_parallel_forge_receipt_consistency_runtime() {
-    let yaml =
-        load_scenario("tests/scenarios/parallel_forge_receipt_consistency_runtime.yml");
+    let yaml = load_scenario("tests/scenarios/parallel_forge_receipt_consistency_runtime.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -2212,8 +2211,31 @@ fn test_parallel_forge_receipt_consistency_runtime() {
 /// `crates/ralph-cli/src/presets.rs::parallel_forge_worktrees_ready_dual_guard`.
 #[test]
 fn test_parallel_forge_worktrees_ready_gate_runtime() {
-    let yaml =
-        load_scenario("tests/scenarios/parallel_forge_worktrees_ready_gate_runtime.yml");
+    let yaml = load_scenario("tests/scenarios/parallel_forge_worktrees_ready_gate_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_parallel_forge_wave_reviewed_gate_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_wave_reviewed_gate_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_parallel_forge_wave_settled_gate_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_wave_settled_gate_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_parallel_forge_work_failed_gate_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_work_failed_gate_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+#[test]
+fn test_parallel_forge_audit_gate_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_audit_gate_runtime.yml");
     run_workflow_guard_scenario(yaml);
 }
 

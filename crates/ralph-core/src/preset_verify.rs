@@ -25,8 +25,16 @@ pub struct ScenarioFile {
 pub struct Scenario {
     pub name: String,
     pub responses: Vec<Response>,
+    pub fixture_files: Vec<FixtureFile>,
     pub expect: ExpectBlock,
     pub limits: Limits,
+}
+
+/// Workspace-relative files seeded before a dynamic scenario runs.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct FixtureFile {
+    pub path: String,
+    pub content: String,
 }
 
 /// A single scripted hat output consumed by the driver in order.
@@ -380,6 +388,7 @@ impl Scenario {
         Ok(Self {
             name,
             responses,
+            fixture_files: raw.fixture_files,
             expect,
             limits,
         })
@@ -528,6 +537,8 @@ struct RawScenarioFile {
 struct RawScenario {
     name: Option<String>,
     responses: Option<Vec<RawResponse>>,
+    #[serde(default)]
+    fixture_files: Vec<FixtureFile>,
     expect: Option<RawExpect>,
     limits: Option<RawLimits>,
 }
@@ -784,7 +795,35 @@ pub fn run_scenario(
     std::fs::create_dir_all(workspace.ralph_dir())
         .map_err(|e| FailureKind::RuntimeException(format!("create .ralph dir failed: {e}")))?;
 
+    for fixture in &scenario.fixture_files {
+        let relative = Path::new(&fixture.path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(FailureKind::RuntimeException(format!(
+                "fixture path must stay within verifier workspace: {}",
+                fixture.path
+            )));
+        }
+        let path = workspace.temp_dir.path().join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                FailureKind::RuntimeException(format!("create fixture parent failed: {e}"))
+            })?;
+        }
+        std::fs::write(&path, &fixture.content).map_err(|e| {
+            FailureKind::RuntimeException(format!("write fixture {} failed: {e}", fixture.path))
+        })?;
+    }
+
     let mut config = config.clone();
+    // The CLI normally normalizes during config loading, but keep the
+    // verifier self-contained: callers may provide an otherwise valid raw
+    // preset config, and precheck desugaring must be present before the
+    // runtime contract is compiled.
+    config.normalize();
     config.core.workspace_root = workspace.temp_dir.path().to_path_buf();
     // Disable freshness TTL so the fixture inputs aren't classified as stale.
     config.event_loop.task_resume_ttl_seconds = Some(0);

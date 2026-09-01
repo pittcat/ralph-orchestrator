@@ -1,0 +1,70 @@
+name: parallel_forge_wave_reviewed_gate_runtime
+description: reviewed handoff rejects incomplete evidence and then forwards an accepted review
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 8
+  hats:
+    reviewer:
+      subscribes_to: [forge.start, task.resume]
+      publishes: [forge.wave.reviewed]
+    integrator:
+      subscribes_to: [forge.wave.reviewed]
+      publishes: [LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: forge.start
+    completion_promise: LOOP_COMPLETE
+    precheck:
+      enabled: true
+      rules:
+        forge.wave.reviewed:
+          prompt: ["verify review report and every Unit verdict"]
+          on_fail:
+            target: reviewer
+            retry_budget: 3
+            on_exhausted: "plan.blocked(reason=precheck_failed)"
+            reason: wave_review_evidence_insufficient
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        forge.wave.reviewed:
+          required_fields: [wave_id, wave_index, unit_verdicts, aggregate_verdict, review_report_path, plan_key]
+          payload: json_object
+      payload_consistency:
+        enabled: true
+        rules:
+          - id: parallel-forge-wave-reviewed-empty-report
+            topic: forge.wave.reviewed.proposed
+            when: {field: review_report_path, eq: ""}
+            message: review report is required
+mock_responses:
+  - hat: reviewer
+    text: |
+      <event topic="forge.wave.reviewed.proposed">
+      {"wave_id":"w1","wave_index":1,"unit_verdicts":{"U1":"REJECTED"},"aggregate_verdict":"ACCEPTED","review_report_path":".ralph/forge/pf/waves/w1/review.md","plan_key":"pf"}
+      </event>
+  - hat: precheck-forge.wave.reviewed
+    text: |
+      <event topic="forge.wave.reviewed.rejected">
+      {"failed_checks":["unit_verdict_mismatch"],"reason":"REJECTED unit cannot be aggregated as ACCEPTED","synthetic":false}
+      </event>
+  - hat: reviewer
+    text: |
+      <event topic="forge.wave.reviewed.proposed">
+      {"wave_id":"w1","wave_index":1,"unit_verdicts":{"U1":"ACCEPTED"},"aggregate_verdict":"ACCEPTED","review_report_path":".ralph/forge/pf/waves/w1/review.md","plan_key":"pf"}
+      </event>
+  - hat: precheck-forge.wave.reviewed
+    text: |
+      <event topic="forge.wave.reviewed">
+      {"wave_id":"w1","wave_index":1,"unit_verdicts":{"U1":"ACCEPTED"},"aggregate_verdict":"ACCEPTED","review_report_path":".ralph/forge/pf/waves/w1/review.md","plan_key":"pf"}
+      </event>
+  - hat: integrator
+    text: |
+      <event topic="LOOP_COMPLETE">{"reason":"review accepted"}</event>
+expected:
+  iterations: 5
+  completion: true
+  events: [{topic: forge.wave.reviewed.rejected}, {topic: forge.wave.reviewed}, {topic: LOOP_COMPLETE}]
+  event_topic_counts: [{topic: forge.wave.reviewed, count: 1}]

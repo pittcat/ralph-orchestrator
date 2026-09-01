@@ -1,0 +1,62 @@
+name: parallel_forge_audit_gate_runtime
+description: only an accepted, stable audit can reach finalizer
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 8
+  hats:
+    auditor:
+      subscribes_to: [forge.start, task.resume]
+      publishes: [forge.audit.done]
+    finalizer:
+      subscribes_to: [forge.audit.done]
+      publishes: [LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: forge.start
+    completion_promise: LOOP_COMPLETE
+    precheck:
+      enabled: true
+      rules:
+        forge.audit.done:
+          prompt: ["verify accepted verdict, target identity, and ancestor relation"]
+          on_fail:
+            target: auditor
+            retry_budget: 3
+            on_exhausted: "plan.blocked(reason=precheck_failed)"
+            reason: final_audit_evidence_insufficient
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        forge.audit.done:
+          required_fields: [verdict, audit_report_path, plan_key, target_branch, target_start_sha, target_status_fingerprint, integration_head_sha]
+          payload: json_object
+          allowed_values: {verdict: [ACCEPTED, REJECTED, BLOCKED]}
+      payload_consistency:
+        enabled: true
+        rules:
+          - id: parallel-forge-audit-not-accepted
+            topic: forge.audit.done.proposed
+            when: {field: verdict, ne: ACCEPTED}
+            message: only accepted audits may finalize
+mock_responses:
+  - hat: auditor
+    text: |
+      <event topic="forge.audit.done.proposed">{"verdict":"ACCEPTED","audit_report_path":".ralph/forge/pf/final-audit.md","plan_key":"pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","integration_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}</event>
+  - hat: precheck-forge.audit.done
+    text: |
+      <event topic="forge.audit.done.rejected">{"failed_checks":["target_status_fingerprint_mismatch"],"reason":"target status changed","synthetic":false}</event>
+  - hat: auditor
+    text: |
+      <event topic="forge.audit.done.proposed">{"verdict":"ACCEPTED","audit_report_path":".ralph/forge/pf/final-audit.md","plan_key":"pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","integration_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}</event>
+  - hat: precheck-forge.audit.done
+    text: |
+      <event topic="forge.audit.done">{"verdict":"ACCEPTED","audit_report_path":".ralph/forge/pf/final-audit.md","plan_key":"pf","target_branch":"main","target_start_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_status_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","integration_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}</event>
+  - hat: finalizer
+    text: |
+      <event topic="LOOP_COMPLETE">{"reason":"audit accepted"}</event>
+expected:
+  iterations: 5
+  completion: true
+  events: [{topic: forge.audit.done.rejected}, {topic: forge.audit.done}, {topic: LOOP_COMPLETE}]

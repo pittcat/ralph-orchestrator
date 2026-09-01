@@ -1466,9 +1466,9 @@ mod tests {
     }
 
     /// Plan 2026-08-27-1430 U4 (S1/S3-S5; R1/R7; D2/D9/D10): the initial
-    /// fan-out carries the preset's FIRST precheck gate. The precheck
-    /// block is enabled with exactly one rule keyed `forge.worktrees.ready`
-    /// (U4 may not open other topics — later Units append their own), the
+    /// fan-out carries the preset's initial precheck gate. The precheck
+    /// block is enabled with the six key-stage rules, including
+    /// `forge.worktrees.ready`,
     /// desugar synthesizes `precheck-forge.worktrees.ready` with
     /// `max_activations == retry_budget + 1 == 4`, and the four
     /// deterministic payload_consistency rules target the PROPOSED topic
@@ -1476,10 +1476,11 @@ mod tests {
     #[test]
     fn parallel_forge_worktrees_ready_dual_guard() {
         let preset = get_preset("parallel-forge").expect("parallel-forge preset");
-        let mut config = RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML parses");
+        let mut config =
+            RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML parses");
         config.normalize();
 
-        // 1. precheck base: enabled, exactly one rule, locked key config.
+        // 1. precheck base: enabled, all key-stage rules, locked initial config.
         let precheck = config
             .event_loop
             .precheck
@@ -1488,9 +1489,8 @@ mod tests {
         assert!(precheck.enabled, "event_loop.precheck.enabled must be true");
         assert_eq!(
             precheck.rules.len(),
-            1,
-            "U4 registers exactly one precheck rule (forge.worktrees.ready); got {:?}",
-            precheck.rules.keys().collect::<Vec<_>>()
+            6,
+            "all key-stage precheck rules must be present"
         );
         let rule = precheck
             .rules
@@ -1504,7 +1504,8 @@ mod tests {
             "forge.plan.blocked(reason=precheck_failed)"
         );
         assert_eq!(
-            rule.on_fail.reason, "worktree_identity_evidence_insufficient"
+            rule.on_fail.reason,
+            "worktree_identity_evidence_insufficient"
         );
         let guidance = rule
             .recovery_guidance
@@ -1537,7 +1538,10 @@ mod tests {
             worktree.publishes
         );
         assert!(
-            !worktree.publishes.iter().any(|t| t == "forge.worktrees.ready"),
+            !worktree
+                .publishes
+                .iter()
+                .any(|t| t == "forge.worktrees.ready"),
             "worktree must not keep publishing the bare guarded topic"
         );
         let dispatcher = config
@@ -3610,6 +3614,104 @@ mod tests {
             missing_docs.is_empty(),
             "forge.full.verification.failed field_docs incomplete for: {missing_docs:?}"
         );
+    }
+
+    #[test]
+    fn parallel_forge_key_stage_evidence_gates_are_declared() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset must exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML should parse");
+        let precheck = &config
+            .event_loop
+            .precheck
+            .as_ref()
+            .expect("parallel-forge must declare precheck")
+            .rules;
+        for topic in [
+            "forge.worktrees.ready",
+            "forge.wave.worktrees.ready",
+            "forge.wave.reviewed",
+            "forge.wave.settled",
+            "work.failed",
+            "forge.audit.done",
+        ] {
+            assert!(
+                precheck.contains_key(topic),
+                "missing precheck rule for {topic}"
+            );
+        }
+
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("parallel-forge must declare event_policy");
+        for (id, topic) in [
+            (
+                "parallel-forge-worktrees-ready-empty-base",
+                "forge.wave.worktrees.ready.proposed",
+            ),
+            (
+                "parallel-forge-reviewed-empty-report",
+                "forge.wave.reviewed.proposed",
+            ),
+            (
+                "parallel-forge-settled-empty-task-ids",
+                "forge.wave.settled.proposed",
+            ),
+            (
+                "parallel-forge-failed-empty-context",
+                "work.failed.proposed",
+            ),
+            (
+                "parallel-forge-audit-not-accepted",
+                "forge.audit.done.proposed",
+            ),
+        ] {
+            let rule = policy
+                .payload_consistency
+                .rules
+                .iter()
+                .find(|rule| rule.id == id)
+                .unwrap_or_else(|| panic!("missing evidence gate rule {id}"));
+            assert_eq!(rule.topic, topic);
+        }
+
+        for (topic, fields) in [
+            (
+                "forge.audit.done",
+                [
+                    "target_branch",
+                    "target_start_sha",
+                    "target_status_fingerprint",
+                    "integration_head_sha",
+                ]
+                .as_slice(),
+            ),
+            (
+                "work.failed",
+                [
+                    "dead_end_confidence",
+                    "dead_end_evidence_coverage",
+                    "dead_end_evidence_file",
+                    "failure_evidence_status",
+                    "correction_status",
+                    "dead_end_gate_passed",
+                ]
+                .as_slice(),
+            ),
+        ] {
+            let schema = policy
+                .schemas
+                .get(topic)
+                .unwrap_or_else(|| panic!("missing schema for {topic}"));
+            for field in fields {
+                assert!(
+                    schema.required_fields.iter().any(|f| f == field),
+                    "{topic} must require {field}"
+                );
+            }
+        }
     }
 
     fn collect_required_field_docs(
