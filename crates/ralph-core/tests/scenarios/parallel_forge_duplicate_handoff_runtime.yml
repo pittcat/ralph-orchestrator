@@ -97,10 +97,14 @@ mock_responses:
       <event topic="forge.worktrees.ready">
       plan_key: "pf-dup"
       integration_branch: "pf/dup"
+      target_start_sha: "aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee"
+      target_status_fingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       </event>
       <event topic="forge.worktrees.ready">
       plan_key: "pf-dup"
       integration_branch: "pf/dup"
+      target_start_sha: "aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee"
+      target_status_fingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       </event>
     hat: pf-worktree
   - text: |

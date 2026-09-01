@@ -133,6 +133,8 @@ mock_responses:
       <event topic="forge.worktrees.ready">
       plan_key: "pf-u3-failed"
       integration_branch: "pf/u3-failed"
+      target_start_sha: "aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee"
+      target_status_fingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       </event>
     hat: pf-worktree
   # Iter 5: dispatcher dispatches slot 0.
