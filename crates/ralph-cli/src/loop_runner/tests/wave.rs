@@ -2145,7 +2145,7 @@ exit 0
     )
     .await;
 
-    let (events, duration, success) = outcome.expect("strong-signal worker should succeed");
+    let (events, duration, success, _pid) = outcome.expect("strong-signal worker should succeed");
     assert!(
         success,
         "worker should report success, got events={events:?}"
@@ -2214,7 +2214,7 @@ async fn test_run_wave_worker_pty_startup_grace_ended_by_events_file_growth() {
     )
     .await;
 
-    let (_events, duration, success) = outcome
+    let (_events, duration, success, _pid) = outcome
         .expect("events-file Strong during grace must end grace and keep the silent worker alive");
     // The worker has already completed the assertion-critical path; stop the
     // appender instead of making the test wait for its full safety tail.
@@ -2278,7 +2278,7 @@ async fn test_run_wave_worker_pty_startup_grace_survives_idle_window() {
     )
     .await;
 
-    let (_events, duration, success) =
+    let (_events, duration, success, _pid) =
         outcome.expect("worker should survive until it prints its first line");
     assert!(
         success,
@@ -2454,7 +2454,7 @@ async fn test_run_wave_worker_pty_startup_grace_ignored_when_idle_disabled() {
     )
     .await;
 
-    let (_events, duration, success) =
+    let (_events, duration, success, _pid) =
         outcome.expect("legacy path with idle disabled must succeed regardless of startup_grace");
     assert!(
         success,

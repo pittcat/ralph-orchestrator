@@ -288,7 +288,7 @@ impl WaveWorkerExecutor for TestExecutor {
             let _ = request.worker_rpc_tx.take();
             let _ = request.worker_tui_state.take();
             let outcome = if success {
-                Ok((vec![core_event("review.done", "ok")], hold_for, success))
+                Ok((vec![core_event("review.done", "ok")], hold_for, success, None))
             } else {
                 Err(("forced failure".to_string(), hold_for))
             };
@@ -3832,6 +3832,7 @@ fn u2_outcome_with(topic: &str, payload: Option<&str>) -> WaveWorkerOutcome {
         }],
         Duration::from_secs(1),
         true,
+        None,
     ))
 }
 
@@ -3909,7 +3910,7 @@ fn classify_slot_result_ok_success_false_with_done_char_u1_pre_u3_completes_via_
         system_injected: None,
     };
     // success=false → WorkerExit::ExitNonZero in classify_slot_result
-    let result: WaveWorkerOutcome = Ok((vec![done_event], Duration::from_secs(3), false));
+    let result: WaveWorkerOutcome = Ok((vec![done_event], Duration::from_secs(3), false, None));
     let classified = classify_slot_result(&result);
 
     // U1/U3 contract: ExitNonZero + Done terminal → Completed(Done).
@@ -4023,7 +4024,7 @@ fn u3_classify_slot_result_ok_path_with_done_after_timeout_still_completes() {
     // Ok(events, duration, success=false) — the success=false makes the
     // dispatcher treat it as ExitNonZero, which combined with a Done
     // terminal yields Completed(Done) per the truth table (AE1).
-    let result: WaveWorkerOutcome = Ok((vec![done_event], Duration::from_secs(10), false));
+    let result: WaveWorkerOutcome = Ok((vec![done_event], Duration::from_secs(10), false, None));
     let classified = classify_slot_result(&result);
 
     match classified {

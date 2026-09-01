@@ -306,6 +306,19 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
         Ok(())
     }
 
+    /// 2026-09-01-001 plan U5 (R5 / D6): record the worker
+    /// pid into `dispatch_records.pid` so `ralph diagnose`
+    /// surfaces the real OS-level pid. Default: no-op so
+    /// mocks / bridges without a store still compile.
+    fn record_slot_pid(
+        &self,
+        _wave_id: &str,
+        _slot_index: u32,
+        _pid: u32,
+    ) -> Result<(), BridgeError> {
+        Ok(())
+    }
+
     /// 2026-09-01-001 plan U1 (R1 / D1-D3): persist a slot's
     /// accepted event list via the underlying store. Default:
     /// no-op so mocks / bridges without a store still compile.
@@ -685,6 +698,16 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
     ) -> Result<(), BridgeError> {
         self.store
             .record_slot_terminal_evidence(wave_id, slot_index, evidence)?;
+        Ok(())
+    }
+
+    fn record_slot_pid(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        pid: u32,
+    ) -> Result<(), BridgeError> {
+        self.store.record_slot_pid(wave_id, slot_index, pid)?;
         Ok(())
     }
 

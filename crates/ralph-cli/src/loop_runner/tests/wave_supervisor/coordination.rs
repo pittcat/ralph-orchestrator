@@ -813,7 +813,7 @@ fn test_u5_record_outcome_empty_success_is_failure() {
     // `results=N failures=0` log line that masked a store row
     // flagged `empty_worker_result`.
     let outcome: crate::loop_runner::wave::WaveWorkerOutcome =
-        Ok((Vec::new(), std::time::Duration::from_millis(5), true));
+        Ok((Vec::new(), std::time::Duration::from_millis(5), true, None));
     record_outcome(&mut tracker, "u5-empty-success", 0, outcome);
 
     let completed = tracker
@@ -866,7 +866,7 @@ fn test_u5_record_outcome_partial_timeout_stays_result() {
         system_injected: None,
     };
     let outcome: crate::loop_runner::wave::WaveWorkerOutcome =
-        Ok((vec![event], std::time::Duration::from_millis(5), false));
+        Ok((vec![event], std::time::Duration::from_millis(5), false, None));
     record_outcome(&mut tracker, "u5-partial-timeout", 0, outcome);
 
     let completed = tracker

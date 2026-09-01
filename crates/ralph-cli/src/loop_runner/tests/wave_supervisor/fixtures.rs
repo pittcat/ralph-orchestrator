@@ -793,7 +793,7 @@ impl WaveWorkerExecutor for U3CountingExecutor {
             };
             (
                 request.index,
-                Ok((vec![event], Duration::from_millis(10), true)),
+                Ok((vec![event], Duration::from_millis(10), true, None)),
             )
         })
     }
@@ -1194,7 +1194,7 @@ impl WaveWorkerExecutor for U5RecordingExecutor {
                 U5SlotOutcome::Success(count) => {
                     let events: Vec<ralph_core::Event> =
                         (0..count).map(|seq| u5_event(index, seq)).collect();
-                    (index, Ok((events, Duration::from_millis(5), true)))
+                    (index, Ok((events, Duration::from_millis(5), true, None)))
                 }
                 U5SlotOutcome::Fail(reason) => (index, Err((reason, Duration::from_millis(5)))),
                 U5SlotOutcome::ReportedFailure {
@@ -1206,6 +1206,7 @@ impl WaveWorkerExecutor for U5RecordingExecutor {
                         vec![u5_failed_event(terminal_topic, &reason)],
                         Duration::from_millis(5),
                         true,
+                        None,
                     )),
                 ),
                 U5SlotOutcome::ScriptedThen { .. } | U5SlotOutcome::PerAttempt(_) => {
@@ -2350,7 +2351,7 @@ impl WaveWorkerExecutor for U4SlotRecordingExecutor {
             };
             (
                 request.index,
-                Ok((vec![event], Duration::from_millis(5), true)),
+                Ok((vec![event], Duration::from_millis(5), true, None)),
             )
         })
     }

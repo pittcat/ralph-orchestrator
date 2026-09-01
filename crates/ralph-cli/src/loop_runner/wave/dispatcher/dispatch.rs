@@ -2902,7 +2902,7 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                         // the channel file in place — fan-in still
                         // runs from memory so the healthy path is
                         // unaffected.
-                        if let Ok((events, _, _)) = &outcome.1 {
+                        if let Ok((events, _, _, _)) = &outcome.1 {
                             if let (Some(store), Some(wid), Some(seq)) = (
                                 slot_attempt_store.as_ref(),
                                 slot_wave_id.as_ref(),
@@ -2989,7 +2989,7 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                 // drop the business batch, so the failed unit can
                 // never activate a downstream consumer.
                 let mut last_outcome = last_outcome;
-                if let Ok((_events, duration, _success)) = &last_outcome.1 {
+                if let Ok((_events, duration, _success, _pid)) = &last_outcome.1 {
                     let duration = *duration;
                     let is_reported_failure = matches!(
                         classify_slot_attempt(&last_outcome.1, slot_wave_kind).reason,
@@ -3055,7 +3055,7 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                         // helper already iterated them. We re-borrow
                         // here to keep the helper signature
                         // borrow-free of `events`.
-                        if let Ok((events, _duration, _success)) = &result.1 {
+                        if let Ok((events, _duration, _success, _pid)) = &result.1 {
                             let (content_hash, event_count) =
                                 compute_slot_batch_fingerprint(events);
                             if let Err(error) = guard.bridge.record_slot_result(
@@ -3070,6 +3070,32 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                                     %error,
                                     "U5: supervisor record_slot_result failed"
                                 );
+                            }
+                            // 2026-09-01-001 plan U5 (R5 / D6): record
+                            // the spawn-time worker pid into
+                            // `dispatch_records.pid` so the
+                            // operator-facing `ralph diagnose` shows
+                            // the real OS-level pid (closes the
+                            // 08-29 incident where every dispatch
+                            // row had pid=NULL). Best-effort: a
+                            // non-PTY backend, a legacy fake executor,
+                            // or a store write failure all leave the
+                            // pid NULL — the warn log lets operators
+                            // notice the gap without blocking dispatch.
+                            if let Some(pid) = _pid {
+                                if let Err(error) = guard.bridge.record_slot_pid(
+                                    &guard.wave_id,
+                                    guard.slot_index,
+                                    *pid,
+                                ) {
+                                    warn!(
+                                        wave_id = %guard.wave_id,
+                                        slot_index = guard.slot_index,
+                                        pid = pid,
+                                        %error,
+                                        "U5: supervisor record_slot_pid failed"
+                                    );
+                                }
                             }
                             // 2026-07-26-004 plan U2/U3 (KTD3): persist
                             // bounded terminal evidence for the Completed

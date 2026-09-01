@@ -47,7 +47,7 @@ use super::io::{
 };
 
 pub type WaveWorkerOutcome =
-    std::result::Result<(Vec<ralph_core::Event>, Duration, bool), (String, Duration)>;
+    std::result::Result<(Vec<ralph_core::Event>, Duration, bool, Option<u32>), (String, Duration)>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WaveWorkerExecutionMode {
@@ -235,6 +235,14 @@ pub async fn run_wave_worker_pty(
             return (index, Err((format!("PTY spawn failed: {e}"), duration)));
         }
     };
+    // 2026-09-01-001 plan U5 (R5 / D6): capture the worker's
+    // OS-level pid at spawn time so `dispatch.rs` can record it
+    // into `dispatch_records.pid`. PTY mode yields a session pid
+    // (the first process in the PTY); non-PTY backends do not
+    // expose one and the field stays `None`. The dispatcher's
+    // record_slot_pid call accepts `None` and degrades to NULL
+    // in the store (warning, not error).
+    let worker_pid = child.process_id().map(|id| id as u32);
     drop(pty_pair.slave);
 
     if let Some(input) = stdin_input
@@ -695,7 +703,7 @@ pub async fn run_wave_worker_pty(
         (index, Err((reason, duration)))
     } else {
         let _ = tx.send((index, success, duration));
-        (index, Ok((events, duration, success)))
+        (index, Ok((events, duration, success, worker_pid)))
     }
 }
 

@@ -19,7 +19,7 @@ pub(crate) fn record_outcome(
     outcome: WaveWorkerOutcome,
 ) {
     match outcome {
-        Ok((events, duration, success)) => {
+        Ok((events, duration, success, _pid)) => {
             // PTY workers return Ok((_, _, false)) for non-zero exit
             // and for timeout-with-events (`run_wave_worker_pty`).
             // Distinguish:
@@ -99,7 +99,7 @@ pub(crate) fn classify_slot_result<'a>(result: &'a WaveWorkerOutcome) -> Classif
         SlotOutcome, TerminalMarker, WorkerExit, classify_worker_outcome,
     };
     match result {
-        Ok((events, _duration, success)) => {
+        Ok((events, _duration, success, _pid)) => {
             let exit = if *success {
                 WorkerExit::Exit0
             } else {
@@ -216,7 +216,7 @@ pub(crate) fn classify_slot_attempt<'a>(
 }
 
 pub(crate) fn reported_failure_detail(result: &WaveWorkerOutcome) -> Option<String> {
-    let (events, _duration, _success) = result.as_ref().ok()?;
+    let (events, _duration, _success, _pid) = result.as_ref().ok()?;
     let failed = events
         .iter()
         .find(|event| event.topic.as_str().ends_with(".unit.failed"))?;

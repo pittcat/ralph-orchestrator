@@ -696,7 +696,7 @@ async fn test_u3_emit_to_wave_channel_records_slot_completed() {
                     events[0].topic, "exec.unit.done",
                     "U3/003: emitted topic must round-trip through the channel reader"
                 );
-                (index, Ok((events, Duration::from_millis(5), true)))
+                (index, Ok((events, Duration::from_millis(5), true, None)))
             })
         }
     }
@@ -890,7 +890,7 @@ async fn test_u1_2026_09_01_dispatcher_persists_slot_event_payloads() {
                 std::fs::write(&events_path, format!("{line}\n")).expect("write channel file");
                 let events = read_worker_events(&events_path);
                 captured.lock().unwrap().push(events_path);
-                (index, Ok((events, Duration::from_millis(5), true)))
+                (index, Ok((events, Duration::from_millis(5), true, None)))
             })
         }
     }
