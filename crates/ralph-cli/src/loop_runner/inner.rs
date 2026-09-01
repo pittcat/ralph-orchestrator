@@ -3658,6 +3658,7 @@ pub(super) async fn run_loop_impl_inner(
 
         let output = outcome.output;
         let success = outcome.success;
+        let watchdog_timeout = outcome.watchdog_timeout;
         let output_hat_id = resolve_hat_for_output_processing(&hat_id, &display_hat);
 
         // Note: TUI lines are now written directly to IterationBuffer during streaming,
@@ -3741,6 +3742,9 @@ pub(super) async fn run_loop_impl_inner(
         let mut normal_merge_state: Option<
             crate::loop_runner::activation_outcome_close::NormalMergeState,
         > = None;
+        let mut silent_merge_outcome: Option<
+            crate::loop_runner::activation_outcome_close::NormalMergeOutcome,
+        > = None;
         if isolated_mode {
             let (outcome_row, merge_state) =
                 crate::loop_runner::activation_outcome_close::prepare_normal_merge(
@@ -3749,12 +3753,13 @@ pub(super) async fn run_loop_impl_inner(
                     state_machine_enabled,
                     &display_hat,
                     success,
-                    outcome.watchdog_timeout,
+                    watchdog_timeout,
                     backend_termination.as_ref(),
                     &output,
                     hat_channel_path.as_deref(),
                 );
             empty_terminal_channel = outcome_row.empty_terminal_channel;
+            silent_merge_outcome = Some(outcome_row);
             normal_merge_state = Some(merge_state);
         }
 
@@ -4799,38 +4804,32 @@ pub(super) async fn run_loop_impl_inner(
             && late_termination_reason.is_none()
             && should_gate_missing_events(&display_hat, &event_loop, &candidate_topics)
         {
-            // 2026-09-01-001 plan U4 (R4 / S4.3): classify the
-            // silent activation before deciding whether to
-            // increment the publish-obligation hard gate.
-            // `BackendDied` (worker died before it could emit)
-            // must NOT count as a publish obligation — the
-            // agent never had the chance. Build a minimal
-            // `ActivationOutcomeFacts` from the per-iteration
-            // state we already have in scope; the merge
-            // channel info is filled with zeros because the
-            // `MergeFailed` priority is only relevant after
-            // merge retries have been attempted (out of scope
-            // for the per-iteration gate block).
+            // 2026-09-01-001 plan U4 (R4 / S4.1-S4.3): classify
+            // from the merge outcome + backend facts gathered in
+            // this same activation. Dummy zeros would collapse
+            // every silent activation into NeverEmitted.
+            let merge = silent_merge_outcome.unwrap_or(
+                crate::loop_runner::activation_outcome_close::NormalMergeOutcome {
+                    empty_terminal_channel: false,
+                    channel_bytes: Some(0),
+                    merge_succeeded: true,
+                    merge_retried: false,
+                },
+            );
             let minimal_facts = crate::loop_runner::activation_outcome::ActivationOutcomeFacts {
                 loop_id: None,
-                channel_exists: false,
-                channel_bytes: Some(0),
-                channel_readable: false,
-                merge_succeeded: true,
-                // Backend termination / watchdog paths exit
-                // early (inner.rs:~3462-3484), so a by-the-time
-                // this gate runs the backend reported success
-                // (or the activation was interrupted, which is
-                // out of scope for the silent-activation
-                // classifier). Default to `true`; BackendDied is
-                // still reachable via the merge retry path in
-                // activation_outcome_close.rs.
-                backend_success: true,
-                backend_exit_code: None,
-                watchdog_timeout: false,
+                channel_exists: merge.channel_bytes.is_some(),
+                channel_bytes: merge.channel_bytes,
+                channel_readable: merge.channel_bytes.is_some(),
+                merge_succeeded: merge.merge_succeeded,
+                backend_success: success,
+                backend_exit_code: outcome.backend_exit_code,
+                watchdog_timeout,
                 backend_termination: backend_termination.is_some(),
-                output_bytes: 0,
-                output_mentions_emit: false,
+                output_bytes: output.len() as u64,
+                output_mentions_emit: crate::loop_runner::late_events::output_mentions_ralph_emit(
+                    &output,
+                ),
                 candidate_event_count: 0,
                 accepted_event_count: 0,
                 rejected_event_count: 0,
@@ -4840,9 +4839,7 @@ pub(super) async fn run_loop_impl_inner(
             let silent_class = crate::loop_runner::activation_outcome::classify_silent_activation(
                 &minimal_facts,
             );
-            let is_backend_died = silent_class
-                == crate::loop_runner::activation_outcome::SilentActivationClass::BackendDied;
-            if is_backend_died {
+            if !silent_class.counts_toward_publish_obligation() {
                 // 2026-09-01-001 plan U4 (S4.3): route to the
                 // existing backend-failure path instead of
                 // incrementing the publish-obligation counter.

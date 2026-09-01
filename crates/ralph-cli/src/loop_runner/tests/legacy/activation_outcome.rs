@@ -834,3 +834,202 @@ fn u13_snapshot_distinguishes_missing_from_unreadable() {
         "ENOENT must produce Missing"
     );
 }
+
+std::thread_local! {
+    static S4_UNLOCK_TARGET: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn s4_unlock_target_for_retry() {
+    S4_UNLOCK_TARGET.with(|cell| {
+        if let Some(path) = cell.borrow().as_ref() {
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            std::fs::set_permissions(path, perms).unwrap();
+        }
+    });
+}
+
+fn s4_make_readonly(path: &Path) {
+    let mut perms = std::fs::metadata(path).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(path, perms).unwrap();
+}
+
+fn s4_clear_readonly(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    let mut perms = std::fs::metadata(path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    let _ = std::fs::set_permissions(path, perms);
+}
+
+/// 2026-09-01-001 plan U4 S4.1: first merge fails (read-only
+/// target), the retry hook restores write access, events land.
+#[test]
+fn s41_merge_retry_succeeds_and_writes_events() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let _cwd = CwdGuard::set(workspace.path());
+    init_git_workspace(workspace.path());
+
+    let (ctx, _event_loop) = build_isolated_executor_loop(workspace.path());
+    let channel_path = seed_hat_channel(&ctx, "executor", "s41", 1);
+    std::fs::write(&channel_path, b"{\"topic\":\"work.done\"}\n").unwrap();
+
+    let target = crate::loop_runner::paths::resolve_emit_events_path(&ctx, false);
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "").unwrap();
+    s4_make_readonly(&target);
+
+    S4_UNLOCK_TARGET.with(|cell| *cell.borrow_mut() = Some(target.clone()));
+    crate::loop_runner::activation_outcome_close::set_merge_retry_test_hook(Some(
+        s4_unlock_target_for_retry,
+    ));
+
+    let config = event_loop_config();
+    let (outcome, _) = crate::loop_runner::activation_outcome_close::prepare_normal_merge(
+        &ctx,
+        &config,
+        false,
+        &ralph_proto::HatId::new("executor"),
+        true,
+        false,
+        None,
+        "",
+        Some(&channel_path),
+    );
+
+    crate::loop_runner::activation_outcome_close::set_merge_retry_test_hook(None);
+    S4_UNLOCK_TARGET.with(|cell| *cell.borrow_mut() = None);
+    s4_clear_readonly(&target);
+
+    assert!(outcome.merge_succeeded, "S4.1: retry must succeed");
+    assert!(outcome.merge_retried, "S4.1: retry must have run");
+    let ledger = std::fs::read_to_string(&target).expect("read merged ledger");
+    assert!(
+        ledger.contains("work.done"),
+        "S4.1: retried merge must land the channel event; got {ledger}"
+    );
+}
+
+/// 2026-09-01-001 plan U4 S4.2: both merge attempts fail →
+/// reason=merge_failed and the channel is quarantined.
+#[test]
+fn s42_merge_retry_still_fails_quarantines_channel() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let _cwd = CwdGuard::set(workspace.path());
+    init_git_workspace(workspace.path());
+
+    let (ctx, _event_loop) = build_isolated_executor_loop(workspace.path());
+    let channel_path = seed_hat_channel(&ctx, "executor", "s42", 1);
+    std::fs::write(&channel_path, b"{\"topic\":\"work.done\"}\n").unwrap();
+
+    let target = crate::loop_runner::paths::resolve_emit_events_path(&ctx, false);
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "").unwrap();
+    s4_make_readonly(&target);
+
+    let config = event_loop_config();
+    let (outcome, _) = crate::loop_runner::activation_outcome_close::prepare_normal_merge(
+        &ctx,
+        &config,
+        false,
+        &ralph_proto::HatId::new("executor"),
+        true,
+        false,
+        None,
+        "",
+        Some(&channel_path),
+    );
+
+    s4_clear_readonly(&target);
+
+    assert!(!outcome.merge_succeeded, "S4.2: merge must still fail");
+    assert!(outcome.merge_retried, "S4.2: retry must have run");
+    assert!(
+        outcome.channel_bytes.unwrap_or(0) > 0,
+        "S4.2: pre-merge channel was non-empty"
+    );
+    let facts = crate::loop_runner::activation_outcome::ActivationOutcomeFacts {
+        channel_exists: true,
+        channel_bytes: outcome.channel_bytes,
+        channel_readable: true,
+        merge_succeeded: outcome.merge_succeeded,
+        backend_success: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        crate::loop_runner::activation_outcome::classify_silent_activation(&facts),
+        crate::loop_runner::activation_outcome::SilentActivationClass::MergeFailed
+    );
+    assert!(
+        crate::loop_runner::activation_outcome::SilentActivationClass::MergeFailed
+            .counts_toward_publish_obligation(),
+        "S4.2: merge_failed still counts toward the publish-obligation gate"
+    );
+    let quarantine_dir = ctx.workspace().join(".ralph/diagnostics/failed-activations");
+    let quarantined = std::fs::read_dir(&quarantine_dir)
+        .map(|rd| rd.filter_map(Result::ok).count())
+        .unwrap_or(0);
+    assert!(
+        quarantined >= 1,
+        "S4.2: failed channel must be quarantined under {}; count={quarantined}",
+        quarantine_dir.display()
+    );
+    assert!(
+        !channel_path.exists(),
+        "S4.2: live channel path must be gone after quarantine"
+    );
+}
+
+/// 2026-09-01-001 plan U4 S4.3: backend death on an empty
+/// channel is BackendDied and does not count toward the
+/// publish-obligation hard gate.
+#[test]
+fn s43_backend_died_skips_publish_obligation_count() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let _cwd = CwdGuard::set(workspace.path());
+    init_git_workspace(workspace.path());
+
+    let (ctx, _event_loop) = build_isolated_executor_loop(workspace.path());
+    let channel_path = seed_hat_channel(&ctx, "executor", "s43", 1);
+    std::fs::write(&channel_path, "").unwrap();
+
+    let target = ctx.workspace().join(".ralph/events-main.jsonl");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "").unwrap();
+
+    let config = event_loop_config();
+    let (outcome, _) = crate::loop_runner::activation_outcome_close::prepare_normal_merge(
+        &ctx,
+        &config,
+        false,
+        &ralph_proto::HatId::new("executor"),
+        false,
+        false,
+        None,
+        "",
+        Some(&channel_path),
+    );
+    let facts = crate::loop_runner::activation_outcome::ActivationOutcomeFacts {
+        channel_exists: outcome.channel_bytes.is_some(),
+        channel_bytes: outcome.channel_bytes,
+        channel_readable: outcome.channel_bytes.is_some(),
+        merge_succeeded: outcome.merge_succeeded,
+        backend_success: false,
+        watchdog_timeout: false,
+        ..Default::default()
+    };
+    let class = crate::loop_runner::activation_outcome::classify_silent_activation(&facts);
+    assert_eq!(
+        class,
+        crate::loop_runner::activation_outcome::SilentActivationClass::BackendDied
+    );
+    assert!(
+        !class.counts_toward_publish_obligation(),
+        "S4.3: backend_died must not increment the publish-obligation hard gate"
+    );
+}

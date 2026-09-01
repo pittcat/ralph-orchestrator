@@ -284,7 +284,7 @@ fn remove_marker_if_points_to(ctx: &LoopContext, channel_path: &Path) {
 
 /// Preserve a failed activation's channel outside the live channel directory
 /// so later activations cannot mistake it for current state.
-fn quarantine_failed_channel(ctx: &LoopContext, channel_path: &Path) -> Result<PathBuf> {
+pub(crate) fn quarantine_failed_channel(ctx: &LoopContext, channel_path: &Path) -> Result<PathBuf> {
     let quarantine_dir = ctx.ralph_dir().join("diagnostics/failed-activations");
     fs::create_dir_all(&quarantine_dir).with_context(|| {
         format!(

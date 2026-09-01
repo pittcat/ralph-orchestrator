@@ -13,7 +13,7 @@ use ralph_core::event_loop::ProcessedEvents;
 use ralph_core::{EventLoop, LoopContext, RalphConfig};
 use ralph_proto::HatId;
 use std::path::Path;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use super::activation_outcome::{
     ActivationOutcomeFacts, ChannelSnapshot, channel_exists_for, channel_readable_for,
@@ -45,6 +45,15 @@ pub(crate) struct NormalMergeOutcome {
     /// treats this as a missing emit and preserves the existing
     /// recovery / fallback path.
     pub empty_terminal_channel: bool,
+    /// Pre-merge channel size. Fed to `classify_silent_activation`
+    /// at the publish-obligation gate so MergeFailed is distinguishable
+    /// from NeverEmitted.
+    pub channel_bytes: Option<u64>,
+    /// Post-retry merge result.
+    pub merge_succeeded: bool,
+    /// `true` when a second `merge_hat_channel_at_path` attempt ran
+    /// (S4.1 / S4.2).
+    pub merge_retried: bool,
 }
 
 /// Capture the pre-merge snapshot and merge the isolated hat-channel
@@ -80,15 +89,50 @@ pub(crate) fn prepare_normal_merge(
         .and_then(|path| channel_reference_for_log(Some(path), ctx.workspace()));
 
     let target_events_path = resolve_emit_events_path(ctx, state_machine_enabled);
-    let merge_result = crate::loop_runner::hat_channel::merge_hat_channel_at_path(
-        ctx,
-        &target_events_path,
-        display_hat.as_str(),
-        Some(config),
-        channel_path.as_deref(),
-    );
-    let merge_succeeded = merge_result.is_ok();
-    if let Err(e) = merge_result {
+    let merge_once = || {
+        crate::loop_runner::hat_channel::merge_hat_channel_at_path(
+            ctx,
+            &target_events_path,
+            display_hat.as_str(),
+            Some(config),
+            channel_path.as_deref(),
+        )
+    };
+    let first_merge = merge_once();
+    // 2026-09-01-001 plan U4 (S4.1): a non-empty channel whose first
+    // merge hit a transient IO error is retried once. Empty-channel
+    // errors already quarantine the file inside `merge_hat_channel`
+    // and must NOT be retried — a retry would see a missing file and
+    // return Ok, collapsing NeverEmitted into a false merge success.
+    let (merge_succeeded, merge_retried, merge_err) = match first_merge {
+        Ok(()) => (true, false, None),
+        Err(first_err) => {
+            let channel_still_present = channel_path
+                .as_deref()
+                .is_some_and(|path| path.exists());
+            if pre_bytes.unwrap_or(0) > 0 && channel_still_present {
+                #[cfg(test)]
+                run_merge_retry_test_hook();
+                match merge_once() {
+                    Ok(()) => {
+                        info!(
+                            hat = %display_hat.as_str(),
+                            reason = "merge_failed_retried",
+                            "U4: isolated hat-channel merge succeeded on retry"
+                        );
+                        (true, true, None)
+                    }
+                    Err(retry_err) => (false, true, Some(retry_err)),
+                }
+            } else {
+                (false, false, Some(first_err))
+            }
+        }
+    };
+    result.channel_bytes = pre_bytes;
+    result.merge_succeeded = merge_succeeded;
+    result.merge_retried = merge_retried;
+    if let Some(e) = merge_err {
         // 2026-07-03-002 plan U4: 从 warn! 升级为 error! + emit 诊断文件。
         // 093813 run 暴露:merge 失败仅 warn! 导致 operator 看不到 events
         // 丢失风险。emit 诊断让 operator 能看到,loop 继续走 fallback。
@@ -100,8 +144,21 @@ pub(crate) fn prepare_normal_merge(
         error!(
             error = %e,
             hat = %display_hat.as_str(),
+            retried = merge_retried,
             "Failed to merge isolated hat channel; events may be lost (see diagnostic file)"
         );
+        if pre_bytes.unwrap_or(0) > 0
+            && let Some(path) = channel_path.as_deref()
+            && path.exists()
+            && let Err(qerr) =
+                crate::loop_runner::hat_channel::quarantine_failed_channel(ctx, path)
+        {
+            warn!(
+                error = %qerr,
+                hat = %display_hat.as_str(),
+                "U4: failed to quarantine merge-failed hat channel"
+            );
+        }
         // An empty channel is a known missing-terminal condition,
         // not an unreadable-channel condition. Preserve the
         // responsible-hat recovery path even though the merge now
@@ -193,4 +250,23 @@ pub(crate) fn write_activation_outcome_for_normal_merge(
         &refined_snapshot,
         &facts,
     );
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static MERGE_RETRY_TEST_HOOK: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_merge_retry_test_hook(hook: Option<fn()>) {
+    MERGE_RETRY_TEST_HOOK.with(|cell| cell.set(hook));
+}
+
+#[cfg(test)]
+fn run_merge_retry_test_hook() {
+    MERGE_RETRY_TEST_HOOK.with(|cell| {
+        if let Some(hook) = cell.get() {
+            hook();
+        }
+    });
 }

@@ -740,6 +740,13 @@ impl SilentActivationClass {
             SilentActivationClass::NeverEmitted => "never_emitted",
         }
     }
+
+    /// S4.3: `BackendDied` is a worker-death, not a missing emit.
+    /// MergeFailed and NeverEmitted still count toward the
+    /// publish-obligation hard gate.
+    pub fn counts_toward_publish_obligation(self) -> bool {
+        !matches!(self, Self::BackendDied)
+    }
 }
 
 pub fn classify_silent_activation(facts: &ActivationOutcomeFacts) -> SilentActivationClass {
@@ -847,5 +854,12 @@ mod classify_tests {
             classify_silent_activation(&f),
             SilentActivationClass::NeverEmitted
         );
+    }
+
+    #[test]
+    fn backend_died_does_not_count_toward_publish_obligation() {
+        assert!(SilentActivationClass::MergeFailed.counts_toward_publish_obligation());
+        assert!(SilentActivationClass::NeverEmitted.counts_toward_publish_obligation());
+        assert!(!SilentActivationClass::BackendDied.counts_toward_publish_obligation());
     }
 }
