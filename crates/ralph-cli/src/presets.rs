@@ -1437,6 +1437,155 @@ mod tests {
         }
     }
 
+    /// Plan 2026-08-27-1430 U3 / R1: the embedded parallel-forge schema
+    /// must declare `target_start_sha` / `target_status_fingerprint` as
+    /// required fields on `forge.worktrees.ready`, so the fan-out handoff
+    /// always carries the target-branch identity snapshot consumed later
+    /// by the audit gate.
+    #[test]
+    fn parallel_forge_worktrees_ready_requires_target_identity() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset");
+        let config = RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML parses");
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("parallel-forge declares event_policy");
+        let entry = policy
+            .schemas
+            .get("forge.worktrees.ready")
+            .expect("parallel-forge schema must declare forge.worktrees.ready");
+        let required: std::collections::BTreeSet<&str> =
+            entry.required_fields.iter().map(String::as_str).collect();
+        for field in ["target_start_sha", "target_status_fingerprint"] {
+            assert!(
+                required.contains(field),
+                "forge.worktrees.ready.required_fields missing `{field}`; got {required:?}"
+            );
+        }
+    }
+
+    /// Plan 2026-08-27-1430 U4 (S1/S3-S5; R1/R7; D2/D9/D10): the initial
+    /// fan-out carries the preset's FIRST precheck gate. The precheck
+    /// block is enabled with exactly one rule keyed `forge.worktrees.ready`
+    /// (U4 may not open other topics — later Units append their own), the
+    /// desugar synthesizes `precheck-forge.worktrees.ready` with
+    /// `max_activations == retry_budget + 1 == 4`, and the four
+    /// deterministic payload_consistency rules target the PROPOSED topic
+    /// so they fire before the LLM gate (E10).
+    #[test]
+    fn parallel_forge_worktrees_ready_dual_guard() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset");
+        let mut config = RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML parses");
+        config.normalize();
+
+        // 1. precheck base: enabled, exactly one rule, locked key config.
+        let precheck = config
+            .event_loop
+            .precheck
+            .as_ref()
+            .expect("parallel-forge must declare event_loop.precheck (U4)");
+        assert!(precheck.enabled, "event_loop.precheck.enabled must be true");
+        assert_eq!(
+            precheck.rules.len(),
+            1,
+            "U4 registers exactly one precheck rule (forge.worktrees.ready); got {:?}",
+            precheck.rules.keys().collect::<Vec<_>>()
+        );
+        let rule = precheck
+            .rules
+            .get("forge.worktrees.ready")
+            .expect("precheck.rules must key forge.worktrees.ready");
+        assert!(!rule.prompt.is_empty(), "precheck prompt must be declared");
+        assert_eq!(rule.on_fail.target, "worktree");
+        assert_eq!(rule.on_fail.retry_budget, 3);
+        assert_eq!(
+            rule.on_fail.on_exhausted,
+            "forge.plan.blocked(reason=precheck_failed)"
+        );
+        assert_eq!(
+            rule.on_fail.reason, "worktree_identity_evidence_insufficient"
+        );
+        let guidance = rule
+            .recovery_guidance
+            .as_ref()
+            .expect("precheck rule must carry recovery_guidance");
+        assert!(
+            !guidance.common.is_empty(),
+            "recovery_guidance.common must not be empty"
+        );
+
+        // 2. Desugar: the synthesized gate hat exists with budget+1
+        //    activations; the producer emits `.proposed`; the dispatcher
+        //    still consumes the accepted bare topic.
+        let gate = config
+            .hats
+            .get("precheck-forge.worktrees.ready")
+            .expect("normalize must synthesize precheck-forge.worktrees.ready");
+        assert_eq!(
+            gate.max_activations,
+            Some(4),
+            "gate max_activations must be retry_budget(3) + 1"
+        );
+        let worktree = config.hats.get("worktree").expect("worktree hat");
+        assert!(
+            worktree
+                .publishes
+                .iter()
+                .any(|t| t == "forge.worktrees.ready.proposed"),
+            "desugar must rewrite worktree publishes to the proposed topic; got {:?}",
+            worktree.publishes
+        );
+        assert!(
+            !worktree.publishes.iter().any(|t| t == "forge.worktrees.ready"),
+            "worktree must not keep publishing the bare guarded topic"
+        );
+        let dispatcher = config
+            .hats
+            .get("forge-dispatcher")
+            .expect("forge-dispatcher hat");
+        assert!(
+            dispatcher
+                .triggers
+                .iter()
+                .any(|t| t == "forge.worktrees.ready"),
+            "dispatcher must still trigger on the accepted bare topic; got {:?}",
+            dispatcher.triggers
+        );
+        assert!(
+            !dispatcher
+                .triggers
+                .iter()
+                .any(|t| t == "forge.worktrees.ready.proposed"),
+            "dispatcher must never subscribe to the proposed topic"
+        );
+
+        // 3. The four deterministic consistency rules fire on the PROPOSED
+        //    topic, before the LLM gate.
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("parallel-forge declares event_policy");
+        for id in [
+            "parallel-forge-worktrees-ready-empty-target-branch",
+            "parallel-forge-worktrees-ready-empty-start-sha",
+            "parallel-forge-worktrees-ready-empty-fingerprint",
+            "parallel-forge-worktrees-ready-empty-map-path",
+        ] {
+            let rule = policy
+                .payload_consistency
+                .rules
+                .iter()
+                .find(|rule| rule.id == id)
+                .unwrap_or_else(|| panic!("missing payload_consistency rule {id}"));
+            assert_eq!(
+                rule.topic, "forge.worktrees.ready.proposed",
+                "rule {id} must target the proposed topic (D10/E10)"
+            );
+        }
+    }
+
     /// Plan 2026-07-30-001 U4 / R4: the embedded parallel-forge preset
     /// must give every executor slot three attempts in total, so a unit
     /// that fails on its own is retried by a fresh process twice before
@@ -3276,6 +3425,190 @@ mod tests {
             allowed,
             vec![serde_json::json!(3)],
             "correction_round must be restricted to [3] for the final settled"
+        );
+    }
+
+    // Plan 2026-08-27-1430 U10 (S19 / S20 / S21; R6 / R8; D3): the four
+    // receipt topics (`forge.exec.development.done`,
+    // `forge.full.verified`, `forge.finalized`, `forge.report.done`)
+    // carry deterministic `payload_consistency` rules on their BARE
+    // topic names (these topics have no precheck and therefore no
+    // `.proposed` rewrite), while `exec.unit.done` stays guard-free:
+    // no synthesized `precheck-exec.unit.done` hat and no consistency
+    // rule targeting it. `normalize()` runs the precheck desugar so a
+    // future `exec.unit.done` precheck would synthesize the gate hat
+    // and fail the first assertion.
+    #[test]
+    fn test_parallel_forge_receipt_consistency_rules() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset must exist");
+        let mut config =
+            RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML should parse");
+        config.normalize();
+
+        // S21 / R8: `exec.unit.done` must have NO guard — the unit
+        // slot topic stays high-frequency and ungated.
+        assert!(
+            !config.hats.contains_key("precheck-exec.unit.done"),
+            "exec.unit.done must not gain a precheck gate hat (S21/R8)"
+        );
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("parallel-forge must declare event_policy");
+        assert!(
+            policy
+                .payload_consistency
+                .rules
+                .iter()
+                .all(|rule| rule.topic != "exec.unit.done"),
+            "no payload_consistency rule may target exec.unit.done (S21/R8)"
+        );
+
+        // S19 / S20: the nine receipt rules on the four bare topics.
+        let expected: &[(&str, &str)] = &[
+            (
+                "parallel-forge-dev-done-empty-plan",
+                "forge.exec.development.done",
+            ),
+            (
+                "parallel-forge-dev-done-nonzero-failed",
+                "forge.exec.development.done",
+            ),
+            ("parallel-forge-full-verified-false", "forge.full.verified"),
+            (
+                "parallel-forge-full-verified-empty-report",
+                "forge.full.verified",
+            ),
+            ("parallel-forge-finalized-empty-sha", "forge.finalized"),
+            (
+                "parallel-forge-finalized-empty-target-branch",
+                "forge.finalized",
+            ),
+            ("parallel-forge-finalized-empty-report", "forge.finalized"),
+            ("parallel-forge-report-empty-path", "forge.report.done"),
+            (
+                "parallel-forge-report-completed-without-accepted-audit",
+                "forge.report.done",
+            ),
+        ];
+        for (id, topic) in expected {
+            let rule = policy
+                .payload_consistency
+                .rules
+                .iter()
+                .find(|rule| rule.id == *id)
+                .unwrap_or_else(|| panic!("missing payload_consistency rule {id}"));
+            assert_eq!(
+                rule.topic, *topic,
+                "rule {id} must target the bare topic {topic} \
+                 (receipt topics have no precheck `.proposed` rewrite)"
+            );
+        }
+    }
+
+    // Plan 2026-08-27-1430 U2 (S11 / D5 / E5,E6): `work.failed` has a
+    // single business writer. The tester must route full-gate failures
+    // through the typed topic `forge.full.verification.failed`; the
+    // forge-failure-handler is the only hat allowed to publish
+    // `work.failed`. tester/integrator/verifier must not list
+    // `work.failed` in publishes/exempt_topics/terminal_events, and
+    // `topic_deny_rules` must pin the four non-handler hats that
+    // historically touched the topic.
+    #[test]
+    fn parallel_forge_work_failed_single_writer() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset must exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML should parse");
+
+        // 1. Only forge-failure-handler may publish work.failed.
+        let mut writers: Vec<&str> = config
+            .hats
+            .iter()
+            .filter(|(_, hat)| hat.publishes.iter().any(|t| t == "work.failed"))
+            .map(|(id, _)| id.as_str())
+            .collect();
+        writers.sort_unstable();
+        assert_eq!(
+            writers,
+            ["forge-failure-handler"],
+            "work.failed must have exactly one publisher: forge-failure-handler"
+        );
+
+        // 2. tester publishes the typed failure topic instead of work.failed.
+        let tester = config.hats.get("tester").expect("tester hat must exist");
+        for (label, list) in [
+            ("publishes", &tester.publishes),
+            ("exempt_topics", &tester.exempt_topics),
+            ("terminal_events", &tester.terminal_events),
+        ] {
+            assert!(
+                !list.iter().any(|t| t == "work.failed"),
+                "tester {label} must not contain work.failed; got {list:?}"
+            );
+            assert!(
+                list.iter().any(|t| t == "forge.full.verification.failed"),
+                "tester {label} must contain forge.full.verification.failed; got {list:?}"
+            );
+        }
+
+        // 3. integrator/verifier drop work.failed from all three lists.
+        for hat_id in ["integrator", "verifier"] {
+            let hat = config
+                .hats
+                .get(hat_id)
+                .unwrap_or_else(|| panic!("{hat_id} hat must exist"));
+            for (label, list) in [
+                ("publishes", &hat.publishes),
+                ("exempt_topics", &hat.exempt_topics),
+                ("terminal_events", &hat.terminal_events),
+            ] {
+                assert!(
+                    !list.iter().any(|t| t == "work.failed"),
+                    "{hat_id} {label} must not contain work.failed; got {list:?}"
+                );
+            }
+        }
+
+        // 4. topic_deny_rules pin tester/integrator/verifier/forge-dispatcher
+        //    away from work.failed.
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("event_policy must be declared for parallel-forge");
+        for hat_id in ["tester", "integrator", "verifier", "forge-dispatcher"] {
+            assert!(
+                policy
+                    .topic_deny_rules
+                    .iter()
+                    .any(|r| r.hat_id == hat_id && r.topic == "work.failed"),
+                "topic_deny_rules must deny {hat_id} x work.failed"
+            );
+        }
+
+        // 5. schema SSOT declares the typed failure topic with locked
+        //    required_fields and full field_docs.
+        let (required, missing_docs) =
+            collect_required_field_docs(&config, "forge.full.verification.failed");
+        let mut sorted = required.clone();
+        sorted.sort_unstable();
+        let mut expected = vec![
+            "context_artifact_path",
+            "failure_fingerprint",
+            "forge_artifact_root",
+            "plan_key",
+            "reason",
+            "verification_report_path",
+        ];
+        expected.sort_unstable();
+        assert_eq!(
+            sorted, expected,
+            "forge.full.verification.failed required_fields must be locked to the U2 set"
+        );
+        assert!(
+            missing_docs.is_empty(),
+            "forge.full.verification.failed field_docs incomplete for: {missing_docs:?}"
         );
     }
 
