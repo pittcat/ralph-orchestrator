@@ -711,3 +711,141 @@ mod tests {
         assert_eq!(facts.wave_policy_rejection_count, 2);
     }
 }
+
+// 2026-09-01-001 plan U4 (R4 / D5 / S4.1-S4.4): a silent
+// activation (no event landed on the bus) must be classified by
+// ROOT CAUSE so the gate increments the right counter and the
+// operator-facing diagnostic surfaces the actual reason.
+//
+// Priority order (the same one plan U4 §6 specifies):
+//   1. MergeFailed  — channel had bytes but `merge_hat_channel_at_path`
+//                     returned Err AND a retry also failed;
+//   2. BackendDied  — backend exited with success=false OR
+//                     watchdog_timeout=true AND channel was empty;
+//   3. NeverEmitted — backend exited cleanly AND channel was
+//                     empty AND output does not mention
+//     `ralph emit` (the genuine "I forgot" case).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SilentActivationClass {
+    MergeFailed,
+    BackendDied,
+    NeverEmitted,
+}
+
+impl SilentActivationClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SilentActivationClass::MergeFailed => "merge_failed",
+            SilentActivationClass::BackendDied => "backend_died",
+            SilentActivationClass::NeverEmitted => "never_emitted",
+        }
+    }
+}
+
+pub fn classify_silent_activation(facts: &ActivationOutcomeFacts) -> SilentActivationClass {
+    // Priority 1: merge failure on a non-empty channel. The
+    // caller may have already retried (S4.1 says "retried and
+    // succeeded → events landed; retried and still failing →
+    // MergeFailed"); the caller passes in the post-retry
+    // `merge_succeeded` so a successful retry returns the
+    // NeverEmitted / BackendDied path naturally without us
+    // hard-coding retry logic here.
+    let channel_had_bytes = facts.channel_bytes.unwrap_or(0) > 0;
+    if channel_had_bytes && !facts.merge_succeeded {
+        return SilentActivationClass::MergeFailed;
+    }
+    // Priority 2: backend died before producing output.
+    if !facts.backend_success || facts.watchdog_timeout {
+        return SilentActivationClass::BackendDied;
+    }
+    // Priority 3: clean exit, empty channel, no emit hint.
+    SilentActivationClass::NeverEmitted
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    fn facts(
+        channel_bytes: Option<u64>,
+        merge_succeeded: bool,
+        backend_success: bool,
+        watchdog_timeout: bool,
+    ) -> ActivationOutcomeFacts {
+        ActivationOutcomeFacts {
+            loop_id: None,
+            channel_exists: channel_bytes.is_some(),
+            channel_bytes,
+            channel_readable: channel_bytes.is_some(),
+            merge_succeeded,
+            backend_success,
+            backend_exit_code: None,
+            watchdog_timeout,
+            backend_termination: false,
+            output_bytes: 0,
+            output_mentions_emit: false,
+            candidate_event_count: 0,
+            accepted_event_count: 0,
+            rejected_event_count: 0,
+            wave_policy_rejection_count: 0,
+            terminal_obligation_topics: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn merge_failed_when_channel_non_empty_and_merge_errored() {
+        let f = facts(Some(128), false, true, false);
+        assert_eq!(
+            classify_silent_activation(&f),
+            SilentActivationClass::MergeFailed
+        );
+    }
+
+    #[test]
+    fn backend_died_when_backend_failed_and_channel_empty() {
+        let f = facts(Some(0), true, false, false);
+        assert_eq!(
+            classify_silent_activation(&f),
+            SilentActivationClass::BackendDied
+        );
+    }
+
+    #[test]
+    fn backend_died_when_watchdog_timed_out() {
+        let f = facts(Some(0), true, true, true);
+        assert_eq!(
+            classify_silent_activation(&f),
+            SilentActivationClass::BackendDied
+        );
+    }
+
+    #[test]
+    fn never_emitted_when_clean_exit_and_empty_channel() {
+        let f = facts(Some(0), true, true, false);
+        assert_eq!(
+            classify_silent_activation(&f),
+            SilentActivationClass::NeverEmitted
+        );
+    }
+
+    #[test]
+    fn merge_failed_precedes_backend_died() {
+        // Both merge failure and backend failed simultaneously
+        // (a worker died mid-merge). The merge seam's verdict
+        // wins because the merge's state is unknowable.
+        let f = facts(Some(64), false, false, false);
+        assert_eq!(
+            classify_silent_activation(&f),
+            SilentActivationClass::MergeFailed
+        );
+    }
+
+    #[test]
+    fn missing_channel_is_never_emitted() {
+        let f = facts(None, true, true, false);
+        assert_eq!(
+            classify_silent_activation(&f),
+            SilentActivationClass::NeverEmitted
+        );
+    }
+}

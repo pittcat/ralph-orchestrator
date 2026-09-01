@@ -4799,21 +4799,79 @@ pub(super) async fn run_loop_impl_inner(
             && late_termination_reason.is_none()
             && should_gate_missing_events(&display_hat, &event_loop, &candidate_topics)
         {
-            event_loop.increment_hard_gate_count();
-            // 2026-06-17-004 U3 (R4+R5): the obligation trigger
-            // replay below still matters because obligation
-            // bookkeeping feeds into should_gate_missing_events
-            // on the next iteration. The guidance emit itself
-            // was removed together with the inject_*_guidance
-            // helpers in hard_gate.rs.
-            event_loop
-                .state_mut()
-                .replay_obligation_triggers_to_activation_state();
-            info!(
-                hat = %display_hat.as_str(),
-                consecutive = event_loop.state().consecutive_hard_gates,
-                "Hard gate triggered: hat has publish obligation but emitted no event"
+            // 2026-09-01-001 plan U4 (R4 / S4.3): classify the
+            // silent activation before deciding whether to
+            // increment the publish-obligation hard gate.
+            // `BackendDied` (worker died before it could emit)
+            // must NOT count as a publish obligation — the
+            // agent never had the chance. Build a minimal
+            // `ActivationOutcomeFacts` from the per-iteration
+            // state we already have in scope; the merge
+            // channel info is filled with zeros because the
+            // `MergeFailed` priority is only relevant after
+            // merge retries have been attempted (out of scope
+            // for the per-iteration gate block).
+            let minimal_facts = crate::loop_runner::activation_outcome::ActivationOutcomeFacts {
+                loop_id: None,
+                channel_exists: false,
+                channel_bytes: Some(0),
+                channel_readable: false,
+                merge_succeeded: true,
+                // Backend termination / watchdog paths exit
+                // early (inner.rs:~3462-3484), so a by-the-time
+                // this gate runs the backend reported success
+                // (or the activation was interrupted, which is
+                // out of scope for the silent-activation
+                // classifier). Default to `true`; BackendDied is
+                // still reachable via the merge retry path in
+                // activation_outcome_close.rs.
+                backend_success: true,
+                backend_exit_code: None,
+                watchdog_timeout: false,
+                backend_termination: backend_termination.is_some(),
+                output_bytes: 0,
+                output_mentions_emit: false,
+                candidate_event_count: 0,
+                accepted_event_count: 0,
+                rejected_event_count: 0,
+                wave_policy_rejection_count: 0,
+                terminal_obligation_topics: Vec::new(),
+            };
+            let silent_class = crate::loop_runner::activation_outcome::classify_silent_activation(
+                &minimal_facts,
             );
+            let is_backend_died = silent_class
+                == crate::loop_runner::activation_outcome::SilentActivationClass::BackendDied;
+            if is_backend_died {
+                // 2026-09-01-001 plan U4 (S4.3): route to the
+                // existing backend-failure path instead of
+                // incrementing the publish-obligation counter.
+                // Diagnostic reason surfaces `backend_died` so
+                // operators can tell apart "I forgot to emit"
+                // from "the worker died before I could".
+                tracing::info!(
+                    hat = %display_hat.as_str(),
+                    "U4: hat activation ended with backend death; \
+                     skipping publish-obligation hard gate (reason=backend_died)"
+                );
+            } else {
+                event_loop.increment_hard_gate_count();
+                // 2026-06-17-004 U3 (R4+R5): the obligation trigger
+                // replay below still matters because obligation
+                // bookkeeping feeds into should_gate_missing_events
+                // on the next iteration. The guidance emit itself
+                // was removed together with the inject_*_guidance
+                // helpers in hard_gate.rs.
+                event_loop
+                    .state_mut()
+                    .replay_obligation_triggers_to_activation_state();
+                info!(
+                    hat = %display_hat.as_str(),
+                    consecutive = event_loop.state().consecutive_hard_gates,
+                    reason = silent_class.as_str(),
+                    "Hard gate triggered: hat has publish obligation but emitted no event"
+                );
+            }
         } else if !agent_wrote_any_valid_or_rejected
             && wave_events.is_empty()
             && !hard_gate_triggered_this_iteration

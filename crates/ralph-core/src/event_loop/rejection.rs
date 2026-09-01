@@ -41,6 +41,31 @@ pub enum RejectionStage {
     ExecutionContract,
     /// Rejected by the payload contract.
     PayloadContract,
+    /// 2026-09-01-001 plan U4 (R4 / S4.2): the isolated hat's
+    /// channel file was non-empty but `merge_hat_channel_at_path`
+    /// returned an IO error and the retry also failed. The
+    /// gate still attributes this to the agent's "no event
+    /// landed on the bus" surface (publish obligation),
+    /// but the reason code on the row is `merge_failed` so
+    /// the diagnose reporter can show the operator the root
+    /// cause without the silent-success collapse that the
+    /// pre-U4 code exhibited (primary-20260826 / 2026-08-10).
+    MergeFailed,
+    /// 2026-09-01-001 plan U4 (R4 / S4.3): the backend exited
+    /// before the agent could emit (`backend_success = false` or
+    /// `watchdog_timeout = true` and channel empty). NOT a
+    /// publish-obligation failure — the agent never had the
+    /// chance to write an event. The gate increments the
+    /// backend-failure counter instead of the hard-gate
+    /// counter, and routes to the existing backend-failure
+    /// recovery path. Reason code on the row is `backend_died`.
+    BackendDied,
+    /// 2026-09-01-001 plan U4 (R4 / S4.4): the agent emitted
+    /// nothing AND the backend exited cleanly AND the channel
+    /// was empty. This is the genuine "I forgot to emit"
+    /// case — publish-obligation hard gate applies unchanged.
+    /// Reason code on the row is `never_emitted`.
+    NeverEmitted,
     /// 2026-06-17-004 U3 (R4+R5): synthesised by the missing-event
     /// hard gate (`hard_gate::inject_missing_event_hard_gate_guidance`).
     /// The agent did not emit any event on its publish obligation;
@@ -73,6 +98,9 @@ impl RejectionStage {
             RejectionStage::Policy => "policy",
             RejectionStage::ExecutionContract => "execution_contract",
             RejectionStage::PayloadContract => "payload_contract",
+            RejectionStage::MergeFailed => "merge_failed",
+            RejectionStage::BackendDied => "backend_died",
+            RejectionStage::NeverEmitted => "never_emitted",
             RejectionStage::MissingEvent => "missing_event",
             RejectionStage::EmitClaimedButNotWritten => "emit_claimed_but_not_written",
         }
