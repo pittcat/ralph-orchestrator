@@ -784,6 +784,28 @@ fn is_precheck_rejected_topic(config: &crate::config::RalphConfig, topic: &str) 
         .is_some_and(|p| p.enabled && p.rules.contains_key(guarded))
 }
 
+/// Whether `topic` is the `<X>.proposed` variant that the precheck
+/// desugar derives from a declared `event_loop.precheck.rules.<X>`.
+///
+/// Pre-normalize the proposed topic has no hat publisher/subscriber in
+/// the authored graph: the desugar rewrites the producer's emit-side
+/// lists to `<X>.proposed` and synthesizes the `precheck-<X>` gate hat
+/// that subscribes to it, and both only exist after `normalize()`. A
+/// preset may still declare the proposed topic in `event_policy.schemas`
+/// so pre-normalize lint (e.g. `payload_consistency_unknown_topic`) can
+/// resolve rules that target it; that declaration must not trip the
+/// required-topic publisher/subscriber gap (plan 2026-08-27-1430 U4).
+fn is_precheck_proposed_topic(config: &crate::config::RalphConfig, topic: &str) -> bool {
+    let Some(guarded) = topic.strip_suffix(".proposed") else {
+        return false;
+    };
+    config
+        .event_loop
+        .precheck
+        .as_ref()
+        .is_some_and(|p| p.enabled && p.rules.contains_key(guarded))
+}
+
 /// Detect orphan topics — published by a custom hat but with no
 /// non-fallback hat subscriber — and return them as warning findings.
 ///
@@ -981,6 +1003,15 @@ pub fn detect_required_topic_gaps(
         if (topic.ends_with(".unit.done") || topic.ends_with(".unit.failed"))
             && preset_uses_wave_runtime(config)
         {
+            continue;
+        }
+        // plan 2026-08-27-1430 U4: `<X>.proposed` topics derived from a
+        // declared+enabled precheck rule gain their publisher (rewritten
+        // producer) and subscriber (synthesized gate hat) only at
+        // normalize time; exempt them like the `.rejected` variant below
+        // so a preset may declare the proposed topic in
+        // `event_policy.schemas` for pre-normalize consistency-rule lint.
+        if is_precheck_proposed_topic(config, topic.as_str()) {
             continue;
         }
 
@@ -2909,6 +2940,74 @@ hats:
                 .iter()
                 .any(|t| t.as_deref() == Some("work.failed.rejected")),
             "rejected topic must not report an orphan warning, got: {orphan_topics:?}"
+        );
+    }
+
+    /// plan 2026-08-27-1430 U4: `<X>.proposed` topics gain their publisher
+    /// (the rewritten producer) and subscriber (the synthesized gate hat)
+    /// only at normalize time. A preset that declares the proposed topic
+    /// in `event_policy.schemas` — so pre-normalize lint can resolve
+    /// payload_consistency rules targeting it — must not trip the
+    /// required-topic publisher/subscriber gap before `normalize()` runs.
+    #[test]
+    fn precheck_proposed_topic_needs_no_authored_publisher_or_subscriber() {
+        let yaml = r#"
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  starting_event: "work.start"
+  precheck:
+    enabled: true
+    rules:
+      work.failed:
+        prompt:
+          - "Evidence file exists"
+        on_fail:
+          target: "worker"
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    schemas:
+      work.failed:
+        payload: json_object
+        required_fields: ["plan_name"]
+      work.failed.proposed:
+        payload: json_object
+        required_fields: ["plan_name"]
+hats:
+  worker:
+    name: "Worker"
+    description: "work"
+    triggers: ["work.start"]
+    publishes: ["work.failed", "LOOP_COMPLETE"]
+"#;
+        // Deliberately NO normalize(): the exemption exists for the
+        // pre-normalize strict-lint path (embedded preset strict lint).
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+        let registry = HatRegistry::from_runtime_config(&config);
+
+        let gap_codes: Vec<String> = detect_required_topic_gaps(&config, &registry)
+            .iter()
+            .map(|f| format!("{}:{:?}", f.id, f.details.get("topic")))
+            .collect();
+        assert!(
+            !gap_codes
+                .iter()
+                .any(|c| c.contains("work.failed.proposed")),
+            "proposed topic must not report publisher/subscriber gaps pre-normalize, got: {gap_codes:?}"
+        );
+
+        // Sanity: after normalize the topic has both ends for real.
+        let mut normalized = config.clone();
+        normalized.normalize();
+        let normalized_registry = HatRegistry::from_runtime_config(&normalized);
+        let post_gaps: Vec<String> = detect_required_topic_gaps(&normalized, &normalized_registry)
+            .iter()
+            .map(|f| format!("{}:{:?}", f.id, f.details.get("topic")))
+            .collect();
+        assert!(
+            !post_gaps.iter().any(|c| c.contains("work.failed.proposed")),
+            "proposed topic must stay clean post-normalize, got: {post_gaps:?}"
         );
     }
 
