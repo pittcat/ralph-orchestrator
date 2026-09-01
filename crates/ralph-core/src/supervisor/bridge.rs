@@ -306,6 +306,40 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
         Ok(())
     }
 
+    /// 2026-09-01-001 plan U1 (R1 / D1-D3): persist a slot's
+    /// accepted event list via the underlying store. Default:
+    /// no-op so mocks / bridges without a store still compile.
+    /// Store-backed bridges override this to delegate to
+    /// [`SupervisorStore::record_slot_event_payloads`].
+    fn record_slot_event_payloads(
+        &self,
+        _wave_id: &str,
+        _slot_index: u32,
+        _attempt_seq: u32,
+        _events: &[crate::Event],
+    ) -> Result<(), BridgeError> {
+        Ok(())
+    }
+
+    /// 2026-09-01-001 plan U2 (R2 / D3): load every persisted
+    /// payload for `(wave_id)` so crash recovery can rebuild a
+    /// `CompletedWave`-shaped input for the salvage seam.
+    /// Default: empty (no persistence layer).
+    fn load_slot_event_payloads(
+        &self,
+        _wave_id: &str,
+    ) -> Result<Vec<(u32, u32, Vec<crate::Event>)>, BridgeError> {
+        Ok(Vec::new())
+    }
+
+    /// 2026-09-01-001 plan U1 (R1 / S1.2): drop every persisted
+    /// payload row for `(wave_id)`. Called by `run_supervisor_fan_in`
+    /// after the slot events have been merged into the main ledger.
+    /// Default: no-op for bridges without persistence.
+    fn delete_slot_event_payloads(&self, _wave_id: &str) -> Result<(), BridgeError> {
+        Ok(())
+    }
+
     /// 2026-07-26-004 plan U2 (KTD3): read a slot's terminal evidence
     /// from the underlying store. Default: `Ok(None)` (not provably
     /// done) for mocks / bridges without a store.
@@ -651,6 +685,30 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
     ) -> Result<(), BridgeError> {
         self.store
             .record_slot_terminal_evidence(wave_id, slot_index, evidence)?;
+        Ok(())
+    }
+
+    fn record_slot_event_payloads(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        attempt_seq: u32,
+        events: &[crate::Event],
+    ) -> Result<(), BridgeError> {
+        self.store
+            .record_slot_event_payloads(wave_id, slot_index, attempt_seq, events)?;
+        Ok(())
+    }
+
+    fn load_slot_event_payloads(
+        &self,
+        wave_id: &str,
+    ) -> Result<Vec<(u32, u32, Vec<crate::Event>)>, BridgeError> {
+        Ok(self.store.load_slot_event_payloads(wave_id)?)
+    }
+
+    fn delete_slot_event_payloads(&self, wave_id: &str) -> Result<(), BridgeError> {
+        self.store.delete_slot_event_payloads(wave_id)?;
         Ok(())
     }
 

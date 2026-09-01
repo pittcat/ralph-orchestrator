@@ -639,7 +639,19 @@ pub async fn run_wave_worker_pty(
     } else {
         read_worker_events(worker_events_path)
     };
-    let _ = fs::remove_file(worker_events_path);
+    // 2026-09-01-001 plan U1 (R1 / S1.1 / S1.3):
+    // persist-before-delete. The dispatcher now owns the
+    // channel-file lifecycle from worker exit onward. The worker
+    // reads the events here and returns them in `WaveWorkerOutcome`;
+    // the dispatcher will (a) record them to the supervisor store
+    // (record_slot_event_payloads) and only then (b) delete the
+    // channel file. Removing the file here would defeat recovery
+    // (U2): if the loop dies before the dispatcher's store write,
+    // the events are gone for good.
+    //
+    // PTY-open-failure paths above still call `fs::remove_file`
+    // because the channel never received any events in those
+    // branches — there is nothing to recover from.
 
     // U6/U9 kill reason strings — distinguished for U9归因.
     // Hard kill uses WORKER_TIMEOUT_ERR_PREFIX so the dispatcher

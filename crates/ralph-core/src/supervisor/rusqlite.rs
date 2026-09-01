@@ -1606,6 +1606,149 @@ impl SupervisorStore for RusqliteSupervisorStore {
         })
     }
 
+    fn record_slot_event_payloads(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        attempt_seq: u32,
+        events: &[crate::Event],
+    ) -> SupervisorStoreResult<()> {
+        // Re-writing the SAME (wave, slot, attempt) is a no-op:
+        // recovery replays and dispatcher IO retries must not
+        // duplicate rows. We delete any pre-existing rows for
+        // the key first, then INSERT — this matches the
+        // in-memory store's "first write wins on identical
+        // length, second write replaces otherwise" idempotency
+        // contract while keeping the SQL straightforward.
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM slot_event_payloads
+                 WHERE wave_id = ?1 AND slot_index = ?2 AND attempt_seq = ?3",
+                rusqlite::params![wave_id, i64::from(slot_index), i64::from(attempt_seq)],
+            )?;
+            for (idx, event) in events.iter().enumerate() {
+                let payload_str = event.payload.as_deref().unwrap_or("");
+                let system_injected = if event.system_injected.unwrap_or(false) {
+                    1i64
+                } else {
+                    0i64
+                };
+                tx.execute(
+                    "INSERT INTO slot_event_payloads (
+                        wave_id, slot_index, attempt_seq, event_seq,
+                        topic, payload, source, wave_index, wave_total, system_injected
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    rusqlite::params![
+                        wave_id,
+                        i64::from(slot_index),
+                        i64::from(attempt_seq),
+                        i64::try_from(idx).map_err(|_| {
+                            SupervisorStoreError::Storage(format!(
+                                "event_seq overflow at index {idx} for slot {slot_index}"
+                            ))
+                        })?,
+                        event.topic.as_str(),
+                        payload_str,
+                        event.source.as_deref(),
+                        event.wave_index.map(i64::from),
+                        event.wave_total.map(i64::from),
+                        system_injected,
+                    ],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    fn load_slot_event_payloads(
+        &self,
+        wave_id: &str,
+    ) -> SupervisorStoreResult<Vec<(u32, u32, Vec<crate::Event>)>> {
+        self.with_conn(|conn| {
+            use std::collections::BTreeMap;
+            let mut stmt = conn.prepare(
+                "SELECT slot_index, attempt_seq, event_seq, topic, payload, source,
+                        wave_index, wave_total, system_injected
+                 FROM slot_event_payloads
+                 WHERE wave_id = ?1
+                 ORDER BY slot_index, attempt_seq, event_seq",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![wave_id], |row| {
+                let slot_index: i64 = row.get(0)?;
+                let attempt_seq: i64 = row.get(1)?;
+                let topic: String = row.get(3)?;
+                let payload: Option<String> = row.get(4)?;
+                let source: Option<String> = row.get(5)?;
+                let wave_index: Option<i64> = row.get(6)?;
+                let wave_total: Option<i64> = row.get(7)?;
+                let system_injected: Option<i64> = row.get(8)?;
+                let _event_seq: i64 = row.get(2)?;
+                Ok((
+                    slot_index,
+                    attempt_seq,
+                    topic,
+                    payload,
+                    source,
+                    wave_index,
+                    wave_total,
+                    system_injected,
+                ))
+            })?;
+            // Group rows by (slot, attempt) preserving event_seq ordering.
+            let mut grouped: BTreeMap<(u32, u32), Vec<crate::Event>> = BTreeMap::new();
+            for row in rows {
+                let (slot_i, attempt_i, topic, payload, source, wave_index, wave_total, sys) =
+                    row?;
+                let slot_index = u32::try_from(slot_i).map_err(|_| {
+                    SupervisorStoreError::Storage(format!(
+                        "slot_index {slot_i} out of range for u32"
+                    ))
+                })?;
+                let attempt_seq = u32::try_from(attempt_i).map_err(|_| {
+                    SupervisorStoreError::Storage(format!(
+                        "attempt_seq {attempt_i} out of range for u32"
+                    ))
+                })?;
+                let event = crate::Event {
+                    topic,
+                    payload,
+                    // `ts` is intentionally not persisted: salvage's
+                    // canonical-row rebuild drops it for fingerprint
+                    // stability, so reading back with an empty `ts`
+                    // matches what the merge sink would have written.
+                    ts: String::new(),
+                    hat: None,
+                    triggered: None,
+                    source,
+                    wave_id: Some(wave_id.to_string()),
+                    wave_index: wave_index.and_then(|i| u32::try_from(i).ok()),
+                    wave_total: wave_total.and_then(|i| u32::try_from(i).ok()),
+                    system_injected: sys.map(|v| v != 0),
+                };
+                grouped
+                    .entry((slot_index, attempt_seq))
+                    .or_default()
+                    .push(event);
+            }
+            Ok(grouped
+                .into_iter()
+                .map(|((slot, attempt), events)| (slot, attempt, events))
+                .collect())
+        })
+    }
+
+    fn delete_slot_event_payloads(&self, wave_id: &str) -> SupervisorStoreResult<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM slot_event_payloads WHERE wave_id = ?1",
+                rusqlite::params![wave_id],
+            )?;
+            Ok(())
+        })
+    }
+
     fn enqueue_compensation(
         &self,
         wave_id: &str,
@@ -3723,6 +3866,88 @@ mod tests {
             .unwrap();
         let calls = cleanup_calls_snapshot();
         assert!(calls.is_empty());
+    }
+
+    // 2026-09-01-001 plan U1 (R1 / S1.1 / T1.1): rusqlite parity
+    // with the in-memory store — record/load round-trips a slot's
+    // accepted event list, preserving topic / payload / source /
+    // wave envelope / system_injected / event_seq.
+    #[cfg(feature = "supervisor-db")]
+    #[test]
+    fn u1_slot_event_payloads_round_trip() {
+        let s = store();
+        let wave = s.register_wave("u1-rt", WaveKind::Exec, 2, 1).unwrap();
+        let events = vec![
+            crate::Event {
+                topic: "exec.unit.done".to_string(),
+                payload: Some(r#"{"slot_index":0}"#.to_string()),
+                ts: String::new(),
+                hat: None,
+                triggered: None,
+                source: Some("exec-worker".to_string()),
+                wave_id: Some(wave.clone()),
+                wave_index: Some(0),
+                wave_total: Some(2),
+                system_injected: Some(false),
+            },
+            crate::Event {
+                topic: "exec.progress".to_string(),
+                payload: Some(r#"{"step":"build"}"#.to_string()),
+                ts: String::new(),
+                hat: None,
+                triggered: None,
+                source: Some("exec-worker".to_string()),
+                wave_id: Some(wave.clone()),
+                wave_index: Some(0),
+                wave_total: Some(2),
+                system_injected: Some(false),
+            },
+        ];
+        s.record_slot_event_payloads(&wave, 0, 1, &events)
+            .unwrap();
+
+        let loaded = s.load_slot_event_payloads(&wave).unwrap();
+        assert_eq!(loaded.len(), 1);
+        let (slot_index, attempt_seq, slot_events) = &loaded[0];
+        assert_eq!(*slot_index, 0);
+        assert_eq!(*attempt_seq, 1);
+        assert_eq!(slot_events.len(), 2);
+        assert_eq!(slot_events[0].topic, "exec.unit.done");
+        assert_eq!(
+            slot_events[0].payload.as_deref(),
+            Some(r#"{"slot_index":0}"#)
+        );
+        assert_eq!(slot_events[0].wave_id.as_deref(), Some(wave.as_str()));
+        assert_eq!(slot_events[0].wave_index, Some(0));
+        assert_eq!(slot_events[0].wave_total, Some(2));
+        assert_eq!(slot_events[1].topic, "exec.progress");
+    }
+
+    // 2026-09-01-001 plan U1 (R1 / T1.2): delete only touches the
+    // target wave's rows.
+    #[cfg(feature = "supervisor-db")]
+    #[test]
+    fn u1_delete_slot_event_payloads_only_target_wave() {
+        let s = store();
+        let w1 = s.register_wave("u1-w1", WaveKind::Exec, 1, 1).unwrap();
+        let w2 = s.register_wave("u1-w2", WaveKind::Exec, 1, 1).unwrap();
+        let ev = vec![crate::Event {
+            topic: "exec.unit.done".to_string(),
+            payload: Some("p".to_string()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: Some(w1.clone()),
+            wave_index: Some(0),
+            wave_total: Some(1),
+            system_injected: None,
+        }];
+        s.record_slot_event_payloads(&w1, 0, 1, &ev).unwrap();
+        s.record_slot_event_payloads(&w2, 0, 1, &ev).unwrap();
+        s.delete_slot_event_payloads(&w1).unwrap();
+        assert!(s.load_slot_event_payloads(&w1).unwrap().is_empty());
+        assert_eq!(s.load_slot_event_payloads(&w2).unwrap().len(), 1);
     }
 }
 

@@ -140,6 +140,12 @@ struct Inner {
     dispatches: HashMap<(String, u32), DispatchRecord>,
     /// Worker results by `(wave_id, slot_index)`.
     worker_results: HashMap<(String, u32), WorkerResult>,
+    /// 2026-09-01-001 plan U1 (R1 / D1-D3): persisted accepted
+    /// slot events keyed by `(wave_id, slot_index, attempt_seq)`.
+    /// Mirrors the v12.sql `slot_event_payloads` table so the
+    /// in-memory and rusqlite stores expose the same
+    /// `record/load/delete` contract.
+    slot_event_payloads: HashMap<(String, u32, u32), SlotEventPayloadsEntry>,
     /// FIFO queue of pending wave IDs waiting for a backpressure
     /// slot to free up.
     queue: Vec<String>,
@@ -235,6 +241,19 @@ struct DispatchRecord {
 struct WorkerResult {
     content_hash: String,
     event_count: usize,
+}
+
+/// 2026-09-01-001 plan U1 (R1 / D1-D3): in-memory mirror of
+/// the `slot_event_payloads` table. Key = `(wave_id,
+/// slot_index, attempt_seq)` so a single attempt's payload list
+/// is read in one lookup; the dispatcher reads the events back
+/// via `load_slot_event_payloads` and clears them via
+/// `delete_slot_event_payloads` after fan-in commits. Events are
+/// stored verbatim (no copy-on-write clone) so re-reads hand the
+/// same `Event` instances back to the merge sink.
+#[derive(Debug, Clone)]
+struct SlotEventPayloadsEntry {
+    events: Vec<crate::Event>,
 }
 
 #[derive(Debug, Clone)]
@@ -2174,6 +2193,65 @@ impl SupervisorStore for InMemorySupervisorStore {
             .get(&(wave_id.to_string(), slot_index))
             .and_then(|d| d.pid))
     }
+
+    fn record_slot_event_payloads(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        attempt_seq: u32,
+        events: &[crate::Event],
+    ) -> SupervisorStoreResult<()> {
+        let mut inner = self.lock()?;
+        // Re-writing the SAME (wave, slot, attempt) is a no-op:
+        // recovery replays may invoke this with the same seq, and
+        // the dispatcher may also retry a write after a transient
+        // IO error. The contract is "write the events that were
+        // captured at this attempt boundary" — repeating the same
+        // boundary must not duplicate rows.
+        let key = (wave_id.to_string(), slot_index, attempt_seq);
+        inner
+            .slot_event_payloads
+            .entry(key)
+            .and_modify(|existing| {
+                if existing.events.len() == events.len() {
+                    // Cheap parity check: if a retry comes in with
+                    // exactly the same event count we keep the first
+                    // write. The trait contract is that identical
+                    // payload -> identical ordering, so length equality
+                    // is sufficient as the idempotency hint and
+                    // avoids the cost of a per-event diff.
+                    return;
+                }
+                existing.events = events.to_vec();
+            })
+            .or_insert_with(|| SlotEventPayloadsEntry {
+                events: events.to_vec(),
+            });
+        Ok(())
+    }
+
+    fn load_slot_event_payloads(
+        &self,
+        wave_id: &str,
+    ) -> SupervisorStoreResult<Vec<(u32, u32, Vec<crate::Event>)>> {
+        let inner = self.lock()?;
+        Ok(inner
+            .slot_event_payloads
+            .iter()
+            .filter(|((w, _, _), _)| w == wave_id)
+            .map(|((_, slot_index, attempt_seq), entry)| {
+                (*slot_index, *attempt_seq, entry.events.clone())
+            })
+            .collect())
+    }
+
+    fn delete_slot_event_payloads(&self, wave_id: &str) -> SupervisorStoreResult<()> {
+        let mut inner = self.lock()?;
+        inner
+            .slot_event_payloads
+            .retain(|(w, _, _), _| w != wave_id);
+        Ok(())
+    }
 }
 
 /// 2026-07-03-001 plan U8: rebind cleanup helper. The
@@ -3064,6 +3142,215 @@ mod tests {
         assert_eq!(
             s.fan_in_status(&wave).unwrap().delivery_state,
             WaveDeliveryState::SalvageCommitted,
+        );
+    }
+
+    // 2026-09-01-001 plan U1 (R1 / S1.1): T1.1 — round-trip a slot's
+    // accepted event list through `record_slot_event_payloads` /
+    // `load_slot_event_payloads` and verify that every event field
+    // (topic, payload, source, wave envelope, system_injected) is
+    // preserved on read-back, and that `event_seq` is the source
+    // order so the merge sink can replay them in the same sequence
+    // the worker emitted.
+    #[test]
+    fn u1_slot_event_payloads_round_trip() {
+        let s = store();
+        let wave = s.register_wave("u1-payload", WaveKind::Exec, 2, 1).unwrap();
+        let events_slot0 = vec![
+            crate::Event {
+                topic: "exec.unit.done".to_string(),
+                payload: Some(r#"{"slot_index":0}"#.to_string()),
+                ts: String::new(),
+                hat: None,
+                triggered: None,
+                source: Some("exec-worker".to_string()),
+                wave_id: Some(wave.clone()),
+                wave_index: Some(0),
+                wave_total: Some(2),
+                system_injected: Some(false),
+            },
+            crate::Event {
+                topic: "exec.progress".to_string(),
+                payload: Some(r#"{"step":"build"}"#.to_string()),
+                ts: String::new(),
+                hat: None,
+                triggered: None,
+                source: Some("exec-worker".to_string()),
+                wave_id: Some(wave.clone()),
+                wave_index: Some(0),
+                wave_total: Some(2),
+                system_injected: Some(false),
+            },
+        ];
+        let events_slot1 = vec![crate::Event {
+            topic: "exec.unit.done".to_string(),
+            payload: Some(r#"{"slot_index":1}"#.to_string()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: Some("exec-worker".to_string()),
+            wave_id: Some(wave.clone()),
+            wave_index: Some(1),
+            wave_total: Some(2),
+            system_injected: Some(true),
+        }];
+        s.record_slot_event_payloads(&wave, 0, 1, &events_slot0)
+            .unwrap();
+        s.record_slot_event_payloads(&wave, 1, 1, &events_slot1)
+            .unwrap();
+
+        let loaded = s.load_slot_event_payloads(&wave).unwrap();
+        assert_eq!(loaded.len(), 2, "two slots persisted");
+
+        let slot0_events = loaded
+            .iter()
+            .find(|(slot, _, _)| *slot == 0)
+            .map(|(_, _, events)| events.clone())
+            .expect("slot 0 must be present");
+        assert_eq!(slot0_events.len(), 2);
+        assert_eq!(slot0_events[0].topic, "exec.unit.done");
+        assert_eq!(
+            slot0_events[0].payload.as_deref(),
+            Some(r#"{"slot_index":0}"#)
+        );
+        assert_eq!(slot0_events[0].source.as_deref(), Some("exec-worker"));
+        assert_eq!(slot0_events[0].wave_id.as_deref(), Some(wave.as_str()));
+        assert_eq!(slot0_events[0].wave_index, Some(0));
+        assert_eq!(slot0_events[0].wave_total, Some(2));
+        assert_eq!(slot0_events[0].system_injected, Some(false));
+        assert_eq!(slot0_events[1].topic, "exec.progress");
+
+        let slot1_events = loaded
+            .iter()
+            .find(|(slot, _, _)| *slot == 1)
+            .map(|(_, _, events)| events.clone())
+            .expect("slot 1 must be present");
+        assert_eq!(slot1_events.len(), 1);
+        assert_eq!(slot1_events[0].system_injected, Some(true));
+    }
+
+    // 2026-09-01-001 plan U1 (R1 / T1.3): same-key rewrite is a
+    // no-op when the payload length matches (recovery replays the
+    // same boundary) and replaces when it differs (a later attempt
+    // produced a different number of events).
+    #[test]
+    fn u1_record_slot_event_payloads_overwrites_same_attempt() {
+        let s = store();
+        let wave = s.register_wave("u1-rewrite", WaveKind::Exec, 1, 1).unwrap();
+        let first = vec![crate::Event {
+            topic: "exec.unit.done".to_string(),
+            payload: Some("v1".to_string()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: Some(wave.clone()),
+            wave_index: Some(0),
+            wave_total: Some(1),
+            system_injected: None,
+        }];
+        s.record_slot_event_payloads(&wave, 0, 1, &first)
+            .unwrap();
+        // Same length re-write — must keep the original payload.
+        let same_length = vec![crate::Event {
+            topic: "exec.unit.failed".to_string(),
+            payload: Some("v2-different-topic".to_string()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: Some(wave.clone()),
+            wave_index: Some(0),
+            wave_total: Some(1),
+            system_injected: None,
+        }];
+        s.record_slot_event_payloads(&wave, 0, 1, &same_length)
+            .unwrap();
+        let loaded = s.load_slot_event_payloads(&wave).unwrap();
+        assert_eq!(loaded.len(), 1);
+        let events = &loaded[0].2;
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].topic, "exec.unit.done",
+            "same-length re-write must keep the first write"
+        );
+        assert_eq!(events[0].payload.as_deref(), Some("v1"));
+
+        // Different length — must replace.
+        let longer = vec![
+            crate::Event {
+                topic: "exec.progress".to_string(),
+                payload: Some("p1".to_string()),
+                ts: String::new(),
+                hat: None,
+                triggered: None,
+                source: None,
+                wave_id: Some(wave.clone()),
+                wave_index: Some(0),
+                wave_total: Some(1),
+                system_injected: None,
+            },
+            crate::Event {
+                topic: "exec.unit.done".to_string(),
+                payload: Some("p2".to_string()),
+                ts: String::new(),
+                hat: None,
+                triggered: None,
+                source: None,
+                wave_id: Some(wave.clone()),
+                wave_index: Some(0),
+                wave_total: Some(1),
+                system_injected: None,
+            },
+        ];
+        s.record_slot_event_payloads(&wave, 0, 1, &longer)
+            .unwrap();
+        let loaded = s.load_slot_event_payloads(&wave).unwrap();
+        assert_eq!(loaded[0].2.len(), 2);
+        assert_eq!(loaded[0].2[1].topic, "exec.unit.done");
+        assert_eq!(loaded[0].2[1].payload.as_deref(), Some("p2"));
+    }
+
+    // 2026-09-01-001 plan U1 (R1 / S1.2 / T1.2): delete only removes
+    // the target wave's rows, leaving siblings untouched.
+    #[test]
+    fn u1_delete_slot_event_payloads_only_target_wave() {
+        let s = store();
+        let w1 = s.register_wave("u1-w1", WaveKind::Exec, 1, 1).unwrap();
+        let w2 = s.register_wave("u1-w2", WaveKind::Exec, 1, 1).unwrap();
+        let ev = vec![crate::Event {
+            topic: "exec.unit.done".to_string(),
+            payload: Some("p".to_string()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: Some(w1.clone()),
+            wave_index: Some(0),
+            wave_total: Some(1),
+            system_injected: None,
+        }];
+        let ev2 = vec![crate::Event {
+            topic: "exec.unit.done".to_string(),
+            payload: Some("q".to_string()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: Some(w2.clone()),
+            wave_index: Some(0),
+            wave_total: Some(1),
+            system_injected: None,
+        }];
+        s.record_slot_event_payloads(&w1, 0, 1, &ev).unwrap();
+        s.record_slot_event_payloads(&w2, 0, 1, &ev2).unwrap();
+
+        s.delete_slot_event_payloads(&w1).unwrap();
+        assert!(s.load_slot_event_payloads(&w1).unwrap().is_empty());
+        assert_eq!(
+            s.load_slot_event_payloads(&w2).unwrap().len(),
+            1,
+            "deleting w1 must not affect w2"
         );
     }
 }

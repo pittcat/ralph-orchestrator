@@ -2889,6 +2889,58 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                         }
                     }
                     if !should_retry {
+                        // 2026-09-01-001 plan U1 (R1 / S1.1 / S1.3):
+                        // persist the FINAL attempt's accepted event
+                        // list BEFORE the channel file is removed.
+                        // Final-attempt-only: intermediate attempts
+                        // are not persisted (KTD9: only the final
+                        // attempt escapes the retry block). Use
+                        // `current_attempt_seq` from the
+                        // `begin_slot_attempt` receipt so the row
+                        // is addressable by recovery (U2). A store
+                        // write failure degrades to warn and leaves
+                        // the channel file in place — fan-in still
+                        // runs from memory so the healthy path is
+                        // unaffected.
+                        if let Ok((events, _, _)) = &outcome.1 {
+                            if let (Some(store), Some(wid), Some(seq)) = (
+                                slot_attempt_store.as_ref(),
+                                slot_wave_id.as_ref(),
+                                current_attempt_seq,
+                            ) {
+                                if let Err(error) = store.record_slot_event_payloads(
+                                    wid,
+                                    slot_index_local,
+                                    seq,
+                                    events,
+                                ) {
+                                    tracing::warn!(
+                                        wave_id = %wid,
+                                        slot_index = slot_index_local,
+                                        attempt_seq = seq,
+                                        error = %error,
+                                        "U1: supervisor record_slot_event_payloads failed; \
+                                         leaving channel file in place"
+                                    );
+                                }
+                            }
+                        }
+                        // Persist-before-delete: only after the store
+                        // write above has had a chance to succeed do
+                        // we drop the channel file. The worker.rs
+                        // side no longer deletes — the dispatcher
+                        // owns the channel lifecycle from worker exit
+                        // onward.
+                        if let Err(err) =
+                            std::fs::remove_file(&current_request.worker_events_path)
+                        {
+                            tracing::debug!(
+                                slot_index = slot_index_local,
+                                path = %current_request.worker_events_path.display(),
+                                error = %err,
+                                "U1: failed to remove channel file after persistence (likely already absent)"
+                            );
+                        }
                         break outcome;
                     }
                     // A1 / A3: hand intermediate attempts a request
@@ -3051,6 +3103,16 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                                     );
                                 }
                             }
+                            // 2026-09-01-001 plan U1 (R1 / S1.1):
+                            // payload persistence happens at the
+                            // break-outcome boundary inside the
+                            // worker retry block above; this
+                            // post-retry loop only sees the FINAL
+                            // attempt's events (KTD9) so the store
+                            // write here would race against the
+                            // earlier write. We rely on the retry
+                            // block's persist-before-delete
+                            // sequencing and skip re-writing here.
                         }
                     }
                     (SlotOutcome::Failed { .. }, Some(reason_str)) => {

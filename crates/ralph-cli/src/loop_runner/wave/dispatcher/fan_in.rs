@@ -450,17 +450,35 @@ pub(crate) fn run_supervisor_fan_in(
                     topic,
                     reason,
                     blocking_slots,
-                } => emit_injected_failed_coord(
-                    bridge,
-                    wave_kind,
-                    &coordination_completed,
-                    &store_wave_id,
-                    main_events_file,
-                    &topic,
-                    reason,
-                    blocking_slots,
-                    exec_fix_salvage_written,
-                ),
+                } => {
+                    let outcome = emit_injected_failed_coord(
+                        bridge,
+                        wave_kind,
+                        &coordination_completed,
+                        &store_wave_id,
+                        main_events_file,
+                        &topic,
+                        reason,
+                        blocking_slots,
+                        exec_fix_salvage_written,
+                    );
+                    // 2026-09-01-001 plan U1 (R1 / S1.2): the wave
+                    // is settled at this point (failed path is also
+                    // a settlement), so the persisted payload rows
+                    // are no longer needed for crash recovery. Drop
+                    // them before returning so the store does not
+                    // accumulate dead rows over time.
+                    if let Err(err) = bridge.delete_slot_event_payloads(&store_wave_id) {
+                        tracing::warn!(
+                            wave_id = %completed.wave_id,
+                            store_wave_id = %store_wave_id,
+                            error = %err,
+                            "U1: delete_slot_event_payloads failed after InjectedFailed; \
+                             payloads will be cleaned on next fan-in"
+                        );
+                    }
+                    outcome
+                }
                 ralph_core::supervisor::CoordinatorAction::InjectedComplete { topic, .. } => {
                     let payload = build_wave_complete_payload(
                         wave_kind,
@@ -469,7 +487,7 @@ pub(crate) fn run_supervisor_fan_in(
                         bridge,
                         aggregate_timeout_secs,
                     );
-                    match commit_complete_coord_event(
+                    let outcome = match commit_complete_coord_event(
                         bridge,
                         main_events_file,
                         &store_wave_id,
@@ -478,9 +496,34 @@ pub(crate) fn run_supervisor_fan_in(
                     ) {
                         CoordCommitOutcome::Committed => SupervisorFanInOutcome::InjectedComplete,
                         CoordCommitOutcome::StoreError => SupervisorFanInOutcome::StoreError,
+                    };
+                    // 2026-09-01-001 plan U1 (R1 / S1.2): successful
+                    // settlement. Drop persisted payloads so the
+                    // store does not accumulate rows for waves
+                    // that have already shipped their merge.
+                    if let Err(err) = bridge.delete_slot_event_payloads(&store_wave_id) {
+                        tracing::warn!(
+                            wave_id = %completed.wave_id,
+                            store_wave_id = %store_wave_id,
+                            error = %err,
+                            "U1: delete_slot_event_payloads failed after InjectedComplete; \
+                             payloads will be cleaned on next fan-in"
+                        );
                     }
+                    outcome
                 }
                 ralph_core::supervisor::CoordinatorAction::AlreadyDone => {
+                    // 2026-09-01-001 plan U1 (R1 / S1.2): the wave
+                    // was already merged (re-tick race). Drop
+                    // persisted payloads defensively — idempotent.
+                    if let Err(err) = bridge.delete_slot_event_payloads(&store_wave_id) {
+                        tracing::warn!(
+                            wave_id = %completed.wave_id,
+                            store_wave_id = %store_wave_id,
+                            error = %err,
+                            "U1: delete_slot_event_payloads failed on AlreadyDone"
+                        );
+                    }
                     SupervisorFanInOutcome::AlreadyDone
                 }
                 ralph_core::supervisor::CoordinatorAction::ContinueCollect

@@ -1449,6 +1449,62 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// mapping without re-reading the snapshot.
     fn pid_for_slot(&self, wave_id: &str, slot_index: u32) -> SupervisorStoreResult<Option<u32>>;
 
+    /// 2026-09-01-001 plan U1 (R1 / D1-D3): persist a slot's
+    /// accepted event list immediately after `read_worker_events`
+    /// returns it but BEFORE the slot channel file is removed.
+    /// Crash recovery (U2 / U3) replays these rows through the
+    /// existing salvage seam to bring the main ledger back to
+    /// the state a healthy fan-in would have produced.
+    ///
+    /// Idempotency contract: writing the same `(wave, slot,
+    /// attempt)` again is a no-op (rows are keyed by
+    /// `(wave, slot, attempt, event_seq)` so re-inserting with
+    /// the same seq is silently dropped). Empty `events` slices
+    /// are accepted and produce no rows.
+    ///
+    /// Error semantics: store write failure is recoverable at the
+    /// call site — the dispatcher logs a warning, leaves the
+    /// channel file in place, and lets fan-in run from memory
+    /// (S1.3 in the plan). The trait returns the raw store error
+    /// so callers can decide.
+    fn record_slot_event_payloads(
+        &self,
+        _wave_id: &str,
+        _slot_index: u32,
+        _attempt_seq: u32,
+        _events: &[crate::Event],
+    ) -> SupervisorStoreResult<()> {
+        // Default no-op keeps the existing test mock stores
+        // (BDD scenarios, `FailingStore` in
+        // `reconciliation_tests`, etc.) compiling without forcing
+        // each one to re-implement the persistence contract.
+        // Production stores (in-memory + rusqlite) override.
+        Ok(())
+    }
+
+    /// 2026-09-01-001 plan U2 (R2 / D3): read every persisted
+    /// payload for `(wave_id)` grouped by `(slot, attempt)`.
+    /// Returns an empty `Vec` for waves that never persisted any
+    /// payload (legacy crash window or wave with no Completed
+    /// slot). Used by recovery redelivery to rebuild
+    /// `CompletedWave` shapes without re-reading slot channels.
+    fn load_slot_event_payloads(
+        &self,
+        _wave_id: &str,
+    ) -> SupervisorStoreResult<Vec<(u32, u32, Vec<crate::Event>)>> {
+        Ok(Vec::new())
+    }
+
+    /// 2026-09-01-001 plan U1 (R1 / S1.2): remove every persisted
+    /// payload row for `(wave_id)`. Called by `run_supervisor_fan_in`
+    /// after the merge sink successfully appends the slot
+    /// events to the main ledger — the persisted copy is then
+    /// redundant and reclaiming it keeps `supervisor.db` small.
+    /// Idempotent: deleting rows that no longer exist is OK.
+    fn delete_slot_event_payloads(&self, _wave_id: &str) -> SupervisorStoreResult<()> {
+        Ok(())
+    }
+
     /// Return the current slot/lifecycle snapshot for the phase
     /// decision pure function (U6).
     fn fan_in_status(&self, wave_id: &str) -> SupervisorStoreResult<WaveSnapshot>;

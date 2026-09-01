@@ -41,8 +41,14 @@ mod imp {
     /// receipt ledger so the dispatcher can persist per-Worker
     /// attempt start/finish state across reopens without
     /// rewriting the main JSONL log.
+    /// v12 (2026-09-01-001 plan U1) adds the `slot_event_payloads`
+    /// ledger so a wave's accepted slot events survive a loop
+    /// death between worker exit and `run_supervisor_fan_in`.
+    /// Crash recovery (U2 / U3) replays these rows through the
+    /// existing salvage seam to bring the main ledger back to
+    /// the same state a healthy fan-in would have produced.
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 11;
+    pub const CURRENT_VERSION: i64 = 12;
 
     /// Apply migrations sequentially. Each migration is a
     /// closure that performs the SQL DDL and bumps the
@@ -367,6 +373,21 @@ mod imp {
             Migration {
                 version: 11,
                 ddl: include_str!("migrations/v11.sql"),
+                column_probe: None,
+            },
+            // 2026-09-01-001 plan U1 (R1 / D1-D3): adds the
+            // `slot_event_payloads` ledger so crash recovery can
+            // replay accepted slot events to the main ledger when
+            // fan-in was interrupted by a loop process death.
+            // Forward-only `CREATE TABLE`; no ALTERs against
+            // existing tables, so the column-probe path is
+            // unnecessary. PRIMARY KEY on `(wave_id, slot_index,
+            // attempt_seq, event_seq)` keeps per-event idempotency
+            // inside a single (wave, slot, attempt) — replays are
+            // a no-op rather than a duplicate-write.
+            Migration {
+                version: 12,
+                ddl: include_str!("migrations/v12.sql"),
                 column_probe: None,
             },
         ]
