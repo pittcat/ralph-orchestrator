@@ -17,6 +17,11 @@ pub use channel_registry::{
 mod dispatcher;
 mod heartbeat;
 mod io;
+// 2026-09-01-001 plan U2 (R2 / D3): startup-time compensation
+// delivery for crash windows where a slot's accepted events
+// were persisted to `slot_event_payloads` but never reached
+// the main ledger via fan-in.
+pub(crate) mod recovery_redelivery;
 mod supervisor_bridge;
 pub(crate) mod task_projection;
 mod worker;

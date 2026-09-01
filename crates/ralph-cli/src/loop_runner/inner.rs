@@ -1061,6 +1061,12 @@ pub(super) async fn run_loop_impl_inner(
                 .parent()
                 .map(|p| p.join("agent").join("tasks.jsonl"))
                 .unwrap_or_else(|| std::path::PathBuf::from(".ralph/agent/tasks.jsonl"));
+            // 2026-09-01-001 plan U2 (R2 / D3): the recovery
+            // redelivery module re-reads the same events file
+            // path that the dispatcher writes to, so keep an
+            // independent clone around for the post-recovery
+            // redelivery pass.
+            let supervisor_events_path_for_redelivery = supervisor_events_path.clone();
             match build_supervisor_bridge(supervisor_cfg, &ctx, supervisor_events_path) {
                 Ok(concrete) => {
                     // U11: reconcile in-flight waves before the loop
@@ -1080,6 +1086,34 @@ pub(super) async fn run_loop_impl_inner(
                         supervisor_cfg.aggregate_timeout_secs,
                     ) {
                         Ok(_) => {
+                            // 2026-09-01-001 plan U2 (R2 / D3): replay
+                            // any slot events that U1 persisted into
+                            // `slot_event_payloads` but that fan-in
+                            // never reached because the loop died in
+                            // the worker-exit → fan-in window. The
+                            // salvage seam is the existing merge path;
+                            // this just feeds it the persisted rows
+                            // it has been missing until now. Idempotent:
+                            // a wave whose `delivery_state` already
+                            // reached `BusinessProjected` is skipped.
+                            let bridge: std::sync::Arc<dyn ralph_core::supervisor::SupervisorBridge> =
+                                std::sync::Arc::new(concrete.clone());
+                            let redelivery_report =
+                                crate::loop_runner::wave::recovery_redelivery::redeliver_persisted_slot_events(
+                                    store.clone(),
+                                    bridge,
+                                    &supervisor_events_path_for_redelivery,
+                                );
+                            if !redelivery_report.redelivered.is_empty()
+                                || !redelivery_report.warnings.is_empty()
+                            {
+                                info!(
+                                    redelivered = redelivery_report.redelivered.len(),
+                                    skipped = redelivery_report.skipped.len(),
+                                    warnings = redelivery_report.warnings.len(),
+                                    "U2: startup recovery redelivered persisted slot events"
+                                );
+                            }
                             // 2026-07-24-001 plan U3 (R7 / KTD5): wave
                             // recovery succeeded — replay any slot
                             // projections that a crash left pending so
@@ -1161,6 +1195,10 @@ pub(super) async fn run_loop_impl_inner(
                         .parent()
                         .map(|p| p.join("agent").join("tasks.jsonl"))
                         .unwrap_or_else(|| std::path::PathBuf::from(".ralph/agent/tasks.jsonl"));
+                    // 2026-09-01-001 plan U2 (R2 / D3): see the
+                    // supervisor-enabled branch above — same clone
+                    // trick keeps the path alive for redelivery.
+                    let supervisor_events_path_for_redelivery = supervisor_events_path.clone();
                     match build_supervisor_bridge(supervisor_cfg, &ctx, supervisor_events_path) {
                         Ok(concrete) => {
                             let store = concrete.store();
@@ -1173,6 +1211,27 @@ pub(super) async fn run_loop_impl_inner(
                                 supervisor_cfg.aggregate_timeout_secs,
                             ) {
                                 Ok(_) => {
+                                    // 2026-09-01-001 plan U2 (R2 / D3):
+                                    // see the supervisor-enabled branch
+                                    // above — the redelivery seam is
+                                    // the same here. Idempotent.
+                                    let bridge: std::sync::Arc<dyn ralph_core::supervisor::SupervisorBridge> =
+                                        std::sync::Arc::new(concrete.clone());
+                                    let redelivery_report = crate::loop_runner::wave::recovery_redelivery::redeliver_persisted_slot_events(
+                                        store.clone(),
+                                        bridge,
+                                        &supervisor_events_path_for_redelivery,
+                                    );
+                                    if !redelivery_report.redelivered.is_empty()
+                                        || !redelivery_report.warnings.is_empty()
+                                    {
+                                        info!(
+                                            redelivered = redelivery_report.redelivered.len(),
+                                            skipped = redelivery_report.skipped.len(),
+                                            warnings = redelivery_report.warnings.len(),
+                                            "U2: default-path startup recovery redelivered persisted slot events"
+                                        );
+                                    }
                                     // 2026-07-24-001 plan U3 (R7 /
                                     // KTD5): replay pending slot→task
                                     // projections after wave recovery
