@@ -2931,14 +2931,47 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                         // side no longer deletes — the dispatcher
                         // owns the channel lifecycle from worker exit
                         // onward.
-                        if let Err(err) =
+                        //
+                        // 2026-09-01-001 plan U6 (R6 / S6.1-S6.2):
+                        // failed / empty / timeout outcomes move the
+                        // channel file into
+                        // `.ralph/diagnostics/failed-activations/`
+                        // so post-mortem investigation can see what
+                        // the worker wrote before the channel was
+                        // closed; clean success keeps the delete
+                        // path. Quarantine IO failure degrades to
+                        // warn + delete so the live channel directory
+                        // is always cleaned up (the "channel must
+                        // leave the live dir" invariant is preserved
+                        // without blocking dispatch).
+                        let classified = classify_slot_attempt(&outcome.1, slot_wave_kind);
+                        let keep_for_postmortem = matches!(
+                            classified.outcome,
+                            ralph_core::supervisor::worker_outcome::SlotOutcome::Failed { .. }
+                        );
+                        if keep_for_postmortem {
+                            if let Err(err) = quarantine_worker_channel(
+                                &current_request.worker_events_path,
+                                slot_index_local,
+                                attempt,
+                            ) {
+                                tracing::warn!(
+                                    slot_index = slot_index_local,
+                                    path = %current_request.worker_events_path.display(),
+                                    error = %err,
+                                    "U6: quarantine_worker_channel failed; \
+                                     falling back to delete to clear the live channel dir"
+                                );
+                                let _ = std::fs::remove_file(&current_request.worker_events_path);
+                            }
+                        } else if let Err(err) =
                             std::fs::remove_file(&current_request.worker_events_path)
                         {
                             tracing::debug!(
                                 slot_index = slot_index_local,
                                 path = %current_request.worker_events_path.display(),
                                 error = %err,
-                                "U1: failed to remove channel file after persistence (likely already absent)"
+                                "U6: failed to remove channel file after persistence (likely already absent)"
                             );
                         }
                         break outcome;
@@ -3977,4 +4010,97 @@ pub(crate) async fn boot_dispatch_pending_redrive_if_resuming(
         worker_executor,
     )
     .await
+}
+
+/// 2026-09-01-001 plan U6 (R6 / S6.1): move a failed slot's
+/// channel file into the post-mortem quarantine directory so
+/// operators can inspect what the worker wrote before the
+/// channel was closed. The quarantine directory lives under
+/// the channel file's grandparent `.ralph/diagnostics/failed-
+/// activations/` and the destination filename encodes the
+/// slot index + attempt sequence so multiple failures on the
+/// same slot do not collide.
+///
+/// `worker_events_path` is the per-slot channel file
+/// (`.ralph/wave-<wave_id>-<slot>.jsonl`); its parent is the
+/// `.ralph/` directory used as the quarantine root.
+fn quarantine_worker_channel(
+    worker_events_path: &std::path::Path,
+    slot_index: u32,
+    attempt: u32,
+) -> std::io::Result<std::path::PathBuf> {
+    let ralph_dir = worker_events_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "worker events path has no parent: {}",
+                    worker_events_path.display()
+                ),
+            )
+        })?;
+    let quarantine_dir = ralph_dir.join("diagnostics").join("failed-activations");
+    std::fs::create_dir_all(&quarantine_dir)?;
+    let file_name = worker_events_path
+        .file_name()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "worker events path has no filename: {}",
+                    worker_events_path.display()
+                ),
+            )
+        })?;
+    let suffix = std::process::id();
+    let destination = quarantine_dir.join(format!(
+        "{}-slot{}-attempt{}-pid{}",
+        file_name.to_string_lossy(),
+        slot_index,
+        attempt,
+        suffix,
+    ));
+    std::fs::rename(worker_events_path, &destination)?;
+    Ok(destination)
+}
+
+#[cfg(test)]
+mod quarantine_tests {
+    use super::*;
+
+    fn fake_worker_events_file(
+        dir: &std::path::Path,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> std::path::PathBuf {
+        let path = dir.join(format!("wave-{wave_id}-{slot_index}.jsonl"));
+        std::fs::write(&path, "fake events\n").expect("seed channel file");
+        path
+    }
+
+    #[test]
+    fn quarantine_moves_failed_channel_under_diagnostics() {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        let ralph_dir = workspace.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+        let channel = fake_worker_events_file(&ralph_dir, "u6-quarantine", 0);
+
+        let destination = quarantine_worker_channel(&channel, 0, 1)
+            .expect("quarantine must succeed");
+
+        assert!(!channel.exists(), "U6/S6.1: source path must not exist after rename");
+        assert!(destination.exists(), "U6/S6.1: destination must hold the moved file");
+        assert!(
+            destination.starts_with(ralph_dir.join("diagnostics").join("failed-activations")),
+            "U6/S6.1: quarantine destination must live under .ralph/diagnostics/failed-activations; \
+             got {}",
+            destination.display()
+        );
+        assert!(
+            destination.to_string_lossy().contains("slot0"),
+            "U6/S6.1: quarantine name must encode slot index for post-mortem navigation"
+        );
+    }
 }
