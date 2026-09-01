@@ -1085,7 +1085,7 @@ pub(super) async fn run_loop_impl_inner(
                         store.clone(),
                         supervisor_cfg.aggregate_timeout_secs,
                     ) {
-                        Ok(_) => {
+                        Ok(report) => {
                             // 2026-09-01-001 plan U2 (R2 / D3): replay
                             // any slot events that U1 persisted into
                             // `slot_event_payloads` but that fan-in
@@ -1104,14 +1104,27 @@ pub(super) async fn run_loop_impl_inner(
                                     bridge,
                                     &supervisor_events_path_for_redelivery,
                                 );
+                            // 2026-09-01-001 plan U3 (R3 / S3.1 / D4):
+                            // inject system_injected `exec.wave.failed`
+                            // for every wave the recovery evaluator
+                            // marked Failed (timeout). KTD2 order:
+                            // salvage first, failed-injection second.
+                            let injected =
+                                crate::loop_runner::wave::recovery_redelivery::inject_timed_out_failed_coord(
+                                    &report.timed_out_pending_injection,
+                                    store.clone(),
+                                    &supervisor_events_path_for_redelivery,
+                                );
                             if !redelivery_report.redelivered.is_empty()
                                 || !redelivery_report.warnings.is_empty()
+                                || !injected.is_empty()
                             {
                                 info!(
                                     redelivered = redelivery_report.redelivered.len(),
                                     skipped = redelivery_report.skipped.len(),
                                     warnings = redelivery_report.warnings.len(),
-                                    "U2: startup recovery redelivered persisted slot events"
+                                    failed_injections = injected.len(),
+                                    "U2/U3: startup recovery redelivered persisted slot events"
                                 );
                             }
                             // 2026-07-24-001 plan U3 (R7 / KTD5): wave
@@ -1210,7 +1223,7 @@ pub(super) async fn run_loop_impl_inner(
                                 store.clone(),
                                 supervisor_cfg.aggregate_timeout_secs,
                             ) {
-                                Ok(_) => {
+                                Ok(report) => {
                                     // 2026-09-01-001 plan U2 (R2 / D3):
                                     // see the supervisor-enabled branch
                                     // above — the redelivery seam is
@@ -1222,14 +1235,26 @@ pub(super) async fn run_loop_impl_inner(
                                         bridge,
                                         &supervisor_events_path_for_redelivery,
                                     );
+                                    // 2026-09-01-001 plan U3 (R3 / S3.1):
+                                    // timed-out waves get a
+                                    // system_injected `exec.wave.failed`
+                                    // so forge-failure-handler can
+                                    // activate.
+                                    let injected = crate::loop_runner::wave::recovery_redelivery::inject_timed_out_failed_coord(
+                                        &report.timed_out_pending_injection,
+                                        store.clone(),
+                                        &supervisor_events_path_for_redelivery,
+                                    );
                                     if !redelivery_report.redelivered.is_empty()
                                         || !redelivery_report.warnings.is_empty()
+                                        || !injected.is_empty()
                                     {
                                         info!(
                                             redelivered = redelivery_report.redelivered.len(),
                                             skipped = redelivery_report.skipped.len(),
                                             warnings = redelivery_report.warnings.len(),
-                                            "U2: default-path startup recovery redelivered persisted slot events"
+                                            failed_injections = injected.len(),
+                                            "U2/U3: default-path startup recovery redelivered persisted slot events"
                                         );
                                     }
                                     // 2026-07-24-001 plan U3 (R7 /

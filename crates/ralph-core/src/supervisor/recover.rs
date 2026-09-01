@@ -49,6 +49,15 @@ pub struct RecoveryReport {
     /// recovery run. Useful for the `ralph diagnose` surface
     /// and the BDD scenario.
     pub timed_out: Vec<String>,
+    /// 2026-09-01-001 plan U3 (R3 / D4): waves that this
+    /// recovery run marked `Failed` because their in-flight
+    /// slots exceeded `aggregate_timeout_secs`. The caller
+    /// (the loop startup wiring) consumes this list to inject
+    /// a system_injected `exec.wave.failed` event into the
+    /// main ledger AFTER any salvage pass has committed, so
+    /// the forge-failure-handler hat has a topic to bind to
+    /// (regression-closed primary-20260829 stall).
+    pub timed_out_pending_injection: Vec<String>,
     /// Number of waves skipped because `delivery_state` was
     /// already at `CoordinationCommitted` (recovery decides
     /// NOT to re-inject the coord event).
@@ -128,6 +137,16 @@ pub fn recover_active_waves_at_startup(
         {
             store.set_wave_phase(&snapshot.wave_id, WavePhase::Failed)?;
             report.timed_out.push(snapshot.wave_id.clone());
+            // 2026-09-01-001 plan U3 (R3 / D4): the recovery
+            // call site consumes `timed_out_pending_injection`
+            // to inject `exec.wave.failed` AFTER salvage.
+            // Populating both lists keeps the existing
+            // `report.timed_out` BDD contract intact while
+            // letting U3 callers iterate without re-running
+            // the timeout evaluator.
+            report
+                .timed_out_pending_injection
+                .push(snapshot.wave_id.clone());
         }
         // Cancelled / RequiredSlotFailure / ExpectedTotalZero:
         // leave the phase alone — the coordinator's next

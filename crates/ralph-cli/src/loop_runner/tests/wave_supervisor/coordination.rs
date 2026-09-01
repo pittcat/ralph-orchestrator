@@ -1048,3 +1048,87 @@ fn u2_2026_09_01_redelivery_handles_legacy_remnant_with_warning() {
         "U2: legacy remnant must not write to the main ledger"
     );
 }
+
+// 2026-09-01-001 plan U3 (R3 / S3.1 / T3.1-T3.3): a wave that
+// the recovery evaluator marked `Failed` (timeout) must get a
+// system_injected `exec.wave.failed` injection so the parallel
+// forge topology's failure-handler hat can activate. The
+// injection must precede the slot 0 salvage row (KTD2 order:
+// salvage first, failed-inject second).
+#[test]
+fn u3_2026_09_01_timed_out_wave_injects_exec_wave_failed() {
+    use crate::loop_runner::wave::recovery_redelivery;
+    use ralph_core::supervisor::WaveKind;
+    use std::sync::Arc;
+
+    let workspace = tempfile::TempDir::new().expect("temp workspace");
+    let ralph_dir = workspace.path().join(".ralph");
+    std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+    let main_events_file = ralph_dir.join("events.jsonl");
+
+    let store = Arc::new(InMemorySupervisorStore::new());
+    let wave = store
+        .register_wave("u3-timed-out-2026-09-01", WaveKind::Exec, 1, 1)
+        .expect("register");
+
+    // Inject — the function reads fan_in_status to build the
+    // payload; the wave exists and is in Dispatch phase so
+    // `delivery_state < CoordinationCommitted` holds.
+    let injected = recovery_redelivery::inject_timed_out_failed_coord(
+        &[wave.clone()],
+        store.clone(),
+        &main_events_file,
+    );
+
+    assert_eq!(
+        injected,
+        vec![wave.clone()],
+        "U3: timed-out wave must appear in the injected list; got {injected:?}"
+    );
+
+    let main_ledger = std::fs::read_to_string(&main_events_file).expect("read main");
+    assert!(
+        main_ledger.contains(r#""topic":"exec.wave.failed""#),
+        "U3: main ledger must carry system_injected exec.wave.failed; got {main_ledger}"
+    );
+    assert!(
+        main_ledger.contains(r#""system_injected":true"#),
+        "U3: exec.wave.failed row must be system_injected; got {main_ledger}"
+    );
+    assert!(
+        main_ledger.contains(&wave),
+        "U3: payload must reference the timed-out wave id; got {main_ledger}"
+    );
+}
+
+// 2026-09-01-001 plan U3 (R3 / S3.2 / T3.4): a wave whose
+// `in_flight_count > 0` but whose elapsed time is BELOW
+// `aggregate_timeout_secs` must NOT receive an
+// `exec.wave.failed` injection. `inject_timed_out_failed_coord`
+// receives a `timed_out_pending_injection` list as input —
+// the recovery evaluator only puts a wave id in this list
+// when it has decided the wave timed out (so this test
+// pins the caller-side contract: do not call inject_… with
+// non-timed-out wave ids).
+#[test]
+fn u3_2026_09_01_empty_injection_list_is_no_op() {
+    use crate::loop_runner::wave::recovery_redelivery;
+    use std::sync::Arc;
+
+    let workspace = tempfile::TempDir::new().expect("temp workspace");
+    let ralph_dir = workspace.path().join(".ralph");
+    std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+    let main_events_file = ralph_dir.join("events.jsonl");
+
+    let store = Arc::new(InMemorySupervisorStore::new());
+    let injected = recovery_redelivery::inject_timed_out_failed_coord(
+        &[],
+        store.clone(),
+        &main_events_file,
+    );
+    assert!(injected.is_empty());
+    assert!(
+        !main_events_file.exists(),
+        "U3: empty injection list must NOT touch the main ledger"
+    );
+}

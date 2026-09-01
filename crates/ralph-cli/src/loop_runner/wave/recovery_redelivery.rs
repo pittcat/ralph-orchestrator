@@ -35,7 +35,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ralph_core::supervisor::{
-    SupervisorBridge, SupervisorStore, WaveDeliveryState, WaveKind, WaveSnapshot,
+    CoordinatorAction, EventMergeSink, FileEventMergeSink, SlotStatus, SupervisorBridge,
+    SupervisorStore, WaveDeliveryState, WaveKind, WaveSnapshot,
 };
 use ralph_core::wave_tracker::{CompletedWave, WaveFailure, WaveResult};
 
@@ -54,6 +55,12 @@ pub struct RedeliveryReport {
     /// Warnings surfaced during the run (e.g. pre-U1 legacy
     /// crash remnants with no payload rows).
     pub warnings: Vec<String>,
+    /// 2026-09-01-001 plan U3 (R3 / S3.1): waves for which
+    /// this pass wrote a system_injected `exec.wave.failed`
+    /// to the main ledger so the forge-failure-handler hat
+    /// has a topic to bind to (closes the primary-20260829
+    /// stall).
+    pub failed_injections: Vec<String>,
 }
 
 /// Public entry point: scan active waves, replay any persisted
@@ -188,6 +195,91 @@ fn process_snapshot(
             ));
         }
     }
+}
+
+/// 2026-09-01-001 plan U3 (R3 / S3.1 / D4): for every wave the
+/// recovery evaluator marked `Failed` because its in-flight
+/// slots exceeded `aggregate_timeout_secs`, inject one
+/// system_injected `exec.wave.failed` into the main ledger so
+/// the parallel-forge topology's forge-failure-handler hat has
+/// a topic to bind to (closes the primary-20260829 stall where
+/// timeout-marked waves were never announced downstream).
+///
+/// Call this AFTER `redeliver_persisted_slot_events` has had a
+/// chance to commit any salvageable Completed-slot events, so
+/// the `exec.wave.failed` row is the LAST record for the wave
+/// in the main ledger (KTD2 ordering: salvage first, then
+/// failed inject).
+pub fn inject_timed_out_failed_coord(
+    timed_out_waves: &[String],
+    store: Arc<dyn SupervisorStore>,
+    main_events_file: &Path,
+) -> Vec<String> {
+    let mut injected = Vec::new();
+    let sink = FileEventMergeSink::new(main_events_file);
+    for wave_id in timed_out_waves {
+        match inject_one(wave_id, store.as_ref(), &sink) {
+            Ok(()) => injected.push(wave_id.clone()),
+            Err(err) => tracing::warn!(
+                wave_id = %wave_id,
+                error = %err,
+                "U3: failed to inject exec.wave.failed for timed-out wave; \
+                 forge-failure-handler may stall for this wave"
+            ),
+        }
+    }
+    injected
+}
+
+fn inject_one(
+    wave_id: &str,
+    store: &dyn SupervisorStore,
+    sink: &FileEventMergeSink,
+) -> Result<(), String> {
+    let snapshot = store
+        .fan_in_status(wave_id)
+        .map_err(|err| format!("fan_in_status: {err}"))?;
+    // Skip if this wave has already advanced past the injection
+    // point. S2.3 idempotency for the salvage pass is mirrored
+    // here for the failed-injection pass: a wave that has already
+    // reached `CoordinationCommitted` was settled by the
+    // coordinator before the crash, so its recovery does NOT need
+    // an extra `exec.wave.failed` line.
+    if snapshot
+        .delivery_state
+        .at_least(WaveDeliveryState::CoordinationCommitted)
+    {
+        return Ok(());
+    }
+    let elapsed_secs = std::time::SystemTime::now()
+        .duration_since(snapshot.started_at)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let slots: Vec<(u32, SlotStatus)> = snapshot.slots.clone();
+    let payload = super::dispatcher::salvage::build_wave_failed_slots_json(
+        wave_id,
+        &slots,
+        &std::collections::HashMap::new(),
+        elapsed_secs,
+    );
+    let event = ralph_core::Event {
+        topic: "exec.wave.failed".to_string(),
+        payload: Some(payload.to_string()),
+        ts: String::new(),
+        hat: None,
+        triggered: None,
+        source: Some("supervisor-recovery".to_string()),
+        wave_id: Some(wave_id.to_string()),
+        // No wave_index/wave_total here — `exec.wave.failed` is
+        // a single-row injection for the wave itself, not part
+        // of the wave's event stream.
+        wave_index: None,
+        wave_total: None,
+        system_injected: Some(true),
+    };
+    sink.append_events(vec![event.into()])
+        .map_err(|err| format!("FileEventMergeSink::append_events: {err:?}"))?;
+    Ok(())
 }
 
 /// Construct a `CompletedWave` from the persisted payload rows.
