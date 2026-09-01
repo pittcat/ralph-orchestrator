@@ -860,7 +860,7 @@ mod tests {
             message: "first".into(),
             recovery_guidance: Some(guidance_with(
                 vec!["first common"],
-                BTreeMap::from([("shared-id".into(), vec!["first".into()])]),
+                BTreeMap::from([("shared-id", vec!["first"])]),
             )),
         };
         let rule_b = PayloadConsistencyRule {
@@ -870,7 +870,7 @@ mod tests {
             message: "second".into(),
             recovery_guidance: Some(guidance_with(
                 vec!["second common"],
-                BTreeMap::from([("shared-id".into(), vec!["second".into()])]),
+                BTreeMap::from([("shared-id", vec!["second"])]),
             )),
         };
         let mut cfg = RalphConfig::default();

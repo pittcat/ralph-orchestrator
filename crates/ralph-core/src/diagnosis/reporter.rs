@@ -2361,7 +2361,7 @@ pub fn render_json_with_causal(
 pub fn render_causal_markdown(report: &super::causal::CausalAttributionReport) -> String {
     use super::causal::AttributionStatus;
 
-    let status_str = serde_json::to_value(&report.status)
+    let status_str = serde_json::to_value(report.status)
         .ok()
         .and_then(|v| v.as_str().map(String::from))
         .unwrap_or_else(|| format!("{:?}", report.status));

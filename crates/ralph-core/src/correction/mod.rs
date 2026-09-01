@@ -2699,7 +2699,7 @@ mod tests {
         }"#;
         let parsed: EvidenceDetail = serde_json::from_str(json).expect("legacy JSON parses");
         assert_eq!(parsed.guidance, None);
-        assert_eq!(parsed.synthetic, false);
+        assert!(!parsed.synthetic);
     }
 
     // ── U2 (plan 2026-08-17-1841) — renderer cap + multi-key filter

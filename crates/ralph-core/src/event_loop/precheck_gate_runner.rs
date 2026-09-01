@@ -344,10 +344,7 @@ pub fn build_precheck_evidence(
 /// the legacy "rejected payload malformed" path without inventing
 /// evidence.
 fn parse_payload_for_precheck(rejected_payload_json: &str) -> Option<serde_json::Value> {
-    match serde_json::from_str(rejected_payload_json) {
-        Ok(v) => Some(v),
-        Err(_) => None,
-    }
+    serde_json::from_str(rejected_payload_json).ok()
 }
 
 /// U3 / M3 / R10: pull the structured `synthetic` /
@@ -770,7 +767,7 @@ mod tests {
         let g = evidence.guidance.as_ref().expect("guidance populated");
         assert_eq!(g.common, vec!["common hint".to_string()]);
         assert_eq!(
-            g.by_check.get("2").map(|v| v.clone()),
+            g.by_check.get("2").cloned(),
             Some(vec!["fill required report".to_string()])
         );
         let keys = evidence.failed_check_keys.as_ref().expect("failed keys");

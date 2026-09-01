@@ -59,7 +59,7 @@ fn enabled_run_writes_input_bundle() {
     assert_eq!(bundle.schema_version, DIAGNOSIS_INPUT_SCHEMA_VERSION);
     assert_eq!(bundle.manifest_status, ManifestStatus::Pending);
     assert!(bundle.run.session_id.is_some(), "session id set");
-    assert!(!bundle.run.loop_id.is_some(), "loop id pending");
+    assert!(bundle.run.loop_id.is_none(), "loop id pending");
     assert!(!bundle.write_blocked, "not blocked");
 
     // complete identity and finalize
