@@ -675,6 +675,8 @@ schemas:
       - worktree_map_path
       - integration_branch
       - target_branch
+      - target_start_sha
+      - target_status_fingerprint
       - base_commit
       - plan_key
     payload: json_object
@@ -694,8 +696,16 @@ schemas:
         fill_rule: Real branch name on the main repo.
       target_branch:
         meaning: Branch checked out by the main worktree before the forge run.
-        source: First worktree entry from `git worktree list --porcelain`.
+        source: RALPH_CURRENT_BRANCH environment variable injected by the runtime.
         fill_rule: Real branch name; must differ from integration_branch.
+      target_start_sha:
+        meaning: HEAD commit SHA of the target branch at fan-out snapshot time.
+        source: git rev-parse HEAD run in $RALPH_WORKSPACE_ROOT this activation.
+        fill_rule: Full 40-char hex SHA.
+      target_status_fingerprint:
+        meaning: SHA-256 fingerprint of the canonical git status porcelain of $RALPH_WORKSPACE_ROOT at fan-out snapshot time.
+        source: git status --porcelain=v1 --untracked-files=all in $RALPH_WORKSPACE_ROOT, dropping lines whose path starts with .ralph/, then SHA-256 of the remaining bytes (utf-8, git line order, lines end with \n).
+        fill_rule: Full 64-char hex SHA-256.
       base_commit:
         meaning: Commit SHA frozen as concurrent baseline after Foundation units.
         source: git rev-parse HEAD on integration branch after Foundation merge.
@@ -703,6 +713,57 @@ schemas:
       plan_key:
         meaning: Forge plan key basename for artifact roots.
         source: Same key as .ralph/forge/<plan-key>/.
+        fill_rule: Must match directory name.
+
+  # Plan 2026-08-27-1430 U4: the precheck desugar rewrites producer emits
+  # to this proposed topic and would inherit payload + required_fields
+  # from the guarded `forge.worktrees.ready` schema at normalize time;
+  # the entry is declared explicitly so PRE-normalize strict lint
+  # (`payload_consistency_unknown_topic`) also sees the topic the four
+  # `parallel-forge-worktrees-ready-*` rules target.
+  forge.worktrees.ready.proposed:
+    required_fields:
+      - execution_plan_path
+      - worktree_map_path
+      - integration_branch
+      - target_branch
+      - target_start_sha
+      - target_status_fingerprint
+      - base_commit
+      - plan_key
+    payload: json_object
+    field_docs:
+      execution_plan_path:
+        meaning: Same contract as forge.worktrees.ready.
+        source: Producer emit rewritten to the proposed topic.
+        fill_rule: Unchanged from forge.worktrees.ready.
+      worktree_map_path:
+        meaning: Same contract as forge.worktrees.ready.
+        source: Producer emit rewritten to the proposed topic.
+        fill_rule: Unchanged from forge.worktrees.ready.
+      integration_branch:
+        meaning: Same contract as forge.worktrees.ready.
+        source: Producer emit rewritten to the proposed topic.
+        fill_rule: Unchanged from forge.worktrees.ready.
+      target_branch:
+        meaning: Same contract as forge.worktrees.ready.
+        source: Producer emit rewritten to the proposed topic.
+        fill_rule: Unchanged from forge.worktrees.ready.
+      target_start_sha:
+        meaning: Same contract as forge.worktrees.ready.
+        source: Producer emit rewritten to the proposed topic.
+        fill_rule: Unchanged from forge.worktrees.ready.
+      target_status_fingerprint:
+        meaning: Same contract as forge.worktrees.ready.
+        source: Producer emit rewritten to the proposed topic.
+        fill_rule: Unchanged from forge.worktrees.ready.
+      base_commit:
+        meaning: Same contract as forge.worktrees.ready.
+        source: Producer emit rewritten to the proposed topic.
+        fill_rule: Unchanged from forge.worktrees.ready.
+      plan_key:
+        meaning: Same contract as forge.worktrees.ready.
+        source: Producer emit rewritten to the proposed topic.
         fill_rule: Must match directory name.
 
   forge.units.reviewed:
@@ -788,11 +849,48 @@ schemas:
       all_required_passed:
         meaning: Whether every required gate command passed.
         source: Parsed full-verification.md outcomes.
-        fill_rule: '"false" routes to work.failed.'
+        fill_rule: '"false" means the tester must emit forge.full.verification.failed instead.'
       plan_key:
         meaning: Forge plan key basename.
         source: Trigger / forge artifact root.
         fill_rule: Must match directory name.
+
+  forge.full.verification.failed:
+    required_fields:
+      - plan_key
+      - verification_report_path
+      - failure_fingerprint
+      - context_artifact_path
+      - forge_artifact_root
+      - reason
+    payload: json_object
+    field_docs:
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Trigger / forge artifact root.
+        fill_rule: Must match directory name.
+      verification_report_path:
+        meaning: Full regression and CI-equivalent test report with the failing outcomes.
+        source: File at .ralph/forge/plan-key/full-verification.md.
+        fill_rule: Must list every command executed and outcome; test -f before emit.
+        examples: [".ralph/<plan>/full-verification.md"]
+      failure_fingerprint:
+        meaning: Stable identifier for this full-verification failure pattern.
+        source: Tester (failed gate commands + exit signals).
+        fill_rule: Hash-like string; reused for identical failures.
+      context_artifact_path:
+        meaning: Repo-relative path to a failure note written this activation.
+        source: File under .ralph/forge/<plan-key>/failures/tester-failed.md.
+        fill_rule: Write before emit; test -f.
+        examples: [".ralph/<plan>/failures/tester-failed.md"]
+      forge_artifact_root:
+        meaning: Directory holding forge artifacts (.ralph/forge/<plan-key>/).
+        source: Known plan_key.
+        fill_rule: Must point at the plan forge root.
+      reason:
+        meaning: Human-readable failure reason for the manager report.
+        source: Tester summary of the failing full-gate commands.
+        fill_rule: Non-empty; name the failing gate commands.
 
   forge.audit.done:
     required_fields:
