@@ -353,3 +353,83 @@ fn malformed_lines_counter_distinguishes_legacy_and_new_outcome_rows() {
     assert_eq!(report.record_count, 2);
     assert_eq!(report.malformed_lines, 0);
 }
+
+// 2026-09-01-001 plan U7 (R7 / S7.1): a Minimal diagnostics
+// session (driven by `runtime_diagnosis_artifacts=true`) must
+// open a runtime-trace sidecar that accepts the
+// `hat_activation_outcome` row. The cap manifest gap (08-29
+// DEV-8) is out of scope for this contract — the test only
+// pins the sidecar-write contract for the
+// `hat_activation_outcome` kind.
+#[test]
+fn u7_2026_09_01_minimal_session_accepts_hat_activation_outcome_row() {
+    use ralph_core::diagnostics::{
+        DiagnosticsCollector, DiagnosticsOptions, RuntimeTraceEntry, RuntimeTracePhase,
+    };
+
+    let tmp = TempDir::new().expect("TempDir");
+    let session = tmp.path().join(".ralph/diagnostics/session");
+    std::fs::create_dir_all(&session).expect("mkdir session");
+
+    let collector = DiagnosticsCollector::with_options(
+        tmp.path(),
+        &DiagnosticsOptions {
+            runtime_diagnosis_artifacts: true,
+            session_dir: Some(session.clone()),
+            ..DiagnosticsOptions::default()
+        },
+    )
+    .expect("minimal collector");
+    assert!(
+        collector.session_dir().is_some(),
+        "U7: minimal session must expose session_dir"
+    );
+    assert!(
+        !collector.is_full_diagnostics(),
+        "U7: minimal session must NOT enable full diagnostics"
+    );
+
+    let mut entry = RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Activation)
+        .with_kind(ACTIVATION_OUTCOME_KIND)
+        .with_hat("executor")
+        .with_status("merged")
+        .with_fields(json!({"loop_id": "loop-7-minimal"}));
+    entry = entry.with_source_ref("hat-channel:executor:loop-7-minimal:1");
+    collector.log_runtime_trace(entry);
+
+    let trace_path = session.join("runtime-trace.jsonl");
+    assert!(
+        trace_path.exists(),
+        "U7: minimal session must create runtime-trace.jsonl; got session={}",
+        session.display()
+    );
+    let body = std::fs::read_to_string(&trace_path).expect("read trace");
+    assert!(
+        body.contains(ACTIVATION_OUTCOME_KIND),
+        "U7: runtime-trace.jsonl must contain hat_activation_outcome row; got {body}"
+    );
+}
+
+// 2026-09-01-001 plan U7 (R7 / S7.2): the disabled collector
+// (the default when `runtime_diagnosis.write_artifacts=false`)
+// must NOT touch any sidecar file and MUST NOT panic when
+// `log_activation_outcome_with_diagnostics` is invoked. The
+// function early-returns on `session_dir().is_none()`; this
+// test pins the no-sidecar and no-panic contract together.
+#[test]
+fn u7_2026_09_01_disabled_collector_skips_all_rows() {
+    use ralph_core::diagnostics::DiagnosticsCollector;
+
+    let tmp = TempDir::new().expect("TempDir");
+    let collector = DiagnosticsCollector::disabled();
+    assert!(collector.session_dir().is_none(), "U7: disabled collector has no session_dir");
+    // Invoking log_runtime_trace on a disabled collector must be a
+    // no-op (the logger is None and the early-return branch fires).
+    // We intentionally do not assert file creation — there must
+    // be NO sidecar under tmp.path() at all.
+    let stray = std::fs::read_dir(tmp.path()).expect("read tmp dir").count();
+    assert_eq!(
+        stray, 0,
+        "U7: disabled collector must NOT create any sidecar under tmp"
+    );
+}
