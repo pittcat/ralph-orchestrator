@@ -557,3 +557,317 @@ Feature: hat_activation_outcome 行不受 Minimal 诊断级别影响
 **19. 停止条件：** `exec.wave.failed` 的 system_injected 白名单不含该 topic（event_origin.rs:133-140 的 6 个 coordination topic——E17 提示；若被拒，停止并回报，不得改白名单擅自放行）；payload 构造函数签名与 E4 不符。
 
 **20. 风险与注意事项：** ① system_injected topic 白名单校验（见停止条件，U3 第一步验证 `exec.wave.failed` 是否在列——`exec.wave.complete` 在列的事实可类推但必须以代码为准）。② 注入后重读发布会激活 failure-handler 的 correction 流程——这是设计意图，但测试环境需确认不触发真实 hat spawn（集成测试只断言账本行，不跑 loop 主体）。
+
+---
+
+### Unit 4：silent activation 归因分类（merge_failed / backend_died / never_emitted）
+
+**1. Unit 目标：** isolated activation 结束且账本无新事件时，runtime 依据已采集的 outcome 事实分类处置：merge 失败先重试一次；backend 早死不计入 publish-obligation hard gate；真空 activation 维持现状。覆盖 S4.1–S4.4。
+
+**2. 对应需求与 Scenario：** R4；S4.1–S4.4；D5；E8/E9/E16。
+
+**3. 外部可观察结果：** 08-26 同类事故（merge 失败）下 loop 不再 3 轮 no-progress 后 fail-close，而是重试成功即正常推进；诊断/runtime-trace 的 reason 字段可区分 `merge_failed` / `backend_died` / `never_emitted`；08-10 同类事故（backend 早死）不再被记为「有发布义务但没发」。
+
+**4. 当前行为基线：** gate 判定只看账本解析结果（inner.rs:4712-4716），全部坍缩为同一文案（inner.rs:4728；diagnosis/reporter.rs:740-746），3 次 fail-close（terminal_routing.rs:322）。现有回归锚点：`replay_light_integration.rs:1450`（missing_event gate 消息断言）、`activation_outcome.rs` T5/T6（merge 失败/成功 fixture）。
+
+**5. 输入与输出：** 输入 = activation outcome 事实集（channel_bytes / merge 结果 / backend_success / exit_code / watchdog / output_bytes，E8）+ 账本解析结果。输出 = 分类 → 处置（重试 merge / backend 失败路径 / 现状计数）+ 诊断 reason。错误：重试 merge 仍失败 → quarantine channel + reason=merge_failed + 计数。不变量：never_emitted 的计数与文案与基线一致（S4.4）。
+
+**6. 修改位置：**
+- `crates/ralph-cli/src/loop_runner/` 新增小模块或加入既有模块（候选：`activation_outcome_close.rs` 同文件，职责最近）— 纯函数 `classify_silent_activation(facts) -> SilentActivationClass { NeverEmitted, MergeFailed, BackendDied }`。优先级规则：merge 结果失败 → MergeFailed；否则 backend_success=false 或 watchdog → BackendDied；否则 NeverEmitted。（Emit 被拒类已由 `agent_wrote_any_valid_or_rejected` 覆盖，到不了 gate，E8。）
+- `crates/ralph-cli/src/loop_runner/activation_outcome_close.rs`（修改）— 非空 channel merge IO 失败（现仅诊断 + error!，:91-104）改为：返回可重试的失败信号给调用侧，并保留 channel 文件路径。
+- `crates/ralph-cli/src/loop_runner/inner.rs:4712-4732`（修改）— gate 判定前取分类：MergeFailed → 调一次 `merge_hat_channel_at_path` 重试（hat_channel.rs:87 既有入口），成功则正常返回（事件落账）；BackendDied → 跳过 publish-obligation 计数，走既有 backend 失败分支（inner.rs:3462-3484 区域）；NeverEmitted → 现状。
+- `crates/ralph-core/src/event_loop/rejection.rs:44-65`（修改）— `RejectionStage` 增加 `MergeFailed` / `BackendDied` 变体（诊断枚举扩展）。
+- `crates/ralph-core/src/diagnosis/reporter.rs:740-746`（修改）— 文案按新变体分支。
+- 明确不修改：`hard_gate.rs` 的 grace/overdue 逻辑、`should_gate_missing_events` 的义务判定（E9）——本 Unit 只改「判定为 silent 之后」的分类与处置。
+
+**7. 可依赖能力：** outcome 事实已采集（E8）；merge 入口可重入（hat_channel.rs:87 纯文件操作，幂等 stamp）；quarantine 模式（E12）。
+
+**8. 禁止依赖的未来能力：** 无。不得在本 Unit 改 supervisor wave 侧（worker 的 empty_worker_result 分类在 outcomes.rs:42-48，不属于 isolated hat-channel 路径，不动）。
+
+**9. 验收测试：** `crates/ralph-cli/src/loop_runner/tests/legacy/activation_outcome.rs` 扩展：① 只读目标 fixture（:699-712 模式）首次 merge 失败 + 第二次放行 → 事件落账、gate 计数不变（S4.1）；② 两次都失败 → reason=merge_failed、quarantine 存在、计数 +1（S4.2）；③ backend_success=false + 空 channel → 不计 publish-obligation（S4.3）；④ 干净空 activation → 现状计数（S4.4 回归）。运行：`cargo nextest run -p ralph-cli --bin ralph -- activation_outcome`。
+
+**10. Acceptance Red：** S4.1 测试先跑——merge 失败一次即被计 gate 或无重试逻辑（断言重试后账本有事件，当前实现无重试 → 账本空 → Red）。无效 Red：fixture 权限模拟失效（只读目录在 root/某些 FS 上不生效应改用注入错误，实现期验证 fixture 有效性）。
+
+**11. 单元测试拆分：**
+- T4.1 `classify_merge_failed_when_merge_err`；T4.2 `classify_backend_died_when_backend_failed`；T4.3 `classify_never_emitted_when_clean_empty`；T4.4 `merge_failed_precedes_backend_died`（两事实同存时 merge 优先——merge 失败时 backend 状态不可信）。
+- T4.5 重试成功路径（mock merge 首次 Err 二次 Ok——注意：只允许 stub 文件系统错误注入，不得 mock 掉账本写入本身）。
+- T4.6 RejectionStage 新变体的诊断文案渲染。
+- 不允许 mock：真实 merge 重试必须走 `merge_hat_channel_at_path` 真实文件操作。
+
+**12. Red → Green → Refactor 顺序：** T4.1–T4.4 Red（分类器不存在）→ 纯函数 → Green → T4.5 Red（无重试）→ activation_outcome_close/inner 重试接线 → Green → T4.6 Red → 诊断变体+文案 → Green → S4.3 backend 分支接线（Red → Green）→ S4.4 回归确认 → Refactor。
+
+**13. 最小实现范围：** 分类器 + 单次 merge 重试 + backend_died 绕行 + 诊断变体。明确不实现：多次重试/指数退避（单次即够，merge 失败是瞬时 IO 错误的假设由 S4.1 验证）；跨 activation 重试（残留 channel 下轮消费——非目标，见 §1）。
+
+**14. 集成验证：** activation_outcome 测试文件全绿 + `cargo nextest run -p ralph-cli --bin ralph -- hard_gate`。真实验证：merge 走真实文件 I/O。
+
+**15. 风险驱动测试：** 故障注入贯穿（T4.5）；S4.4 即回归保护。
+
+**16. 回归范围：** `cargo nextest run -p ralph-cli --bin ralph -- activation_outcome`；`-- hard_gate`；`-- replay_light`（missing_event 消息断言，E9）；`cargo nextest run -p ralph-core -- rejection`；`-- diagnosis`。理由：gate 判定是所有 isolated preset 的共用路径。
+
+**17. 预期文件变更：**
+
+| 位置 | 变更类型 | 变更原因 | Evidence |
+|---|---|---|---|
+| `loop_runner/activation_outcome_close.rs` | 修改 | 分类器 + 可重试信号 | E8 |
+| `loop_runner/inner.rs` | 修改 | gate 判定接入分类处置 | E8/E9 |
+| `event_loop/rejection.rs` | 修改 | 新 RejectionStage 变体 | E9 |
+| `diagnosis/reporter.rs` | 修改 | 文案分支 | E9 |
+| `loop_runner/tests/legacy/activation_outcome.rs` | 修改（新增用例） | S4.1–S4.4 | E15 |
+
+**18. 完成标准：** S4.1–S4.4 全绿；回归范围全绿；`replay_light_integration.rs:1450` 的 missing_event 断言未削弱（如文案调整必须同步更新断言并在提交说明原因）；clippy/build 通过。
+
+**19. 停止条件：** outcome 事实在 gate 判定点不可得（生命周期与 E8 描述不符）；merge 重试会重复 stamp `triggered` 回填导致重复事件（hat_channel.rs:104-264 语义若为非幂等 → 停止，改为不自动重试只改归因分类，并回报决策变更）。
+
+**20. 风险与注意事项：** ① merge 重试的幂等性（见停止条件 ②，U4 第一步验证 hat_channel merge 是否幂等）。② backend_died 绕行后若该 hat 事件本就必需，wave 仍会 stall——这是正确行为（backend 死了重试 activation 才有意义），诊断 reason 使归因可查。③ 不得把 BackendDied 也做成「合成 default_publishes 兜底」（inner.rs:4733-4753 现状对 never_emitted 的兜底），那会伪造业务事件。
+
+---
+
+### Unit 5：record_slot_pid 接线 + diagnose 展示真实 pid
+
+**1. Unit 目标：** slot worker spawn 成功后把真实 pid 写入 `dispatch_records.pid`；`ralph diagnose` 读取真实值。覆盖 S5.1/S5.2。
+
+**2. 对应需求与 Scenario：** R5；S5.1/S5.2；D6；E10/E11。
+
+**3. 外部可观察结果：** wave 运行期间 `dispatch_records.pid` 非 NULL；`ralph diagnose` 输出 slot pid 为真实值。
+
+**4. 当前行为基线：** INSERT 不含 pid（rusqlite.rs:586）；API 存在无调用（E10）；diagnose 近似（diagnose.rs:1059 注释自证）。
+
+**5. 输入与输出：** 输入 = spawn 后的进程 pid。输出 = store 行更新。错误：pid 不可得（如 executor 未暴露）→ 保持 NULL + warn（不阻断 dispatch）。不变量：dispatch 流程不因 pid 写入失败而失败。
+
+**6. 修改位置：**
+- `crates/ralph-adapters/src/pty_executor.rs:363,1813`（修改，最小）— 暴露 pid（若已暴露则零改动；U5 第一步验证）。
+- `crates/ralph-cli/src/loop_runner/wave/worker.rs`（修改）— `run_wave_worker` 结果/回传结构携带 pid。
+- `crates/ralph-cli/src/loop_runner/wave/dispatcher/dispatch.rs:2551` 附近（修改）— spawn 后调 `record_slot_pid(wave_id, slot_index, pid)`（rusqlite.rs:1564 既有）。
+- `crates/ralph-cli/src/commands/diagnose.rs:1059`（修改）— 删除近似逻辑，读真实 pid；注释同步更新。
+- 明确不修改：`try_dispatch_next` 的 INSERT（pid 回填走 UPDATE 语义，既有 API）；不实现 reaper。
+
+**7. 可依赖能力：** record_slot_pid 三实现（E10）；fake executor 基座（E15，需确认 fake 也可注入假 pid——若不能则 store 层单测覆盖 + 真实路径以 warn 降级）。
+
+**8. 禁止依赖的未来能力：** 无（reaper 是显式非目标）。
+
+**9. 验收测试：** dispatcher 测试：spawn（fake/真实 PTY 视基座能力）→ 断言 store `dispatch_records.pid` 等于回传值。diagnose 测试：构造 store 行 → 输出含 pid。运行：`cargo nextest run -p ralph-cli --bin ralph -- wave_supervisor` + `cargo nextest run -p ralph-cli --bin ralph -- diagnose`。
+
+**10. Acceptance Red：** 断言 dispatch_records.pid 非 NULL → Red：恒 NULL（E11）。无效 Red：测试没真正走到 spawn（slot 未 dispatch）。
+
+**11. 单元测试拆分：** T5.1 `record_slot_pid_round_trip`（rusqlite+memory）；T5.2 `pid_write_failure_does_not_block_dispatch`（stub store Err）；T5.3 diagnose 输出渲染。
+
+**12. Red → Green → Refactor：** T5.1 Red（API 已有，可能直接 Green——若直接 Green 则作为 characterization 保留，在提交说明）→ T5.2 Red → 错误降级 → Green → dispatcher 接线（验收 Red → Green）→ T5.3 → Refactor。
+
+**13. 最小实现范围：** pid 回传链路 + 一次 store 调用 + diagnose 改读。明确不实现：进程存活检测、kill、任何周期任务。
+
+**14. 集成验证：** wave_supervisor 测试套件 + diagnose 测试。
+
+**15. 风险驱动测试：** 无额外（接线类改动，故障注入已由 T5.2 覆盖）。
+
+**16. 回归范围：** `cargo nextest run -p ralph-core -- supervisor`；`cargo nextest run -p ralph-cli --bin ralph -- wave`；`-- diagnose`；`integration_wave_channel_convergence`。
+
+**17. 预期文件变更：**
+
+| 位置 | 变更类型 | 变更原因 | Evidence |
+|---|---|---|---|
+| `ralph-adapters/src/pty_executor.rs` | 修改（如需） | 暴露 pid | E10 |
+| `wave/worker.rs` | 修改 | pid 回传 | E10 |
+| `dispatcher/dispatch.rs` | 修改 | record_slot_pid 调用 | E10/E11 |
+| `commands/diagnose.rs` | 修改 | 真实 pid 展示 | E10 |
+| 测试（wave_supervisor / diagnose / supervisor store） | 新增用例 | S5.1/S5.2 | E15 |
+
+**18. 完成标准：** S5.1/S5.2 全绿；回归全绿；clippy/build 通过；pid 失败降级 warn 路径有测试。
+
+**19. 停止条件：** pty_executor 与子进程句柄之间无 pid 通道且 `run_wave_worker` 拿不到 `Child`（两处都不可达 → 停止，回报重新决策 D6）；record_slot_pid 的 rusqlite 实现与 trait 签名不匹配。
+
+**20. 风险与注意事项：** ① PTY 场景 pid 是会话首进程，子进程组不在本 Unit 范围（非目标）。② fake executor 若无 pid 概念，用约定值（如 0 或 fixture pid）并注明，不得伪造「真实 pid」断言。
+
+---
+
+### Unit 6：worker channel 失败现场 quarantine
+
+**1. Unit 目标：** slot 非干净结局（empty/failed/timeout）时 channel 文件移入 `.ralph/diagnostics/failed-activations/`；干净成功仍删除。覆盖 S6.1/S6.2。
+
+**2. 对应需求与 Scenario：** R6；S6.1/S6.2；D7；E1/E12。
+
+**3. 外部可观察结果：** 失败 wave 运行后 diagnostics 目录可找到 slot channel 原文件（含 wave/slot/attempt 命名）；成功运行无残留。
+
+**4. 当前行为基线：** worker.rs:642 无条件删除（U1 后改为「持久化成功后删除」——本 Unit 在 U1 的新删除点上加分支）。quarantine 模式证据：hat_channel.rs:287-313。
+
+**5. 输入与输出：** 输入 = slot outcome 分类（outcomes.rs:181 classify 结果）+ channel 路径。输出 = 文件移动或删除。错误：移动失败 → warn + 退化为删除（不阻断）。不变量：channel 文件最终必然离开原路径（不干扰后续 wave）。
+
+**6. 修改位置：** `crates/ralph-cli/src/loop_runner/wave/dispatcher/dispatch.rs`（U1 移交后的删除决策点）— 按 outcome 分类分支：clean success → 删除；其余 → 移动。quarantine 目录与命名模式复用 E12。明确不修改：outcomes.rs 分类逻辑本身。
+
+**7. 可依赖能力：** U1 的删除时机移交；hat_channel quarantine 实现模式（E12）。
+
+**8. 禁止依赖的未来能力：** 无。
+
+**9. 验收测试：** dispatcher 测试：构造 empty/failed 结局 → 断言 quarantine 文件存在且原名路径不存在；clean success → 文件删除。运行：`cargo nextest run -p ralph-cli --bin ralph -- wave_supervisor`。
+
+**10. Acceptance Red：** failed 结局后断言 quarantine 文件存在 → Red：文件被删（现状）。无效 Red：quarantine 目录权限（用 tempdir）。
+
+**11. 单元测试拆分：** T6.1 failed→quarantine；T6.2 empty→quarantine；T6.3 success→删除；T6.4 移动 IO 失败→warn+删除降级。
+
+**12. Red → Green → Refactor：** T6.1 Red → 移动逻辑 → Green → T6.2/T6.3 Red（分支覆盖）→ Green → T6.4 → Green → Refactor。
+
+**13. 最小实现范围：** 删除点分支 + 移动函数。明确不实现：quarantine 清理策略（保留策略随诊断目录既有惯例）；wave 结束后的批量清理。
+
+**14. 集成验证：** wave_supervisor 套件 + `integration_wave_channel_convergence`（timeout/cancel 场景会经过新分支）。
+
+**15. 风险驱动测试：** T6.4 故障注入（依据：诊断目录写失败不得连锁阻断 wave 处理——E15 已有 diagnostics 写失败场景先例）。
+
+**16. 回归范围：** `cargo nextest run -p ralph-cli --bin ralph -- wave`；`integration_wave_channel_convergence`。
+
+**17. 预期文件变更：**
+
+| 位置 | 变更类型 | 变更原因 | Evidence |
+|---|---|---|---|
+| `dispatcher/dispatch.rs` | 修改 | quarantine 分支 | E1/E12 |
+| wave_supervisor 测试目录 | 新增用例 | S6.1/S6.2 | E15 |
+
+**18. 完成标准：** S6.1/S6.2 全绿；回归全绿；clippy/build 通过。
+
+**19. 停止条件：** U1 的删除移交实际未落在 dispatch.rs（与 U1 实际实现不符 → 以 U1 落点为准调整本 Unit 位置并记录）；outcome 分类在删除决策点不可得。
+
+**20. 风险与注意事项：** quarantine 目录体积增长——wave channel 为 KB 级且仅失败路径写入，可接受；如诊断目录已有清理策略则遵循，没有则不新增（非目标）。
+
+---
+
+### Unit 7：Minimal 诊断模式下 hat_activation_outcome 行落盘
+
+**1. Unit 目标：** `log_runtime_trace` 的 Minimal 早退对 `hat_activation_outcome` 行豁免——任何诊断级别下 outcome 行都落盘。覆盖 S7.1/S7.2。
+
+**2. 对应需求与 Scenario：** R7；S7.1/S7.2；D8；E13。
+
+**3. 外部可观察结果：** Minimal 模式运行的 loop,runtime-trace sidecar 含每次 isolated activation 的 outcome 行（08-29 类诊断不再缺这一层证据）。
+
+**4. 当前行为基线：** Minimal 早退（diagnostics/mod.rs:1662，E13）。**先加 Characterization Test**：固定「Minimal 模式其他行类型仍早退、仅 outcome 行豁免」的边界——避免豁免面扩大。
+
+**5. 输入与输出：** 输入 = runtime-trace 行 + 诊断级别。输出 = sidecar 文件行。不变量：非 outcome 行在 Minimal 下的行为逐字节不变（S7.2）。
+
+**6. 修改位置：** `crates/ralph-core/src/diagnostics/mod.rs:1662` 附近（修改）— 早退条件加行类型豁免判定（判定依据 = 行内 `kind`/`type` 字段为 `hat_activation_outcome`，以现有行序列化结构为准，进入 Unit 时确认字段名）。`crates/ralph-core/tests/hat_activation_outcome_contract.rs`（修改，新增 Minimal 用例）。明确不修改：诊断级别定义、其他行类型。
+
+**7. 可依赖能力：** outcome contract 测试基座（E13）。
+
+**8. 禁止依赖的未来能力：** 无。
+
+**9. 验收测试：** contract 测试新增：Minimal 模式跑一次 outcome 记录 → sidecar 含该行；非 outcome 行 → 不含（S7.2）。运行：`cargo nextest run -p ralph-core --test hat_activation_outcome_contract`。
+
+**10. Acceptance Red：** Minimal 断言行存在 → Red：早退致无行（E13）。无效 Red：sidecar 路径解析错。
+
+**11. 单元测试拆分：** T7.1 minimal_outcome_row_written；T7.2 minimal_non_outcome_rows_still_skipped（Characterization）；T7.3 non_minimal_unchanged（与既有 contract 重叠则复用）。
+
+**12. Red → Green → Refactor：** T7.2 先写（Characterization，当前即 Green，保留）→ T7.1 Red → 豁免实现 → Green → T7.3 回归 → Refactor（如有重复级别判定）。
+
+**13. 最小实现范围：** 单点豁免。明确不实现：诊断级别体系调整、其他行类型豁免。
+
+**14. 集成验证：** contract 测试 + `cargo nextest run -p ralph-core -- diagnostics`。
+
+**15. 风险驱动测试：** Characterization（T7.2，依据：豁免面扩大回归是唯一的实质风险）。
+
+**16. 回归范围：** `cargo nextest run -p ralph-core -- diagnostics`；`cargo nextest run -p ralph-core --test hat_activation_outcome_contract`；`cargo nextest run -p ralph-cli --bin ralph -- activation_outcome`。
+
+**17. 预期文件变更：**
+
+| 位置 | 变更类型 | 变更原因 | Evidence |
+|---|---|---|---|
+| `diagnostics/mod.rs` | 修改 | 豁免判定 | E13 |
+| `tests/hat_activation_outcome_contract.rs` | 修改（新增用例） | S7.1/S7.2 | E13 |
+
+**18. 完成标准：** S7.1/S7.2 全绿；回归全绿；clippy/build 通过；豁免仅限 outcome 行（T7.2 钉住）。
+
+**19. 停止条件：** 早退点与 E13 描述不符（如早退发生在更外层、outcome 行根本不到 :1662）→ 沿调用链定位真实拦截点，若改动面扩大到诊断初始化流程则停止回报。
+
+**20. 风险与注意事项：** Minimal 的设计意图若是「零 sidecar IO」，本 Unit 与之冲突——进入 Unit 时查 diagnostics 级别文档/注释确认意图；若确认是刻意设计，停止并回报（改提案为：diagnose 时提示提升级别），不得擅自推翻。
+
+---
+
+## 8. Unit 串行依赖图
+
+```
+U1（slot 事件持久化 + persist-before-delete）
+  ↓ U2 消费 U1 的 load_slot_event_payloads 与新表语义；且 U1 把 channel 删除决策移交 dispatcher，U2/U6 的分支都挂在该决策点上
+U2（崩溃恢复补偿投递）
+  ↓ U3 的「先 salvage 再注入 failed」复用 U2 的 recovery_redelivery 模块与接线点
+U3（超时 wave 注入 exec.wave.failed）
+  ↓ 无能力依赖；排在 U4 前是因为同属恢复/投递主线，先闭合 wave 侧再回 hat 侧
+U4（silent activation 归因分类）
+  ↓ 无能力依赖；U5/U6 同属 wave worker 取证，U4 完成 hat 侧后回到 wave 侧收口
+U5（pid 接线）
+  ↓ 无能力依赖；与 U6 同在 worker/dispatch 区域，相邻执行降低上下文切换
+U6（channel 失败现场 quarantine）
+  ↓ 依赖 U1 移交后的删除决策点（U1 必须先完成）
+U7（Minimal outcome 行落盘）
+  ↓ 无能力依赖；最小改动放最后，作为全计划回归的收尾验证载体
+```
+
+- 为什么不可交换：U2/U3 依赖 U1 的存储能力（硬依赖）；U6 依赖 U1 的删除点移交（硬依赖）；U3 依赖 U2 的恢复模块（硬依赖）。U4/U5 无硬依赖，固定在现位置仅为降低风险（先主线后旁支），不与任何 Unit 并行。
+- 如何避免提前实现：U1 明确「不写恢复消费」；U2 明确「不做超时注入」；各 Unit §8 均已列出禁令。
+
+---
+
+## 9. 执行命令清单
+
+> 全部遵守 AGENTS.md HARD RULE 1/2/5：测试入口只走 `cargo nextest run` 系列；spawn ralph 的集成测试必须用 `tests/common/mod.rs` 的 scrub helper；最终全量走 `./scripts/run-tests.sh`（不要在开发中途跑全量代替 targeted）。
+
+| 命令 | 运行时机 | 验证目的 | 预期结果 | 失败能否继续 |
+|---|---|---|---|---|
+| `cargo nextest --version` | 开工前 | 版本 = 0.9.140（mise.toml SSOT） | `0.9.140` | 否（先 `mise install`） |
+| `sed -n '…p' <file>` 复核 E1–E17 行号 | 每个 Unit 第一步 | 证据与基线一致 | 符号在 ±20 行内 | 否（触发停止条件） |
+| `cargo nextest run -p ralph-core -- supervisor` | U1/U2/U3/U5 的 Red 与 Green | store 双实现、recover、coordinator | 目标测试先 Red 后 Green，其余全绿 | 否 |
+| `cargo nextest run -p ralph-cli --bin ralph -- wave_supervisor` | U1/U2/U3/U5/U6 | dispatcher/worker/fan-in | 同上 | 否 |
+| `cargo nextest run -p ralph-cli --test integration_wave_channel_convergence` | U1/U2/U3/U6 | wave 投递全链路回归 + 新断言 | 全绿（含 s_08 crash window） | 否 |
+| `cargo nextest run -p ralph-cli --test integration_wave_recovery_redelivery` | U2/U3 | S2.1–S2.4/S3.1/S3.2 | 先 Red 后 Green | 否 |
+| `cargo nextest run -p ralph-cli --test u7_real_ralph_emit` | U1/U2 | 真实 emit 链路回归 | 全绿 | 否 |
+| `cargo nextest run -p ralph-cli --bin ralph -- activation_outcome` | U4/U7 | S4.1–S4.4 | 先 Red 后 Green | 否 |
+| `cargo nextest run -p ralph-cli --bin ralph -- hard_gate` | U4 | gate 相邻回归 | 全绿 | 否 |
+| `cargo nextest run -p ralph-cli --bin ralph -- replay_light` | U4 | missing_event 消息回归（E9） | 全绿 | 否 |
+| `cargo nextest run -p ralph-core -- rejection` / `-- diagnosis` | U4 | 诊断枚举/文案相邻 | 全绿 | 否 |
+| `cargo nextest run -p ralph-cli --bin ralph -- diagnose` | U5 | S5.2 | 先 Red 后 Green | 否 |
+| `cargo nextest run -p ralph-core --test hat_activation_outcome_contract` | U7 | S7.1/S7.2 | T7.1 先 Red 后 Green | 否 |
+| `cargo nextest run -p ralph-core -- diagnostics` | U7 | 诊断级别相邻回归 | 全绿 | 否 |
+| `cargo nextest run -p ralph-cli --bin ralph -- task_projection` | U2 | 恢复段相邻（E6） | 全绿 | 否 |
+| `cargo clippy --workspace` | 每个 Unit 收尾 | Lint（pedantic） | 零警告（既有基线水平） | 否 |
+| `cargo build` | 每个 Unit 收尾 | 编译 | 通过 | 否 |
+| `cargo fmt --check` | 每个 Unit 收尾 | 格式 | 通过 | 否 |
+| `./scripts/run-tests.sh` | **仅 U7 完成后一次**（nextest 两阶段 + doctest） | 最终全量门禁 | 全绿 | 否 |
+| `RALPH_CURRENT_HAT=executor RALPH_EVENTS_FILE=/tmp/x.jsonl cargo nextest run -p ralph-cli --test integration_wave_recovery_redelivery` | U2/U3 收尾 | HARD RULE 5 污染验收 | 全绿 | 否 |
+
+---
+
+## 10. 最终质量门禁
+
+* S1.1–S7.2 全部 Scenario 验收通过；R1–R7 每需求至少一个可执行测试（§6 矩阵逐行核对）。
+* §9 所有 Unit 级命令在最后状态全绿；`./scripts/run-tests.sh` 全绿（含 phase 2 串行隔离与 doctest）。
+* 无新增失败/跳过测试；无 `.only`；无 Snapshot/Golden 更新（本计划无 snapshot 类测试，出现即违规）；无削弱断言（`replay_light` 的 missing_event 断言若因文案分支调整，必须在提交信息中说明新旧映射）。
+* 健康路径行为不变证明：`integration_wave_channel_convergence` 的账本输出与基线一致（s_01–s_10 全绿且未改断言）。
+* D1–D9 置信度在执行中未跌破 0.85；跌破过的 Unit 必须有停止→补证据→复评记录。
+* 实际变更文件集合 ⊆ §7 各 Unit §17 的并集；任一越界文件需在提交信息中说明归属哪个 Unit 的哪个停止条件处理后修订。
+* 每个 Unit 形成完整 TDD 闭环（Red 记录 → Green → 回归 → 关闭）；Unit 顺序 = U1→…→U7，无交叉提交。
+* 本计划与 active plan 2026-08-27-1430 的零交集约束成立（`git diff --name-only` 与 E18 清单比对）。
+
+---
+
+## 11. 最终计划自检
+
+| 检查项 | 结果 | 证据或说明 |
+|---|---|---|
+| 这是实施计划而不是 Roadmap 吗 | 是 | 每 Unit 有入口文件/行号、Red 失败原因、完成标准 |
+| Executor 是否仍需做关键设计决策 | 否 | D1–D9 全部定案；仅余行号复核与二个实现期微选择（T1.3 幂等语义二选一、restore_unmerged 接线或删除），均已给出判定标准且不影响行为契约 |
+| 所有文件和接口是否有代码库证据 | 是 | §2.2 E1–E18；新增文件均标注「计划新增」 |
+| 所有关键决策置信度是否 ≥ 0.85 | 是 | §3 最低 0.85（D2–D6、D8），D1/D7 0.90，D9 0.95 |
+| 是否存在未处理的低置信度假设 | 否 | §1 已确认假设 A1–A3 均有代码证据；待验证假设清零 |
+| 每个 Unit 是否只有一个可观察行为 | 是 | U1 持久化、U2 补偿投递、U3 超时注入、U4 归因分类、U5 pid、U6 quarantine、U7 诊断豁免 |
+| 每个 Unit 是否可以独立验证 | 是 | 各有独立测试命令与完成标准 |
+| 每个 Unit 是否有真实 Red | 是 | 各 Unit §10 写明 Red 表现与无效 Red 排除 |
+| 每个 Unit 是否包含回归范围 | 是 | 各 Unit §16 基于调用链列出 |
+| 是否存在未来 Unit 依赖 | 否 | §8 依赖图每条边注明已验证能力来源 |
+| 是否存在泛化任务描述 | 否 | 无「完善/优化/相应」类表述 |
+| 所有 Scenario 是否可追踪到测试和 Unit | 是 | §5/§6 矩阵 |
+| 所有关键决策是否有 Evidence | 是 | §3 每行引用 E 编号 |
+| 计划是否可以严格串行执行 | 是 | §8 线性图，无并行边 |
+
+---
+
+## 附：明确的非目标与后续立项建议（不属本计划执行范围）
+
+1. **主动死进程 reaper / 周期性 coordinator tick**：需新机制（in-loop tick 锚点），待 U5 pid 数据落地后立独立计划。
+2. **P0-4 correction 轮次 runtime 锚点**：跨事件计数无声明式机制（诊断报告 §3），候选为硬编码门禁（red-team 队列模式，validation.rs:124-437）或通用 counter API，需独立计划。
+3. **P0-2/P0-3 残余**（audit.done verdict 分流、wave 上下文 runtime 注入）：runtime 边界约束（triggers 不支持 payload 过滤）已写入诊断报告 §3，与 active plan 2026-08-27-1430 收口时对齐。
+4. **record_slot_result warn-only 可见性**（08-29 worker_results=0 疑点）：需复跑取证确认后立项。
+5. **P2/P3**（预算调参、死配置清理、alias 移除）：hygiene 批次，随 active plan 收尾处理。
