@@ -8,7 +8,7 @@ origin: docs/brainstorms/2026-08-12-003-feat-evidence-driven-orchestration-state
 product_contract_source: ce-brainstorm
 plan_depth: deep
 plan_status: READY
-baseline_commit: e94c07822bce7eacbf9b05cc4920fd4ed0aa4316
+baseline_commit: 59c0dcf06634bd9fc2b8c5dd3495e24f317fe5d3
 ---
 
 # feat: 为 parallel-forge 增加关键阶段证据门禁
@@ -20,10 +20,11 @@ baseline_commit: e94c07822bce7eacbf9b05cc4920fd4ed0aa4316
 ## 0. 计划状态
 
 * **状态：`READY`**
-* **基线：** `e94c07822bce7eacbf9b05cc4920fd4ed0aa4316`（`fix(parallel-forge): 修复 worktree 恢复并强制 DAG 并发`）
+* **基线：** `59c0dcf06634bd9fc2b8c5dd3495e24f317fe5d3`（`fix(parallel-forge-resume): 工作区内绝对路径产物归一化为相对路径`）。原基线 `e94c0782`（DAG 并发）与其后的 `34996b7b`（slot worktree 恢复 + 公共 wave ID 保留）、`59c0dcf0`（resume 绝对路径归一化）一并视为已验证前置能力（见 D17 / E17 / E20）
 * **调查范围：** `presets/en/parallel-forge.yml`、`presets/schemas/parallel-forge.yml`、`presets/scenarios/parallel-forge-*.yml`、`crates/ralph-core/src/config/{precheck,ralph_config}.rs`、`crates/ralph-core/src/event_policy/validation.rs`、`crates/ralph-core/src/event_policy_payload_consistency.rs`、`crates/ralph-core/src/event_loop/precheck_gate_runner.rs`、`crates/ralph-cli/src/{presets.rs,commands/emit/command_impl.rs}`、`crates/ralph-core/tests/scenarios/parallel_forge_*.yml`、`ce-executor-pipeline` 对照实现
-* **已执行验证：** 读源码、测试与 Git diff；`git rev-parse HEAD`；`git show e94c0782`；`cargo nextest --version` → `0.9.140`
-* **尚未执行（留给 Executor 的 Red/Green，不是计划阻塞）：** 新增证据门禁尚未实现，因此本计划内 S1–S22 的目标 Red/Green 尚未执行；最终全量 `./scripts/run-tests.sh` 也尚未执行。
+* **已执行验证：** 读源码、测试与 Git diff；`git rev-parse HEAD`；`git show e94c0782`；`cargo nextest --version` → `0.9.140`。2026-08-31 重定基线复核：`git diff e94c0782..HEAD` 确认 `presets/`、`crates/ralph-core/tests/`、event_policy / precheck / desugar 链路零改动，仅 `parallel_forge_resume.rs`、wave dispatcher / supervisor bridge、`wave_tracker.rs`、TUI/RPC 有变化；E17 行号已按当前源码重核；E19 所列 4 项基线回归测试已在 `59c0dcf0` 实跑通过（4/4）
+* **执行历史：** 2026-08-29 曾以 `worktree/ralph-orchestrator/2026-08-27-1430-feat-parallel-forge-evidence-gates-plan` 跑过一次：Wave 1+2 闭环，Wave 3 dispatch 后 stall（5 slot 中 3 个 succeeded 但 `exec.unit.done` 未落主 events，PID 被外部 kill，salvage_write_count=0）；slot 级 commit（U05/U06/U07/U09 的 gate 改动）只存在于该 worktree 的 integration 分支，**未合入主仓**，主仓 `presets/` 自 `e94c0782` 起零改动。诊断：`docs/report/2026-08-29-parallel-forge-2026-08-27-1430-feat-parallel-forge-evidence-gates-plan-diagnosis.md`。默认从当前基线全新执行；旧 worktree 内 commit 仅作参考。stall 根因（hat-channel → main events 路由，诊断 DEV-1/9）不在本计划范围，重跑若复现必须立即停止并回报。
+* **尚未执行（留给 Executor 的 Red/Green，不是计划阻塞）：** 主仓尚未实现新增证据门禁，因此本计划内 S1–S22 的目标 Red/Green 尚未执行；最终全量 `./scripts/run-tests.sh` 也尚未执行。
 * **阻塞项：** 无。所有实施决策置信度 ≥ 0.85
 
 ---
@@ -40,7 +41,7 @@ baseline_commit: e94c07822bce7eacbf9b05cc4920fd4ed0aa4316
   * `work.failed` **publishers：** `forge-failure-handler`（真路径）、`integrator` / `verifier`（publishes 有、instructions 禁止）、**`tester`（publishes + instructions 第 6 步直接 emit）**。
   * **不存在** topic `forge.full.verification.failed`（仅出现在已归档计划文档，当前 YAML/schema 无此键）。
   * `parallel_forge_handoff::derive_plan_handoff` 已忽略 artifact 的 `execution_wave` 作为硬排序，按 `depends_on` 计算最早安全 wave；未知依赖和环会在 handoff 阶段报错。
-  * `parallel_forge_resume::validate_manifest` 已允许 `plan_path` 在 parent/child TUI 边界发生 absolute/relative 表示变化，但其它 manifest identity 字段仍精确比较。
+  * `parallel_forge_resume::validate_manifest` 已允许 `plan_path` 在 parent/child TUI 边界发生 absolute/relative 表示变化，但其它 manifest identity 字段仍精确比较；`capture_artifacts` 现将「可证明位于 worktree 内的绝对路径产物」归一化为相对路径而非误判逃逸（工作区外绝对路径仍 fail-closed 拒绝）。
 * **目标行为：** 见 §4 Scenarios。双 guard topic 在 producer emit 路径上先被确定性 consistency 拒绝（挂在 `<T>.proposed`），再进 LLM precheck；通过后才出现 accepted `<T>`。`work.failed` 只有 failure-handler 能发。最终 merge 只被 accepted 且 ACCEPTED 的 `forge.audit.done` 激活。
 * **行为差异：** 非法/空/矛盾/证据不足的关键事件从「prompt 自律后仍推进」变为「reject_with_resume → 单 owner 修复；3 次耗尽 → runtime 注入 `forge.plan.blocked`」。
 * **本次范围：** 只改 builtin `parallel-forge` 的 preset/schema/projection/hat instructions/ownership、对应 BDD 与 `presets/scenarios/`、author notes、规定下游同步清单（无改动则记录 no-op）。
@@ -92,9 +93,10 @@ baseline_commit: e94c07822bce7eacbf9b05cc4920fd4ed0aa4316
 | E14 | `crates/ralph-cli/src/{preflight,config_resolution}.rs` `PRESET_OPT_IN*` 已含 `"precheck"` | 加 `event_loop.precheck` 不会被 operator omit 静默丢掉 | U11 对这两处记 no-op | 高 |
 | E15 | `ce-executor-pipeline.yml:92-172` + `ce_executor_pipeline_fail_gate_*.yml` | 对照：precheck YAML 形状、`on_fail.target`、耗尽 BDD、gate 转发 verbatim | 复制该形状，不要发明第二套 gate 机制 | 高 |
 | E16 | `crates/ralph-core/src/config/precheck.rs:178-221` | desugar 为 `.proposed` 继承 guarded 的 `payload`+`required_fields`；`.rejected` 要求 `failed_checks`,`reason` | 不必手写 `.proposed` schema，除非 consistency 要在 normalize 前 lint 该 topic——本计划 lint 走 parse_yaml（含 desugar），故可把 rule.topic 设为 `.proposed` | 高 |
-| E17 | `crates/ralph-core/src/parallel_forge_handoff.rs:353-460, 598-626`；`crates/ralph-core/src/parallel_forge_resume.rs:670-708, 1497-1514`；`git show e94c0782` | 当前基线已按 `depends_on` 重算最早安全 wave、拒绝未知依赖/环，并允许 resume 的 `plan_path` 绝对/相对表示变化 | 证据门禁计划不得再把 `execution_wave` 当硬串行边；新增或回归场景必须保留独立 Unit 并发和 parent/child resume 行为 | 高 |
+| E17 | `crates/ralph-core/src/parallel_forge_handoff.rs:353-460, 598-626`；`crates/ralph-core/src/parallel_forge_resume.rs:621 起（validate_manifest）、835-975（capture_artifacts / relativize_artifact_path）、1549-1720（resume 测试）`；`git show e94c0782` / `git show 59c0dcf0` | 当前基线已按 `depends_on` 重算最早安全 wave、拒绝未知依赖/环，允许 resume 的 `plan_path` 绝对/相对表示变化，并把 worktree 内绝对路径产物归一化为相对路径 | 证据门禁计划不得再把 `execution_wave` 当硬串行边；新增或回归场景必须保留独立 Unit 并发、parent/child resume 与绝对路径归一化行为 | 高 |
 | E18 | `presets/en/parallel-forge.yml:313-321, 415-505`；`crates/ralph-core/data/ralph-tools-wave.md:109-122`；`skills/ralph-preset-{author,review}/references/{patterns,finding-rubric}.md` | 当前 preset、注入 skill 与 author/review rubric 已明确「depends_on 决定 worker admission，integration_order 只决定 merge」 | 计划下游同步由“no-op”改为已落地基线确认；不得让后续 Unit 恢复人工串行语义 | 高 |
-| E19 | `cargo nextest run -p ralph-core --lib artifact_first_handoff_rewrites_serial_layout_for_independent_units`；`cargo nextest run -p ralph-core --lib identity_accepts_parent_child_absolute_plan_path_representation`；`ralph preset check --help`；`bash scripts/check-cli-doc-drift.sh --strict` | 两项 e94c0782 回归测试通过；`preset check` 支持 `-H/--strict/--format json`；CLI 文档 drift 检查通过 | 更新后的 Unit gate 可复用这些真实命令；全量验证仍留给执行阶段 | 高 |
+| E19 | `cargo nextest run -p ralph-core --lib artifact_first_handoff_rewrites_serial_layout_for_independent_units`；`cargo nextest run -p ralph-core --lib identity_accepts_parent_child_absolute_plan_path_representation`；`cargo nextest run -p ralph-core --lib absolute_in_worktree_artifact_path_is_normalized_not_flagged`；`cargo nextest run -p ralph-core --lib absolute_outside_worktree_artifact_path_still_flagged`；`ralph preset check --help`；`bash scripts/check-cli-doc-drift.sh --strict` | e94c0782 两项与 59c0dcf0 两项回归测试均通过；`preset check` 支持 `-H/--strict/--format json`；CLI 文档 drift 检查通过 | 更新后的 Unit gate 可复用这些真实命令；全量验证仍留给执行阶段 | 高 |
+| E20 | `git show 34996b7b`；`git show 59c0dcf0`；`docs/report/2026-08-29-parallel-forge-2026-08-27-1430-feat-parallel-forge-evidence-gates-plan-diagnosis.md` | 基线后新增能力：slot worktree 中断后复用已验证绑定、supervisor store ID 与业务 wave ID 分离、`scripts/run-tests.sh` 清理 wave 身份环境变量；resume 绝对路径归一化（修复诊断 DEV-4）。首次 plan 执行在 Wave 3 stall（诊断 DEV-1/9：executor 完成但 `exec.unit.done` 未落主 events），该根因不在本计划范围 | Unit 写集合不得触碰 wave dispatcher / supervisor bridge / resume 生产代码；重跑若再现同类 stall 立即停并回报 | 高 |
 
 ### 2.3 受影响范围（已确认路径）
 
@@ -128,7 +130,7 @@ baseline_commit: e94c07822bce7eacbf9b05cc4920fd4ed0aa4316
 | D14 | auditor 非 ACCEPTED | 仍发 `forge.audit.done` 靠 gate 拒 / 直接 `forge.plan.blocked` | **instructions：仅 ACCEPTED 才 emit `forge.audit.done`；否则 `forge.plan.blocked`。consistency 仍拒绝 `verdict ne ACCEPTED` 作第二道** | E8 | 只靠 prompt 会回到现状 | 0.88 |
 | D15 | 测试落点 | 改 builtin 全量 fixture / 迷你 EventLoop YAML + 结构测试钉死 builtin | **builtin 用 `RalphConfig::parse_yaml(get_preset("parallel-forge").content)` 结构断言；行为用迷你 YAML（规则从 preset 复制，注释要求同步）+ `run_workflow_guard_scenario`** | E13、E15 | 把 12+ hat 全量塞进每个 BDD 不可维护 | 0.90 |
 | D16 | Unit 调度依据 | 按 topic/文件顺序串行 / 按真实接口与写集合并发 | **U1/U2/U3 先从同一基线并发；U4 关闭 precheck 基础后，U5/U6/U7/U8/U9/U10 按各自直接依赖 ASAP 并发；U11 仅在最终 schema/拓扑汇合后执行** | E17、E18；当前 runtime 已按 `depends_on` 重算 wave | 旧线性图没有真实因果证据；同一 YAML 的不同语义区域可 deterministic merge | 0.93 |
-| D17 | 当前基线变更归属 | 把 e94c0782 重新纳入本计划 / 将其视为已验证前置能力 | **视为已验证前置能力，不在本计划重复实现；新增回归覆盖 DAG 重算、环/未知依赖拒绝与 resume path 表示变化** | E17 | 该能力已经存在并有直接单测；重复实现会扩大范围 | 0.96 |
+| D17 | 基线变更归属 | 把 e94c0782 / 34996b7b / 59c0dcf0 重新纳入本计划 / 视为已验证前置能力 | **三个 commit 均视为已验证前置能力，不在本计划重复实现；新增回归覆盖 DAG 重算、环/未知依赖拒绝、resume path 表示变化与绝对路径归一化** | E17,E19,E20 | 这些能力已存在并有直接单测；重复实现会扩大范围 | 0.96 |
 
 指纹计算伪代码（Executor 必须写进 worktree/auditor/precheck prompt，禁止另发明）：
 
@@ -320,7 +322,7 @@ Feature: parallel-forge 关键阶段证据门禁
 Regression → Close；只有表中 `depends_on` 的 Release Gate 会释放后继 Unit。
 
 ```text
-Validated Baseline e94c0782
+Validated Baseline 59c0dcf0
   ├──────────────┬──────────────┬──────────────┐
   ↓              ↓              ↓              ↓
  U1 notes     U2 writer     U3 identity   U10 receipts
@@ -358,7 +360,7 @@ deterministic conflict review。
 | U10 | P0 | [] | 基线 checkout 完成；receipt consistency 结构/BDD 通过 | U11 | U1,U2,U3,U4,U5,U6,U7,U8,U9 | `../pf-u10` / `plan/pf-u10` | 四个 receipt rule、相关 instructions、scenario、结构测试 | cargo nextest；可并发 | 不得触碰 precheck 或 exec.unit.done |
 | U11 | P3 | [U1,U2,U3,U4,U5,U6,U7,U8,U9,U10] | 全部直接前驱 Release Gate；动态 verify 与下游审计完成 | 最终质量门禁 | 无 | `../pf-u11` / `plan/pf-u11` | dynamic scenarios、solution doc、必要下游文档 | verify/strict lint；最终资源队列 | deterministic merge 后才跑全量 |
 
-所有 Unit 的基线 commit 均为 `e94c07822bce7eacbf9b05cc4920fd4ed0aa4316`。
+所有 Unit 的基线 commit 均为 `59c0dcf06634bd9fc2b8c5dd3495e24f317fe5d3`。
 预计写集合之外的文件只允许读取；发现需要修改共享区域时必须停止并更新本计划，
 不能在 worktree 中临时扩大范围。
 
@@ -393,7 +395,7 @@ E17：当前 handoff 已按 DAG 重算 wave，并已有独立 Unit 被重新并�
 可依赖 `get_preset("parallel-forge")` + `RalphConfig::parse_yaml`。禁止实现任何 gate YAML。
 
 #### 9–12. 验收 / Red / 单测顺序
-1. 先运行现有 DAG 回归测试，确认 e94c0782 基线为 Green；如需补 unknown dependency/cycle characterization，先验证新增测试在当前实现上 Green，不得伪造缺陷 Red。
+1. 先运行现有 DAG 回归测试，确认 59c0dcf0 基线为 Green；如需补 unknown dependency/cycle characterization，先验证新增测试在当前实现上 Green，不得伪造缺陷 Red。
 2. 写 notes 并通过 author/review anchor 校验；notes 缺失或矩阵不完整时才是本 Unit 的有效 Red。
 3. 写 notes（字段必须含 execution_model: **supervisor+wave**，与 YAML `supervisor.enabled: true` + wave emit 一致）。  
 4. `cargo nextest run -p ralph-core --lib artifact_first_handoff_rewrites_serial_layout_for_independent_units`
@@ -775,7 +777,7 @@ R7–R9；S22。
 * 更新 `parallel-forge-blocked.yml` 仅当 schema 需要（inspector blocked 路径不应被新 required 打断）。  
 * `docs/solutions/workflow-orchestration/parallel-forge-evidence-gates.md` **新增**（实现后的教训，禁止 commit `.ralph/review/**`）。  
 * 下游审计表写入该 solution（见下）。  
-* CLI/finding/注入 skill 的 DAG 语义已在基线 e94c0782 同步；Executor 只需审计是否有证据门禁变更造成新的文档 drift，不得回退为串行语义。
+* CLI/finding/注入 skill 的 DAG 语义已在基线同步（`e94c0782` 起，当前 `59c0dcf0` 仍成立）；Executor 只需审计是否有证据门禁变更造成新的文档 drift，不得回退为串行语义。
 
 下游清单（Executor 逐项打开确认，无改动写「no-op + 原因」）：
 
@@ -789,8 +791,8 @@ R7–R9；S22。
 | `presets/manifest.yml` `index.json` | no-op |
 | `CLAUDE.md`/`AGENTS.md` parallel-forge 一句：可补「关键 handoff 双 guard」 | 若改 CLAUDE 必须 `cp CLAUDE.md AGENTS.md` |
 | `.cursor/rules` / zsh plugin | no-op（未改 preset 名） |
-| `crates/ralph-core/data/*.md` | 已由基线 e94c0782 更新 `ralph-tools-wave.md` 的 DAG/资源边界；本计划不重复改，仍须回归 drift 检查 |
-| author/review skill | 已由基线 e94c0782 同步 `patterns.md`/`finding-rubric.md` 的 DAG 语义；本计划不重复改，仍须跑 anchor 测试 |
+| `crates/ralph-core/data/*.md` | 已由基线（`e94c0782` 起，`59c0dcf0` 复核成立）更新 `ralph-tools-wave.md` 的 DAG/资源边界；本计划不重复改，仍须回归 drift 检查 |
+| author/review skill | 已由基线（同上）同步 `patterns.md`/`finding-rubric.md` 的 DAG 语义；本计划不重复改，仍须跑 anchor 测试 |
 
 验证命令见 §9。动态 verify **必须**断言 JSON `passed` / `accepted_events` / `failure_kind`，禁止只看 exit 0。
 
@@ -834,7 +836,7 @@ Validated Baseline
 | Total Units | 11 | U1–U11 |
 | DAG Depth | 4 | P0 → P1 → P2 → P3 |
 | Critical Path | U3 → U4 → U9 → U11 | 真实字段、gate 基础、merge 授权、最终动态验证 |
-| Initial Ready Set | U1,U2,U3,U10 | 全部从 e94c0782 独立启动 |
+| Initial Ready Set | U1,U2,U3,U10 | 全部从 59c0dcf0 独立启动 |
 | Max Planned Concurrency | 5 | U5–U9 可同时执行；资源不足时只队列化验证，不改变 DAG |
 | Serial Edges | 8 | 全部见 Serial Edge Ledger |
 | Avoidable Serialization | 0 | 已移除旧 U1→…→U11 人工排序及 U5→U6 假依赖 |
@@ -891,7 +893,7 @@ Validated Baseline
 | --- | --- | --- |
 | 这是实施计划而不是 Roadmap 吗 | 是 | Unit 指向具体 YAML 键、rule id、测试函数名 |
 | Executor 是否仍需做关键设计决策 | 否 | D1–D17 已锁 topic 名、on_exhausted、`.proposed`、fingerprint、DAG 调度 |
-| 所有文件和接口是否有代码库证据 | 是 | E1–E19；新增文件均标「计划新增」 |
+| 所有文件和接口是否有代码库证据 | 是 | E1–E20；新增文件均标「计划新增」 |
 | 所有关键决策置信度是否 ≥ 0.85 | 是 | 最低 D8/D14=0.88 |
 | 是否存在未处理的低置信度假设 | 否 | 无 |
 | 每个 Unit 是否只有一个可观察行为 | 是 | U1 契约表征；U2 writer；U3 字段；U4–U9 各一个 topic 门；U10 收据类；U11 验证同步 |
