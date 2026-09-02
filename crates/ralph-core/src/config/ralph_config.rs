@@ -178,10 +178,15 @@ impl RalphConfig {
             // flow step's scope. Derived topics are gate-internal and must
             // not become transition signals when the step uses the legacy
             // "all allowed topics transition" default.
+            // `mechanism` is the canonical preset-level location, while
+            // `event_loop.mechanism` is retained for legacy overlays.  The
+            // flow loader already resolves the canonical location first;
+            // desugaring must mutate that same flow or the producer's
+            // `.proposed` event will be rejected by flow scope.
             if let Some(flow) = self
-                .event_loop
                 .mechanism
                 .as_mut()
+                .or_else(|| self.event_loop.mechanism.as_mut())
                 .and_then(|mechanism| mechanism.flow.as_mut())
             {
                 for step in &mut flow.steps {

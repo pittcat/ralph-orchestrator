@@ -775,4 +775,53 @@ hats:
             vec!["work.done".to_string(), "plan.blocked".to_string()]
         );
     }
+
+    #[test]
+    fn desugar_updates_top_level_mechanism_flow() {
+        let yaml = r#"
+mechanism:
+  flow:
+    type: declared
+    steps:
+      - id: setup
+        allowed_emits: [work.done, plan.blocked]
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      work.done:
+        prompt: ["check"]
+        on_fail:
+          target: worker
+hats:
+  worker:
+    name: Worker
+    description: worker
+    triggers: [work.start]
+    publishes: [work.done]
+"#;
+        let mut config = crate::config::RalphConfig::parse_yaml(yaml).unwrap();
+        config.normalize();
+
+        let step = &config
+            .mechanism
+            .as_ref()
+            .unwrap()
+            .flow
+            .as_ref()
+            .unwrap()
+            .steps[0];
+        assert!(
+            step.allowed_emits
+                .contains(&"work.done.proposed".to_string())
+        );
+        assert!(
+            step.allowed_emits
+                .contains(&"work.done.rejected".to_string())
+        );
+        assert_eq!(
+            step.transition_emits,
+            vec!["work.done".to_string(), "plan.blocked".to_string()]
+        );
+    }
 }
