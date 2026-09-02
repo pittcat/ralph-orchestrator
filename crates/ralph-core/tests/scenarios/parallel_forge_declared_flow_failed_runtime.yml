@@ -201,11 +201,7 @@ mock_responses:
   # This keeps the step in incremental_verify (work.failed is a
   # non-transition); subsequent success topics must stay absent.
   - text: |
-      <event topic="work.failed">
-      reason: "incremental verification hit a regression"
-      plan_key: "pf-u3-failed"
-      context_artifact_path: ".ralph/forge/pf-u3-failed/failures/verifier-failed.md"
-      </event>
+      <event topic="work.failed">{"task_id":"pf-u3-failed","reason":"incremental verification hit a regression","plan_key":"pf-u3-failed","context_artifact_path":".ralph/forge/pf-u3-failed/failures/verifier-failed.md"}</event>
     hat: pf-verifier
   # Iter 13: reporter's forge.report.done — accepted by FlowStepScope
   # because incremental_verify's allowed_emits includes

@@ -98,10 +98,7 @@ mock_responses:
     hat: unit-executor
   # Iter 5: exec-integrator publishes work.done (wave closed, step advanced).
   - text: |
-      <event topic="work.done">
-      status: "complete"
-      wave_id: "pf-wave"
-      </event>
+      <event topic="work.done">{"task_id":"pf-wave","status":"complete","wave_id":"pf-wave"}</event>
     hat: exec-integrator
 
 # supervisor_fan_in: tells run_bdd_supervisor_fan_in to drive the

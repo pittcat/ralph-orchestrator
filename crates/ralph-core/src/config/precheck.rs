@@ -722,3 +722,57 @@ event_loop:
         );
     }
 }
+
+#[cfg(test)]
+mod flow_scope_desugar_tests {
+    #[test]
+    fn desugar_adds_derived_topics_without_making_them_transitions() {
+        let yaml = r#"
+event_loop:
+  mechanism:
+    flow:
+      type: declared
+      steps:
+        - id: setup
+          allowed_emits: [work.done, plan.blocked]
+  precheck:
+    enabled: true
+    rules:
+      work.done:
+        prompt: ["check"]
+        on_fail:
+          target: worker
+hats:
+  worker:
+    name: Worker
+    description: worker
+    triggers: [work.start]
+    publishes: [work.done]
+"#;
+        let mut config = crate::config::RalphConfig::parse_yaml(yaml).unwrap();
+        config.normalize();
+
+        let step = &config
+            .event_loop
+            .mechanism
+            .as_ref()
+            .unwrap()
+            .flow
+            .as_ref()
+            .unwrap()
+            .steps[0];
+        assert!(step.allowed_emits.contains(&"work.done".to_string()));
+        assert!(
+            step.allowed_emits
+                .contains(&"work.done.proposed".to_string())
+        );
+        assert!(
+            step.allowed_emits
+                .contains(&"work.done.rejected".to_string())
+        );
+        assert_eq!(
+            step.transition_emits,
+            vec!["work.done".to_string(), "plan.blocked".to_string()]
+        );
+    }
+}

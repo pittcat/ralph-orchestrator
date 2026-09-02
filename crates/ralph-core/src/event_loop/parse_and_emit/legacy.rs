@@ -2871,10 +2871,8 @@ impl EventLoop {
             .unwrap_or(false);
         let policy_config_ref = policy_config_owned.as_ref();
         let mut accepted_log_events = Vec::new();
-        // Retain the accepted JSONL metadata (especially timestamps) for
-        // post-publication handoff registration; the validation loop consumes
-        // `events` below.
-        let committed_events = events.clone();
+        // Keep the original candidates for the first validation pass. The
+        // accepted stream is finalized only after the publish-time gate below.
 
         // U1 (plan 2026-08-10-001): helper that rebuilds a ralph_proto::Event
         // from a JSONL event, preserving source/target/wave/system_injected
@@ -2987,6 +2985,7 @@ impl EventLoop {
             }
             outcomes
         };
+        let candidate_events = events.clone();
 
         for (index, event) in events.into_iter().enumerate() {
             let payload = event.payload.clone().unwrap_or_default();
@@ -3794,13 +3793,14 @@ impl EventLoop {
                 gate_outcomes.get(&gate_key),
                 Some(crate::event_loop::emit_gate::EmitGateOutcome::Reject(reject))
                     if reject.reason_code == "phase_violation"
-            ) {
-                continue;
-            }
-            if matches!(
+            ) || matches!(
                 gate_outcomes.get(&gate_key),
                 Some(crate::event_loop::emit_gate::EmitGateOutcome::AcceptRepairStream)
             ) {
+                // Repair-stream candidates and phase-violation rejects are
+                // diagnostics only; other rejected candidates retain the
+                // historical accepted-event trace for compatibility while
+                // the committed side-effect stream below stays filtered.
                 continue;
             }
 
@@ -3968,6 +3968,27 @@ impl EventLoop {
             }
             pending
         };
+
+        // Build the committed candidate stream only after the final gate has
+        // run. `accepted_log_events` remains the historical diagnostic trace;
+        // knowledge, handoff, drift, and contract side effects consume this
+        // filtered stream so rejected candidates cannot mutate durable state.
+        let pending_keys: std::collections::HashSet<(String, String)> = pending_publish
+            .iter()
+            .map(|event| (event.topic.as_str().to_string(), event.payload.clone()))
+            .collect();
+        let committed_events: Vec<crate::event_reader::Event> = candidate_events
+            .into_iter()
+            .filter(|event| {
+                let is_loop_control =
+                    event.topic == completion_topic || event.topic == cancellation_topic;
+                is_loop_control
+                    || pending_keys.contains(&(
+                        event.topic.clone(),
+                        event.payload.clone().unwrap_or_default(),
+                    ))
+            })
+            .collect();
 
         // Plan GAP-02 / Unit 2: apply the StateMachine
         // candidate decisions to the live runtime only at the

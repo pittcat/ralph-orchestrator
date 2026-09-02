@@ -172,6 +172,34 @@ impl RalphConfig {
             let proposed = format!("{topic}.proposed");
             let rejected = format!("{topic}.rejected");
 
+            // The producer is rewritten to `<topic>.proposed` and the
+            // synthesized gate emits either `<topic>` or
+            // `<topic>.rejected`. Keep all three forms inside the current
+            // flow step's scope. Derived topics are gate-internal and must
+            // not become transition signals when the step uses the legacy
+            // "all allowed topics transition" default.
+            if let Some(flow) = self
+                .event_loop
+                .mechanism
+                .as_mut()
+                .and_then(|mechanism| mechanism.flow.as_mut())
+            {
+                for step in &mut flow.steps {
+                    if !step.allowed_emits.iter().any(|emit| emit == topic) {
+                        continue;
+                    }
+                    let original_allowed = step.allowed_emits.clone();
+                    if step.transition_emits.is_empty() {
+                        step.transition_emits = original_allowed;
+                    }
+                    for derived in [&proposed, &rejected] {
+                        if !step.allowed_emits.iter().any(|emit| emit == derived) {
+                            step.allowed_emits.push((*derived).clone());
+                        }
+                    }
+                }
+            }
+
             for (hat_id, hat) in &mut self.hats {
                 let publishes_topic = hat.publishes.iter().any(|p| p == topic);
                 let terminal_topic = hat.terminal_events.iter().any(|t| t == topic);

@@ -211,7 +211,7 @@ event_loop:
     write_event_to_jsonl(
         &events_path,
         "plan.blocked",
-        r#"{"reason": "review_failed"}"#,
+        r#"{"reason": "all_done: review_failed"}"#,
     );
     let result = event_loop.process_events_from_jsonl().unwrap();
     assert!(

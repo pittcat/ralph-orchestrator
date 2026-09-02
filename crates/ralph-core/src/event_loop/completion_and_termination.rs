@@ -432,17 +432,14 @@ impl EventLoop {
                 // the JSONL ingest path now also writes
                 // to the U6 repair sink.
                 self.record_repair_event(&proto);
-                // Admit the event so lifecycle tracker
-                // records it, but the publication-side
-                // will not see it on the main bus.
+                // Keep the attempt available to lifecycle/recovery
+                // diagnostics, but do not expose it as an accepted main-bus
+                // event.
             }
             crate::event_loop::emit_gate::EmitGateOutcome::Reject(reject) => {
                 self.record_stage_rejection(&proto, reject);
-                // Admit the event so lifecycle tracker
-                // still records the original emit attempt.
-                // The BDD wire-level assertion pins that
-                // the bus NEVER receives the rejected
-                // event (post `process_events_from_jsonl`).
+                // Keep the attempt in rejection diagnostics only. The event
+                // must not enter the accepted/committed stream.
             }
         }
         outcome
