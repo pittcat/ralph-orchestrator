@@ -3589,8 +3589,12 @@ mod tests {
             .as_ref()
             .expect("parallel-forge must declare precheck")
             .rules;
+        // Plan 2026-08-27 U5-U11 evidence gates: every key-stage emit
+        // except fan-out `forge.worktrees.ready` (which intentionally
+        // short-circuits the LLM precheck — see
+        // `parallel_forge_fanout_short_circuits_worktrees_ready_llm_precheck`)
+        // passes through a synthesized LLM gate hat.
         for topic in [
-            "forge.worktrees.ready",
             "forge.wave.worktrees.ready",
             "forge.wave.reviewed",
             "forge.wave.settled",
