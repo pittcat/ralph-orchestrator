@@ -76,6 +76,14 @@ mechanism:
           - forge.worktrees.ready
           - forge.wave.worktrees.ready
           - forge.plan.blocked
+        # Explicit: do not inherit allowed_emits as transitions.
+        # `forge.wave.worktrees.ready` is in-loop (development_loop), not
+        # a forward `on` for the next step. Leaving transition_emits empty
+        # lets precheck desugar copy every allowed topic and fail
+        # `flow_transition_emit_no_forward_target`.
+        transition_emits:
+          - forge.worktrees.ready
+          - forge.plan.blocked
       # U7: repeatable per-wave spine. The development loop may have
       # several independent waves active at once. Each wave emits its
       # full handoff chain and a `forge.wave.settled` terminal; that
@@ -130,6 +138,12 @@ mechanism:
           - forge.full.verification.failed
           - work.failed
           - forge.report.done
+        # Explicit: `forge.full.verification.failed` stays in-step for the
+        # failure-handler; it must not copy into transition_emits via
+        # precheck desugar on `work.failed`.
+        transition_emits:
+          - forge.full.verified
+          - work.failed
       - id: audit
         kind: linear
         "on": forge.full.verified
@@ -196,38 +210,15 @@ event_loop:
   starting_event: forge.start
   max_iterations: 60
   max_runtime_seconds: 28800
-  # Plan 2026-08-27-1430 U4 (S1/S3-S5; D2/D9): evidence gate on the
-  # initial fan-out. Desugar rewrites the worktree hat's
-  # publishes/terminal_events to `forge.worktrees.ready.proposed` and
-  # synthesizes a `precheck-forge.worktrees.ready` gate hat that consumes
-  # the proposed event and emits either `forge.worktrees.ready` (pass,
-  # payload forwarded verbatim) or `forge.worktrees.ready.rejected`
-  # (fail with `failed_checks` + `reason`). Retry budget 3; on exhaustion
-  # the runtime emits `forge.plan.blocked{kind: precheck_exhausted}`
-  # directly, which wakes the cleanup branch. The gate is transparent to
-  # the producer: the worktree hat keeps emitting `forge.worktrees.ready`
-  # exactly as today; the runtime handles the `.proposed` rewrite. This is
-  # the ONLY precheck rule registered by U4 — later key-stage Units append
-  # their own topics.
+  # Fan-out `forge.worktrees.ready` has no LLM precheck gate: a
+  # synthesized `precheck-forge.worktrees.ready` hat sat between
+  # worktree and forge-dispatcher and could leave dispatcher unactivated
+  # after an accepted ready. Empty-field payload_consistency still
+  # rejects garbage identity on the bare topic. Other key-stage LLM
+  # gates below are unchanged.
   precheck:
     enabled: true
     rules:
-      forge.worktrees.ready:
-        prompt:
-          - "Step 1: open the `worktree_map_path` file referenced by the payload. Reject (forge.worktrees.ready.rejected) with failed_check `worktree_map_missing` if `test -f` fails or the file is empty/unreadable."
-          - "Step 2: read `RALPH_CURRENT_BRANCH` from the environment. Reject with failed_check `target_branch_mismatch` if payload `target_branch` does not equal it exactly."
-          - "Step 3: run `git -C \"$RALPH_WORKSPACE_ROOT\" rev-parse HEAD`. Reject with failed_check `target_start_sha_mismatch` if the result does not equal payload `target_start_sha`."
-          - "Step 4: recompute the status fingerprint in `$RALPH_WORKSPACE_ROOT` exactly as the producer did: `git status --porcelain=v1 --untracked-files=all`, drop every line whose path (for renames, the path right of \" -> \"; otherwise the path after the status code) starts with `.ralph/`, join the kept lines with \"\\n\" plus one trailing \"\\n\" when non-empty (empty string when none), then hex(SHA-256) of the UTF-8 bytes. Reject with failed_check `target_status_fingerprint_mismatch` if it does not equal payload `target_status_fingerprint`."
-          - "Step 5: hard thresholds — every check above must pass; no partial credit. If ALL checks pass, re-emit `forge.worktrees.ready` with the payload forwarded VERBATIM (every field copied exactly, no rewrites). If ANY check fails, emit `forge.worktrees.ready.rejected` with `failed_checks` (using ONLY the four names above) and `reason` (one actionable sentence naming the gap)."
-        on_fail:
-          target: "worktree"
-          retry_budget: 3
-          on_exhausted: "forge.plan.blocked(reason=precheck_failed)"
-          reason: "worktree_identity_evidence_insufficient"
-        recovery_guidance:
-          common:
-            - "open worktree_map_path and recompute target_start_sha / target_status_fingerprint from $RALPH_WORKSPACE_ROOT; do not only rewrite payload fields"
-            - "rebuild forge.worktrees.ready from the recomputed evidence and rerun ralph emit forge.worktrees.ready --policy-check before a real emit"
       forge.wave.worktrees.ready:
         prompt:
           - "Step 1: open `worktree_map_path` and verify it exists, is readable, and contains only the current wave's Unit worktrees; reject with `worktree_map_missing` when it cannot be verified."
@@ -412,29 +403,25 @@ event_loop:
           topic: forge.wave.settled.proposed
           when: {field: verified_base_commit, eq: ""}
           message: "verified_base_commit must be a non-empty commit SHA; the next wave's worktree base is taken from this value."
-        # Plan 2026-08-27-1430 U4 (S1/S3/S5; D2/D10): dual guard on the
-        # initial fan-out. The precheck desugar rewrites producer emits
-        # to `forge.worktrees.ready.proposed`, so these rules target the
-        # PROPOSED topic and fire BEFORE the LLM gate (zero-cost
-        # structural rejection; `eq: ""` Hits exactly when the producer
-        # emits an empty identity/evidence field, a real value Misses
-        # and passes through to the gate).
+        # Fan-out identity: empty fields Hit on the bare topic (no LLM
+        # gate in front of dispatcher). `eq: ""` fires exactly when the
+        # producer emits an empty identity/evidence field.
         - id: parallel-forge-worktrees-ready-empty-target-branch
-          topic: forge.worktrees.ready.proposed
+          topic: forge.worktrees.ready
           when: {field: target_branch, eq: ""}
           message: "target_branch must be the non-empty value of RALPH_CURRENT_BRANCH; an empty target branch breaks the fan-out identity contract."
         - id: parallel-forge-worktrees-ready-empty-start-sha
-          topic: forge.worktrees.ready.proposed
+          topic: forge.worktrees.ready
           when: {field: target_start_sha, eq: ""}
           message: "target_start_sha must be a non-empty commit SHA (`git rev-parse HEAD` in RALPH_WORKSPACE_ROOT); an empty start SHA makes target-drift detection impossible."
         - id: parallel-forge-worktrees-ready-empty-fingerprint
-          topic: forge.worktrees.ready.proposed
+          topic: forge.worktrees.ready
           when: {field: target_status_fingerprint, eq: ""}
           message: "target_status_fingerprint must be a non-empty SHA-256 of the canonical status porcelain; an empty fingerprint makes target-drift detection impossible."
         - id: parallel-forge-worktrees-ready-empty-map-path
-          topic: forge.worktrees.ready.proposed
+          topic: forge.worktrees.ready
           when: {field: worktree_map_path, eq: ""}
-          message: "worktree_map_path must be a non-empty path to the worktree map artifact; the dispatcher and the evidence gate both read it."
+          message: "worktree_map_path must be a non-empty path to the worktree map artifact; the dispatcher reads it."
         - id: parallel-forge-wave-worktrees-empty-map
           topic: forge.wave.worktrees.ready.proposed
           when: {field: worktree_map_path, eq: ""}
@@ -872,25 +859,13 @@ hats:
                       kept is non-empty (empty string when kept is empty)
              fingerprint = hex(SHA-256(canonical as utf-8 bytes))
            (full 64-char hex SHA-256).
-      7. Precheck then emit `forge.worktrees.ready` including `plan_key`,
+      7. Emit `forge.worktrees.ready` including `plan_key`,
          `worktree_map_path`, `execution_plan_path`, `integration_branch`,
          `target_branch`, `target_start_sha`, `target_status_fingerprint`,
-         and `base_commit`. The `--policy-check` run before the real emit
-         is MANDATORY (per `ralph-tools` §5 precheck discipline): this
-         event now passes through a deterministic structure check and an
-         evidence gate before the dispatcher can see it, so an emit that
-         skips the policy check wastes a full activation on a rejection
-         you could have caught locally.
+         and `base_commit`. Run `--policy-check` before the real emit
+         (per `ralph-tools` §5). Empty identity fields are rejected by
+         deterministic structure checks; do not skip the policy check.
       8. On failure: write `blocks/worktree-blocked.md`, emit `forge.plan.blocked` with context paths.
-      9. On `forge.worktrees.ready.rejected` (task resume carrying
-         `failed_checks` + `reason`): fix the EVIDENCE, not the payload.
-         Recreate or repair the worktree map file, re-read
-         `RALPH_CURRENT_BRANCH`, and recompute `target_start_sha` /
-         `target_status_fingerprint` from `$RALPH_WORKSPACE_ROOT` exactly
-         as in steps 5-6, then rerun `--policy-check` and re-emit. Never
-         respond to a rejection by only editing payload fields to match
-         what the gate expects — three rejections escalate to
-         `forge.plan.blocked`.
 
       Do not delete worktrees in this hat. Single business event only.
 
@@ -1273,10 +1248,8 @@ hats:
       `wave_id`, `slot_index`, `unit_id`, and `plan_key`, plus `unit_report_path` and `content_hash`.
       Failure: emit `exec.unit.failed` with `reason` and `plan_key`.
 
-      **Do not close tasks in this activation:** this Unit's task is atomically closed
-      only after the integrator projection of `forge.wave.settled` via
-      `state_projection.actions.forge.wave.settled` `CloseTaskBatch` (`settled_task_ids`).
-      **Do not** call `ralph tools task close` or imply that `exec.unit.done` closes a task.
+      **Do not close tasks in this activation.** Do **not** call
+      `ralph tools task close` or imply that `exec.unit.done` closes a task.
 
       Emit only one business event in this activation.
 
@@ -1793,96 +1766,3 @@ hats:
       existing audit/report facts to manufacture a new success. Only resend
       `LOOP_COMPLETE` with the previous `forge.report.done.report_path`; to create
       a new report, emit a new `forge.report.done` first.
-
-state_projection:
-  actions:
-    - on: forge.plan.inspected
-      set:
-        forge.inspection_report_path: "$.inspection_report_path"
-        forge.plan_path: "$.plan_path"
-        forge.plan_key: "$.plan_key"
-    - on: forge.plan.ready
-      set:
-        forge.development_plan_path: "$.development_plan_path"
-        forge.execution_plan_path: "$.execution_plan_path"
-        forge.unit_count: "$.unit_count"
-        forge.plan_key: "$.plan_key"
-    - on: forge.concurrency.approved
-      set:
-        forge.approval_report_path: "$.approval_report_path"
-    - on: forge.worktrees.ready
-      set:
-        forge.worktree_map_path: "$.worktree_map_path"
-        forge.integration_branch: "$.integration_branch"
-        forge.target_branch: "$.target_branch"
-        forge.target_start_sha: "$.target_start_sha"
-        forge.target_status_fingerprint: "$.target_status_fingerprint"
-        forge.base_commit: "$.base_commit"
-        forge.plan_key: "$.plan_key"
-    # Per-wave keys so the failure handler can restore wave context on
-    # `exec.wave.failed` (which carries no plan_key / wave_index /
-    # verified_base_commit). `forge.wave.worktrees.ready` pins the base
-    # the current wave was built from; each `forge.wave.settled`
-    # refreshes the verified base that the next wave will build on.
-    - on: forge.wave.worktrees.ready
-      set:
-        forge.wave.current_wave_id: "$.wave_id"
-        forge.wave.current_wave_index: "$.wave_index"
-        forge.wave.verified_base_commit: "$.verified_base_commit"
-    - on: forge.wave.settled
-      set:
-        forge.wave.last_settled_wave_id: "$.wave_id"
-        forge.wave.last_settled_wave_index: "$.wave_index"
-        forge.wave.verified_base_commit: "$.verified_base_commit"
-    - on: forge.exec.development.done
-      set:
-        forge.execution_plan_path: "$.execution_plan_path"
-        forge.plan_key: "$.plan_key"
-        forge.completed_unit_count: "$.completed_unit_count"
-        forge.failed_unit_count: "$.failed_unit_count"
-    - on: forge.units.reviewed
-      set:
-        forge.review_summary_path: "$.summary_path"
-        forge.all_units_approved: "$.all_approved"
-        forge.plan_key: "$.plan_key"
-    - on: forge.integration.done
-      set:
-        forge.integration_log_path: "$.integration_log_path"
-        forge.commit_map_path: "$.commit_map_path"
-        forge.plan_key: "$.plan_key"
-    - on: forge.full.verified
-      set:
-        forge.full_verification_path: "$.verification_report_path"
-        forge.plan_key: "$.plan_key"
-    - on: forge.audit.done
-      set:
-        forge.audit_verdict: "$.verdict"
-        forge.audit_report_path: "$.audit_report_path"
-        forge.plan_key: "$.plan_key"
-    - on: forge.finalized
-      set:
-        forge.target_branch: "$.target_branch"
-        forge.integration_branch: "$.integration_branch"
-        forge.target_commit_sha: "$.target_commit_sha"
-        forge.finalization_report_path: "$.finalization_report_path"
-        forge.plan_key: "$.plan_key"
-    - on: forge.cleanup.done
-      set:
-        forge.cleanup_report_path: "$.cleanup_report_path"
-        forge.cleanup_status: "$.cleanup_status"
-        forge.cleanup_attempted_count: "$.attempted_count"
-        forge.cleanup_cleaned_count: "$.cleaned_count"
-        forge.cleanup_pending_count: "$.pending_count"
-        forge.plan_key: "$.plan_key"
-    - on: forge.plan.blocked
-      set:
-        forge.block_context_path: "$.context_artifact_path"
-        forge.artifact_root: "$.forge_artifact_root"
-        forge.plan_key: "$.plan_key"
-        forge.plan_path: "$.plan_path"
-    - on: work.failed
-      set:
-        forge.failure_context_path: "$.context_artifact_path"
-        forge.artifact_root: "$.forge_artifact_root"
-        forge.plan_key: "$.plan_key"
-        forge.plan_path: "$.plan_path"

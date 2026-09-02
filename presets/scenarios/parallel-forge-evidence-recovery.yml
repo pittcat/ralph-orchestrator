@@ -1,6 +1,7 @@
 version: 1
-# Dynamic recovery contract: the initial fan-out gate rejects once, then the
-# producer re-emits corrected evidence and follows the successful handoff.
+# Dynamic recovery: worktree emits forge.worktrees.ready (no fan-out LLM
+# gate). Remaining hats follow the success handoff. Audit still has a
+# precheck hat.
 scenarios:
   - name: fanout-recovery
     fixture_files:
@@ -38,15 +39,6 @@ scenarios:
       - hat: worktree
         output: '<event topic="forge.worktrees.ready">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","worktree_map_path":".ralph/forge/pf/worktree-map.yml","integration_branch":"forge/pf","target_branch":"{{git.branch}}","target_start_sha":"{{git.head_sha}}","target_status_fingerprint":"{{git.status_fingerprint}}","base_commit":"{{git.head_sha}}","plan_key":"pf"}</event>'
         success: true
-      - hat: precheck-forge.worktrees.ready
-        output: '<event topic="forge.worktrees.ready.rejected">{"failed_checks":["target_status_fingerprint_mismatch"],"reason":"recompute the target fingerprint","synthetic":false}</event>'
-        success: true
-      - hat: worktree
-        output: '<event topic="forge.worktrees.ready">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","worktree_map_path":".ralph/forge/pf/worktree-map.yml","integration_branch":"forge/pf","target_branch":"{{git.branch}}","target_start_sha":"{{git.head_sha}}","target_status_fingerprint":"{{git.status_fingerprint}}","base_commit":"{{git.head_sha}}","plan_key":"pf"}</event>'
-        success: true
-      - hat: precheck-forge.worktrees.ready
-        output: '<event topic="forge.worktrees.ready">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","worktree_map_path":".ralph/forge/pf/worktree-map.yml","integration_branch":"forge/pf","target_branch":"{{git.branch}}","target_start_sha":"{{git.head_sha}}","target_status_fingerprint":"{{git.status_fingerprint}}","base_commit":"{{git.head_sha}}","plan_key":"pf"}</event>'
-        success: true
       - hat: forge-dispatcher
         output: '<event topic="forge.exec.development.done">{"execution_plan_path":".ralph/forge/pf/execution-plan.yml","completed_unit_count":1,"failed_unit_count":0,"plan_key":"pf"}</event>'
         success: true
@@ -72,7 +64,7 @@ scenarios:
         success: true
     expect:
       start_event: forge.start
-      accepted_events: [forge.plan.inspected, forge.plan.ready, forge.concurrency.approved, forge.worktrees.ready, forge.worktrees.ready.rejected, forge.exec.development.done, forge.full.verified, forge.audit.done, forge.finalized, forge.cleanup.done, forge.report.done, LOOP_COMPLETE]
+      accepted_events: [forge.plan.inspected, forge.plan.ready, forge.concurrency.approved, forge.worktrees.ready, forge.exec.development.done, forge.full.verified, forge.audit.done, forge.finalized, forge.cleanup.done, forge.report.done, LOOP_COMPLETE]
       forbidden_events: [forge.plan.blocked, work.failed]
       terminal: success
       terminal_topic: LOOP_COMPLETE

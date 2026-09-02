@@ -1,0 +1,121 @@
+# Fan-out wakeup: accepted forge.worktrees.ready must activate
+# forge-dispatcher next, with no LLM precheck hat in between.
+#
+# Topology matches the production worktree → dispatcher handoff
+# (isolated, dummy hats). Must use run_workflow_guard_scenario.
+
+name: pf_fanout_dispatcher_wakeup_runtime
+description: accepted forge.worktrees.ready wakes forge-dispatcher with no precheck hat
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 8
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    required_events:
+      - exec.unit.ready
+    starting_event: forge.start
+  hats:
+    pf-inspector:
+      subscribes_to:
+        - forge.start
+      publishes:
+        - forge.plan.inspected
+    pf-planner:
+      subscribes_to:
+        - forge.plan.inspected
+      publishes:
+        - forge.plan.ready
+    pf-guardian:
+      subscribes_to:
+        - forge.plan.ready
+      publishes:
+        - forge.concurrency.approved
+    pf-worktree:
+      subscribes_to:
+        - forge.concurrency.approved
+      publishes:
+        - forge.worktrees.ready
+    pf-dispatcher:
+      subscribes_to:
+        - forge.worktrees.ready
+      publishes:
+        - exec.unit.ready
+    pf-reporter:
+      subscribes_to:
+        - exec.unit.ready
+      publishes:
+        - LOOP_COMPLETE
+
+mock_responses:
+  - hat: pf-inspector
+    text: |
+      <event topic="forge.plan.inspected">
+      plan_key: "pf-fanout"
+      plan_usable: true
+      </event>
+  - hat: pf-planner
+    text: |
+      <event topic="forge.plan.ready">
+      plan_key: "pf-fanout"
+      unit_count: 1
+      </event>
+  - hat: pf-guardian
+    text: |
+      <event topic="forge.concurrency.approved">
+      approved: true
+      plan_key: "pf-fanout"
+      </event>
+  - hat: pf-worktree
+    text: |
+      <event topic="forge.worktrees.ready">
+      plan_key: "pf-fanout"
+      worktree_map_path: ".ralph/forge/pf-fanout/worktree-map.yml"
+      execution_plan_path: ".ralph/forge/pf-fanout/execution-plan.yml"
+      integration_branch: "forge/pf-fanout"
+      target_branch: "main"
+      target_start_sha: "aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee"
+      target_status_fingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      base_commit: "aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee"
+      </event>
+  - hat: pf-dispatcher
+    text: |
+      <event topic="exec.unit.ready">
+      wave_id: "pf-fanout-wave"
+      slot_index: 0
+      unit_id: "U1"
+      plan_key: "pf-fanout"
+      </event>
+  - hat: pf-reporter
+    text: |
+      <event topic="LOOP_COMPLETE">
+      report_path: "docs/reports/pf-fanout.md"
+      </event>
+
+expected:
+  iterations: 6
+  events:
+    - topic: forge.plan.inspected
+    - topic: forge.plan.ready
+    - topic: forge.concurrency.approved
+    - topic: forge.worktrees.ready
+    - topic: exec.unit.ready
+  event_topic_counts:
+    - topic: forge.worktrees.ready
+      count: 1
+    - topic: exec.unit.ready
+      count: 1
+  activation_hats:
+    - pf-inspector
+    - pf-planner
+    - pf-guardian
+    - pf-worktree
+    - pf-dispatcher
+    - pf-reporter
+  absent_events:
+    - topic: forge.worktrees.ready.proposed
+    - topic: forge.worktrees.ready.rejected
+    - topic: forge.plan.blocked
+    - topic: work.failed
+  completion: true

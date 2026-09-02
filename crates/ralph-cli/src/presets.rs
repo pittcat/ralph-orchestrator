@@ -1465,84 +1465,55 @@ mod tests {
         }
     }
 
-    /// Plan 2026-08-27-1430 U4 (S1/S3-S5; R1/R7; D2/D9/D10): the initial
-    /// fan-out carries the preset's initial precheck gate. The precheck
-    /// block is enabled with the six key-stage rules, including
-    /// `forge.worktrees.ready`,
-    /// desugar synthesizes `precheck-forge.worktrees.ready` with
-    /// `max_activations == retry_budget + 1 == 4`, and the four
-    /// deterministic payload_consistency rules target the PROPOSED topic
-    /// so they fire before the LLM gate (E10).
+    /// Fan-out `forge.worktrees.ready` must not go through an LLM
+    /// precheck hat: after normalize(), worktree still publishes the
+    /// bare topic, dispatcher still triggers on it, no synthesized
+    /// `precheck-forge.worktrees.ready` exists, and the four empty-field
+    /// consistency rules target the bare topic.
     #[test]
-    fn parallel_forge_worktrees_ready_dual_guard() {
+    fn parallel_forge_fanout_short_circuits_worktrees_ready_llm_precheck() {
         let preset = get_preset("parallel-forge").expect("parallel-forge preset");
         let mut config =
             RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML parses");
         config.normalize();
 
-        // 1. precheck base: enabled, all key-stage rules, locked initial config.
         let precheck = config
             .event_loop
             .precheck
             .as_ref()
-            .expect("parallel-forge must declare event_loop.precheck (U4)");
+            .expect("parallel-forge must declare event_loop.precheck");
         assert!(precheck.enabled, "event_loop.precheck.enabled must be true");
+        assert!(
+            !precheck.rules.contains_key("forge.worktrees.ready"),
+            "fan-out must not register an LLM precheck on forge.worktrees.ready; got {:?}",
+            precheck.rules.keys().collect::<Vec<_>>()
+        );
         assert_eq!(
             precheck.rules.len(),
-            6,
-            "all key-stage precheck rules must be present"
+            5,
+            "remaining key-stage LLM precheck rules: wave worktrees/reviewed/settled, work.failed, audit.done"
         );
-        let rule = precheck
-            .rules
-            .get("forge.worktrees.ready")
-            .expect("precheck.rules must key forge.worktrees.ready");
-        assert!(!rule.prompt.is_empty(), "precheck prompt must be declared");
-        assert_eq!(rule.on_fail.target, "worktree");
-        assert_eq!(rule.on_fail.retry_budget, 3);
-        assert_eq!(
-            rule.on_fail.on_exhausted,
-            "forge.plan.blocked(reason=precheck_failed)"
-        );
-        assert_eq!(
-            rule.on_fail.reason,
-            "worktree_identity_evidence_insufficient"
-        );
-        let guidance = rule
-            .recovery_guidance
-            .as_ref()
-            .expect("precheck rule must carry recovery_guidance");
         assert!(
-            !guidance.common.is_empty(),
-            "recovery_guidance.common must not be empty"
+            !config.hats.contains_key("precheck-forge.worktrees.ready"),
+            "normalize must not synthesize a fan-out precheck hat"
         );
 
-        // 2. Desugar: the synthesized gate hat exists with budget+1
-        //    activations; the producer emits `.proposed`; the dispatcher
-        //    still consumes the accepted bare topic.
-        let gate = config
-            .hats
-            .get("precheck-forge.worktrees.ready")
-            .expect("normalize must synthesize precheck-forge.worktrees.ready");
-        assert_eq!(
-            gate.max_activations,
-            Some(4),
-            "gate max_activations must be retry_budget(3) + 1"
-        );
         let worktree = config.hats.get("worktree").expect("worktree hat");
         assert!(
             worktree
                 .publishes
                 .iter()
-                .any(|t| t == "forge.worktrees.ready.proposed"),
-            "desugar must rewrite worktree publishes to the proposed topic; got {:?}",
+                .any(|t| t == "forge.worktrees.ready"),
+            "worktree must publish the bare ready topic; got {:?}",
             worktree.publishes
         );
         assert!(
             !worktree
                 .publishes
                 .iter()
-                .any(|t| t == "forge.worktrees.ready"),
-            "worktree must not keep publishing the bare guarded topic"
+                .any(|t| t == "forge.worktrees.ready.proposed"),
+            "worktree must not be rewritten to .proposed; got {:?}",
+            worktree.publishes
         );
         let dispatcher = config
             .hats
@@ -1553,19 +1524,10 @@ mod tests {
                 .triggers
                 .iter()
                 .any(|t| t == "forge.worktrees.ready"),
-            "dispatcher must still trigger on the accepted bare topic; got {:?}",
+            "dispatcher must trigger on the accepted bare topic; got {:?}",
             dispatcher.triggers
         );
-        assert!(
-            !dispatcher
-                .triggers
-                .iter()
-                .any(|t| t == "forge.worktrees.ready.proposed"),
-            "dispatcher must never subscribe to the proposed topic"
-        );
 
-        // 3. The four deterministic consistency rules fire on the PROPOSED
-        //    topic, before the LLM gate.
         let policy = config
             .event_loop
             .event_policy
@@ -1584,8 +1546,8 @@ mod tests {
                 .find(|rule| rule.id == id)
                 .unwrap_or_else(|| panic!("missing payload_consistency rule {id}"));
             assert_eq!(
-                rule.topic, "forge.worktrees.ready.proposed",
-                "rule {id} must target the proposed topic (D10/E10)"
+                rule.topic, "forge.worktrees.ready",
+                "rule {id} must target the bare fan-out topic"
             );
         }
     }

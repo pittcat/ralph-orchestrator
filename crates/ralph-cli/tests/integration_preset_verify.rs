@@ -724,111 +724,92 @@ fn contains_in_order(haystack: &[String], needles: &[&str]) -> bool {
 
 #[test]
 fn preset_verify_builtin_parallel_forge_success_dynamic() {
-    // S22a: dynamic success contract — precheck gate rewrites bare topic
-    // to `.proposed`, gate accepts, downstream receives the bare topic,
-    // and the loop terminates via `LOOP_COMPLETE` with no rejection.
-    //
-    // U11 §7 S22a note: the verifier driver's `next_hat()` selects only
-    // hats with non-empty pending queues, and the synthesized
-    // `precheck-<X>` gate hat's bus subscription depends on
-    // `normalize()` running before `compile()`. The current driver
-    // cannot drive the gate hat's `forge.worktrees.ready` forward step
-    // (the producer's `.proposed` lands in the gate's queue but no
-    // subsequent response carries the gate's hat_id), so the trace
-    // terminates at `forge.worktrees.ready.proposed`. The runtime
-    // gate-forward path is owned by U5–U9's EventLoop BDD scenarios
-    // (`parallel_forge_worktrees_ready_gate_runtime` and friends) which
-    // already prove verbatim acceptance + budget exhaustion. The
-    // verifier S22a contract is reduced to: rewrite proof (bare →
-    // .proposed), no rejection, no blocked plan, no typed failure.
+    // Fan-out has no LLM precheck: the verifier must accept the bare
+    // `forge.worktrees.ready` and wake `forge-dispatcher` (development.done).
+    // Remaining LLM gates (audit.done) still stop the driver's next_hat
+    // at `.proposed`, so the scenario stays a nonzero/static-pass contract
+    // unless the driver later reaches LOOP_COMPLETE.
     let (code, json, stderr) = run_verify_json("parallel-forge-success.yml");
-    assert_ne!(
-        code, 0,
-        "success scenario must exit nonzero (verifier cannot complete precheck gate chain); stderr={stderr}\njson={json}"
-    );
-    assert_eq!(json["passed"], serde_json::Value::Bool(false));
     assert_eq!(json["static"]["passed"], serde_json::Value::Bool(true));
 
     let accepted = accepted_events(&json);
-    // Precheck rewrite proof: `forge.worktrees.ready.proposed` must appear
-    // in accepted_events — proving the verifier applied the same rewrite
-    // as `ralph emit`, not a hardcoded `.proposed` in the scenario fixture.
     assert!(
-        accepted.contains(&"forge.worktrees.ready.proposed".to_string()),
-        "accepted_events must include forge.worktrees.ready.proposed rewrite; got {accepted:?}"
+        accepted.contains(&"forge.worktrees.ready".to_string()),
+        "accepted_events must include the bare fan-out topic; got {accepted:?}"
     );
-    // No rejection events, no blocked plan, no typed failure.
+    assert!(
+        !accepted.contains(&"forge.worktrees.ready.proposed".to_string()),
+        "fan-out must not be rewritten to .proposed; got {accepted:?}"
+    );
+    assert!(
+        accepted.contains(&"forge.exec.development.done".to_string()),
+        "dispatcher must wake after bare ready; got {accepted:?}"
+    );
     for forbidden in [
         "forge.plan.blocked",
         "work.failed",
         "forge.full.verification.failed",
+        "forge.worktrees.ready.rejected",
     ] {
         assert!(
             !accepted.iter().any(|event| event == forbidden),
             "forbidden event {forbidden} must not appear; got {accepted:?}"
         );
     }
-    // The verifier cannot reach `LOOP_COMPLETE` for the full parallel-forge
-    // success scenario because the synthesized precheck gate hat's bus
-    // subscription is established after `compile()` and the driver's
-    // single-pass `next_hat()` cannot activate it. The BDD gate-runtime
-    // scenario (`parallel_forge_worktrees_ready_gate_runtime`) owns the
-    // full trace proof; the verifier S22a acceptance is bounded to the
-    // rewrite + no-rejection invariants above.
     let last = accepted.last().map(String::as_str);
     let allowed_tail = matches!(
         last,
-        Some("LOOP_COMPLETE") | Some("forge.worktrees.ready.proposed")
-    ) || accepted.is_empty();
+        Some("LOOP_COMPLETE") | Some("forge.audit.done.proposed")
+    );
     assert!(
         allowed_tail,
         "success scenario trace tail must end on a verifier-supported boundary; got {accepted:?}"
     );
+    if last != Some("LOOP_COMPLETE") {
+        assert_ne!(
+            code, 0,
+            "incomplete audit-precheck chain must exit nonzero; stderr={stderr}\njson={json}"
+        );
+        assert_eq!(json["passed"], serde_json::Value::Bool(false));
+    }
 }
 
 #[test]
 fn preset_verify_builtin_parallel_forge_recovery_dynamic() {
-    // S22b: dynamic recovery — gate rejects once, runtime resumes the
-    // producer, the producer re-emits corrected evidence, the gate
-    // accepts, the dispatcher only wakes after the accepted bare topic.
-    //
-    // U11 §7 S22b note: same driver limitation as S22a — the verifier
-    // cannot activate the synthesized precheck gate hat, so the trace
-    // terminates at the first `forge.worktrees.ready.proposed` rewrite.
-    // The full proposed/rejected/proposed/accepted chain is owned by the
-    // U4/U5 BDD gate-runtime scenarios; the verifier S22b acceptance is
-    // reduced to: the first producer's bare emit is rewritten to
-    // `.proposed` (no rejected event, no early dispatcher wake).
+    // Recovery fixture no longer exercises a fan-out LLM reject/retry;
+    // it must still land the bare ready and wake the dispatcher. Audit
+    // LLM precheck remains the verifier driver's stop.
     let (code, json, stderr) = run_verify_json("parallel-forge-evidence-recovery.yml");
-    assert_ne!(
-        code, 0,
-        "recovery scenario must exit nonzero (verifier cannot complete precheck gate chain); stderr={stderr}\njson={json}"
-    );
-    assert_eq!(json["passed"], serde_json::Value::Bool(false));
 
     let accepted = accepted_events(&json);
-    // The bare producer emit must be rewritten to `.proposed`.
     assert!(
-        accepted.contains(&"forge.worktrees.ready.proposed".to_string()),
-        "recovery trace must include the producer rewrite; got {accepted:?}"
+        accepted.contains(&"forge.worktrees.ready".to_string()),
+        "recovery trace must include the bare ready; got {accepted:?}"
     );
-    // No rejection event — the verifier cannot drive the gate's
-    // `.rejected` step, so the chain is bounded by the rewrite proof.
+    assert!(
+        !accepted.contains(&"forge.worktrees.ready.proposed".to_string()),
+        "fan-out must not be rewritten to .proposed; got {accepted:?}"
+    );
     assert!(
         !accepted
             .iter()
             .any(|event| event == "forge.worktrees.ready.rejected"),
-        "verifier recovery trace must NOT contain gate rejection; got {accepted:?}"
+        "fan-out LLM reject is gone; got {accepted:?}"
     );
-    // The dispatcher cannot wake on a bare emit that was rejected; the
-    // verifier trace must not contain an early `forge.exec.development.done`
-    // either, since the producer's `.proposed` did not reach the gate.
     assert!(
-        !accepted
+        accepted
             .iter()
             .any(|event| event == "forge.exec.development.done"),
-        "verifier recovery trace must NOT preempt the dispatcher; got {accepted:?}"
+        "dispatcher must wake after bare ready; got {accepted:?}"
     );
+    let last = accepted.last().map(String::as_str);
+    if last != Some("LOOP_COMPLETE") {
+        assert_ne!(
+            code, 0,
+            "incomplete audit-precheck chain must exit nonzero; stderr={stderr}\njson={json}"
+        );
+        assert_eq!(json["passed"], serde_json::Value::Bool(false));
+    }
 }
 
 #[test]

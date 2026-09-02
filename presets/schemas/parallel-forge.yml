@@ -748,57 +748,6 @@ schemas:
         source: Same key as .ralph/forge/<plan-key>/.
         fill_rule: Must match directory name.
 
-  # Plan 2026-08-27-1430 U4: the precheck desugar rewrites producer emits
-  # to this proposed topic and would inherit payload + required_fields
-  # from the guarded `forge.worktrees.ready` schema at normalize time;
-  # the entry is declared explicitly so PRE-normalize strict lint
-  # (`payload_consistency_unknown_topic`) also sees the topic the four
-  # `parallel-forge-worktrees-ready-*` rules target.
-  forge.worktrees.ready.proposed:
-    required_fields:
-      - execution_plan_path
-      - worktree_map_path
-      - integration_branch
-      - target_branch
-      - target_start_sha
-      - target_status_fingerprint
-      - base_commit
-      - plan_key
-    payload: json_object
-    field_docs:
-      execution_plan_path:
-        meaning: Same contract as forge.worktrees.ready.
-        source: Producer emit rewritten to the proposed topic.
-        fill_rule: Unchanged from forge.worktrees.ready.
-      worktree_map_path:
-        meaning: Same contract as forge.worktrees.ready.
-        source: Producer emit rewritten to the proposed topic.
-        fill_rule: Unchanged from forge.worktrees.ready.
-      integration_branch:
-        meaning: Same contract as forge.worktrees.ready.
-        source: Producer emit rewritten to the proposed topic.
-        fill_rule: Unchanged from forge.worktrees.ready.
-      target_branch:
-        meaning: Same contract as forge.worktrees.ready.
-        source: Producer emit rewritten to the proposed topic.
-        fill_rule: Unchanged from forge.worktrees.ready.
-      target_start_sha:
-        meaning: Same contract as forge.worktrees.ready.
-        source: Producer emit rewritten to the proposed topic.
-        fill_rule: Unchanged from forge.worktrees.ready.
-      target_status_fingerprint:
-        meaning: Same contract as forge.worktrees.ready.
-        source: Producer emit rewritten to the proposed topic.
-        fill_rule: Unchanged from forge.worktrees.ready.
-      base_commit:
-        meaning: Same contract as forge.worktrees.ready.
-        source: Producer emit rewritten to the proposed topic.
-        fill_rule: Unchanged from forge.worktrees.ready.
-      plan_key:
-        meaning: Same contract as forge.worktrees.ready.
-        source: Producer emit rewritten to the proposed topic.
-        fill_rule: Must match directory name.
-
   forge.units.reviewed:
     required_fields:
       - execution_plan_path

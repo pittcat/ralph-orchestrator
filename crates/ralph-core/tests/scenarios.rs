@@ -2196,19 +2196,18 @@ fn test_parallel_forge_receipt_consistency_runtime() {
     run_workflow_guard_scenario(yaml);
 }
 
-/// Plan 2026-08-27-1430 U4 (S1/S3/S4/S5; R1/R7; D2/D9/D10): the
-/// `forge.worktrees.ready` dual guard. An empty `target_start_sha` is
-/// rejected by the deterministic consistency rule on the PROPOSED topic
-/// before the LLM gate activates; a branch/fingerprint mismatch passes
-/// consistency but is rejected by the synthesized precheck gate; three
-/// rejections exhaust the retry budget and the runtime injects
-/// `forge.plan.blocked{kind=precheck_exhausted}`; only the verbatim
-/// forward lands as an accepted `forge.worktrees.ready` and wakes the
-/// dispatcher exactly once. The consistency rules and the precheck rule
-/// in the YAML are verbatim copies of the builtin preset (see the file
-/// header for the sync contract); the structural lock for the builtin
-/// lives in
-/// `crates/ralph-cli/src/presets.rs::parallel_forge_worktrees_ready_dual_guard`.
+/// Accepted `forge.worktrees.ready` must activate the dispatcher next
+/// with no synthesized precheck hat in between.
+#[test]
+fn test_parallel_forge_fanout_dispatcher_wakeup_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_fanout_dispatcher_wakeup_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// Isolated characterization of an LLM precheck gate on
+/// `forge.worktrees.ready` (fixture-local rule, not builtin fan-out).
+/// Builtin parallel-forge no longer synthesizes this gate; structural
+/// lock is `parallel_forge_fanout_short_circuits_worktrees_ready_llm_precheck`.
 #[test]
 fn test_parallel_forge_worktrees_ready_gate_runtime() {
     let yaml = load_scenario("tests/scenarios/parallel_forge_worktrees_ready_gate_runtime.yml");
