@@ -2064,6 +2064,15 @@ mod coordinator;
 /// future Units (U2 artifact / U3 DAG persistence) can pull in
 /// the same validation primitive without re-implementing it.
 pub mod dag_mode;
+/// 2026-09-03-0959 plan U3 (R2 / R17 / D4 / D17 / D18 / E5 / E7 / E9 / E16):
+/// durable DAG store trait + bounded registration receipt surface.
+/// The in-memory implementation lands here; the rusqlite
+/// implementation lands in a future Unit. Receipt round-trip is
+/// required so `forge.plan.ready` accepted boundaries can write
+/// a bounded receipt BEFORE `ensure_task_projection` / `ack`.
+pub mod dag_plan_receipt;
+pub mod dag_store;
+pub mod dag_store_memory;
 mod memory;
 #[cfg(test)]
 mod memory_protocol_tests;
