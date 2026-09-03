@@ -66,6 +66,10 @@ pub mod parallel_forge_handoff;
 /// a `--reuse-worktree` cleanup destroys it, validated fail-closed
 /// before the new loop starts.
 pub mod parallel_forge_resume;
+/// U1 (plan 2026-09-01-2102): typed, read-only checkpoint assessment
+/// for the combined `--continue --worktree --reuse-worktree` workflow.
+/// Pure function: no writes, no rotations, no archive creation.
+pub mod recovery_checkpoint;
 /// U11 (plan 2026-07-30-004): durable Recovery Intent store with a
 /// persistent retry budget that survives loop restarts.
 pub mod recovery_intent;
