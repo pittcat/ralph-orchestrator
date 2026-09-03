@@ -2071,6 +2071,13 @@ pub mod dag_mode;
 /// required so `forge.plan.ready` accepted boundaries can write
 /// a bounded receipt BEFORE `ensure_task_projection` / `ack`.
 pub mod dag_plan_receipt;
+/// 2026-09-03-0959 plan U4 (R3, R4, R6; S3-S6; D5, D6, D10;
+/// E1, E5, E8, E9): pure work-conserving admission engine for
+/// the runtime-owned DAG scheduler. No I/O — takes a snapshot
+/// + caps and returns an ordered `Vec<AdmissionDecision>`. The
+/// runtime driver (U5+) calls this once per tick and applies
+/// the result inside its store transaction.
+pub mod dag_scheduler;
 pub mod dag_store;
 pub mod dag_store_memory;
 mod memory;
