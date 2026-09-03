@@ -2093,6 +2093,25 @@ pub mod dag_plan_receipt;
 /// runtime driver (U5+) calls this once per tick and applies
 /// the result inside its store transaction.
 pub mod dag_scheduler;
+/// 2026-09-03-0959 plan U7 (R7; S8-S11; D7-D9; E10-E12):
+/// changed-path authorisation guard. Every Unit's reviewed
+/// diff is validated TWICE — once at review entry, once at
+/// integration lane lock acquire. This module owns the
+/// pure-data guard; the lane that *uses* it lives in
+/// [`integration_lane`].
+pub mod changed_path_guard;
+/// 2026-09-03-0959 plan U7: per-target integration lease +
+/// compare-and-swap fast-forward pipeline. One active lease
+/// per target branch, deterministic eligibility order, CAS
+/// on expected head, RAII guard. Trait split between real
+/// (`RealGitIntegrationPort`) and fake (`FakeGitIntegrationPort`)
+/// ports.
+pub mod integration_lane;
+/// 2026-09-03-0959 plan U7: integration store — idempotent
+/// integration records keyed on
+/// `(unit_id, base_commit, integrated_commit, expected_head_before)`,
+/// with SHA-256 fingerprint for drift detection.
+pub mod dag_integration;
 /// 2026-09-03-0959 plan U5 (R11/R12; S13/S14; D1/D2/D13; E6/E7/E13/E16):
 /// observation-only shadow sink + pure decision function for the
 /// runtime-owned DAG scheduler. Records per-tick scheduler

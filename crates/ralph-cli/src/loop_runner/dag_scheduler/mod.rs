@@ -12,6 +12,15 @@
 //!   - `shadow` — `ShadowSinkReader::read` is the read-only
 //!     projection used by the inspect command (mirrors U5's
 //!     `dag_shadow::ShadowSink`).
+//!   - `worktree` (U7) — `UnitWorktree::acquire` binds each
+//!     Unit's trusted worktree to a verified base commit.
+//!     Reuses the existing worktree if its branch tip matches
+//!     the verified base; rejects on host-dirty / host-untracked
+//!     or base-mismatch.
+//!   - `integration` (U7) — `IntegrationOrchestrator::integrate`
+//!     runs the per-target CAS fast-forward pipeline: second
+//!     changed-path check, lane lease acquire, targeted gate,
+//!     CAS FF, idempotent integration record.
 //!
 //! U6 intentionally does NOT own the integration-half
 //! authorisation gate (the changed-path check that runs again
@@ -22,6 +31,8 @@
 pub mod driver;
 pub mod jobs;
 pub mod shadow;
+pub mod worktree;
+pub mod integration;
 
 // U6 ships these modules but does NOT re-export their public types
 // at the `dag_scheduler::*` path: every type's bin-side consumer is
