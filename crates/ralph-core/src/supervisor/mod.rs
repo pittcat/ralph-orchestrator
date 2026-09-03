@@ -2038,6 +2038,13 @@ pub enum CompensationKind {
 
 pub use crate::worktree::Worktree;
 pub use coordinator::{CoordinatorAction, SupervisorCoordinator};
+// 2026-09-03-0959 plan U5 (R11/R12; S13/S14; D1/D2/D13; E6/E7/E13/E16):
+// re-export the sanitized inspect summary so the CLI command surface
+// (`ralph inspect loop --format json`) can pull it from
+// `ralph_core::supervisor::SchedulerInspectSummary` without reaching into
+// the `dag_inspect` submodule. The summary is the only safe bridge
+// between the runtime-owned shadow sink and the operator-facing JSON.
+pub use dag_inspect::SchedulerInspectSummary;
 pub use dag_mode::{SchedulerMode, SchedulerModeError, validate_scheduler_mode};
 pub use memory::InMemorySupervisorStore;
 pub use merge_sink::{EventMergeSink, FileEventMergeSink, InMemoryMergeSink, MergeSinkError};
