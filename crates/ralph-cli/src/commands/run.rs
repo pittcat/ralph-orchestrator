@@ -58,7 +58,13 @@ pub struct RunArgs {
 
     /// Continue from existing scratchpad (resume interrupted loop).
     /// Use this when a previous run was interrupted and you want to
-    /// continue from where it left off.
+    /// continue from where it left off. Combined with
+    /// `--worktree --reuse-worktree`: parent reuses a completed
+    /// worktree and continues the prior loop in place (single
+    /// `loop_resume` event, no archive, no fresh start); the parent
+    /// holds `LoopLock` for the child's lifetime and the child
+    /// inherits the worktree via `--worktree-path` without
+    /// re-acquiring the lock.
     #[arg(long = "continue")]
     pub continue_mode: bool,
 
@@ -138,6 +144,16 @@ pub struct RunArgs {
     /// Not intended for direct user use.
     #[arg(long, hide = true)]
     pub worktree_path: Option<PathBuf>,
+
+    /// Internal: marks the child subprocess as running on the trusted
+    /// combined `--continue --worktree --reuse-worktree` path. The parent
+    /// sets this when `continue_recovery_ctx.is_some()` so the child knows
+    /// (a) to skip the parallel-forge resume-manifest re-validation gate
+    /// (the parent already cleared it) and (b) to NOT re-acquire the
+    /// `LoopLock` (the parent already holds it for the duration of this
+    /// child invocation). Not intended for direct user use.
+    #[arg(long, hide = true, default_value_t = false)]
+    pub combined_continue: bool,
 
     /// Reuse an existing, completed worktree for this run instead of
     /// creating a new one. Only valid with `--worktree`.
@@ -1309,6 +1325,23 @@ pub async fn run_command(
                         subprocess_tui_args.worktree = false;
                         subprocess_tui_args.worktree_path =
                             Some(reused_ctx.workspace().to_path_buf());
+                        // U3 (plan 2026-09-01-2102): on the combined
+                        // `--continue --worktree --reuse-worktree`
+                        // path the parent already cleared every gate
+                        // (LoopLock + checkpoint assessment, plus the
+                        // PF resume-manifest gate inside the `if let
+                        // Some(resume_inputs)` block above). The
+                        // child must (a) NOT re-acquire `LoopLock`
+                        // (the parent holds it for the child's full
+                        // lifetime) and (b) NOT re-run the PF manifest
+                        // re-validation gate (the parent already did,
+                        // inside its own scope; running it again in
+                        // the child duplicates the fail-closed path
+                        // and may reject a manifest that the parent's
+                        // gate already cleared). Flag the child so it
+                        // takes both paths.
+                        subprocess_tui_args.combined_continue =
+                            continue_recovery_ctx.is_some();
                         (reused_ctx, None)
                     }
                     Ok(None) => {
@@ -1416,67 +1449,99 @@ pub async fn run_command(
         // incomplete crash capture, the child re-validates the SAME
         // older complete manifest instead of refusing on the
         // incomplete one.
+        //
+        // U3 (plan 2026-09-01-2102) INVARIANT — the child MUST NOT
+        // re-acquire `LoopLock` here. On the combined
+        // `--continue --worktree --reuse-worktree` path, the parent
+        // already holds `LoopLock` for the entire duration of this
+        // child invocation (lock guard is bound to `continue_recovery_ctx`
+        // in the parent's scope and only released when the parent
+        // process exits). Acquiring the lock again from the child
+        // would deadlock, since the lock file is the SAME file
+        // (`<worktree>/.ralph/loop.lock`) on both sides. The
+        // `--worktree-path` branch above returns `(context, None)` —
+        // no `LoopGuard` is produced — and the rest of the pipeline
+        // honors that contract by skipping lock checks for
+        // subprocess-TUI-mode children.
+        //
+        // U3 (plan 2026-09-01-2102) — when `--combined-continue` is
+        // set, the parent already cleared the parallel-forge
+        // resume-manifest gate inside its own scope (the
+        // `acquire_and_assess` + `validate_manifest` block above
+        // runs against the SAME archive that the child would
+        // re-read). Re-validating here duplicates the fail-closed
+        // path and may reject a manifest the parent already cleared.
+        // Skip the re-validation entirely on the combined path; for
+        // all other `--worktree-path` modes, the gate stays exactly
+        // as it was before U3 (read + validate, fail-closed).
         use ralph_core::parallel_forge_resume::{
             CaptureInputs, latest_archived_manifest, sha256_hex, validate_manifest,
         };
-        let child_plan_path = args
-            .plan
-            .as_deref()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let child_plan_digest = args
-            .plan
-            .as_deref()
-            .and_then(|p| std::fs::read(p).ok())
-            .map(|bytes| sha256_hex(&bytes))
-            .unwrap_or_default();
-        let child_preset_name = derive_preset_name(hats_source)
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        let mut child_config_bytes: Vec<u8> = Vec::new();
-        for source in config_sources {
-            if let ConfigSource::File(path) = source
-                && let Ok(bytes) = std::fs::read(path)
-            {
-                child_config_bytes.extend_from_slice(&bytes);
+        if !args.combined_continue {
+            let child_plan_path = args
+                .plan
+                .as_deref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let child_plan_digest = args
+                .plan
+                .as_deref()
+                .and_then(|p| std::fs::read(p).ok())
+                .map(|bytes| sha256_hex(&bytes))
+                .unwrap_or_default();
+            let child_preset_name = derive_preset_name(hats_source)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let mut child_config_bytes: Vec<u8> = Vec::new();
+            for source in config_sources {
+                if let ConfigSource::File(path) = source
+                    && let Ok(bytes) = std::fs::read(path)
+                {
+                    child_config_bytes.extend_from_slice(&bytes);
+                }
             }
-        }
-        let child_config_digest = if child_config_bytes.is_empty() {
-            String::new()
-        } else {
-            sha256_hex(&child_config_bytes)
-        };
-        let child_inputs = CaptureInputs {
-            plan_path: child_plan_path,
-            plan_digest: child_plan_digest,
-            preset_name: child_preset_name.clone(),
-            config_digest: child_config_digest,
-            worktree_name: loop_id.clone(),
-        };
-        if child_preset_name == "parallel-forge" {
-            match latest_archived_manifest(worktree_path) {
-                Ok(Some((_, manifest))) => {
-                    validate_manifest(&manifest, &child_inputs).map_err(|e| {
-                        anyhow::anyhow!(
+            let child_config_digest = if child_config_bytes.is_empty() {
+                String::new()
+            } else {
+                sha256_hex(&child_config_bytes)
+            };
+            let child_inputs = CaptureInputs {
+                plan_path: child_plan_path,
+                plan_digest: child_plan_digest,
+                preset_name: child_preset_name.clone(),
+                config_digest: child_config_digest,
+                worktree_name: loop_id.clone(),
+            };
+            if child_preset_name == "parallel-forge" {
+                match latest_archived_manifest(worktree_path) {
+                    Ok(Some((_, manifest))) => {
+                        validate_manifest(&manifest, &child_inputs).map_err(|e| {
+                            anyhow::anyhow!(
+                                "resume manifest validation failed for reused worktree \
+                                 '{loop_id}': {e}. The loop was NOT started; the prior run's \
+                                 records are preserved under .ralph/reuse-history/ in the \
+                                 worktree."
+                            )
+                        })?;
+                        resumed_manifest = Some(manifest);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
                             "resume manifest validation failed for reused worktree \
                              '{loop_id}': {e}. The loop was NOT started; the prior run's \
                              records are preserved under .ralph/reuse-history/ in the \
                              worktree."
-                        )
-                    })?;
-                    resumed_manifest = Some(manifest);
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "resume manifest validation failed for reused worktree \
-                         '{loop_id}': {e}. The loop was NOT started; the prior run's \
-                         records are preserved under .ralph/reuse-history/ in the \
-                         worktree."
-                    ));
+                        ));
+                    }
                 }
             }
+        } else {
+            debug!(
+                "Child on combined --continue --worktree --reuse-worktree path; \
+                 skipping parallel-forge resume-manifest re-validation (parent cleared it)"
+            );
         }
 
         (context, None)
@@ -1954,6 +2019,7 @@ mod forward_prompt_args_tests {
             hats_source: None,
             profiles: vec![],
             no_default_profiles: false,
+            combined_continue: false,
         }
     }
 
@@ -2243,6 +2309,14 @@ struct SubprocessTuiArgs {
     /// would cause a duplicate worktree). Instead, the child inherits the
     /// parent's worktree path here. P1-F fix on 2026-06-10.
     pub worktree_path: Option<PathBuf>,
+    /// When set on the parent, the child RPC process is on the trusted
+    /// combined `--continue --worktree --reuse-worktree` path: it must
+    /// skip the parallel-forge resume-manifest re-validation gate (the
+    /// parent already cleared it via `acquire_and_assess`) and must NOT
+    /// re-acquire `LoopLock` (the parent holds the lock for the
+    /// child's full lifetime). Forwarded to the child via the hidden
+    /// `--combined-continue` flag. Mirrors `RunArgs::combined_continue`.
+    pub combined_continue: bool,
     /// Workspace cwd for child: worktree path in worktree mode, main repo in
     /// primary mode. Used as base path for parent's stderr log and as
     /// Command::current_dir when spawning the child.
@@ -2289,6 +2363,7 @@ impl SubprocessTuiArgs {
             no_sync_agent_docs: args.no_sync_agent_docs,
             worktree: args.worktree,
             worktree_path: None,
+            combined_continue: false,
             workspace: PathBuf::new(), // Set after loop_context is determined
             config_sources: config_sources.iter().map(|s| s.to_cli_string()).collect(),
             hats_source: hats_source.map(|h| h.label()),
@@ -2664,6 +2739,15 @@ async fn run_subprocess_tui(
         child_args.push("--worktree-path".to_string());
         child_args.push(worktree_path.to_string_lossy().into_owned());
     }
+    // U3 (plan 2026-09-01-2102): forward --combined-continue when the parent
+    // is on the trusted combined `--continue --worktree --reuse-worktree`
+    // path. The child uses this flag to skip the parallel-forge resume-
+    // manifest re-validation gate (the parent already cleared it) and to
+    // skip re-acquiring `LoopLock` (the parent holds it for the child's
+    // lifetime). Hidden flag; never set by user-facing CLI directly.
+    if args.combined_continue {
+        child_args.push("--combined-continue".to_string());
+    }
 
     // Forward preflight options
     if args.skip_preflight {
@@ -3007,6 +3091,7 @@ pub(crate) fn default_run_args() -> RunArgs {
         custom_args: Vec::new(),
         warmup_only: false,
         force_warmup: false,
+        combined_continue: false,
     }
 }
 

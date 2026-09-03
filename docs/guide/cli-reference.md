@@ -119,6 +119,38 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 
 `[CUSTOM_ARGS]...` are custom backend command and arguments, passed after `--`.
 
+#### Combined continuation (`--continue --worktree --reuse-worktree`)
+
+Use this combination to resume a prior loop **in place** inside a
+previously-completed worktree. The parent process:
+
+1. Acquires `LoopLock` on `<worktree>/.ralph/loop.lock` and runs the
+   recovery checkpoint assessment (`Eligible` verdict required).
+2. Reuses the completed worktree at its exact name (looked up from
+   `--plan` basename or `--worktree-name`).
+3. Skips `clean_worktree_runtime_artifacts` — the events file must
+   remain on disk because the resumed loop reads from it.
+4. Spawns the child RPC subprocess via `--worktree-path` and the
+   hidden `--combined-continue` flag.
+
+The child inherits the parent's lock (no re-acquisition, no deadlock)
+and skips the parallel-forge resume-manifest re-validation gate
+(the parent already cleared it). The resumed loop emits exactly one
+`loop.resume` event; no `starting` event, no `task.resume`
+bootstrap, no `reuse-history/` archive is written.
+
+Example:
+
+```bash
+ralph run --continue --worktree --reuse-worktree \
+  --plan docs/plans/2026-09-01-2102-feat-trusted-worktree-continuation-plan.md
+```
+
+Without `--continue`, `--reuse-worktree` alone starts a **new** loop in
+the reused worktree after archiving its `.ralph/` runtime state — see
+`--reuse-worktree` in the table above for the legacy non-continued
+reuse contract.
+
 ### ralph inspect
 
 Read-only diagnostics that do not modify runtime state.

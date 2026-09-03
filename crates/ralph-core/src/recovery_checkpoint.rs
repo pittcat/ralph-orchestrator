@@ -307,18 +307,25 @@ pub(crate) fn resolve_events_target(
     Ok(resolved)
 }
 
-/// Inspect `.ralph/loop.lock` and return the recorded PID if it is
-/// non-zero. Returns `None` when the file is absent, empty,
-/// unparseable, or has a zero PID. We do **not** acquire the flock —
-/// U2 is responsible for the liveness check; this helper only reports
-/// what the metadata says.
+/// Inspect `.ralph/loop.lock` and return the recorded PID **iff it is a
+/// different live process**. Returns `None` when the file is absent,
+/// empty, unparseable, has a zero PID, or records the current process's
+/// own PID (the gate runs *after* U2's `LoopLock::try_acquire`, so the
+/// lock metadata is the current process — refusing here would make
+/// the gate permanently refuse itself; see U3 surface note in
+/// `integration_resume.rs::combined_continue_happy_path_eligible_passes`).
+///
+/// We do **not** acquire the flock — U2 is responsible for the liveness
+/// check; this helper only reports what the metadata says, minus the
+/// current process.
 pub(crate) fn is_loop_lock_held(lock_path: &Path) -> Option<u32> {
     if !lock_path.exists() {
         return None;
     }
     let body = fs::read_to_string(lock_path).ok()?;
     let metadata: LockMetadata = serde_json::from_str(&body).ok()?;
-    if metadata.pid != 0 {
+    let current_pid = std::process::id();
+    if metadata.pid != 0 && metadata.pid != current_pid {
         Some(metadata.pid)
     } else {
         None
