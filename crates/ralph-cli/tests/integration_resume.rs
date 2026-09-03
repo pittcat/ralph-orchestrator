@@ -1802,3 +1802,442 @@ hats:
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// 2026-09-01-2102 U2: combined --continue --worktree --reuse-worktree
+// gate (RunIntent::ContinueReusedWorktree). The gate is fail-closed:
+// - missing worktree → WorktreeMissing, no `.worktrees/<id>/` created
+// - AlreadyCompleted history → Checkpoint hint with the two
+//   operator-facing remedies (drop --continue or
+//   --remove-worktree-and-continue)
+// - Eligible checkpoint → archive directory is NEVER created, live
+//   runtime artifacts are untouched
+// - Live lock from another process → WorktreeLive with PID; refusing
+//   to attach
+//
+// `LoopHistory::record_started` / `record_completed` are the SSOT for
+// the `history.jsonl` line format. The tests use those recorders
+// instead of hand-rolling JSON lines so the fixture stays honest even
+// if the on-disk shape evolves.
+// ─────────────────────────────────────────────────────────────────────────
+
+mod combined_intent {
+    use ralph_core::loop_history::LoopHistory;
+    use ralph_core::loop_lock::LoopLock;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn setup_git_repo(path: &Path) {
+        let status = Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init failed");
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(path)
+            .status()
+            .expect("git config email");
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(path)
+            .status()
+            .expect("git config name");
+        fs::write(path.join("README.md"), "# Test\n").expect("write README");
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .status()
+            .expect("git add");
+        Command::new("git")
+            .args(["commit", "-m", "Initial commit", "--quiet"])
+            .current_dir(path)
+            .status()
+            .expect("git commit");
+    }
+
+    /// Minimal config that exits as soon as it boots. `completion_promise`
+    /// matches `loop.complete` so the topology closes without spinning
+    /// past the gate. `backend: custom / command: true` lets the loop
+    /// reach `loop.complete` deterministically.
+    fn write_minimal_config(path: &Path) {
+        let config = r#"event_loop:
+  completion_promise: "loop.complete"
+  starting_event: "loop.start"
+  max_iterations: 1
+  max_runtime_seconds: 30
+
+cli:
+  backend: "custom"
+  command: "true"
+
+memories:
+  enabled: false
+
+tasks:
+  enabled: false
+
+hats:
+  worker:
+    name: "Worker"
+    description: "Single hat that closes the loop."
+    triggers: ["loop.start"]
+    publishes: ["loop.complete"]
+"#;
+        fs::write(path.join("ralph.yml"), config).expect("write ralph.yml");
+    }
+
+    fn precreate_worktree(main_repo: &Path, loop_id: &str) -> PathBuf {
+        // The runtime computes the worktree path as
+        // `<workspace_root>/.worktrees/<loop_id>` (see
+        // `commands::run_recovery::acquire_and_assess` and
+        // `loop_runner::loop_owner::spawn_worktree_loop`). The
+        // older top-level `default_worktree_root` helper in this
+        // test file uses a different scheme (`parent/worktree/...`),
+        // so we cannot reuse it for the U2 gate path — the gate
+        // would surface "does not exist at" against the
+        // `default_worktree_root` location and pass against the
+        // runtime location, hiding wiring bugs.
+        let worktree_path = main_repo.join(".worktrees").join(loop_id);
+        let status = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                worktree_path.to_str().unwrap(),
+                "HEAD",
+            ])
+            .current_dir(main_repo)
+            .status()
+            .expect("git worktree add");
+        assert!(status.success(), "git worktree add must succeed");
+        worktree_path
+    }
+
+    /// Build the minimum `assess_checkpoint` fixture on top of an
+    /// already-created worktree. `events.jsonl` is left empty by
+    /// default so the gate's verdict is determined entirely by the
+    /// history the caller writes before invoking ralph.
+    ///
+    /// The `current-events` marker content MUST resolve to a regular
+    /// file when joined against the worktree. `assess_checkpoint`
+    /// treats both missing and non-regular targets as
+    /// `MissingCurrentEventsTarget`. We use the absolute path of the
+    /// events file (same scheme as the unit tests' `fixture()`
+    /// helper in `recovery_checkpoint.rs`) so the fixture is
+    /// independent of `cwd` quirks in nextest's process-per-test
+    /// isolation.
+    fn seed_assess_fixture(worktree_path: &Path, loop_id: &str) {
+        let ralph_dir = worktree_path.join(".ralph");
+        let agent_dir = ralph_dir.join("agent");
+        fs::create_dir_all(&agent_dir).unwrap();
+
+        let events_file = ralph_dir.join("events.jsonl");
+        fs::write(&events_file, "").unwrap();
+        fs::write(
+            ralph_dir.join("current-events"),
+            events_file.to_str().expect("events_file must be UTF-8"),
+        )
+        .unwrap();
+        fs::write(ralph_dir.join("current-loop-id"), format!("{loop_id}\n")).unwrap();
+        fs::write(agent_dir.join("scratchpad.md"), "# scratch\n").unwrap();
+        fs::write(ralph_dir.join("history.jsonl"), "").unwrap();
+    }
+
+    /// The pre-existing `--continue` handler in `run.rs` enforces a
+    /// `scratchpad.md` exists at the configured workspace root
+    /// (the main repo, not the worktree) before the runtime ever
+    /// reaches the new `acquire_and_assess` gate. Without this
+    /// pre-stage, every combined run bails out with "Cannot continue:
+    /// scratchpad not found" before the gate can run. We seed the
+    /// minimum-viable scratchpad at the main repo so the existing
+    /// check passes and the gate is what surfaces the verdict.
+    fn seed_main_repo_scratchpad(main_repo: &Path) {
+        let agent_dir = main_repo.join(".ralph/agent");
+        fs::create_dir_all(&agent_dir).expect("create main repo .ralph/agent");
+        fs::write(agent_dir.join("scratchpad.md"), "# main repo scratchpad\n")
+            .expect("write main repo scratchpad");
+    }
+
+    /// C1: combined flags with a `--plan` whose basename resolves to
+    /// a worktree that does NOT exist. The gate is fail-closed:
+    /// - stderr names the missing worktree and its expected path
+    /// - the `.worktrees/<id>/` directory was never created (no
+    ///   half-built worktree left behind for the operator to clean up)
+    #[test]
+    fn combined_missing_worktree_rejected_no_create() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let main_repo = temp_dir.path();
+        setup_git_repo(main_repo);
+        write_minimal_config(main_repo);
+        seed_main_repo_scratchpad(main_repo);
+
+        let loop_id = "u2-missing-wt";
+        let plan_path = main_repo.join(format!("{loop_id}.md"));
+        fs::write(&plan_path, "# plan\n").unwrap();
+
+        // Sanity: worktree does not exist yet at the runtime path
+        // (`<workspace_root>/.worktrees/<loop_id>`).
+        let expected = main_repo.join(".worktrees").join(loop_id);
+        assert!(
+            !expected.exists(),
+            "test precondition: target worktree must not exist"
+        );
+
+        let output = super::common::ralph_bin()
+            .args([
+                "run",
+                "--continue",
+                "--worktree",
+                "--reuse-worktree",
+                "--no-tui",
+                "--skip-preflight",
+                "--plan",
+                plan_path.to_str().unwrap(),
+            ])
+            .current_dir(main_repo)
+            .output()
+            .expect("ralph run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("U2 missing-wt stderr: {stderr}");
+        assert!(
+            !output.status.success(),
+            "missing-worktree combined run must exit non-zero"
+        );
+        assert!(
+            stderr.contains("does not exist at"),
+            "stderr must name the missing-worktree reason: {stderr}"
+        );
+        assert!(
+            stderr.contains(loop_id),
+            "stderr must reference the worktree name '{loop_id}': {stderr}"
+        );
+        // The gate did not half-create the worktree.
+        assert!(
+            !expected.exists(),
+            "missing-worktree rejection must not create {expected:?}"
+        );
+    }
+
+    /// C2: combined flags against a worktree whose history records
+    /// `completion_promise`. The gate must surface a Checkpoint
+    /// refusal that includes BOTH operator-facing remedies (drop
+    /// --continue, or use --remove-worktree-and-continue). The hint
+    /// has to be discoverable from stderr without re-running the CLI
+    /// with --help.
+    #[test]
+    fn combined_completed_history_rejected_with_remove_continue_hint() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let main_repo = temp_dir.path();
+        setup_git_repo(main_repo);
+        write_minimal_config(main_repo);
+        seed_main_repo_scratchpad(main_repo);
+
+        let loop_id = "u2-already-done";
+        let plan_path = main_repo.join(format!("{loop_id}.md"));
+        fs::write(&plan_path, "# plan\n").unwrap();
+
+        let worktree_path = precreate_worktree(main_repo, loop_id);
+        seed_assess_fixture(&worktree_path, loop_id);
+
+        // Record the prior run in the SSOT shape so the gate can
+        // recognize it as already completed.
+        let history = LoopHistory::new(worktree_path.join(".ralph/history.jsonl"));
+        history.record_started("previous run").unwrap();
+        history.record_completed("completion_promise").unwrap();
+
+        let output = super::common::ralph_bin()
+            .args([
+                "run",
+                "--continue",
+                "--worktree",
+                "--reuse-worktree",
+                "--no-tui",
+                "--skip-preflight",
+                "--plan",
+                plan_path.to_str().unwrap(),
+            ])
+            .current_dir(main_repo)
+            .output()
+            .expect("ralph run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("U2 already-done stderr: {stderr}");
+        assert!(
+            !output.status.success(),
+            "already-completed combined run must exit non-zero"
+        );
+        assert!(
+            stderr.contains("already completed")
+                || stderr.contains("completion_promise"),
+            "stderr must name the already-completed reason: {stderr}"
+        );
+        assert!(
+            stderr.contains("drop --continue"),
+            "stderr must surface the drop-rewrite remedy: {stderr}"
+        );
+        assert!(
+            stderr.contains("--remove-worktree-and-continue"),
+            "stderr must surface the destructive-continue remedy: {stderr}"
+        );
+        // The archive step must NOT have run for an AlreadyCompleted
+        // verdict — the gate refuses before the cleanup branch.
+        assert!(
+            !worktree_path.join(".ralph/reuse-history").exists(),
+            "AlreadyCompleted must refuse before any archive happens"
+        );
+    }
+
+    /// C3: combined flags against an Eligible checkpoint. The
+    /// continuation contract preserves the runtime fixtures the gate
+    /// depends on (scratchpad, current-loop-id, current-events
+    /// marker, history) and NEVER creates `.ralph/reuse-history/`.
+    /// This is the inverse of the U1 `--reuse-worktree` (without
+    /// --continue) tests where the archive step is required.
+    ///
+    /// The loop DOES run (and will append to events.jsonl /
+    /// create tasks.jsonl) — that is the whole point of the gate
+    /// returning `Eligible` and proceeding. We deliberately assert
+    /// only the artifacts the **gate** is responsible for: the
+    /// archive directory must not exist, and the pre-existing
+    /// scratchpad/current-loop-id/current-events/history fixtures
+    /// must still be readable so a follow-up retry can re-assess
+    /// the same checkpoint.
+    #[test]
+    fn combined_skips_cleanup_when_archive_path_unused() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let main_repo = temp_dir.path();
+        setup_git_repo(main_repo);
+        write_minimal_config(main_repo);
+        seed_main_repo_scratchpad(main_repo);
+
+        let loop_id = "u2-eligible-skip-cleanup";
+        let plan_path = main_repo.join(format!("{loop_id}.md"));
+        fs::write(&plan_path, "# plan\n").unwrap();
+
+        let worktree_path = precreate_worktree(main_repo, loop_id);
+        seed_assess_fixture(&worktree_path, loop_id);
+
+        // Pre-stage live runtime artifacts the resume contract reads.
+        let ralph_dir = worktree_path.join(".ralph");
+        let agent_dir = ralph_dir.join("agent");
+        let events_file = ralph_dir.join("events.jsonl");
+        let tasks_file = agent_dir.join("tasks.jsonl");
+        fs::write(&events_file, "{\"line\":\"prior-event\"}\n").unwrap();
+        fs::write(&tasks_file, "{\"id\":\"u2-eligible-skip-cleanup:step-1\"}\n").unwrap();
+
+        let output = super::common::ralph_bin()
+            .args([
+                "run",
+                "--continue",
+                "--worktree",
+                "--reuse-worktree",
+                "--no-tui",
+                "--skip-preflight",
+                "--plan",
+                plan_path.to_str().unwrap(),
+            ])
+            .current_dir(main_repo)
+            .output()
+            .expect("ralph run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("U2 eligible-skip stderr: {stderr}");
+
+        // The archive path was never taken — this is the core U2
+        // invariant: combined --continue --reuse-worktree must skip
+        // clean_worktree_runtime_artifacts regardless of whether the
+        // gate verdict was Eligible or AlreadyCompleted.
+        assert!(
+            !ralph_dir.join("reuse-history").exists(),
+            "Eligible combined path must not create .ralph/reuse-history/: {stderr}"
+        );
+
+        // Gate-controlled fixtures survive — if the gate had
+        // rotated any of these, a follow-up retry could not
+        // re-assess the same checkpoint and would lose the
+        // continuation contract.
+        assert!(events_file.exists(), "events.jsonl must survive");
+        assert!(tasks_file.exists(), "tasks.jsonl must survive");
+        assert!(
+            ralph_dir.join("current-loop-id").exists(),
+            "current-loop-id marker must survive"
+        );
+        assert!(
+            ralph_dir.join("current-events").exists(),
+            "current-events marker must survive"
+        );
+        assert!(
+            agent_dir.join("scratchpad.md").is_file(),
+            "scratchpad must survive"
+        );
+    }
+
+    /// C4: combined flags when the worktree's loop lock is held by
+    /// another live process. The test acquires the lock with the
+    /// SSOT `LoopLock::try_acquire` API and keeps the guard alive
+    /// while spawning ralph; the subprocess must surface a
+    /// WorktreeLive refusal that names the holder PID.
+    #[test]
+    fn combined_lock_busy_second_process_rejected() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let main_repo = temp_dir.path();
+        setup_git_repo(main_repo);
+        write_minimal_config(main_repo);
+        seed_main_repo_scratchpad(main_repo);
+
+        let loop_id = "u2-lock-busy";
+        let plan_path = main_repo.join(format!("{loop_id}.md"));
+        fs::write(&plan_path, "# plan\n").unwrap();
+
+        let worktree_path = precreate_worktree(main_repo, loop_id);
+        seed_assess_fixture(&worktree_path, loop_id);
+
+        // Acquire and HOLD the worktree's loop lock from this test
+        // process. The subprocess ralph run must then fail the
+        // LoopLock::try_acquire step in the gate.
+        let holder = LoopLock::try_acquire(&worktree_path, "test holder")
+            .expect("test must successfully acquire the worktree lock first");
+        let holder_pid = std::process::id();
+
+        let output = super::common::ralph_bin()
+            .args([
+                "run",
+                "--continue",
+                "--worktree",
+                "--reuse-worktree",
+                "--no-tui",
+                "--skip-preflight",
+                "--plan",
+                plan_path.to_str().unwrap(),
+            ])
+            .current_dir(main_repo)
+            .output()
+            .expect("ralph run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("U2 lock-busy stderr: {stderr}");
+        drop(holder);
+
+        assert!(
+            !output.status.success(),
+            "lock-busy combined run must exit non-zero"
+        );
+        assert!(
+            stderr.contains("locked by another live loop"),
+            "stderr must name the lock-busy reason: {stderr}"
+        );
+        assert!(
+            stderr.contains("refusing to attach"),
+            "stderr must surface the refusing-to-attach hint: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("pid {holder_pid}")),
+            "stderr must name the holder PID {holder_pid}: {stderr}"
+        );
+        assert!(
+            stderr.contains(loop_id),
+            "stderr must reference the worktree name '{loop_id}': {stderr}"
+        );
+    }
+}

@@ -862,13 +862,13 @@ pub async fn run_command(
 
     // Apply CLI overrides (after normalization so they take final precedence)
     // Per spec: CLI -p and -P are mutually exclusive (enforced by clap)
-    if let Some(text) = args.prompt_text {
-        config.event_loop.prompt = Some(text);
+    if let Some(text) = args.prompt_text.as_ref() {
+        config.event_loop.prompt = Some(text.clone());
         config.event_loop.prompt_file = String::new(); // Clear file path
-    } else if let Some(path) = args.prompt_file {
+    } else if let Some(path) = args.prompt_file.as_ref() {
         config.event_loop.prompt_file = path.to_string_lossy().to_string();
         config.event_loop.prompt = None; // Clear inline
-    } else if let Some(plan_path) = &args.plan {
+    } else if let Some(plan_path) = args.plan.as_ref() {
         // --plan serves as the prompt source when no explicit prompt
         // argument is given, while also driving the worktree prefix.
         config.event_loop.prompt_file = plan_path.to_string_lossy().to_string();
@@ -1065,12 +1065,47 @@ pub async fn run_command(
     // and skip worktree creation entirely - child then created a second worktree
     // in the main repo, defeating the isolation guarantee.
     let (loop_context, _lock_guard) = if args.worktree {
-        // Explicit --worktree flag: create worktree directly without acquiring lock
-        // Worktree mode does not hold .ralph/loop.lock - it's fully isolated
+        // Explicit --worktree flag: create worktree directly without acquiring lock.
+        // Fresh worktree mode does not hold .ralph/loop.lock - it's fully isolated.
+        //
+        // EXCEPTION (U2, plan 2026-09-01-2102): when `--continue` joins the pair,
+        // we are entering the *trusted continuation* path. That path must NOT
+        // archive `.ralph/` (the resume contract reads those events), so we take
+        // an exclusive `LoopLock` on the worktree's `.ralph/loop.lock` and gate
+        // on `recovery_checkpoint::assess_checkpoint` BEFORE any other disk side
+        // effect. The lock guard is held in `continue_recovery_ctx` for the rest
+        // of `run_command`; it is released (truncated + flock dropped) when that
+        // binding goes out of scope at function return.
         //
         // When `--reuse-worktree` is also set, look up an existing
         // completed worktree by exact name and reuse it. If no match
         // exists yet, create the first worktree with that exact name.
+        let intent = crate::commands::run_recovery::classify_run_intent_flags(
+            args.continue_mode,
+            args.worktree,
+            args.reuse_worktree,
+        )
+        .map_err(|e| anyhow::anyhow!("failed to classify run intent: {e}"))?;
+        let continue_recovery_ctx: Option<crate::commands::run_recovery::ContinueContext> =
+            if matches!(
+                intent,
+                crate::commands::run_recovery::RunIntent::ContinueReusedWorktree
+            ) {
+                let ctx = crate::commands::run_recovery::acquire_and_assess(
+                    args.worktree_name.as_deref(),
+                    args.plan.as_deref(),
+                    workspace_root,
+                    &prompt_summary,
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                info!(
+                    "Continuation gate cleared for worktree '{}'; lock held until run exit",
+                    ctx.loop_id
+                );
+                Some(ctx)
+            } else {
+                None
+            };
         if args.reuse_worktree {
             debug!("Reusing worktree for explicit --worktree --reuse-worktree mode");
             match exact_worktree_name.as_deref() {
@@ -1129,17 +1164,35 @@ pub async fn run_command(
                             None
                         };
 
-                        let archive_dir = clean_worktree_runtime_artifacts(
-                            &reusable.path,
-                            resume_inputs.as_ref(),
-                        )
-                        .context("Failed to clean runtime artifacts in reused worktree")?;
-                        if let Some(path) = &archive_dir {
+                        // U2 (plan 2026-09-01-2102): the trusted continuation path
+                        // MUST NOT archive `.ralph/` runtime artifacts. The
+                        // resume contract (`task.resume`) reads the very events
+                        // `clean_worktree_runtime_artifacts` would rotate out,
+                        // so we skip the cleanup entirely when `continue_recovery_ctx`
+                        // is `Some`. The lock is already held by that context,
+                        // so a parallel `--reuse-worktree` (without --continue)
+                        // cannot sneak through during this window.
+                        let archive_dir = if continue_recovery_ctx.is_none() {
+                            let dir = clean_worktree_runtime_artifacts(
+                                &reusable.path,
+                                resume_inputs.as_ref(),
+                            )
+                            .context("Failed to clean runtime artifacts in reused worktree")?;
+                            if let Some(path) = &dir {
+                                info!(
+                                    "Archived prior runtime artifacts to {} before reuse",
+                                    path.display()
+                                );
+                            }
+                            dir
+                        } else {
                             info!(
-                                "Archived prior runtime artifacts to {} before reuse",
-                                path.display()
+                                "Skipping runtime-artifact cleanup on combined --continue --reuse-worktree \
+                                 path; lock already held for worktree '{}'",
+                                continue_recovery_ctx.as_ref().map(|c| c.loop_id.as_str()).unwrap_or("?")
                             );
-                        }
+                            None
+                        };
 
                         // U1: parallel-forge resume-manifest gate —
                         // fail-closed BEFORE the LoopContext is created.

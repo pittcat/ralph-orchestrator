@@ -12,6 +12,7 @@ pub mod preset;
 pub mod profile_args;
 pub mod resume;
 pub mod run;
+pub mod run_recovery;
 pub mod tui;
 pub mod tutorial;
 #[cfg(test)]
