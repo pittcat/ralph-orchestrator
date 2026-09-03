@@ -87,16 +87,19 @@ fixture_files:
           depends_on: []
           execution_wave: 1
           integration_order: 1
+          target_branch: "feat/unit-u1"
         - id: U2
           title: Parallel foundation
           depends_on: []
           execution_wave: 1
           integration_order: 2
+          target_branch: "feat/unit-u2"
         - id: U3
           title: Feature
           depends_on: [U1]
           execution_wave: 2
           integration_order: 3
+          target_branch: "feat/unit-u3"
 
 mock_responses:
   - text: |
