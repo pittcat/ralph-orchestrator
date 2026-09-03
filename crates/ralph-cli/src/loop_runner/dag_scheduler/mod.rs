@@ -33,6 +33,7 @@ pub mod jobs;
 pub mod shadow;
 pub mod worktree;
 pub mod integration;
+pub mod recovery;
 
 // U6 ships these modules but does NOT re-export their public types
 // at the `dag_scheduler::*` path: every type's bin-side consumer is
