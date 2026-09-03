@@ -12,6 +12,8 @@ use super::state_projection::StateProjectionConfig;
 use super::workflow_contract::WorkflowContractConfig;
 use super::workflow_guards::{HatExecutionMode, WorkflowGuardsConfig};
 
+use super::scheduler_mode::SchedulerMode;
+
 /// Hat-specific allowed values for a field within an event schema.
 ///
 /// When a field has hat-aware restrictions, only the hats listed here may
@@ -1110,6 +1112,114 @@ supervisor:
         assert_eq!(cfg.supervisor.aggregate_timeout_secs, 600);
     }
 
+    // ───────────────────────────────────────────────────────────────
+    // 2026-09-03-0959 plan U1: tri-state `scheduler_mode` gate.
+    //
+    // These tests pin the wire-format and the default behaviour so
+    // that future CLI / preset / runtime work can rely on:
+    //   - default == Wave (R3 zero-regression contract)
+    //   - round-trip for the three snake_case variants
+    //   - unknown values rejected at the serde boundary (E12)
+    //   - the field surfaces on the typed `EventLoopConfig` exactly
+    //     as documented.
+    // ───────────────────────────────────────────────────────────────
+    use crate::config::scheduler_mode::SchedulerMode as U1SchedulerMode;
+
+    #[test]
+    fn u1_scheduler_mode_defaults_to_wave() {
+        // R3 / D2: existing loops and presets must keep the legacy
+        // `WaveTracker` path with zero behaviour change. The default
+        // value of the new field must be `Wave`, not the DAG variants.
+        let cfg = SupervisorConfig::default();
+        assert_eq!(
+            cfg.scheduler_mode,
+            U1SchedulerMode::Wave,
+            "default scheduler_mode must be Wave to preserve R3 / D2"
+        );
+        assert!(
+            cfg.scheduler_mode.uses_legacy_authority(),
+            "default must select the legacy authority"
+        );
+    }
+
+    #[test]
+    fn u1_scheduler_mode_roundtrip_supervisor_block() {
+        // The wire-format contract: each snake_case variant must
+        // round-trip through the `supervisor:` block in a real
+        // `EventLoopConfig` parse (not just a typed enum parse).
+        for (raw, expected) in [
+            ("wave", U1SchedulerMode::Wave),
+            ("dag_shadow", U1SchedulerMode::DagShadow),
+            ("dag", U1SchedulerMode::Dag),
+        ] {
+            let yaml = format!("supervisor:\n  enabled: true\n  scheduler_mode: {raw}\n");
+            let cfg: EventLoopConfig = serde_yaml::from_str(&yaml)
+                .unwrap_or_else(|e| panic!("snake_case parse failed for {raw}: {e}"));
+            assert_eq!(
+                cfg.supervisor.scheduler_mode, expected,
+                "scheduler_mode mismatch for raw={raw}"
+            );
+            assert!(
+                cfg.supervisor.enabled,
+                "enabled must survive the supervisor block parse for {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn u1_scheduler_mode_rejects_unknown_value_at_serde_boundary() {
+        // E12: an unknown value must fail at serde deserialization
+        // rather than silently downgrading to `Wave`. The CLI
+        // preflight surfaces this so the operator gets an explicit
+        // "did you mean `dag` or `dag_shadow`?" error instead of a
+        // runtime panic later.
+        let yaml = r"
+supervisor:
+  enabled: true
+  scheduler_mode: fifo
+";
+        let result: Result<EventLoopConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "unknown scheduler_mode must fail at the serde boundary (E12)"
+        );
+    }
+
+    #[test]
+    fn u1_event_loop_config_carries_scheduler_mode_field() {
+        // The new field must surface on the typed `EventLoopConfig`
+        // exactly where the preset / CLI / preflight layer expects
+        // it: under `event_loop.supervisor.scheduler_mode`. This is
+        // the contract the rest of U1 (and U2 / U3) build on.
+        let yaml = r"
+supervisor:
+  enabled: true
+  scheduler_mode: dag_shadow
+";
+        let cfg: EventLoopConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.supervisor.enabled);
+        assert_eq!(cfg.supervisor.scheduler_mode, U1SchedulerMode::DagShadow);
+    }
+
+    #[test]
+    fn u1_scheduler_mode_omitted_yields_wave_legacy_default() {
+        // When the operator's YAML omits the field, the typed view
+        // must default to `Wave` (the R3 zero-regression contract).
+        // The CLI preflight only enforces the cross-field rule when
+        // an operator explicitly opts into `dag_shadow` or `dag`.
+        let yaml = r"
+supervisor:
+  enabled: true
+  max_concurrent_workers: 8
+";
+        let cfg: EventLoopConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            cfg.supervisor.scheduler_mode,
+            U1SchedulerMode::Wave,
+            "omitting scheduler_mode must keep the Wave legacy default"
+        );
+    }
+
     /// 2026-07-06-004 plan U1 RED: default-disabled contract. The
     /// typed config must exist and every field must default to
     /// `false` so existing loops, presets, and the policy-check
@@ -1303,6 +1413,21 @@ pub struct SupervisorConfig {
     /// `CONCEPTS.md` claim.
     #[serde(default = "default_supervisor_slot_retry_budget")]
     pub slot_retry_budget: u32,
+
+    /// 2026-09-03-0959 plan U1 (R1, R14 / S1, S2 / D2, D15 / E12, E17):
+    /// tri-state selector for the wave-scheduler authority. Defaults
+    /// to [`SchedulerMode::Wave`] so existing loops and presets keep
+    /// the legacy `WaveTracker` path with zero behaviour change.
+    ///
+    /// `DagShadow` and `Dag` are **fail-closed** unless
+    /// `enabled = true` AND `event_loop.execution_mode = isolated`;
+    /// the cross-field check lives in
+    /// [`crate::config::scheduler_mode::validate_scheduler_mode`]
+    /// and is invoked by the CLI preflight (not by serde). The
+    /// dispatcher and runtime authority handover (U2 / U3) are
+    /// separate Units and must not be wired here.
+    #[serde(default = "default_supervisor_scheduler_mode")]
+    pub scheduler_mode: SchedulerMode,
 }
 
 fn default_supervisor_enabled() -> bool {
@@ -1325,6 +1450,10 @@ fn default_supervisor_slot_retry_budget() -> u32 {
     1
 }
 
+fn default_supervisor_scheduler_mode() -> SchedulerMode {
+    SchedulerMode::Wave
+}
+
 impl Default for SupervisorConfig {
     fn default() -> Self {
         Self {
@@ -1333,6 +1462,7 @@ impl Default for SupervisorConfig {
             max_concurrent_workers: default_supervisor_max_concurrent_workers(),
             aggregate_timeout_secs: default_supervisor_aggregate_timeout_secs(),
             slot_retry_budget: default_supervisor_slot_retry_budget(),
+            scheduler_mode: default_supervisor_scheduler_mode(),
         }
     }
 }

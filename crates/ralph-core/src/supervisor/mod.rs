@@ -2038,6 +2038,7 @@ pub enum CompensationKind {
 
 pub use crate::worktree::Worktree;
 pub use coordinator::{CoordinatorAction, SupervisorCoordinator};
+pub use dag_mode::{SchedulerMode, SchedulerModeError, validate_scheduler_mode};
 pub use memory::InMemorySupervisorStore;
 pub use merge_sink::{EventMergeSink, FileEventMergeSink, InMemoryMergeSink, MergeSinkError};
 pub use phase::{FailedReason, PhaseDecision, PhaseInputs, evaluate_phase};
@@ -2056,6 +2057,13 @@ pub use worktree_bind::{
 mod attempt_tests;
 mod bridge;
 mod coordinator;
+/// 2026-09-03-0959 plan U1: tri-state `scheduler_mode` gate that
+/// isolates the legacy `WaveTracker` authority from the new
+/// runtime-owned DAG scheduler authority. Public so the config +
+/// preflight layer can pattern-match on `SchedulerMode` and so
+/// future Units (U2 artifact / U3 DAG persistence) can pull in
+/// the same validation primitive without re-implementing it.
+pub mod dag_mode;
 mod memory;
 #[cfg(test)]
 mod memory_protocol_tests;
