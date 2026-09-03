@@ -58,8 +58,11 @@ use std::sync::Arc;
 
 use ralph_core::supervisor::changed_path_guard::{
     ChangedPathError, ChangedPathRejection, ChangedPathSet, DiffPathEntry,
-    FORBIDDEN_TOP_LEVEL_PREFIXES,
 };
+// `FORBIDDEN_TOP_LEVEL_PREFIXES` is referenced only from the
+// `tests` module below (bin compilation has no other use), so
+// pull it in there directly to avoid an `unused_imports` warning
+// at the bin target.
 use ralph_core::supervisor::dag_integration::{
     InMemoryIntegrationStore, IntegrationInput, IntegrationRecord, IntegrationStore,
 };
@@ -271,7 +274,9 @@ pub use ralph_core::supervisor::integration_lane::RealRepo;
 mod tests {
     use super::*;
 
-    use ralph_core::supervisor::changed_path_guard::DiffPathEntry;
+    use ralph_core::supervisor::changed_path_guard::{
+        DiffPathEntry, FORBIDDEN_TOP_LEVEL_PREFIXES,
+    };
     use ralph_core::supervisor::integration_lane::{
         CasOutcome, FakeGitIntegrationPort, FakeRepo, GateOutcome, IntegrationLane,
     };

@@ -2,6 +2,21 @@
 //! per-Unit worktree binding — trusted worktree created or
 //! reused from a verified base commit.
 //!
+//! U7 ships the bin-side public surface as a transitional
+//! state: the worktree is consumed by U8 (correction
+//! wiring) and U10 (preset cutover) in the same plan, and
+//! the U7 acceptance tests already cover the surface via
+//! `crate::loop_runner::dag_scheduler::worktree::tests`.
+//! Until those later units land, no bin-side module other
+//! than this file's own tests exercises `UnitWorktree` /
+//! `UnitWorktreeError` / `acquire` — we mark the module
+//! `#![allow(dead_code)]` to mirror `integration.rs`'s
+//! transitional pattern and keep the `RUSTFLAGS='-D warnings'`
+//! gate honest. The lint will return the moment U8 / U10
+//! introduce a bin-side caller and dead-code warnings flip
+//! back on.
+#![allow(dead_code)]
+
 //! # Why a per-Unit worktree?
 //!
 //! Plan §7 U7 says: "Each Unit works in a worktree created
