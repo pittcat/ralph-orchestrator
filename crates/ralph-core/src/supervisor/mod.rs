@@ -2055,6 +2055,18 @@ pub use worktree_bind::{
     DefaultWorktreeFactory, WorktreeBinding, WorktreeError, WorktreeFactory,
     assert_isolation_matches, bind_slot_worktree, env_keys as worktree_env_keys,
 };
+// 2026-09-03-0959 plan U8 (R9; S8, S11; D11, D12; E2, E9, E11):
+// re-export the deadline primitives so the runtime job kernel
+// (U6 in `ralph-cli`) can depend on
+// `ralph_core::supervisor::{Clock, DeadlinePolicy, ...}` without
+// reaching into the `job_deadline` submodule.
+pub use correction::{
+    CorrectionDecision, CorrectionMachine, CorrectionState, MAX_CORRECTION_ROUNDS,
+};
+pub use job_deadline::{
+    Clock, DeadlinePolicy, DeadlineState, DeadlineVerdict, FailureClass, Signal, SystemClock,
+    VirtualClock, classify_runtime_job_error, classify_signal, evaluate_deadline,
+};
 
 /// 2026-08-07-009 plan U1 (R1-R8 / KTD1-KTD4 / KTD11): per-slot
 /// attempt receipt contract. Shared parity tests for memory and
@@ -2172,6 +2184,18 @@ mod u3_atomic_terminal_tests;
 mod u4_descriptor_tests;
 pub mod worker_outcome;
 pub mod worktree_bind;
+/// 2026-09-03-0959 plan U8 (R9; S8, S11; D11, D12; E2, E9, E11):
+/// pure deadline + idle lease logic with injectable clock.
+/// Every runtime job runs under a non-extendable hard cap.
+/// Idle lease renews only on strong progress; weak output
+/// consumes a bounded total budget (not per-renewal).
+pub mod job_deadline;
+/// 2026-09-03-0959 plan U8: bounded correction state machine.
+/// Max 3 correction rounds; on exhaust, a single typed
+/// `Blocked` is emitted (no further recovery, no looping).
+/// Fix resumes from the *failing stage* the correction's
+/// origin reports (CAS-pinned to the `(unit_key, round)` pair).
+pub mod correction;
 
 // 2026-07-03-001 supervisor real-wiring: re-export the sunk-down
 // bridge surface so `ralph-cli` and the BDD scenarios can depend on
