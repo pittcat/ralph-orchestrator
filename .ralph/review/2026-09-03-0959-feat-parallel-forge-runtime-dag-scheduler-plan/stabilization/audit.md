@@ -12,7 +12,7 @@
 - **trace_file**: `.ralph/review/2026-09-03-0959-feat-parallel-forge-runtime-dag-scheduler-plan/trace.md`
 - **resolved_baseline_sha** (work.done trigger): `33a126b0fe19acc798b1b5245be11aec834fb252`
 - **tested_from_sha** (work.done.executor_head_sha): `2a4007803e575addd9f2fa72a873ac2f55bd66a9`
-- **head_sha** (post-stabilization): `2a4007803e575addd9f2fa72a873ac2f55bd66a9` (initial) → `<post-stabilization HEAD after fix(stabilizer) commit>` (final)
+- **head_sha** (post-stabilization, after `fix(stabilizer): STAB-CORR-001` commit): `c41583d07003f542f68cc095e5625656d53c994a` (correction commit landed and clean working tree re-confirmed)
 - **review_phase**: `stabilization` (initial; `U7`-territory fixture normalization deferred to future activation)
 - **baseline_verification_file**: `.ralph/review/2026-09-03-0959-feat-parallel-forge-runtime-dag-scheduler-plan/baseline-verification.md` (status: `green`)
 - **post_verification_file**: `.ralph/review/2026-09-03-0959-feat-parallel-forge-runtime-dag-scheduler-plan/final-verification.md` (status: `red` partial)
