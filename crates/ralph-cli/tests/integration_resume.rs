@@ -1930,6 +1930,121 @@ hats:
     /// helper in `recovery_checkpoint.rs`) so the fixture is
     /// independent of `cwd` quirks in nextest's process-per-test
     /// isolation.
+    /// U4 helper: pre-create the worktree at the **canonical
+    /// external layout** (`<parent>/worktree/<project>/<id>`) that
+    /// the combined `--continue --worktree --reuse-worktree` path
+    /// actually uses to look up by name via
+    /// `WorktreeConfig::default().worktree_path(repo_root)` (see
+    /// `find_reusable_worktree_by_name` and `spawn_worktree_loop`).
+    ///
+    /// The other helper `precreate_worktree` uses the older
+    /// `workspace_root/.worktrees/<id>` scheme (matching
+    /// `commands::run_recovery::acquire_and_assess`'s literal
+    /// join), which the gate's U3 happy-path test accepts because
+    /// it does not depend on the worktree lookup — it only checks
+    /// the gate diagnostic. The U4 crash-window repair test DOES
+    /// depend on the lookup succeeding (so the child reads the
+    /// pre-staged outbox at the same path), so it must use the
+    /// canonical layout.
+    /// U4 helper: pre-create the worktree at BOTH locations the
+    /// combined `--continue --worktree --reuse-worktree` path
+    /// touches:
+    ///
+    /// 1. **Canonical external layout** (`<parent>/worktree/<project>/<id>`):
+    ///    where `spawn_worktree_loop` actually creates the worktree
+    ///    and where the child process chdir's into. The repair
+    ///    step reads the outbox at `<this>/.ralph/agent/accepted-
+    ///    transitions.jsonl`, so the outbox MUST be staged here.
+    /// 2. **Legacy gate location** (`<main_repo>/.worktrees/<id>`):
+    ///    where `acquire_and_assess` (`run_recovery.rs:283`) checks
+    ///    `workspace_root.join(".worktrees").join(name).is_dir()`
+    ///    as the gate's "worktree exists on disk" precondition. If
+    ///    this directory is missing the gate fails closed with
+    ///    `GateError::WorktreeMissing` and the child never runs —
+    ///    which is correct production behavior but makes this U4
+    ///    test unable to reach the repair step.
+    ///
+    /// Both directories point at the same git tree (HEAD of
+    /// `main_repo`); only the path differs. Both directories'
+    /// `.ralph/agent/` is seeded with the assess fixture so the
+    /// gate's `assess_checkpoint` finds what it needs at the
+    /// canonical path (the gate locks the legacy location and
+    /// assesses the canonical location — see
+    /// `run_recovery::acquire_and_assess`).
+    fn precreate_canonical_worktree(main_repo: &Path, loop_id: &str) -> PathBuf {
+        // Canonical external layout — where ralph's actual loop runs.
+        let canonical_root = main_repo
+            .parent()
+            .unwrap_or(main_repo)
+            .join("worktree")
+            .join(main_repo.file_name().expect("repo must have a basename"));
+        fs::create_dir_all(&canonical_root)
+            .expect("create canonical worktree root");
+        let canonical_path = canonical_root.join(loop_id);
+
+        // Legacy gate location — where the gate looks first.
+        let legacy_path = main_repo.join(".worktrees").join(loop_id);
+        fs::create_dir_all(legacy_path.parent().expect("legacy parent"))
+            .expect("create legacy gate root");
+
+        // Add ONE git worktree at the canonical path. The legacy
+        // directory is just a sibling directory we pre-stage so
+        // the gate's literal-join check passes — it is NOT a git
+        // worktree of its own (a second `git worktree add` would
+        // conflict on the same ref).
+        let status = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                canonical_path.to_str().unwrap(),
+                "HEAD",
+            ])
+            .current_dir(main_repo)
+            .status()
+            .expect("git worktree add (canonical)");
+        assert!(
+            status.success(),
+            "git worktree add (canonical) must succeed: {:?}",
+            canonical_path
+        );
+
+        // Mirror the assess fixture into the legacy location too.
+        // The gate (`acquire_and_assess` -> `assess_checkpoint`)
+        // reads `.ralph/current-loop-id`, `.ralph/current-events`,
+        // `.ralph/events.jsonl`, `.ralph/history.jsonl`, and
+        // `.ralph/agent/scratchpad.md` from the LEGACY
+        // `.worktrees/<id>` location — the gate locks the legacy
+        // path so the assessment also runs there. The CANONICAL
+        // path's `.ralph/` is what the child loop reads for
+        // `repair_state_machine_projection_from_outbox` and event
+        // writes; the caller stages that via
+        // `seed_assess_fixture(&canonical_path, loop_id)` after
+        // this helper returns.
+        let legacy_ralph = legacy_path.join(".ralph");
+        let legacy_agent = legacy_ralph.join("agent");
+        fs::create_dir_all(&legacy_agent)
+            .expect("create legacy .ralph/agent");
+        let legacy_events = legacy_ralph.join("events.jsonl");
+        fs::write(&legacy_events, "").expect("legacy events.jsonl");
+        fs::write(
+            legacy_ralph.join("current-events"),
+            legacy_events.to_str().expect("legacy events UTF-8"),
+        )
+        .expect("legacy current-events marker");
+        fs::write(
+            legacy_ralph.join("current-loop-id"),
+            format!("{loop_id}\n"),
+        )
+        .expect("legacy current-loop-id marker");
+        fs::write(legacy_agent.join("scratchpad.md"), "# scratch\n")
+            .expect("legacy scratchpad");
+        fs::write(legacy_ralph.join("history.jsonl"), "")
+            .expect("legacy history.jsonl");
+
+        canonical_path
+    }
+
     fn seed_assess_fixture(worktree_path: &Path, loop_id: &str) {
         let ralph_dir = worktree_path.join(".ralph");
         let agent_dir = ralph_dir.join("agent");
@@ -2627,6 +2742,435 @@ hats:
         assert!(
             archive_dir.join(MANIFEST_FILE_NAME).exists(),
             "stale manifest must remain on disk after child run"
+        );
+    }
+
+    /// U4 (plan §3.4 Crash-Window Repair): on the combined
+    /// `--continue --worktree --reuse-worktree` cold-start, the
+    /// pre-existing outbox-only StateMachine projection must be
+    /// committed to the StateLedger exactly once across repeated
+    /// cold-starts. The first cold-start repairs the projection
+    /// (count = 1); the second cold-start is a no-op because the
+    /// durable snapshot already contains the transition_id
+    /// (`has_applied_transition_id == true`). The on-disk outbox
+    /// entry is left untouched (append-only), and the worktree
+    /// `events.jsonl` does NOT gain any business event from the
+    /// repair itself — repair is purely a ledger projection.
+    #[test]
+    fn checkpoint_repair_first_apply_second_noop() {
+        use ralph_core::event_loop::accepted_transition::AcceptedTransition;
+        use ralph_core::state::StateLedger;
+        use ralph_core::state_machine::{
+            StateMachineTransitionDelta, StateMachineTransitionId,
+        };
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let main_repo = temp_dir.path();
+        setup_git_repo(main_repo);
+        write_minimal_config(main_repo);
+        seed_main_repo_scratchpad(main_repo);
+
+        let loop_id = "u4-repair-once";
+        let plan_path = main_repo.join(format!("{loop_id}.md"));
+        fs::write(&plan_path, "# plan\n").unwrap();
+
+        let worktree_path = precreate_canonical_worktree(main_repo, loop_id);
+        seed_assess_fixture(&worktree_path, loop_id);
+
+        // Build a canonical, well-formed StateMachine projection
+        // and bake it into an `OutboxEntry` line in the worktree's
+        // durable outbox. The entry has `delivered: false` and
+        // `state_machine_projection: Some(...)` so the cold-start
+        // repair commits the projection on first run.
+        let transition_id = AcceptedTransition::compute_transition_id(
+            loop_id,
+            "planner:1",
+            "rev-1",
+            "forge.plan.ready:planner",
+            "deadbeef",
+        );
+        let sm_id = StateMachineTransitionId(format!(
+            "sm-v2:{}",
+            &transition_id[..32]
+        ));
+        let projection = StateMachineTransitionDelta {
+            transition_id: sm_id.clone(),
+            source_hat: Some("planner".to_string()),
+            topic: "forge.plan.ready".to_string(),
+            instance_key: Some("instance-1".to_string()),
+            new_state: "plan-ready".to_string(),
+            opens_instance: true,
+            closes_instance: false,
+            terminal_observed: false,
+            terminal_honored: false,
+        };
+        let outbox_line = serde_json::json!({
+            "activation_id": "planner:1",
+            "committed_at": "2026-09-03T00:00:01Z",
+            "contract_revision": "rev-1",
+            "delivered": false,
+            "loop_id": loop_id,
+            "payload_digest": "deadbeef",
+            "state_machine_projection": projection,
+            "topic": "forge.plan.ready",
+            "transition_id": transition_id,
+        });
+        let outbox_path = worktree_path
+            .join(".ralph")
+            .join("agent")
+            .join("accepted-transitions.jsonl");
+        fs::write(&outbox_path, format!("{outbox_line}\n")).unwrap();
+
+        // ─── First cold-start ─────────────────────────────────────
+        let output1 = super::common::ralph_bin()
+            .args([
+                "run",
+                "--continue",
+                "--worktree",
+                "--reuse-worktree",
+                "--no-tui",
+                "--skip-preflight",
+                "--plan",
+                plan_path.to_str().unwrap(),
+            ])
+            .current_dir(main_repo)
+            .output()
+            .expect("ralph run #1");
+        let stderr1 = String::from_utf8_lossy(&output1.stderr);
+        let stdout1 = String::from_utf8_lossy(&output1.stdout);
+        // The gate must have cleared (Eligible) so the cold-start
+        // actually reached the repair step. We don't require rc==0
+        // because the parent's outer `run --continue --worktree`
+        // can exit non-zero after the child completes (max_iterations
+        // with --continue is itself a resumable condition, often
+        // surfaced as exit code 3 — see `commands::run::run_command`
+        // mapping for TerminationReason::MaxIterations). The cold-start
+        // repair step (which is what this test pins) runs BEFORE
+        // the loop body and BEFORE that exit-code mapping, so its
+        // durable effect is observable regardless of rc.
+        assert!(
+            stderr1.contains("Continuation gate cleared")
+                || stdout1.contains("Continuation gate cleared"),
+            "first cold-start must reach the gate and clear it; \
+             the repair step only runs after the gate clears. \
+             stderr={stderr1} stdout={stdout1}"
+        );
+
+        // Durable ledger inspection — the projection's transition_id
+        // must be applied to the StateMachine runtime snapshot, and
+        // the outbox must still hold the original entry (append-only).
+        // Pass the WORKTREE ROOT (not the `.ralph` subdir) to
+        // `StateLedger::new`: the ledger is rooted at
+        // `<workspace>/.ralph/ledger.jsonl`. Passing the `.ralph`
+        // subdir would re-join the relative path and read from
+        // `<.ralph>/.ralph/ledger.jsonl`, which never exists.
+        let ledger = StateLedger::new(&worktree_path, true);
+        let runtime_after_run1 = ledger
+            .snapshot()
+            .state_machine_runtime
+            .as_ref()
+            .expect("first cold-start must populate StateMachine runtime");
+        assert_eq!(
+            runtime_after_run1.accepted_transition_count(),
+            1,
+            "first cold-start must commit exactly one StateMachine projection; \
+             count={} stderr={stderr1}",
+            runtime_after_run1.accepted_transition_count(),
+        );
+        assert!(
+            runtime_after_run1.has_applied_transition_id(&sm_id),
+            "first cold-start must register the projection's transition_id as applied"
+        );
+        let outbox_after_run1 =
+            fs::read_to_string(&outbox_path).expect("outbox readable after run #1");
+        assert_eq!(
+            outbox_after_run1.lines().filter(|l| !l.trim().is_empty()).count(),
+            1,
+            "outbox must remain append-only — repair must NOT remove or rewrite entries"
+        );
+        // Capture the ledger's current `commit_log` head count so we
+        // can confirm run #2 didn't append anything new to the
+        // commit log (R6: re-running repair on a healthy ledger is
+        // a no-op).
+        let ledger_jsonl_after_run1 = fs::read_to_string(
+            worktree_path.join(".ralph").join("ledger.jsonl"),
+        )
+        .unwrap_or_default();
+        let commits_after_run1 = ledger_jsonl_after_run1
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+
+        // ─── Second cold-start (immediate retry) ──────────────────
+        // The combined path must be safe to invoke twice in a row.
+        // The repair step is the load-bearing invariant: it must
+        // NOT double-apply the projection (R6 idempotency).
+        let output2 = super::common::ralph_bin()
+            .args([
+                "run",
+                "--continue",
+                "--worktree",
+                "--reuse-worktree",
+                "--no-tui",
+                "--skip-preflight",
+                "--plan",
+                plan_path.to_str().unwrap(),
+            ])
+            .current_dir(main_repo)
+            .output()
+            .expect("ralph run #2");
+        let stderr2 = String::from_utf8_lossy(&output2.stderr);
+        let stdout2 = String::from_utf8_lossy(&output2.stdout);
+        eprintln!("U4 repair#2 stderr: {stderr2}");
+        eprintln!("U4 repair#2 stdout: {stdout2}");
+        // The second cold-start must also reach the gate and clear it.
+        // We don't require rc==0 for the same reason as run #1: the
+        // outer `--continue --worktree` exit code is independent of
+        // the cold-start repair step. The durable invariant we care
+        // about is the projection's count and the ledger's commit
+        // log size — both inspected below.
+        assert!(
+            stderr2.contains("Continuation gate cleared")
+                || stdout2.contains("Continuation gate cleared"),
+            "second cold-start must reach the gate and clear it; \
+             the repair step only runs after the gate clears. \
+             stderr={stderr2} stdout={stdout2}"
+        );
+
+        // The projection's transition_id is still applied exactly
+        // once. We re-load the ledger from disk so we measure the
+        // durable state (the in-memory ledger's commit_log is reset
+        // on every `StateLedger::new`, so we must consult the
+        // snapshot's StateMachine runtime — that is the durable
+        // signal). Pass the worktree root (not the `.ralph`
+        // subdir) — see comment in run #1.
+        let ledger_after_run2 = StateLedger::new(&worktree_path, true);
+        let runtime_after_run2 = ledger_after_run2
+            .snapshot()
+            .state_machine_runtime
+            .as_ref()
+            .expect("second cold-start must keep the StateMachine runtime populated");
+        assert_eq!(
+            runtime_after_run2.accepted_transition_count(),
+            1,
+            "second cold-start must NOT increment accepted_transition_count; \
+             repair is a no-op once transition_id is applied. \
+             count={} stderr={stderr2}",
+            runtime_after_run2.accepted_transition_count(),
+        );
+        assert!(
+            runtime_after_run2.has_applied_transition_id(&sm_id),
+            "second cold-start must keep the projection's transition_id as applied"
+        );
+
+        // The on-disk commit log must NOT have grown. R6: the
+        // ledger's replayable commit history must stay stable across
+        // idempotent repair runs.
+        let ledger_jsonl_after_run2 = fs::read_to_string(
+            worktree_path.join(".ralph").join("ledger.jsonl"),
+        )
+        .unwrap_or_default();
+        let commits_after_run2 = ledger_jsonl_after_run2
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+        assert_eq!(
+            commits_after_run2, commits_after_run1,
+            "ledger.jsonl must NOT grow on second cold-start; \
+             repair is a no-op when transition_id already applied. \
+             before={commits_after_run1} after={commits_after_run2} stderr={stderr2}"
+        );
+
+        // Outbox is still append-only — neither run drained or
+        // re-appended.
+        let outbox_after_run2 =
+            fs::read_to_string(&outbox_path).expect("outbox readable after run #2");
+        assert_eq!(
+            outbox_after_run2.lines().filter(|l| !l.trim().is_empty()).count(),
+            1,
+            "outbox must still hold exactly one entry after run #2 (append-only)"
+        );
+        assert_eq!(
+            outbox_after_run1, outbox_after_run2,
+            "outbox must be byte-identical across the two cold-starts \
+             (append-only — neither run mutates existing entries)"
+        );
+
+        // Events ledger in the worktree must NOT contain any
+        // business event from the repair itself. Repair is a pure
+        // StateLedger projection; it does not publish to the bus.
+        let events_path = worktree_path.join(".ralph/events.jsonl");
+        if events_path.exists() {
+            let events_body =
+                fs::read_to_string(&events_path).expect("events.jsonl readable");
+            for line in events_body.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                assert!(
+                    !trimmed.contains("\"forge.plan.ready\"")
+                        && !trimmed.contains("\"plan-ready\""),
+                    "repair must NOT publish a business event to events.jsonl; \
+                     found: {trimmed}"
+                );
+            }
+        }
+    }
+
+    /// U4 (plan §3.4 Crash-Window Repair — negative path): when the
+    /// outbox path itself is unreadable (a directory, not a file),
+    /// the cold-start repair must fail closed BEFORE any business
+    /// event reaches the bus. This is the genuine-IO branch of the
+    /// repair contract — production wiring at
+    /// `acceptance_and_lifecycle.rs:516-522` returns `Err(io::Error)`
+    /// from `repair_state_machine_projection_from_outbox` and the
+    /// runtime bails out before publishing anything.
+    #[test]
+    fn checkpoint_repair_genuine_outbox_io_fails_closed_without_bus_startup() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let main_repo = temp_dir.path();
+        setup_git_repo(main_repo);
+        write_minimal_config(main_repo);
+        seed_main_repo_scratchpad(main_repo);
+
+        let loop_id = "u4-repair-iofail";
+        let plan_path = main_repo.join(format!("{loop_id}.md"));
+        fs::write(&plan_path, "# plan\n").unwrap();
+
+        let worktree_path = precreate_canonical_worktree(main_repo, loop_id);
+        seed_assess_fixture(&worktree_path, loop_id);
+
+        // Make the outbox path a DIRECTORY instead of a file —
+        // genuine I/O error: `fs::read_to_string` will fail
+        // (EISDIR on Linux). The repair step must surface this as
+        // `Err(io::Error)` and the cold-start must fail closed.
+        let outbox_path = worktree_path
+            .join(".ralph")
+            .join("agent")
+            .join("accepted-transitions.jsonl");
+        fs::create_dir_all(&outbox_path).expect("make outbox path a directory");
+
+        let events_path = worktree_path.join(".ralph/events.jsonl");
+        let events_existed_before = events_path.exists();
+        let events_size_before = if events_existed_before {
+            fs::metadata(&events_path).map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+
+        let output = super::common::ralph_bin()
+            .args([
+                "run",
+                "--continue",
+                "--worktree",
+                "--reuse-worktree",
+                "--no-tui",
+                "--skip-preflight",
+                "--plan",
+                plan_path.to_str().unwrap(),
+            ])
+            .current_dir(main_repo)
+            .output()
+            .expect("ralph run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        eprintln!("U4 iofail stderr: {stderr}");
+        eprintln!("U4 iofail stdout: {stdout}");
+
+        // Exit must be non-zero — the cold-start failed closed.
+        assert!(
+            !output.status.success(),
+            "cold-start with unreadable outbox must fail closed; \
+             got rc={:?} stderr={stderr}",
+            output.status.code()
+        );
+
+        // The error chain is: read_outbox fails on
+        // `fs::read_to_string` of a directory → io::Error propagates
+        // through repair → runtime bails before publishing. The
+        // surface area in stderr/stdout names the failure (either
+        // via tracing error!() or via the `EventLoop::from_resolved`
+        // expect's panic message, which embeds the underlying
+        // io::Error). We accept any of the canonical markers.
+        let combined = format!("{stderr}{stdout}");
+        let mentions_outbox_failure = combined.contains("outbox")
+            || combined.contains("OutboxEntry")
+            || combined.contains("accepted-transitions.jsonl")
+            || combined.contains("EISDIR")
+            || combined.contains("Is a directory")
+            || combined.contains("is a directory")
+            || combined.contains("repair");
+        assert!(
+            mentions_outbox_failure,
+            "stderr/stdout must explain why the cold-start failed; \
+             expect a message mentioning the outbox, repair, or \
+             'Is a directory'. got: stderr={stderr} stdout={stdout}"
+        );
+
+        // Bootstrap may legitimately create events.jsonl with
+        // lifecycle events (gate-clear diagnostics, loop.start
+        // markers, etc.) before the cold-start fails closed. What
+        // matters is that no BUSINESS event reached the bus — the
+        // repair contract is "fail closed before publish". The
+        // per-line content check below is the load-bearing
+        // assertion; the size check only verifies the file did
+        // not balloon (no hat activations succeeded).
+        let events_size_after = if events_path.exists() {
+            fs::metadata(&events_path).map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+        // Bootstrap diagnostics are bounded; 4 KiB is a generous
+        // upper bound for the gate/loop.start lines emitted
+        // before the U13 archive-failed panic. Anything larger
+        // would indicate a successful hat activation wrote a
+        // business payload.
+        assert!(
+            events_size_after <= 4096,
+            "events.jsonl must stay small when cold-start fails closed; \
+             bootstrap diagnostics are bounded — anything larger means a \
+             business event slipped through. before={events_size_before} \
+             after={events_size_after} stderr={stderr}"
+        );
+
+        // The runtime must also not have advanced past the gate to
+        // write any "Continuation gate cleared" diagnostic for the
+        // cold-start loop — the gate may have cleared (we want it
+        // to, so the repair actually runs), but the cold-start
+        // itself must NOT have published any business event to the
+        // bus. We assert that no business-topic line was written.
+        if events_path.exists() {
+            let body = fs::read_to_string(&events_path).unwrap_or_default();
+            for line in body.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                // Business topics we'd never expect to see before
+                // the cold-start completes: any hat output topic.
+                assert!(
+                    !trimmed.contains("\"topic\":\"work.start\"")
+                        && !trimmed.contains("\"topic\":\"plan.ready\"")
+                        && !trimmed.contains("\"topic\":\"work.done\"")
+                        && !trimmed.contains("\"topic\":\"task.start\"")
+                        && !trimmed.contains("\"topic\":\"forge.plan.ready\"")
+                        && !trimmed.contains("\"topic\":\"forge.wave.worktrees.ready\""),
+                    "no business event must reach events.jsonl when \
+                     cold-start fails closed; found: {trimmed}"
+                );
+            }
+        }
+
+        // The directory we planted at the outbox path is still on
+        // disk — the runtime must not have removed it as a
+        // "recovery" side effect. The fail-closed contract means
+        // the path is left untouched so the operator can inspect
+        // the corruption.
+        assert!(
+            outbox_path.is_dir(),
+            "outbox path must remain a directory on disk after fail-closed \
+             (operator-visible corruption marker)"
         );
     }
 }
