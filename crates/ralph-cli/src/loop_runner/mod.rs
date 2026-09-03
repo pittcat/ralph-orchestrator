@@ -65,6 +65,13 @@ mod sync_timeout;
 #[cfg(test)]
 mod sync_timeout_tests;
 mod termination_diagnostics_support;
+// Plan 2026-09-03-0959 U6: generic job kernel + per-Unit pipeline
+// driver for `scheduler_mode: dag`. These two modules are the U6
+// deliverable; the wave worker (`wave::worker`) keeps its own
+// env / event contract untouched. See `runtime_job::mod` and
+// `dag_scheduler::mod` for the file layout + responsibility split.
+pub mod dag_scheduler;
+pub mod runtime_job;
 pub mod wave;
 
 #[cfg(test)]
