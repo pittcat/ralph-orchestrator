@@ -503,15 +503,26 @@ impl EventLoop {
 
     /// Injects memory data and the ralph-tools skill into the prefix.
     ///
-    /// Special case: loads memory entries from the store, applies budget
-    /// truncation, then appends the ralph-tools skill content (which covers
-    /// both tasks and memories CLI usage).
+    /// Special case: loads memory entries visible to `hat_id` from the
+    /// store, applies budget truncation to the **filtered** set, then
+    /// appends the ralph-tools skill content (which covers both tasks
+    /// and memories CLI usage).
     /// Memory data is gated by `memories.enabled && memories.inject == Auto`.
     /// The ralph-tools skill is injected when either memories or tasks are enabled.
+    ///
+    /// Visibility is per-hat: shared memories are always visible;
+    /// private memories only surface to their owning hat. The budget
+    /// must therefore be applied to the filtered set, never to the
+    /// unfiltered store — otherwise a peer's private entries would
+    /// (a) leak into the prompt and (b) silently consume budget that
+    /// belongs to the caller's own memories (plan 2026-09-01-2102 U5).
     pub(super) fn inject_memories_and_tools_skill(&self, prefix: &mut String, hat_id: &HatId) {
         let memories_config = &self.config.memories;
 
-        // Inject memory DATA if memories are enabled with auto-inject
+        // Inject memory DATA if memories are enabled with auto-inject.
+        // Load **visible** memories (shared + this hat's private) so
+        // private entries from other hats never reach another hat's
+        // prompt and never consume budget reserved for this hat.
         if memories_config.enabled && memories_config.inject == InjectMode::Auto {
             info!(
                 "Memory injection check: enabled={}, inject={:?}, workspace_root={:?}",
@@ -528,9 +539,13 @@ impl EventLoop {
                 memories_path.exists()
             );
 
-            let memories = match store.load() {
+            let memories = match store.load_visible(Some(hat_id.as_str())) {
                 Ok(memories) => {
-                    info!("Successfully loaded {} memories from store", memories.len());
+                    info!(
+                        "Successfully loaded {} visible memories from store (hat={})",
+                        memories.len(),
+                        hat_id
+                    );
                     memories
                 }
                 Err(e) => {
