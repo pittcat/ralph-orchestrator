@@ -57,14 +57,14 @@ pub(crate) use activation_outcome::{
 // working unchanged.
 mod entry;
 mod inner;
+mod rpc_bootstrap;
 mod run_impl;
 mod runner;
-mod rpc_bootstrap;
 mod suspend;
 mod sync_timeout;
-mod termination_diagnostics_support;
 #[cfg(test)]
 mod sync_timeout_tests;
+mod termination_diagnostics_support;
 pub mod wave;
 
 #[cfg(test)]

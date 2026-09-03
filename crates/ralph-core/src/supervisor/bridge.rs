@@ -701,12 +701,7 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
         Ok(())
     }
 
-    fn record_slot_pid(
-        &self,
-        wave_id: &str,
-        slot_index: u32,
-        pid: u32,
-    ) -> Result<(), BridgeError> {
+    fn record_slot_pid(&self, wave_id: &str, slot_index: u32, pid: u32) -> Result<(), BridgeError> {
         self.store.record_slot_pid(wave_id, slot_index, pid)?;
         Ok(())
     }

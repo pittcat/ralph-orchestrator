@@ -4084,17 +4084,15 @@ fn quarantine_worker_channel(
         })?;
     let quarantine_dir = ralph_dir.join("diagnostics").join("failed-activations");
     std::fs::create_dir_all(&quarantine_dir)?;
-    let file_name = worker_events_path
-        .file_name()
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "worker events path has no filename: {}",
-                    worker_events_path.display()
-                ),
-            )
-        })?;
+    let file_name = worker_events_path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "worker events path has no filename: {}",
+                worker_events_path.display()
+            ),
+        )
+    })?;
     let suffix = std::process::id();
     let destination = quarantine_dir.join(format!(
         "{}-slot{}-attempt{}-pid{}",
@@ -4128,11 +4126,17 @@ mod quarantine_tests {
         std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
         let channel = fake_worker_events_file(&ralph_dir, "u6-quarantine", 0);
 
-        let destination = quarantine_worker_channel(&channel, 0, 1)
-            .expect("quarantine must succeed");
+        let destination =
+            quarantine_worker_channel(&channel, 0, 1).expect("quarantine must succeed");
 
-        assert!(!channel.exists(), "U6/S6.1: source path must not exist after rename");
-        assert!(destination.exists(), "U6/S6.1: destination must hold the moved file");
+        assert!(
+            !channel.exists(),
+            "U6/S6.1: source path must not exist after rename"
+        );
+        assert!(
+            destination.exists(),
+            "U6/S6.1: destination must hold the moved file"
+        );
         assert!(
             destination.starts_with(ralph_dir.join("diagnostics").join("failed-activations")),
             "U6/S6.1: quarantine destination must live under .ralph/diagnostics/failed-activations; \

@@ -36,13 +36,13 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 
 use ralph_core::diagnostics::{
-    AnomalyDescriptor, DiagnosticsCollector, DiagnosticsOptions, EvidenceWindowWriter,
-    EVIDENCE_WINDOW_SCHEMA_VERSION,
+    AnomalyDescriptor, DiagnosticsCollector, DiagnosticsOptions, EVIDENCE_WINDOW_SCHEMA_VERSION,
+    EvidenceWindowWriter,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
 
 const WINDOW_CAPACITY: usize = 200;
 
@@ -147,8 +147,8 @@ fn ring_buffer_push_drops_oldest_past_capacity() {
     // `push` past capacity and asserts the queue only retains the
     // last `capacity` entries (the S6.3 contract).
     let temp = TempDir::new().expect("TempDir");
-    let mut writer = EvidenceWindowWriter::new(temp.path(), WINDOW_CAPACITY)
-        .expect("EvidenceWindowWriter::new");
+    let mut writer =
+        EvidenceWindowWriter::new(temp.path(), WINDOW_CAPACITY).expect("EvidenceWindowWriter::new");
 
     for i in 0..(WINDOW_CAPACITY + 1) {
         writer.push(json!({"seq": i}));
@@ -171,8 +171,8 @@ fn flush_writes_anomaly_descriptor_first() {
     // carries trigger_kind / ts / iteration. The frozen file is
     // not created until flush is called (S6.1).
     let temp = TempDir::new().expect("TempDir");
-    let mut writer = EvidenceWindowWriter::new(temp.path(), WINDOW_CAPACITY)
-        .expect("EvidenceWindowWriter::new");
+    let mut writer =
+        EvidenceWindowWriter::new(temp.path(), WINDOW_CAPACITY).expect("EvidenceWindowWriter::new");
 
     let window_path = temp.path().join("evidence-window.jsonl");
     assert!(
@@ -197,7 +197,10 @@ fn flush_writes_anomaly_descriptor_first() {
     assert_eq!(lines.len(), 4, "1 anomaly + 2 pre-trigger + 1 post-trigger");
 
     let first = &lines[0];
-    assert_eq!(first["schema_version"], json!(EVIDENCE_WINDOW_SCHEMA_VERSION));
+    assert_eq!(
+        first["schema_version"],
+        json!(EVIDENCE_WINDOW_SCHEMA_VERSION)
+    );
     assert_eq!(first["kind"], json!("anomaly"));
     assert_eq!(first["trigger_kind"], json!("watchdog_timeout"));
     assert_eq!(first["iteration"], json!(7));
@@ -215,8 +218,8 @@ fn flush_with_empty_buffer_still_emits_anomaly_descriptor() {
     // anomaly line (plus any post-trigger lines supplied by the
     // caller).
     let temp = TempDir::new().expect("TempDir");
-    let mut writer = EvidenceWindowWriter::new(temp.path(), WINDOW_CAPACITY)
-        .expect("EvidenceWindowWriter::new");
+    let mut writer =
+        EvidenceWindowWriter::new(temp.path(), WINDOW_CAPACITY).expect("EvidenceWindowWriter::new");
 
     let anomaly = AnomalyDescriptor {
         trigger_kind: "non_zero_exit".to_string(),
@@ -240,8 +243,8 @@ fn ring_buffer_caps_pre_trigger_rows_at_capacity() {
     // the last `capacity` pre-trigger rows land in the file. Older
     // rows are silently dropped (ring buffer semantics).
     let temp = TempDir::new().expect("TempDir");
-    let mut writer = EvidenceWindowWriter::new(temp.path(), WINDOW_CAPACITY)
-        .expect("EvidenceWindowWriter::new");
+    let mut writer =
+        EvidenceWindowWriter::new(temp.path(), WINDOW_CAPACITY).expect("EvidenceWindowWriter::new");
 
     for i in 0..1000 {
         writer.push(json!({"seq": i, "payload": "candidate"}));
@@ -275,8 +278,8 @@ fn oversized_string_field_is_truncated_in_window_row() {
     let _guard = tracing::subscriber::set_default(subscriber);
 
     let temp = TempDir::new().expect("TempDir");
-    let mut writer = EvidenceWindowWriter::new(temp.path(), WINDOW_CAPACITY)
-        .expect("EvidenceWindowWriter::new");
+    let mut writer =
+        EvidenceWindowWriter::new(temp.path(), WINDOW_CAPACITY).expect("EvidenceWindowWriter::new");
 
     let huge = "x".repeat(50 * 1024 * 1024);
     writer.push(json!({"prompt": huge.clone()}));
@@ -314,14 +317,10 @@ fn collector_causal_evidence_mode_creates_evidence_window_writer() {
     // `EvidenceWindowWriter` and the sidecar must appear once a
     // flush is invoked.
     let temp = TempDir::new().expect("TempDir");
-    let collector =
-        DiagnosticsCollector::with_options(temp.path(), &causal_evidence_options())
-            .expect("collector");
+    let collector = DiagnosticsCollector::with_options(temp.path(), &causal_evidence_options())
+        .expect("collector");
 
-    let session = collector
-        .session_dir()
-        .expect("session dir")
-        .to_path_buf();
+    let session = collector.session_dir().expect("session dir").to_path_buf();
 
     collector.push_evidence_window_line(json!({"event": "decision_receipt"}));
     collector.push_evidence_window_line(json!({"event": "policy_receipt"}));
@@ -384,8 +383,8 @@ fn collector_full_diagnostics_mode_also_creates_evidence_window_writer() {
     // a watchdog-timeout on a full-diagnostics run produces the
     // same sidecar as a causal-only run.
     let temp = TempDir::new().expect("TempDir");
-    let collector = DiagnosticsCollector::with_options(temp.path(), &full_options())
-        .expect("collector");
+    let collector =
+        DiagnosticsCollector::with_options(temp.path(), &full_options()).expect("collector");
 
     collector.push_evidence_window_line(json!({"event": "trace"}));
 
@@ -414,8 +413,8 @@ fn post_trigger_lines_are_serialized_after_pre_trigger() {
     // post-trigger (caller-supplied). Even if the post-trigger
     // payload contains oversized fields, it must be capped.
     let temp = TempDir::new().expect("TempDir");
-    let mut writer = EvidenceWindowWriter::new(temp.path(), WINDOW_CAPACITY)
-        .expect("EvidenceWindowWriter::new");
+    let mut writer =
+        EvidenceWindowWriter::new(temp.path(), WINDOW_CAPACITY).expect("EvidenceWindowWriter::new");
 
     writer.push(json!({"seq": 0}));
     writer.push(json!({"seq": 1}));
@@ -428,10 +427,7 @@ fn post_trigger_lines_are_serialized_after_pre_trigger() {
     };
     let huge = "z".repeat(20 * 1024 * 1024);
     writer
-        .flush(
-            anomaly,
-            vec![json!({"phase": "termination", "log": huge})],
-        )
+        .flush(anomaly, vec![json!({"phase": "termination", "log": huge})])
         .expect("flush");
 
     let body =
@@ -444,8 +440,7 @@ fn post_trigger_lines_are_serialized_after_pre_trigger() {
     // Post-trigger truncation keeps the serialized row bounded.
     let last = lines.last().unwrap();
     assert!(
-        last["log"].as_str().unwrap().len()
-            <= ralph_core::diagnostics::MAX_SIDECAR_FIELD_BYTES,
+        last["log"].as_str().unwrap().len() <= ralph_core::diagnostics::MAX_SIDECAR_FIELD_BYTES,
         "post-trigger truncated field must fit in MAX_SIDECAR_FIELD_BYTES",
     );
 }

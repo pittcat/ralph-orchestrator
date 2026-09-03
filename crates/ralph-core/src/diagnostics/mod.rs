@@ -25,9 +25,9 @@
 mod agent_output;
 mod drift;
 mod errors;
+pub mod evidence_window;
 mod feedback;
 mod hook_runs;
-pub mod evidence_window;
 pub mod input_bundle;
 mod log_rotation;
 mod orchestration;
@@ -45,8 +45,8 @@ pub use agent_output::{AgentOutputContent, AgentOutputEntry, AgentOutputLogger};
 pub use drift::{DriftLogger, MAX_DRIFT_MESSAGE_CHARS};
 pub use errors::{DiagnosticError, ErrorLogger};
 pub use evidence_window::{
-    AnomalyDescriptor, DEFAULT_WINDOW_CAPACITY, EvidenceWindowWriter, EVIDENCE_WINDOW_SCHEMA_VERSION,
-    trigger_kinds,
+    AnomalyDescriptor, DEFAULT_WINDOW_CAPACITY, EVIDENCE_WINDOW_SCHEMA_VERSION,
+    EvidenceWindowWriter, trigger_kinds,
 };
 pub use feedback::{FEEDBACK_SCHEMA_VERSION, FeedbackEntry, FeedbackLogger, FeedbackPhase};
 pub use hook_runs::{HookDisposition, HookRunLogger, HookRunTelemetryEntry};
@@ -134,10 +134,7 @@ where
 /// concrete failure cause (rather than an empty string). Lives
 /// outside the `DiagnosticsCollector` impl because it has no
 /// `self` dependency — only the row vector.
-fn annotate_gaps_with_reason(
-    coverage: &mut [input_bundle::BoundaryCoverageEntry],
-    reason: &str,
-) {
+fn annotate_gaps_with_reason(coverage: &mut [input_bundle::BoundaryCoverageEntry], reason: &str) {
     for entry in coverage.iter_mut() {
         if entry.status == input_bundle::BoundaryCoverageStatus::Gap {
             entry.reason = Some(reason.to_string());
@@ -618,9 +615,9 @@ impl DiagnosticsOptions {
     /// become a no-op buffer of zero width (which would
     /// cause `flush` to silently drop every pre-trigger line).
     pub fn causal_evidence_window_capacity(&self) -> usize {
-        let capacity = self.causal_evidence_window_capacity.unwrap_or(
-            evidence_window::DEFAULT_WINDOW_CAPACITY,
-        );
+        let capacity = self
+            .causal_evidence_window_capacity
+            .unwrap_or(evidence_window::DEFAULT_WINDOW_CAPACITY);
         capacity.max(1)
     }
 }
@@ -708,7 +705,8 @@ pub struct DiagnosticsCollector {
     /// Initialized to eight zero counters (one per `CausalBoundary`)
     /// so a session with no events still serializes eight covered
     /// rows.
-    boundary_counters: Arc<Mutex<std::collections::BTreeMap<CausalBoundary, input_bundle::BoundaryCounter>>>,
+    boundary_counters:
+        Arc<Mutex<std::collections::BTreeMap<CausalBoundary, input_bundle::BoundaryCounter>>>,
 }
 
 impl std::fmt::Debug for DiagnosticsCollector {
@@ -1105,10 +1103,7 @@ impl DiagnosticsCollector {
         };
         CausalBoundary::all()
             .map(|boundary| {
-                let counter = counters
-                    .get(&boundary)
-                    .cloned()
-                    .unwrap_or_default();
+                let counter = counters.get(&boundary).cloned().unwrap_or_default();
                 input_bundle::BoundaryCoverageEntry::new(boundary, &counter, gap_reason.clone())
             })
             .collect()
@@ -1768,9 +1763,7 @@ impl DiagnosticsCollector {
             return Ok(());
         };
         let mut guard = writer.lock().map_err(|err| {
-            std::io::Error::other(format!(
-                "evidence-window writer mutex poisoned: {err}"
-            ))
+            std::io::Error::other(format!("evidence-window writer mutex poisoned: {err}"))
         })?;
         guard.flush(anomaly, post_trigger_lines)
     }

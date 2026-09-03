@@ -98,7 +98,8 @@ fn enabled_run_writes_input_bundle() {
         size_bytes: Some(128),
         last_modified: None,
     }];
-    let final_bundle = updated.with_finalized(artifacts, vec!["single-chain".to_string()], Vec::new());
+    let final_bundle =
+        updated.with_finalized(artifacts, vec!["single-chain".to_string()], Vec::new());
     let res = write_input_bundle(&session, &final_bundle).expect("write_manifest");
     assert!(res.is_some());
     let bytes = fs::read(&path).expect("read final manifest");
@@ -292,18 +293,24 @@ fn v2_manifest_contains_eight_boundary_coverage_entries() {
     // happen to fire during this session.
     let mut counters = std::collections::BTreeMap::new();
     for boundary in CausalBoundary::all() {
-        counters.insert(boundary, ralph_core::diagnostics::BoundaryCounter {
-            expected: 1,
-            recorded: 1,
-        });
+        counters.insert(
+            boundary,
+            ralph_core::diagnostics::BoundaryCounter {
+                expected: 1,
+                recorded: 1,
+            },
+        );
     }
     let coverage: Vec<BoundaryCoverageEntry> = counters
         .iter()
         .map(|(boundary, counter)| BoundaryCoverageEntry::new(*boundary, counter, None))
         .collect();
     assert_eq!(coverage.len(), 8, "must enumerate all 8 boundaries");
-    let bundle = DiagnosisInputBundle::new_pending(&session)
-        .with_finalized(Vec::new(), Vec::new(), coverage);
+    let bundle = DiagnosisInputBundle::new_pending(&session).with_finalized(
+        Vec::new(),
+        Vec::new(),
+        coverage,
+    );
     let res = write_input_bundle(&session, &bundle).expect("write_manifest");
     assert!(res.is_some());
 
@@ -357,7 +364,11 @@ fn degraded_logger_produces_structured_gap() {
             expected: 3,
             recorded: 1,
         };
-        coverage.push(BoundaryCoverageEntry::new(boundary, &counter, Some(reason_text.clone())));
+        coverage.push(BoundaryCoverageEntry::new(
+            boundary,
+            &counter,
+            Some(reason_text.clone()),
+        ));
     }
     let bundle = DiagnosisInputBundle::new_pending(&session)
         .with_finalized(Vec::new(), Vec::new(), coverage)

@@ -13,10 +13,10 @@ use super::*; // mod.rs re-exports: event_logging, execution, exit_conditions, h
 // so the qualified imports live here at the file head.
 use super::entry::merge_isolated_channel_on_interrupt;
 use super::entry::persist_starting_event_to_events_file;
+use super::rpc_bootstrap::loop_bootstrap;
 use super::run_impl::build_supervisor_bridge;
 use super::runner::RpcSharedState;
 use super::runner::resolve_loop_id;
-use super::rpc_bootstrap::loop_bootstrap;
 use super::sync_timeout::SyncRunError;
 use super::sync_timeout::adapter_timeout_duration;
 use super::sync_timeout::run_sync_with_timeout;
@@ -1096,8 +1096,9 @@ pub(super) async fn run_loop_impl_inner(
                             // it has been missing until now. Idempotent:
                             // a wave whose `delivery_state` already
                             // reached `BusinessProjected` is skipped.
-                            let bridge: std::sync::Arc<dyn ralph_core::supervisor::SupervisorBridge> =
-                                std::sync::Arc::new(concrete.clone());
+                            let bridge: std::sync::Arc<
+                                dyn ralph_core::supervisor::SupervisorBridge,
+                            > = std::sync::Arc::new(concrete.clone());
                             let redelivery_report =
                                 crate::loop_runner::wave::recovery_redelivery::redeliver_persisted_slot_events(
                                     store.clone(),
@@ -1228,8 +1229,9 @@ pub(super) async fn run_loop_impl_inner(
                                     // see the supervisor-enabled branch
                                     // above — the redelivery seam is
                                     // the same here. Idempotent.
-                                    let bridge: std::sync::Arc<dyn ralph_core::supervisor::SupervisorBridge> =
-                                        std::sync::Arc::new(concrete.clone());
+                                    let bridge: std::sync::Arc<
+                                        dyn ralph_core::supervisor::SupervisorBridge,
+                                    > = std::sync::Arc::new(concrete.clone());
                                     let redelivery_report = crate::loop_runner::wave::recovery_redelivery::redeliver_persisted_slot_events(
                                         store.clone(),
                                         bridge,
@@ -3548,8 +3550,7 @@ pub(super) async fn run_loop_impl_inner(
             && exit_code != 0
             && let Err(err) = event_loop.diagnostics().flush_evidence_window(
                 ralph_core::diagnostics::AnomalyDescriptor {
-                    trigger_kind: ralph_core::diagnostics::trigger_kinds::NON_ZERO_EXIT
-                        .to_string(),
+                    trigger_kind: ralph_core::diagnostics::trigger_kinds::NON_ZERO_EXIT.to_string(),
                     ts: chrono::Utc::now().to_rfc3339(),
                     iteration: iteration as u64,
                     details: Some(serde_json::json!({
@@ -4836,9 +4837,8 @@ pub(super) async fn run_loop_impl_inner(
                 wave_policy_rejection_count: 0,
                 terminal_obligation_topics: Vec::new(),
             };
-            let silent_class = crate::loop_runner::activation_outcome::classify_silent_activation(
-                &minimal_facts,
-            );
+            let silent_class =
+                crate::loop_runner::activation_outcome::classify_silent_activation(&minimal_facts);
             if !silent_class.counts_toward_publish_obligation() {
                 // 2026-09-01-001 plan U4 (S4.3): route to the
                 // existing backend-failure path instead of

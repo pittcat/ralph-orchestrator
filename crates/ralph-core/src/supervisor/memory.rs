@@ -13,8 +13,8 @@
 //! snapshot state without touching the live locks.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
 #[cfg(test)]
@@ -3299,8 +3299,7 @@ mod tests {
             wave_total: Some(1),
             system_injected: None,
         }];
-        s.record_slot_event_payloads(&wave, 0, 1, &first)
-            .unwrap();
+        s.record_slot_event_payloads(&wave, 0, 1, &first).unwrap();
         // Same length re-write — must keep the original payload.
         let same_length = vec![crate::Event {
             topic: "exec.unit.failed".to_string(),
@@ -3353,8 +3352,7 @@ mod tests {
                 system_injected: None,
             },
         ];
-        s.record_slot_event_payloads(&wave, 0, 1, &longer)
-            .unwrap();
+        s.record_slot_event_payloads(&wave, 0, 1, &longer).unwrap();
         let loaded = s.load_slot_event_payloads(&wave).unwrap();
         assert_eq!(loaded[0].2.len(), 2);
         assert_eq!(loaded[0].2[1].topic, "exec.unit.done");

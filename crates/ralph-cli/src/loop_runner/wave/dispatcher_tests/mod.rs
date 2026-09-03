@@ -288,7 +288,12 @@ impl WaveWorkerExecutor for TestExecutor {
             let _ = request.worker_rpc_tx.take();
             let _ = request.worker_tui_state.take();
             let outcome = if success {
-                Ok((vec![core_event("review.done", "ok")], hold_for, success, None))
+                Ok((
+                    vec![core_event("review.done", "ok")],
+                    hold_for,
+                    success,
+                    None,
+                ))
             } else {
                 Err(("forced failure".to_string(), hold_for))
             };
