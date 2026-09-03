@@ -401,6 +401,16 @@ pub(crate) fn render_refusal(refusal: &AssessmentRefusal) -> String {
              combined --continue cannot proceed without a fresh parent signature",
             worktree_display = worktree.display()
         ),
+        AssessmentRefusal::EventsTargetOutsideWorkspace {
+            resolved,
+            expected_prefix,
+        } => format!(
+            ".ralph/current-events resolves to {resolved_display} which is \
+             outside the workspace .ralph/ prefix ({prefix_display}); refusing \
+             to continue with a foreign events file",
+            resolved_display = resolved.display(),
+            prefix_display = expected_prefix.display()
+        ),
     }
 }
 

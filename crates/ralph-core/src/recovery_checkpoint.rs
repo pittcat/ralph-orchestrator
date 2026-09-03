@@ -125,6 +125,22 @@ pub enum AssessmentRefusal {
         /// Workspace (worktree) whose gate was checked.
         worktree: PathBuf,
     },
+    /// U4 (plan 2026-09-01-2102): `.ralph/current-events` resolves
+    /// to a real regular file, but that file lives outside
+    /// `<workspace>/.ralph/`. A writer with write access to the
+    /// marker could otherwise redirect the assessment to a foreign
+    /// events file and produce a split-brain verdict that mixes
+    /// foreign-event-context with trusted-marker-context
+    /// (adversarial: A2). Both paths are recorded as canonical
+    /// forms so the operator-facing message can name them
+    /// unambiguously.
+    EventsTargetOutsideWorkspace {
+        /// Canonical path the marker resolved to.
+        resolved: PathBuf,
+        /// Canonical path of `<workspace>/.ralph/` that the
+        /// resolved target was expected to live under.
+        expected_prefix: PathBuf,
+    },
 }
 
 /// Errors raised by the assessment entrypoint (caller mistakes; not
@@ -436,6 +452,16 @@ pub(crate) fn read_marker(path: &Path) -> io::Result<Option<String>> {
 /// is returned when the resolved target does not exist or is not a
 /// regular file. Relative paths are resolved against `workspace`;
 /// absolute paths are used as-is.
+///
+/// U4 (plan 2026-09-01-2102): once the target has been confirmed to
+/// exist as a regular file, both the target and the workspace's
+/// `.ralph/` directory are canonicalized, and the target must live
+/// under the canonicalized `<workspace>/.ralph/` prefix. A target
+/// outside that prefix (foreign absolute path, or a relative path
+/// like `../foo` that escapes `.ralph/`) is refused with
+/// [`AssessmentRefusal::EventsTargetOutsideWorkspace`]. The
+/// canonicalized form is returned on success because downstream code
+/// is path-string-based and canonical paths are more reliable.
 pub(crate) fn resolve_events_target(
     workspace: &Path,
     marker_path: &Path,
@@ -459,10 +485,41 @@ pub(crate) fn resolve_events_target(
     } else {
         workspace.join(target)
     };
+    // Existence precondition: keep this check before canonicalize so
+    // the existing "missing target" refusal semantics survive intact
+    // and only a real regular file reaches the prefix check.
     if !resolved.is_file() {
         return Err(AssessmentRefusal::MissingCurrentEventsTarget);
     }
-    Ok(resolved)
+    // U4 (plan 2026-09-01-2102): canonicalize `<workspace>/.ralph/`
+    // and the resolved target, then assert the target lives under
+    // the canonical workspace prefix. A foreign file (absolute path
+    // to a regular file outside the worktree, or a relative path
+    // that escapes `.ralph/`) is rejected so the marker cannot
+    // redirect the assessment to a foreign events file
+    // (adversarial: A2).
+    let workspace_ralph_path = workspace.join(".ralph");
+    let workspace_ralph = workspace_ralph_path
+        .canonicalize()
+        .map_err(|e| AssessmentRefusal::OutboxIoError(e.to_string()))?;
+    let resolved_canonical = match resolved.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            // The file existed at `is_file()` check time but lost
+            // its existence between then and canonicalize (rare
+            // race, e.g. external truncation). Treat as the
+            // existing "missing target" refusal to preserve the
+            // original semantics.
+            return Err(AssessmentRefusal::MissingCurrentEventsTarget);
+        }
+    };
+    if !resolved_canonical.starts_with(&workspace_ralph) {
+        return Err(AssessmentRefusal::EventsTargetOutsideWorkspace {
+            resolved: resolved_canonical,
+            expected_prefix: workspace_ralph,
+        });
+    }
+    Ok(resolved_canonical)
 }
 
 /// Inspect `.ralph/loop.lock` and return the recorded PID **iff it is a
@@ -842,5 +899,160 @@ mod tests {
         .unwrap();
         let perms = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(perms, 0o600, "parent-cleared gate must be 0600");
+    }
+
+    // -----------------------------------------------------------------
+    // U4 (plan 2026-09-01-2102): resolve_events_target path constraint
+    // -----------------------------------------------------------------
+
+    /// Write `<workspace>/.ralph/current-events` with `body`. Caller
+    /// is responsible for choosing a body that lands at a real
+    /// regular file when the test expects a successful resolution;
+    /// for refusal tests, an unreachable path is fine.
+    fn write_events_marker(workspace: &Path, body: &str) {
+        let ralph_dir = workspace.join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).unwrap();
+        std::fs::write(ralph_dir.join("current-events"), body).unwrap();
+    }
+
+    /// 14. Foreign absolute path rejected: marker body points at a
+    ///     regular file that exists on disk but lives outside the
+    ///     workspace's `.ralph/` directory. Guards against an actor
+    ///     with write access to `.ralph/current-events` redirecting
+    ///     the assessment to a foreign events file and producing a
+    ///     split-brain verdict (adversarial: A2).
+    #[test]
+    fn resolve_events_target_rejects_foreign_absolute_path() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let marker_path = workspace.join(CURRENT_EVENTS_RELATIVE);
+
+        // Foreign regular file lives in a separate TempDir so it
+        // is guaranteed to be outside `<workspace>/.ralph/`.
+        let foreign_dir = TempDir::new().unwrap();
+        let foreign = foreign_dir.path().join("foreign-events.jsonl");
+        std::fs::write(&foreign, "").unwrap();
+
+        write_events_marker(&workspace, foreign.to_str().unwrap());
+
+        let err = resolve_events_target(&workspace, &marker_path).unwrap_err();
+        match err {
+            AssessmentRefusal::EventsTargetOutsideWorkspace { .. } => {}
+            other => panic!("expected EventsTargetOutsideWorkspace, got {other:?}"),
+        }
+    }
+
+    /// 15. Foreign relative path rejected: marker body is a relative
+    ///     path that, when joined with `workspace`, resolves outside
+    ///     `<workspace>/.ralph/`.
+    #[test]
+    fn resolve_events_target_rejects_foreign_relative_path() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let marker_path = workspace.join(CURRENT_EVENTS_RELATIVE);
+
+        // `../outside-ralph/foo.jsonl` joined with `workspace` (e.g.
+        // `/tmp/.tmpXYZ/..` => `/tmp`) lands at `/tmp/outside-ralph/
+        // foo.jsonl`. We control that parent path; create the file
+        // there so the existence precondition passes and the prefix
+        // check is the only barrier.
+        let parent = dir.path().parent().unwrap();
+        let outside_dir = parent.join("outside-ralph");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let outside_file = outside_dir.join("foo.jsonl");
+        std::fs::write(&outside_file, "").unwrap();
+
+        write_events_marker(&workspace, "../outside-ralph/foo.jsonl");
+
+        let err = resolve_events_target(&workspace, &marker_path).unwrap_err();
+        match err {
+            AssessmentRefusal::EventsTargetOutsideWorkspace { .. } => {}
+            other => panic!("expected EventsTargetOutsideWorkspace, got {other:?}"),
+        }
+    }
+
+    /// 16. In-workspace relative path accepted: marker body is a
+    ///     `.ralph/events-main.jsonl` style relative path that
+    ///     resolves (after `workspace.join(...)`) to a real regular
+    ///     file inside `<workspace>/.ralph/`.
+    #[test]
+    fn resolve_events_target_accepts_in_workspace_relative_path() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let ralph_dir = workspace.join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).unwrap();
+        let events_file = ralph_dir.join("events-main.jsonl");
+        std::fs::write(&events_file, "").unwrap();
+        let marker_path = ralph_dir.join("current-events");
+
+        write_events_marker(&workspace, ".ralph/events-main.jsonl");
+
+        let resolved = resolve_events_target(&workspace, &marker_path).unwrap();
+        let expected = events_file.canonicalize().unwrap();
+        assert_eq!(resolved, expected);
+    }
+
+    /// 17. In-workspace absolute path accepted: marker body is the
+    ///     absolute path of a real regular file under
+    ///     `<workspace>/.ralph/`.
+    #[test]
+    fn resolve_events_target_accepts_in_workspace_absolute_path() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let ralph_dir = workspace.join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).unwrap();
+        let events_file = ralph_dir.join("events-main.jsonl");
+        std::fs::write(&events_file, "").unwrap();
+        let marker_path = ralph_dir.join("current-events");
+
+        write_events_marker(&workspace, events_file.to_str().unwrap());
+
+        let resolved = resolve_events_target(&workspace, &marker_path).unwrap();
+        let expected = events_file.canonicalize().unwrap();
+        assert_eq!(resolved, expected);
+    }
+
+    /// 18. Missing file still rejected (existing behavior preserved):
+    ///     marker body pointing at a non-existent file must return
+    ///     `MissingCurrentEventsTarget`, NOT the new variant. The
+    ///     prefix check must not fire on a path that was already
+    ///     refused by the existence precondition.
+    #[test]
+    fn resolve_events_target_missing_file_still_returns_missing_target() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let marker_path = workspace.join(CURRENT_EVENTS_RELATIVE);
+
+        write_events_marker(&workspace, ".ralph/does-not-exist.jsonl");
+
+        let err = resolve_events_target(&workspace, &marker_path).unwrap_err();
+        assert_eq!(err, AssessmentRefusal::MissingCurrentEventsTarget);
+    }
+
+    /// 19. Whitespace-only marker body (existing behavior preserved):
+    ///     blank content must return `MissingCurrentEventsTarget`.
+    #[test]
+    fn resolve_events_target_whitespace_only_marker_returns_missing_target() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let marker_path = workspace.join(CURRENT_EVENTS_RELATIVE);
+
+        write_events_marker(&workspace, "   ");
+
+        let err = resolve_events_target(&workspace, &marker_path).unwrap_err();
+        assert_eq!(err, AssessmentRefusal::MissingCurrentEventsTarget);
+    }
+
+    /// 20. Empty marker body (existing behavior preserved).
+    #[test]
+    fn resolve_events_target_empty_marker_returns_missing_target() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let marker_path = workspace.join(CURRENT_EVENTS_RELATIVE);
+
+        write_events_marker(&workspace, "");
+
+        let err = resolve_events_target(&workspace, &marker_path).unwrap_err();
+        assert_eq!(err, AssessmentRefusal::MissingCurrentEventsTarget);
     }
 }
