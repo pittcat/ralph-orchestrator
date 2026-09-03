@@ -178,6 +178,7 @@ event_loop:
           - "Read the dimension's `git-state-goal-alignment-start.txt` and `git-state-goal-alignment-end.txt` under `.ralph/review/<plan_name>/` when present, then run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
           - "Compare start and end evidence: unchanged pre-existing foreign paths may remain, but reject any newly created, newly modified, deleted, or content-changed source, config, lockfile, cache, generated, or other non-`.ralph/` path. Missing start/end evidence is a failed check, not proof of cleanliness."
           - "Confirm the goal-alignment findings artifact named by the event exists and is readable."
+          - "Parse the artifact's `## Findings` section and its Summary counts. Compare the actual finding count with the event's `findings_count`; compare each Summary severity count with the parsed finding severities; and verify the Summary total equals the severity-count sum. Any mismatch is failed_check `findings_count_mismatch`; do not forward the event."
           - "If all checks pass, forward `review.goalalign.done` verbatim. Otherwise emit `review.goalalign.done.rejected` with `failed_checks` and one actionable `reason`."
         on_fail:
           target: "dim:goal-alignment"
@@ -187,12 +188,13 @@ event_loop:
         recovery_guidance:
           common:
             - "Read the dirty-path evidence, clean or quarantine every non-.ralph/ side effect from this activation, rerun the Git checks, then rebuild and re-emit the same review event."
-            - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
+            - "For `findings_count_mismatch`, re-parse `## Findings`, correct the Summary counts to match the artifact, then rebuild and re-emit the same review event. Do not stage or commit foreign changes or hide the path."
       review.correctness.done:
         prompt:
           - "Read the dimension's `git-state-correctness-start.txt` and `git-state-correctness-end.txt` under `.ralph/review/<plan_name>/` when present, then run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
           - "Compare start and end evidence: unchanged pre-existing foreign paths may remain, but reject any newly created, newly modified, deleted, or content-changed source, config, lockfile, cache, generated, or other non-`.ralph/` path. Missing start/end evidence is a failed check, not proof of cleanliness."
           - "Confirm the correctness findings artifact named by the event exists and is readable."
+          - "Parse the artifact's `## Findings` section and its Summary counts. Compare the actual finding count with the event's `findings_count`; compare each Summary severity count with the parsed finding severities; and verify the Summary total equals the severity-count sum. Any mismatch is failed_check `findings_count_mismatch`; do not forward the event."
           - "If all checks pass, forward `review.correctness.done` verbatim. Otherwise emit `review.correctness.done.rejected` with `failed_checks` and one actionable `reason`."
         on_fail:
           target: "dim:correctness"
@@ -202,12 +204,13 @@ event_loop:
         recovery_guidance:
           common:
             - "Read the dirty-path evidence, clean or quarantine every non-.ralph/ side effect from this activation, rerun the Git checks, then rebuild and re-emit the same review event."
-            - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
+            - "For `findings_count_mismatch`, re-parse `## Findings`, correct the Summary counts to match the artifact, then rebuild and re-emit the same review event. Do not stage or commit foreign changes or hide the path."
       review.testing.done:
         prompt:
           - "Read the dimension's `git-state-testing-start.txt` and `git-state-testing-end.txt` under `.ralph/review/<plan_name>/` when present, then run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
           - "Compare start and end evidence: unchanged pre-existing foreign paths may remain, but reject any newly created, newly modified, deleted, or content-changed source, config, lockfile, cache, generated, or other non-`.ralph/` path. Missing start/end evidence is a failed check, not proof of cleanliness."
           - "Confirm the testing findings artifact named by the event exists and is readable."
+          - "Parse the artifact's `## Findings` section and its Summary counts. Compare the actual finding count with the event's `findings_count`; compare each Summary severity count with the parsed finding severities; and verify the Summary total equals the severity-count sum. Any mismatch is failed_check `findings_count_mismatch`; do not forward the event."
           - "If all checks pass, forward `review.testing.done` verbatim. Otherwise emit `review.testing.done.rejected` with `failed_checks` and one actionable `reason`."
         on_fail:
           target: "dim:testing"
@@ -217,12 +220,13 @@ event_loop:
         recovery_guidance:
           common:
             - "Read the dirty-path evidence, clean or quarantine every non-.ralph/ side effect from this activation, rerun the Git checks, then rebuild and re-emit the same review event."
-            - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
+            - "For `findings_count_mismatch`, re-parse `## Findings`, correct the Summary counts to match the artifact, then rebuild and re-emit the same review event. Do not stage or commit foreign changes or hide the path."
       review.maintainability.done:
         prompt:
           - "Read the dimension's `git-state-maintainability-start.txt` and `git-state-maintainability-end.txt` under `.ralph/review/<plan_name>/` when present, then run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
           - "Compare start and end evidence: unchanged pre-existing foreign paths may remain, but reject any newly created, newly modified, deleted, or content-changed source, config, lockfile, cache, generated, or other non-`.ralph/` path. Missing start/end evidence is a failed check, not proof of cleanliness."
           - "Confirm the maintainability findings artifact named by the event exists and is readable."
+          - "Parse the artifact's `## Findings` section and its Summary counts. Compare the actual finding count with the event's `findings_count`; compare each Summary severity count with the parsed finding severities; and verify the Summary total equals the severity-count sum. Any mismatch is failed_check `findings_count_mismatch`; do not forward the event."
           - "If all checks pass, forward `review.maintainability.done` verbatim. Otherwise emit `review.maintainability.done.rejected` with `failed_checks` and one actionable `reason`."
         on_fail:
           target: "dim:maintainability"
@@ -232,12 +236,13 @@ event_loop:
         recovery_guidance:
           common:
             - "Read the dirty-path evidence, clean or quarantine every non-.ralph/ side effect from this activation, rerun the Git checks, then rebuild and re-emit the same review event."
-            - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
+            - "For `findings_count_mismatch`, re-parse `## Findings`, correct the Summary counts to match the artifact, then rebuild and re-emit the same review event. Do not stage or commit foreign changes or hide the path."
       review.standards.done:
         prompt:
           - "Read the dimension's `git-state-standards-start.txt` and `git-state-standards-end.txt` under `.ralph/review/<plan_name>/` when present, then run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
           - "Compare start and end evidence: unchanged pre-existing foreign paths may remain, but reject any newly created, newly modified, deleted, or content-changed source, config, lockfile, cache, generated, or other non-`.ralph/` path. Missing start/end evidence is a failed check, not proof of cleanliness."
           - "Confirm the project-standards findings artifact named by the event exists and is readable."
+          - "Parse the artifact's `## Findings` section and its Summary counts. Compare the actual finding count with the event's `findings_count`; compare each Summary severity count with the parsed finding severities; and verify the Summary total equals the severity-count sum. Any mismatch is failed_check `findings_count_mismatch`; do not forward the event."
           - "If all checks pass, forward `review.standards.done` verbatim. Otherwise emit `review.standards.done.rejected` with `failed_checks` and one actionable `reason`."
         on_fail:
           target: "dim:project-standards"
@@ -247,12 +252,13 @@ event_loop:
         recovery_guidance:
           common:
             - "Read the dirty-path evidence, clean or quarantine every non-.ralph/ side effect from this activation, rerun the Git checks, then rebuild and re-emit the same review event."
-            - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
+            - "For `findings_count_mismatch`, re-parse `## Findings`, correct the Summary counts to match the artifact, then rebuild and re-emit the same review event. Do not stage or commit foreign changes or hide the path."
       review.adversarial.done:
         prompt:
           - "Read the dimension's `git-state-adversarial-start.txt` and `git-state-adversarial-end.txt` under `.ralph/review/<plan_name>/` when present, then run `git status --porcelain=v1 --untracked-files=all`, `git diff --stat HEAD`, and `git diff --name-status HEAD`. Treat `.ralph/` review artifacts as allowed runtime output."
           - "Compare start and end evidence: unchanged pre-existing foreign paths may remain, but reject any newly created, newly modified, deleted, or content-changed source, config, lockfile, cache, generated, or other non-`.ralph/` path. Missing start/end evidence is a failed check, not proof of cleanliness."
           - "Confirm the adversarial findings artifact named by the event exists and is readable."
+          - "Parse the artifact's `## Findings` section and its Summary counts. Compare the actual finding count with the event's `findings_count`; compare each Summary severity count with the parsed finding severities; and verify the Summary total equals the severity-count sum. Any mismatch is failed_check `findings_count_mismatch`; do not forward the event."
           - "If all checks pass, forward `review.adversarial.done` verbatim. Otherwise emit `review.adversarial.done.rejected` with `failed_checks` and one actionable `reason`."
         on_fail:
           target: "dim:adversarial"
@@ -262,7 +268,7 @@ event_loop:
         recovery_guidance:
           common:
             - "Read the dirty-path evidence, clean or quarantine every non-.ralph/ side effect from this activation, rerun the Git checks, then rebuild and re-emit the same review event."
-            - "Do not stage or commit foreign changes, hide the path, or only rewrite the findings count."
+            - "For `findings_count_mismatch`, re-parse `## Findings`, correct the Summary counts to match the artifact, then rebuild and re-emit the same review event. Do not stage or commit foreign changes or hide the path."
   event_policy:
     enabled: true
     mode: enforce
