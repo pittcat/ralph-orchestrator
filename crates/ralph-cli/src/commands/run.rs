@@ -152,7 +152,15 @@ pub struct RunArgs {
     /// (the parent already cleared it) and (b) to NOT re-acquire the
     /// `LoopLock` (the parent already holds it for the duration of this
     /// child invocation). Not intended for direct user use.
-    #[arg(long, hide = true, default_value_t = false)]
+    ///
+    /// U1 (plan 2026-09-01-2102): clap-layer defense in depth — the
+    /// flag is ONLY meaningful when `--worktree-path` is also present
+    /// (the parent only passes it to the child it spawns on the
+    /// trusted combined path). A wrapper / Makefile that passes
+    /// `--combined-continue=true` directly without `--worktree-path`
+    /// is rejected by clap with the "requires = worktree_path" error,
+    /// before any runtime gate check runs.
+    #[arg(long, hide = true, default_value_t = false, requires = "worktree_path")]
     pub combined_continue: bool,
 
     /// Reuse an existing, completed worktree for this run instead of
@@ -1285,6 +1293,58 @@ pub async fn run_command(
                             })?;
                         }
 
+                        // U1 (plan 2026-09-01-2102): parent writes the
+                        // out-of-band signature the child reads before
+                        // it is allowed to skip the parallel-forge
+                        // resume-manifest re-validation gate. The
+                        // signature carries (a) the loop id (so a gate
+                        // written for a different worktree is rejected
+                        // by the child), (b) the just-validated resume
+                        // manifest digest (so a gate written against a
+                        // different manifest is rejected — adversarial
+                        // A1), and (c) the wall-clock time at which the
+                        // parent wrote it (so a stale signature from a
+                        // previous aborted run is rejected by the
+                        // child). The child's matching checks live at
+                        // the start of the `else if args.worktree_path
+                        // .is_some()` branch below.
+                        //
+                        // The signature is written ONLY when the parent
+                        // is on the combined `--continue --worktree
+                        // --reuse-worktree` path
+                        // (`continue_recovery_ctx.is_some()`); the
+                        // child only sets `args.combined_continue` in
+                        // that case, so the child's gate check is
+                        // unreachable for non-combined parent runs.
+                        if continue_recovery_ctx.is_some() {
+                            use ralph_core::recovery_checkpoint::{
+                                ParentClearedGate, PARENT_CLEARED_GATE_RELATIVE,
+                                write_parent_cleared_gate,
+                            };
+                            use std::time::{SystemTime, UNIX_EPOCH};
+                            let manifest_sha256 = resumed_manifest
+                                .as_ref()
+                                .map(ralph_core::parallel_forge_resume::ResumeManifest::compute_digest)
+                                .unwrap_or_default();
+                            let written_at_unix_ms = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map(|d| d.as_millis())
+                                .unwrap_or(0);
+                            let gate = ParentClearedGate {
+                                loop_id: reusable.loop_id.clone(),
+                                manifest_sha256,
+                                written_at_unix_ms,
+                            };
+                            let gate_path =
+                                reusable.path.join(PARENT_CLEARED_GATE_RELATIVE);
+                            write_parent_cleared_gate(&gate_path, &gate).map_err(|e| {
+                                anyhow::anyhow!(
+                                    "failed to write parent-cleared gate at {}: {e}",
+                                    gate_path.display()
+                                )
+                            })?;
+                        }
+
                         // Re-create the worktree's symlinks (in case the
                         // previous loop removed them) and refresh the
                         // context file metadata. setup_worktree_symlinks
@@ -1471,77 +1531,169 @@ pub async fn run_command(
         // runs against the SAME archive that the child would
         // re-read). Re-validating here duplicates the fail-closed
         // path and may reject a manifest the parent already cleared.
-        // Skip the re-validation entirely on the combined path; for
-        // all other `--worktree-path` modes, the gate stays exactly
-        // as it was before U3 (read + validate, fail-closed).
+        //
+        // U1 (plan 2026-09-01-2102) — but trusting the parent's
+        // signal unconditionally is the adversarial A1 hole: a
+        // wrapper / Makefile can pass `--combined-continue=true`
+        // directly on a child `ralph run --worktree-path <wt>` and
+        // bypass the gate. The child MUST verify the parent wrote
+        // a fresh out-of-band signature (`.ralph/.parent-cleared-gate`)
+        // and that the signature's `manifest_sha256` matches the
+        // archived manifest's digest on disk. Any failure refuses
+        // the run BEFORE the loop starts. For all other
+        // `--worktree-path` modes (the non-combined path), the gate
+        // stays exactly as it was before U1 (read + validate,
+        // fail-closed).
         use ralph_core::parallel_forge_resume::{
             CaptureInputs, latest_archived_manifest, sha256_hex, validate_manifest,
         };
-        if !args.combined_continue {
-            let child_plan_path = args
-                .plan
-                .as_deref()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let child_plan_digest = args
-                .plan
-                .as_deref()
-                .and_then(|p| std::fs::read(p).ok())
-                .map(|bytes| sha256_hex(&bytes))
-                .unwrap_or_default();
-            let child_preset_name = derive_preset_name(hats_source)
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            let mut child_config_bytes: Vec<u8> = Vec::new();
-            for source in config_sources {
-                if let ConfigSource::File(path) = source
-                    && let Ok(bytes) = std::fs::read(path)
-                {
-                    child_config_bytes.extend_from_slice(&bytes);
+        use ralph_core::recovery_checkpoint::{ParentGateReadError, read_parent_cleared_gate};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let child_plan_path = args
+            .plan
+            .as_deref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let child_plan_digest = args
+            .plan
+            .as_deref()
+            .and_then(|p| std::fs::read(p).ok())
+            .map(|bytes| sha256_hex(&bytes))
+            .unwrap_or_default();
+        let child_preset_name = derive_preset_name(hats_source)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let mut child_config_bytes: Vec<u8> = Vec::new();
+        for source in config_sources {
+            if let ConfigSource::File(path) = source
+                && let Ok(bytes) = std::fs::read(path)
+            {
+                child_config_bytes.extend_from_slice(&bytes);
+            }
+        }
+        let child_config_digest = if child_config_bytes.is_empty() {
+            String::new()
+        } else {
+            sha256_hex(&child_config_bytes)
+        };
+
+        if args.combined_continue {
+            // U1 combined-path gate: parent must have written a
+            // fresh signature, and the signature's manifest_sha256
+            // must match the archived manifest currently on disk.
+            let now_unix_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let gate = read_parent_cleared_gate(worktree_path, &loop_id, now_unix_ms)
+                .map_err(|e| {
+                    let reason = match &e {
+                        ParentGateReadError::Missing => "missing".to_string(),
+                        ParentGateReadError::Unreadable(msg) => format!("unreadable: {msg}"),
+                        ParentGateReadError::MalformedJson(msg) => format!("malformed: {msg}"),
+                        ParentGateReadError::LoopIdMismatch { expected, actual } => format!(
+                            "loop_id mismatch (expected '{expected}', actual '{actual}')"
+                        ),
+                        ParentGateReadError::Stale { age_ms, max_age_ms } => {
+                            format!("stale ({age_ms}ms > {max_age_ms}ms)")
+                        }
+                    };
+                    anyhow::anyhow!(
+                        "combined --continue refused: parent gate {reason} \
+                         at '{}' — child MUST NOT skip parallel-forge \
+                         manifest re-validation",
+                        worktree_path.display()
+                    )
+                })?;
+
+            // The parent cleared the manifest gate; verify the
+            // archived manifest on disk is the SAME one the parent
+            // saw (adversarial A1: a different manifest could have
+            // been archived between parent-write and child-read).
+            let archived = latest_archived_manifest(worktree_path).map_err(|e| {
+                anyhow::anyhow!(
+                    "combined --continue refused: could not read archived manifest \
+                     to verify parent gate manifest_sha256 at '{}': {e}. child MUST \
+                     NOT skip parallel-forge manifest re-validation",
+                    worktree_path.display()
+                )
+            })?;
+            match archived {
+                Some((_, manifest)) => {
+                    let archived_sha = manifest.compute_digest();
+                    if archived_sha != gate.manifest_sha256 {
+                        return Err(anyhow::anyhow!(
+                            "combined --continue refused: parent gate \
+                             manifest_sha256 tampered (gate says \
+                             '{gate_sha}', archived manifest digest \
+                             '{archived_sha}'). child MUST NOT skip \
+                             parallel-forge manifest re-validation",
+                            gate_sha = gate.manifest_sha256,
+                            archived_sha = archived_sha
+                        ));
+                    }
+                    resumed_manifest = Some(manifest);
+                }
+                None => {
+                    if !gate.manifest_sha256.is_empty() {
+                        return Err(anyhow::anyhow!(
+                            "combined --continue refused: parent gate \
+                             manifest_sha256 '{}' does not match any \
+                             archived manifest at {}. child MUST NOT \
+                             skip parallel-forge manifest re-validation",
+                            gate.manifest_sha256,
+                            worktree_path.display()
+                        ));
+                    }
+                    // Gate SHA is empty (non-PF preset); no archive
+                    // is expected. Proceed without manifest.
                 }
             }
-            let child_config_digest = if child_config_bytes.is_empty() {
-                String::new()
-            } else {
-                sha256_hex(&child_config_bytes)
-            };
+
+            debug!(
+                "Child on combined --continue --worktree --reuse-worktree path; \
+                 parent gate verified at worktree '{}' (loop_id={}, \
+                 manifest_sha256={})",
+                worktree_path.display(),
+                loop_id,
+                gate.manifest_sha256
+            );
+        } else if child_preset_name == "parallel-forge" {
+            // Non-combined path: keep the legacy read + validate
+            // behavior (U2-fix / U3-fix unchanged). The child is
+            // not on the trusted parent-cleared path so it must do
+            // the full gate work itself, fail-closed.
             let child_inputs = CaptureInputs {
                 plan_path: child_plan_path,
                 plan_digest: child_plan_digest,
-                preset_name: child_preset_name.clone(),
+                preset_name: child_preset_name,
                 config_digest: child_config_digest,
                 worktree_name: loop_id.clone(),
             };
-            if child_preset_name == "parallel-forge" {
-                match latest_archived_manifest(worktree_path) {
-                    Ok(Some((_, manifest))) => {
-                        validate_manifest(&manifest, &child_inputs).map_err(|e| {
-                            anyhow::anyhow!(
-                                "resume manifest validation failed for reused worktree \
-                                 '{loop_id}': {e}. The loop was NOT started; the prior run's \
-                                 records are preserved under .ralph/reuse-history/ in the \
-                                 worktree."
-                            )
-                        })?;
-                        resumed_manifest = Some(manifest);
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        return Err(anyhow::anyhow!(
+            match latest_archived_manifest(worktree_path) {
+                Ok(Some((_, manifest))) => {
+                    validate_manifest(&manifest, &child_inputs).map_err(|e| {
+                        anyhow::anyhow!(
                             "resume manifest validation failed for reused worktree \
                              '{loop_id}': {e}. The loop was NOT started; the prior run's \
                              records are preserved under .ralph/reuse-history/ in the \
                              worktree."
-                        ));
-                    }
+                        )
+                    })?;
+                    resumed_manifest = Some(manifest);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "resume manifest validation failed for reused worktree \
+                         '{loop_id}': {e}. The loop was NOT started; the prior run's \
+                         records are preserved under .ralph/reuse-history/ in the \
+                         worktree."
+                    ));
                 }
             }
-        } else {
-            debug!(
-                "Child on combined --continue --worktree --reuse-worktree path; \
-                 skipping parallel-forge resume-manifest re-validation (parent cleared it)"
-            );
         }
 
         (context, None)

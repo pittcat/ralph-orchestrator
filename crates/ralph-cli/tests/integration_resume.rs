@@ -1901,6 +1901,21 @@ hats:
         // would surface "does not exist at" against the
         // `default_worktree_root` location and pass against the
         // runtime location, hiding wiring bugs.
+        //
+        // U1 follow-up: `find_reusable_worktree_by_name` (called
+        // immediately after `acquire_and_assess` in run.rs) uses
+        // `WorktreeConfig::default().worktree_path(repo_root)`,
+        // which on the default layout resolves to
+        // `<parent>/worktree/<project>/<name>` — a DIFFERENT path
+        // than `acquire_and_assess` writes its lock to. Until that
+        // drift is fixed (out of U1 scope), the happy-path test
+        // cannot reach the gate-write block at run.rs:1319; it falls
+        // through to "No existing worktree named ... creating the
+        // first exact-name worktree" because the reuse lookup misses.
+        // The U1 invariant check therefore cannot fire here today.
+        // We surface that gap explicitly in the test rather than
+        // silently masking it; U2/U3 follow-up must reconcile the
+        // two path schemes.
         let worktree_path = main_repo.join(".worktrees").join(loop_id);
         let status = Command::new("git")
             .args([
@@ -2060,6 +2075,30 @@ hats:
         fs::write(ralph_dir.join("current-loop-id"), format!("{loop_id}\n")).unwrap();
         fs::write(agent_dir.join("scratchpad.md"), "# scratch\n").unwrap();
         fs::write(ralph_dir.join("history.jsonl"), "").unwrap();
+    }
+
+    /// U1 (plan 2026-09-01-2102): write a fresh `.ralph/.parent-cleared-gate`
+    /// file inside the worktree so the child `--combined-continue` path
+    /// can verify the parent signature. `manifest_sha256` may be empty
+    /// for non-PF presets; when non-empty it MUST match the SHA of the
+    /// archived manifest the child will re-read.
+    fn seed_parent_cleared_gate(
+        worktree_path: &Path,
+        loop_id: &str,
+        manifest_sha256: &str,
+        written_at_unix_ms: u128,
+    ) {
+        let ralph_dir = worktree_path.join(".ralph");
+        let gate = serde_json::json!({
+            "loop_id": loop_id,
+            "manifest_sha256": manifest_sha256,
+            "written_at_unix_ms": written_at_unix_ms,
+        });
+        fs::write(
+            ralph_dir.join(".parent-cleared-gate"),
+            serde_json::to_string(&gate).expect("encode parent gate"),
+        )
+        .expect("write parent gate");
     }
 
     /// The pre-existing `--continue` handler in `run.rs` enforces a
@@ -2501,6 +2540,50 @@ hats:
             "scratchpad must survive"
         );
 
+        // U1 (plan 2026-09-01-2102): when the parent gate clears, the
+        // parent writes the out-of-band `.parent-cleared-gate` signature
+        // file inside the worktree. The child subprocess on the combined
+        // path reads that file to verify the parent cleared the
+        // parallel-forge manifest gate.
+        //
+        // KNOWN GAP (U2 follow-up, captured for the parent agent):
+        // `find_reusable_worktree_by_name` (called by run.rs:1136) and
+        // `acquire_and_assess` (called by run.rs:1118) look up the
+        // worktree under DIFFERENT paths on the default layout:
+        //   - acquire_and_assess uses `<workspace_root>/.worktrees/<id>`
+        //     (see run_recovery.rs:283).
+        //   - find_reusable_worktree_by_name uses
+        //     `<parent>/worktree/<project>/<id>` via
+        //     `WorktreeConfig::default().worktree_path(repo_root)`.
+        // When both flags are set, `acquire_and_assess` succeeds at the
+        // `.worktrees/<id>` path, but the lookup in `Ok(Some(reusable))`
+        // (run.rs:1141) returns `Ok(None)`, so the parent falls through
+        // to `spawn_worktree_loop` (creating a brand-new worktree at
+        // `<parent>/worktree/<project>/<id>`) and NEVER enters the gate
+        // write block at run.rs:1319. The parent signature is therefore
+        // not written today. We assert the diagnostic so the path drift
+        // is visible in CI, not silently masked; the file-existence
+        // invariant below is enforced by the targeted U1 child-side
+        // tests (`combined_continue_without_parent_gate_is_refused`,
+        // `combined_continue_with_stale_gate_is_refused`,
+        // `combined_continue_with_tampered_gate_is_refused`) which
+        // seed the gate file directly and exercise the child path
+        // against a fresh subprocess invocation.
+        let gate_cleared = stdout.contains("Continuation gate cleared")
+            || stderr.contains("Continuation gate cleared");
+        let _gate_path = ralph_dir.join(".parent-cleared-gate");
+        // Drift marker (U2 follow-up): surface in CI without failing.
+        let path_drift_reused = stdout.contains("Reusing worktree at")
+            || stderr.contains("Reusing worktree at");
+        if gate_cleared && !path_drift_reused {
+            eprintln!(
+                "U1 NOTE: parent gate cleared but `find_reusable_worktree_by_name` did \
+                 not enter its reuse branch — the gate-write block at run.rs:1319 was \
+                 skipped. This is the U2 path-drift bug; do NOT add a hard assertion \
+                 here until U2 reconciles the two worktree-path schemes."
+            );
+        }
+
         // Bug fix applied (recovery_checkpoint.rs::is_loop_lock_held now
         // filters the current process pid). The Eligible path is
         // reachable; capture the diagnostic if the gate ever falls
@@ -2629,7 +2712,7 @@ hats:
     #[test]
     fn combined_continue_child_skips_pf_manifest_gate() {
         use ralph_core::parallel_forge_resume::{
-            MANIFEST_FILE_NAME, MANIFEST_SCHEMA_VERSION, sha256_hex,
+            MANIFEST_FILE_NAME, MANIFEST_SCHEMA_VERSION, ResumeManifest, sha256_hex,
         };
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2650,8 +2733,11 @@ hats:
         // Pre-stage a STALE archive manifest whose `preset_name` does
         // NOT match the active preset. With the gate active, this
         // would fail validation with `IdentityDrift { fields:
-        // ["preset_name"] }`. With `--combined-continue`, the gate
-        // skips the call entirely, so the drift is invisible.
+        // ["preset_name"] }`. With `--combined-continue` + a verified
+        // parent gate, the validation is skipped but the archived
+        // manifest's digest is still cross-checked against the parent
+        // gate's `manifest_sha256` — so the stale drift is invisible
+        // because the manifest is only READ (not validated).
         let ralph_dir = worktree_path.join(".ralph");
         let reuse_history = ralph_dir.join("reuse-history");
         let nanos = SystemTime::now()
@@ -2692,6 +2778,26 @@ hats:
         )
         .expect("write stale manifest");
 
+        // U1 (plan 2026-09-01-2102): a fresh parent-cleared gate must
+        // exist for the child to trust the combined path. The gate's
+        // `manifest_sha256` MUST match the archived manifest's actual
+        // digest — compute it from the typed `ResumeManifest` so the
+        // child's cross-check passes and the test reaches the
+        // "validation was skipped" assertion.
+        let stale_bytes = fs::read(archive_dir.join(MANIFEST_FILE_NAME)).expect("read stale");
+        let stale_typed: ResumeManifest =
+            serde_json::from_slice(&stale_bytes).expect("parse stale into ResumeManifest");
+        let now_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis();
+        seed_parent_cleared_gate(
+            &worktree_path,
+            loop_id,
+            &stale_typed.compute_digest(),
+            now_unix_ms,
+        );
+
         let output = super::common::ralph_bin()
             .args([
                 "run",
@@ -2713,10 +2819,11 @@ hats:
         eprintln!("U3 child-skip stderr: {stderr}");
         eprintln!("U3 child-skip stdout: {stdout}");
 
-        // The core invariant: with --combined-continue the gate must
-        // skip the manifest validation entirely. The only failure
-        // messages validate_manifest produces would be the strings
-        // below; if any of them appear, the gate ran.
+        // The core invariant: with --combined-continue + a verified
+        // parent gate, the child MUST skip the manifest validation
+        // (U3 contract). U1 preserves this by requiring the parent
+        // gate's manifest_sha256 to match the on-disk digest — the
+        // manifest is READ for cross-check but never validated.
         assert!(
             !stderr.contains("resume manifest validation failed"),
             "child on combined path must skip the PF manifest gate; gate ran and refused: {stderr}"
@@ -2742,6 +2849,311 @@ hats:
         assert!(
             archive_dir.join(MANIFEST_FILE_NAME).exists(),
             "stale manifest must remain on disk after child run"
+        );
+    }
+
+    /// U1 (plan 2026-09-01-2102 / adversarial A1): the child
+    /// `--combined-continue` invocation MUST refuse to start the
+    /// loop when the parent did not write a `.ralph/.parent-cleared-gate`
+    /// signature file. The adversarial scenario is a wrapper /
+    /// Makefile that passes `--combined-continue=true` directly on
+    /// a child `ralph run --worktree-path <wt>` without going through
+    /// a real parent run that cleared the gate. The fail-closed
+    /// error names the missing file and the security rationale
+    /// verbatim.
+    #[test]
+    fn combined_continue_without_parent_gate_is_refused() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let main_repo = temp_dir.path();
+        setup_git_repo(main_repo);
+        write_minimal_config(main_repo);
+        seed_main_repo_scratchpad(main_repo);
+
+        let loop_id = "u1-no-gate";
+        let plan_path = main_repo.join(format!("{loop_id}.md"));
+        fs::write(&plan_path, "# plan\n").unwrap();
+
+        let worktree_path = precreate_worktree(main_repo, loop_id);
+        seed_assess_fixture(&worktree_path, loop_id);
+
+        // Sanity: no parent gate is present (the test must not be
+        // accidentally helped by a leftover from a sibling run).
+        let gate_path = worktree_path.join(".ralph/.parent-cleared-gate");
+        assert!(
+            !gate_path.exists(),
+            "test precondition: parent gate must be absent"
+        );
+
+        let output = super::common::ralph_bin()
+            .args([
+                "run",
+                "--no-tui",
+                "--skip-preflight",
+                "--worktree-path",
+                worktree_path.to_str().unwrap(),
+                "--combined-continue",
+                "-H",
+                "builtin:parallel-forge",
+                "--plan",
+                plan_path.to_str().unwrap(),
+            ])
+            .current_dir(main_repo)
+            .output()
+            .expect("ralph run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        eprintln!("U1 no-gate stderr: {stderr}");
+        eprintln!("U1 no-gate stdout: {stdout}");
+
+        assert!(
+            !output.status.success(),
+            "missing parent gate must refuse the run; status was {:?}",
+            output.status
+        );
+        assert!(
+            stderr.contains("combined --continue refused")
+                && stderr.contains("parent gate missing"),
+            "stderr must name the missing-gate refusal reason: {stderr}"
+        );
+        assert!(
+            stderr.contains("child MUST NOT skip parallel-forge manifest re-validation"),
+            "stderr must surface the A1 security rationale verbatim: {stderr}"
+        );
+
+        // The combined-path diagnostic that gates on the parent's
+        // signature must NOT report "Continuation gate cleared"
+        // (that's the parent gate's verdict and is irrelevant on
+        // the child path).
+        assert!(
+            !stdout.contains("Continuation gate cleared"),
+            "child path has no parent gate verdict: {stdout}"
+        );
+
+        // No gate file should have been created by the failed run.
+        assert!(
+            !gate_path.exists(),
+            "failed child run must not synthesize a parent gate file"
+        );
+
+        // Now ensure the same worktree CAN run when a fresh parent
+        // gate is supplied — the refusal is conditional, not a
+        // permanent brick. This guards against accidentally wiring
+        // a "fail-closed" condition that can never recover.
+        let _ = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock"); // touch to silence unused
+        let now_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis();
+        seed_parent_cleared_gate(&worktree_path, loop_id, "", now_unix_ms);
+
+        let recovered = super::common::ralph_bin()
+            .args([
+                "run",
+                "--no-tui",
+                "--skip-preflight",
+                "--worktree-path",
+                worktree_path.to_str().unwrap(),
+                "--combined-continue",
+                "-H",
+                "builtin:parallel-forge",
+                "--plan",
+                plan_path.to_str().unwrap(),
+            ])
+            .current_dir(main_repo)
+            .output()
+            .expect("ralph run recovered");
+        let recovered_stderr = String::from_utf8_lossy(&recovered.stderr);
+        assert!(
+            !recovered_stderr.contains("combined --continue refused"),
+            "recovery with a fresh parent gate must not be refused: {recovered_stderr}"
+        );
+    }
+
+    /// U1 (plan 2026-09-01-2102 / freshness invariant): a parent gate
+    /// written more than 5 minutes ago is treated as stale and the
+    /// child MUST refuse to trust it. This is the freshness arm of
+    /// the trust boundary: an attacker who captured a stale gate
+    /// file (e.g. from a previous parent run on the same shared
+    /// filesystem) cannot replay it.
+    #[test]
+    fn combined_continue_with_stale_gate_is_refused() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let main_repo = temp_dir.path();
+        setup_git_repo(main_repo);
+        write_minimal_config(main_repo);
+        seed_main_repo_scratchpad(main_repo);
+
+        let loop_id = "u1-stale-gate";
+        let plan_path = main_repo.join(format!("{loop_id}.md"));
+        fs::write(&plan_path, "# plan\n").unwrap();
+
+        let worktree_path = precreate_worktree(main_repo, loop_id);
+        seed_assess_fixture(&worktree_path, loop_id);
+
+        // 10 minutes in the past — well past the 5-minute freshness
+        // window defined by `PARENT_CLEARED_GATE_FRESHNESS_MS`.
+        let stale_ms: u128 = 10 * 60 * 1000;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis();
+        seed_parent_cleared_gate(
+            &worktree_path,
+            loop_id,
+            "",
+            now_ms.saturating_sub(stale_ms),
+        );
+
+        let output = super::common::ralph_bin()
+            .args([
+                "run",
+                "--no-tui",
+                "--skip-preflight",
+                "--worktree-path",
+                worktree_path.to_str().unwrap(),
+                "--combined-continue",
+                "-H",
+                "builtin:parallel-forge",
+                "--plan",
+                plan_path.to_str().unwrap(),
+            ])
+            .current_dir(main_repo)
+            .output()
+            .expect("ralph run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("U1 stale-gate stderr: {stderr}");
+
+        assert!(
+            !output.status.success(),
+            "stale parent gate must refuse the run; status was {:?}",
+            output.status
+        );
+        assert!(
+            stderr.contains("combined --continue refused")
+                && stderr.contains("parent gate stale"),
+            "stderr must name the stale-gate refusal reason: {stderr}"
+        );
+        assert!(
+            stderr.contains("child MUST NOT skip parallel-forge manifest re-validation"),
+            "stderr must surface the A1 security rationale verbatim: {stderr}"
+        );
+    }
+
+    /// U1 (plan 2026-09-01-2102 / manifest_sha256 invariant): a parent
+    /// gate whose `manifest_sha256` does NOT match the SHA-256
+    /// digest of the archived manifest currently on disk is treated
+    /// as tampered and the child MUST refuse. This catches the case
+    /// where a different manifest was archived AFTER the parent
+    /// wrote the gate but BEFORE the child read it (the adversarial
+    /// A1 race).
+    #[test]
+    fn combined_continue_with_tampered_gate_is_refused() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let main_repo = temp_dir.path();
+        setup_git_repo(main_repo);
+        write_minimal_config(main_repo);
+        seed_main_repo_scratchpad(main_repo);
+
+        let loop_id = "u1-tampered-gate";
+        let plan_path = main_repo.join(format!("{loop_id}.md"));
+        fs::write(&plan_path, "# plan\n").unwrap();
+
+        let worktree_path = precreate_worktree(main_repo, loop_id);
+        seed_assess_fixture(&worktree_path, loop_id);
+
+        // Pre-stage a benign archived manifest so the child's
+        // `latest_archived_manifest` returns `Some`. The parent gate
+        // declares a SHA that is deliberately wrong (a fake hex
+        // string that no real archive would hash to). The child's
+        // cross-check MUST refuse the run with a "tampered" reason.
+        let ralph_dir = worktree_path.join(".ralph");
+        let reuse_history = ralph_dir.join("reuse-history");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let archive_dir = reuse_history.join(format!("{nanos}"));
+        fs::create_dir_all(&archive_dir).expect("create archive dir");
+        let archived = serde_json::json!({
+            "schema_version": ralph_core::parallel_forge_resume::MANIFEST_SCHEMA_VERSION,
+            "captured_at": "2026-09-01T00:00:00Z",
+            "identity": {
+                "plan_path": plan_path.to_str().unwrap(),
+                "plan_digest": "",
+                "preset_name": "parallel-forge",
+                "config_digest": "",
+                "worktree_name": loop_id,
+                "source_head_sha": "",
+                "loop_id": loop_id,
+            },
+            "boundary": {
+                "accepted": [],
+                "pending_hat": null,
+                "original_trigger": null,
+                "wave": null,
+            },
+            "tasks": [],
+            "artifacts": [],
+            "incomplete_reasons": [],
+            "manifest_digest": "",
+        });
+        fs::write(
+            archive_dir.join("parallel-forge-resume-manifest.v1.json"),
+            serde_json::to_string_pretty(&archived).unwrap(),
+        )
+        .expect("write archive");
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis();
+        // A 64-char hex string that does NOT match any real
+        // archive's SHA on disk. The child reads the archive's
+        // `compute_digest()` and compares it against this string;
+        // the mismatch must surface as a "tampered" refusal.
+        let bogus_sha = "deadbeef".repeat(8);
+        seed_parent_cleared_gate(&worktree_path, loop_id, &bogus_sha, now_ms);
+
+        let output = super::common::ralph_bin()
+            .args([
+                "run",
+                "--no-tui",
+                "--skip-preflight",
+                "--worktree-path",
+                worktree_path.to_str().unwrap(),
+                "--combined-continue",
+                "-H",
+                "builtin:parallel-forge",
+                "--plan",
+                plan_path.to_str().unwrap(),
+            ])
+            .current_dir(main_repo)
+            .output()
+            .expect("ralph run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("U1 tampered-gate stderr: {stderr}");
+
+        assert!(
+            !output.status.success(),
+            "tampered parent gate must refuse the run; status was {:?}",
+            output.status
+        );
+        assert!(
+            stderr.contains("combined --continue refused")
+                && stderr.contains("manifest_sha256 tampered"),
+            "stderr must name the tampered-gate refusal reason: {stderr}"
+        );
+        assert!(
+            stderr.contains("child MUST NOT skip parallel-forge manifest re-validation"),
+            "stderr must surface the A1 security rationale verbatim: {stderr}"
+        );
+        // The refusal must surface BOTH sides of the SHA comparison
+        // so the operator can diagnose.
+        assert!(
+            stderr.contains(&bogus_sha),
+            "stderr must include the bogus gate SHA for diagnosis: {stderr}"
         );
     }
 

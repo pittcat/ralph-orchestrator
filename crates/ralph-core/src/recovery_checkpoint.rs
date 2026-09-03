@@ -55,6 +55,7 @@
 //! module pure, the operator can call it any number of times and
 //! always observe the same answer.
 
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -109,6 +110,21 @@ pub enum AssessmentRefusal {
         /// The PID recorded on the lock metadata.
         holder_pid: u32,
     },
+    /// U1 (plan 2026-09-01-2102): the parent's out-of-band signature
+    /// (`.ralph/.parent-cleared-gate`) is missing, stale, unreadable,
+    /// or its `loop_id` does not match the expected one. The child
+    /// MUST NOT trust `--combined-continue` without a fresh parent
+    /// signature — a wrapper / Makefile that just passes the flag
+    /// directly would otherwise bypass the parallel-forge manifest
+    /// re-validation gate (adversarial: A1). The detailed reason
+    /// (missing / stale / tampered / loop-id-mismatch) is carried
+    /// out-of-band by [`ParentGateReadError`] from
+    /// [`read_parent_cleared_gate`]; the variant here only records
+    /// *that* it failed and the worktree it failed against.
+    GateNotClearedByParent {
+        /// Workspace (worktree) whose gate was checked.
+        worktree: PathBuf,
+    },
 }
 
 /// Errors raised by the assessment entrypoint (caller mistakes; not
@@ -131,6 +147,148 @@ const SCRATCHPAD_RELATIVE: &str = ".ralph/agent/scratchpad.md";
 const HISTORY_RELATIVE: &str = ".ralph/history.jsonl";
 /// Workspace-relative path of the loop lock file.
 const LOOP_LOCK_RELATIVE: &str = ".ralph/loop.lock";
+
+/// U1 (plan 2026-09-01-2102): workspace-relative path of the parent's
+/// out-of-band signature for the combined `--continue
+/// --worktree --reuse-worktree` path. The parent writes this file
+/// after clearing every gate (lock + checkpoint + parallel-forge
+/// manifest); the child reads it before skipping the same gates. If
+/// the file is missing, stale, or its contents do not match the
+/// worktree's archived resume manifest, the child refuses with
+/// `combined --continue refused: ...` so a wrapper / Makefile cannot
+/// bypass the gate by passing `--combined-continue=true` directly.
+pub const PARENT_CLEARED_GATE_RELATIVE: &str = ".ralph/.parent-cleared-gate";
+
+/// U1 (plan 2026-09-01-2102): maximum age (milliseconds) a parent
+/// signature remains trustworthy. Five minutes is the upper bound on
+/// the parent-to-child IPC window for a real `--no-tui` invocation;
+/// anything older is treated as a stale signature and refused.
+pub const PARENT_CLEARED_GATE_FRESHNESS_MS: u128 = 5 * 60 * 1000;
+
+/// U1 (plan 2026-09-01-2102): structured contents of the parent's
+/// out-of-band signature. Serialized as JSON with mode `0600` on Unix.
+///
+/// - `loop_id` must match the parent-recorded loop id (rejects a
+///   gate written for a different worktree).
+/// - `manifest_sha256` must equal the worktree's archived resume
+///   manifest digest (rejects a gate written against a different
+///   manifest — the adversarial A1 case).
+/// - `written_at_unix_ms` must be within the last
+///   [`PARENT_CLEARED_GATE_FRESHNESS_MS`] (rejects a stale signature
+///   left on disk by a previous aborted run).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentClearedGate {
+    /// Parent-recorded loop id. The child compares this against the
+    /// `loop_id` derived from the worktree's `.ralph/current-loop-id`.
+    pub loop_id: String,
+    /// SHA-256 hex digest of the resume manifest the parent just
+    /// validated. Empty string when the preset does not use a
+    /// parallel-forge resume manifest.
+    pub manifest_sha256: String,
+    /// Unix epoch milliseconds at which the parent wrote this gate.
+    pub written_at_unix_ms: u128,
+}
+
+/// U1 (plan 2026-09-01-2102): detailed reason a parent-cleared gate
+/// check failed. Distinct from [`AssessmentRefusal::GateNotClearedByParent`],
+/// which is the coarse "the gate failed" marker — this enum gives the
+/// caller the precise reason so the operator-facing message can name
+/// it ("parent gate missing" vs "parent gate stale" vs
+/// "parent gate tampered"). Used by
+/// [`read_parent_cleared_gate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParentGateReadError {
+    /// Gate file does not exist at the worktree's
+    /// `.ralph/.parent-cleared-gate` path.
+    Missing,
+    /// Gate file exists but could not be read (permission, IO, …).
+    Unreadable(String),
+    /// Gate file exists but its body is not valid JSON, or the JSON
+    /// does not match [`ParentClearedGate`].
+    MalformedJson(String),
+    /// Gate file's `loop_id` does not match `expected_loop_id`.
+    LoopIdMismatch {
+        /// Loop id the caller expected.
+        expected: String,
+        /// Loop id recorded on the gate.
+        actual: String,
+    },
+    /// Gate file's `written_at_unix_ms` is older than
+    /// [`PARENT_CLEARED_GATE_FRESHNESS_MS`].
+    Stale {
+        /// Observed age (milliseconds) of the gate.
+        age_ms: u128,
+        /// Maximum allowed age (milliseconds).
+        max_age_ms: u128,
+    },
+}
+
+/// U1 (plan 2026-09-01-2102): read the parent's out-of-band signature
+/// and validate its freshness + loop identity. The caller is
+/// responsible for matching `manifest_sha256` against the worktree's
+/// archived resume manifest digest.
+///
+/// Returns `Ok(ParentClearedGate)` when the file exists, parses as
+/// the expected shape, `loop_id` matches `expected_loop_id`, and the
+/// signature is fresh. Otherwise returns a [`ParentGateReadError`]
+/// describing the precise reason.
+///
+/// Pure read; never writes to disk.
+pub fn read_parent_cleared_gate(
+    workspace: &Path,
+    expected_loop_id: &str,
+    now_unix_ms: u128,
+) -> Result<ParentClearedGate, ParentGateReadError> {
+    let path = workspace.join(PARENT_CLEARED_GATE_RELATIVE);
+    let body = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(ParentGateReadError::Missing);
+        }
+        Err(e) => return Err(ParentGateReadError::Unreadable(e.to_string())),
+    };
+    let gate: ParentClearedGate = match serde_json::from_str(&body) {
+        Ok(g) => g,
+        Err(e) => return Err(ParentGateReadError::MalformedJson(e.to_string())),
+    };
+    if gate.loop_id != expected_loop_id {
+        return Err(ParentGateReadError::LoopIdMismatch {
+            expected: expected_loop_id.to_string(),
+            actual: gate.loop_id,
+        });
+    }
+    let age_ms = now_unix_ms.saturating_sub(gate.written_at_unix_ms);
+    if age_ms > PARENT_CLEARED_GATE_FRESHNESS_MS {
+        return Err(ParentGateReadError::Stale {
+            age_ms,
+            max_age_ms: PARENT_CLEARED_GATE_FRESHNESS_MS,
+        });
+    }
+    Ok(gate)
+}
+
+/// U1 (plan 2026-09-01-2102): write a parent-cleared gate file. Mode
+/// `0600` on Unix (only the parent that wrote it can read it again,
+/// matching the rest of `.ralph/`). Creates the parent `.ralph/`
+/// directory if missing.
+pub fn write_parent_cleared_gate(
+    path: &Path,
+    gate: &ParentClearedGate,
+) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::to_string(gate)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    fs::write(path, body)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
 
 /// Assess a workspace's checkpoint readiness.
 ///
@@ -542,5 +700,147 @@ mod tests {
             }
             other => panic!("unexpected verdict shape: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // U1 (plan 2026-09-01-2102): parent-cleared gate helper tests
+    // -----------------------------------------------------------------
+
+    fn gate_path(workspace: &Path) -> PathBuf {
+        workspace.join(PARENT_CLEARED_GATE_RELATIVE)
+    }
+
+    fn write_gate_raw(workspace: &Path, body: &str) {
+        let path = gate_path(workspace);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, body).unwrap();
+    }
+
+    /// 7. Missing gate file → `ParentGateReadError::Missing`.
+    #[test]
+    fn parent_gate_missing_returns_missing_error() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let now = 1_700_000_000_000_u128;
+        let err = read_parent_cleared_gate(&workspace, "loop-x", now).unwrap_err();
+        assert_eq!(err, ParentGateReadError::Missing);
+    }
+
+    /// 8. Stale gate file (`written_at_unix_ms` older than the
+    ///    freshness window) → `ParentGateReadError::Stale`.
+    #[test]
+    fn parent_gate_stale_returns_stale_error() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let now = 1_700_000_000_000_u128;
+        let stale_age = PARENT_CLEARED_GATE_FRESHNESS_MS + 1;
+        let gate = ParentClearedGate {
+            loop_id: "loop-x".to_string(),
+            manifest_sha256: String::new(),
+            written_at_unix_ms: now - stale_age,
+        };
+        write_gate_raw(&workspace, &serde_json::to_string(&gate).unwrap());
+        let err = read_parent_cleared_gate(&workspace, "loop-x", now).unwrap_err();
+        assert_eq!(
+            err,
+            ParentGateReadError::Stale {
+                age_ms: stale_age,
+                max_age_ms: PARENT_CLEARED_GATE_FRESHNESS_MS,
+            }
+        );
+    }
+
+    /// 9. Gate file with a non-matching `loop_id` → `LoopIdMismatch`.
+    #[test]
+    fn parent_gate_loop_id_mismatch_returns_loop_id_error() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let now = 1_700_000_000_000_u128;
+        let gate = ParentClearedGate {
+            loop_id: "loop-other".to_string(),
+            manifest_sha256: String::new(),
+            written_at_unix_ms: now,
+        };
+        write_gate_raw(&workspace, &serde_json::to_string(&gate).unwrap());
+        let err = read_parent_cleared_gate(&workspace, "loop-x", now).unwrap_err();
+        assert_eq!(
+            err,
+            ParentGateReadError::LoopIdMismatch {
+                expected: "loop-x".to_string(),
+                actual: "loop-other".to_string(),
+            }
+        );
+    }
+
+    /// 10. Gate file whose body is not valid JSON → `MalformedJson`.
+    #[test]
+    fn parent_gate_malformed_json_returns_malformed_error() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().to_path_buf();
+        write_gate_raw(&workspace, "this is not json {");
+        let err = read_parent_cleared_gate(&workspace, "loop-x", 0).unwrap_err();
+        match err {
+            ParentGateReadError::MalformedJson(_) => {}
+            other => panic!("expected MalformedJson, got {other:?}"),
+        }
+    }
+
+    /// 11. Fresh, matching gate file → returns `Ok(ParentClearedGate)`
+    ///     with the original fields intact.
+    #[test]
+    fn parent_gate_fresh_and_matching_returns_gate() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let now = 1_700_000_000_000_u128;
+        let gate = ParentClearedGate {
+            loop_id: "loop-x".to_string(),
+            manifest_sha256: "deadbeef".to_string(),
+            written_at_unix_ms: now - 60_000,
+        };
+        write_gate_raw(&workspace, &serde_json::to_string(&gate).unwrap());
+        let read = read_parent_cleared_gate(&workspace, "loop-x", now).unwrap();
+        assert_eq!(read, gate);
+    }
+
+    /// 12. Round-trip: write then read returns the same struct.
+    #[test]
+    fn parent_gate_write_then_read_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let gate = ParentClearedGate {
+            loop_id: "loop-rt".to_string(),
+            manifest_sha256: "abcd1234".to_string(),
+            written_at_unix_ms: 1_700_000_000_000_u128,
+        };
+        let path = gate_path(&workspace);
+        write_parent_cleared_gate(&path, &gate).unwrap();
+        let read = read_parent_cleared_gate(&workspace, "loop-rt", gate.written_at_unix_ms)
+            .unwrap();
+        assert_eq!(read, gate);
+    }
+
+    /// 13. Unix-only: `write_parent_cleared_gate` produces a `0600`
+    ///     file. Skipped on non-Unix platforms (Windows ACL model
+    ///     differs; the JSON contents still round-trip).
+    #[cfg(unix)]
+    #[test]
+    fn parent_gate_write_uses_0600_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let path = gate_path(&workspace);
+        write_parent_cleared_gate(
+            &path,
+            &ParentClearedGate {
+                loop_id: "loop-m".to_string(),
+                manifest_sha256: String::new(),
+                written_at_unix_ms: 0,
+            },
+        )
+        .unwrap();
+        let perms = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(perms, 0o600, "parent-cleared gate must be 0600");
     }
 }

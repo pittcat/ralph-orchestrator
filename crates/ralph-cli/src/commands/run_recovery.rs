@@ -373,7 +373,12 @@ pub fn acquire_and_assess(
 ///
 /// Kept in this module (not the `recovery_checkpoint` core) because the
 /// exact wording is a CLI-layer concern; the core stays string-free.
-fn render_refusal(refusal: &AssessmentRefusal) -> String {
+///
+/// `pub(crate)` so [`crate::commands::run`] can reuse the same wording
+/// when it surfaces the gate verdict as an anyhow error in the U1
+/// parent-cleared gate path (the in-line check there uses the same
+/// single-line message as the typed verdict here, for consistency).
+pub(crate) fn render_refusal(refusal: &AssessmentRefusal) -> String {
     match refusal {
         AssessmentRefusal::LoopIdentityMismatch { expected, actual } => format!(
             "loop identity mismatch: expected '{expected}', found '{actual}' in \
@@ -390,6 +395,11 @@ fn render_refusal(refusal: &AssessmentRefusal) -> String {
             ".ralph/loop.lock indicates another live loop (pid {holder_pid}); \
              the lock assessment is independent of the gate's own lock because \
              the prior holder crashed before releasing the flock"
+        ),
+        AssessmentRefusal::GateNotClearedByParent { worktree } => format!(
+            "parent-cleared gate at {worktree_display} is missing/stale/tampered; \
+             combined --continue cannot proceed without a fresh parent signature",
+            worktree_display = worktree.display()
         ),
     }
 }
