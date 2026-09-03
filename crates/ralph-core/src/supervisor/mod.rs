@@ -2057,6 +2057,14 @@ pub use worktree_bind::{
 mod attempt_tests;
 mod bridge;
 mod coordinator;
+/// 2026-09-03-0959 plan U5 (R12; S14; D13; E16): sanitized
+/// shadow inspect summary that aggregates [`dag_shadow::ShadowSink`]
+/// into operator-facing JSON without leaking raw payload bytes,
+/// DB paths, agent prompt text, or secrets. The legacy
+/// `SupervisorInspectSummary` below keeps reading from the live
+/// `SupervisorStore`; this new type is the runtime-owned DAG
+/// shadow's inspect surface.
+pub mod dag_inspect;
 /// 2026-09-03-0959 plan U1: tri-state `scheduler_mode` gate that
 /// isolates the legacy `WaveTracker` authority from the new
 /// runtime-owned DAG scheduler authority. Public so the config +
@@ -2078,6 +2086,15 @@ pub mod dag_plan_receipt;
 /// runtime driver (U5+) calls this once per tick and applies
 /// the result inside its store transaction.
 pub mod dag_scheduler;
+/// 2026-09-03-0959 plan U5 (R11/R12; S13/S14; D1/D2/D13; E6/E7/E13/E16):
+/// observation-only shadow sink + pure decision function for the
+/// runtime-owned DAG scheduler. Records per-tick scheduler
+/// decisions + utilization deltas WITHOUT triggering any
+/// execution side effect (no worktree bind, no merge, no task
+/// close, no business terminal event). The driver (U6+) feeds
+/// snapshots here on each accepted event tick; inspect tooling
+/// reads from here via [`dag_inspect::SchedulerInspectSummary`].
+pub mod dag_shadow;
 pub mod dag_store;
 pub mod dag_store_memory;
 mod memory;
