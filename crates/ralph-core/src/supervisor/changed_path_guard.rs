@@ -51,6 +51,12 @@ pub enum ChangedPathRejection {
     /// Path is a submodule (git mode 160000 / gitlink) — the
     /// integrator cannot squash a submodule pointer.
     SubmodulePath(String),
+    /// Path is inside the lane allowlist but NOT in the job's
+    /// declared changed-path set (R18/D23/S18 bidirectional
+    /// authorisation: a job declaring `foo.rs` but writing
+    /// `bar.rs` inside the allowlist is rejected). `job` is the
+    /// owning job identifier (e.g. unit id) for diagnostics.
+    OutsideDeclared { path: String, job: String },
 }
 
 impl std::fmt::Display for ChangedPathRejection {
@@ -61,6 +67,9 @@ impl std::fmt::Display for ChangedPathRejection {
             Self::ForbiddenPath(p) => write!(f, "forbidden path: {p}"),
             Self::SymlinkPath(p) => write!(f, "symlink path: {p}"),
             Self::SubmodulePath(p) => write!(f, "submodule path: {p}"),
+            Self::OutsideDeclared { path, job } => {
+                write!(f, "path outside declared set: {path} (job: {job})")
+            }
         }
     }
 }
@@ -174,17 +183,29 @@ impl ChangedPathSet {
     }
 
     /// Authorise the changed-path set against the lane
-    /// allowlist. Returns the sorted, deduplicated list of
-    /// paths when all checks pass.
+    /// allowlist AND the job's declared changed-path set. Returns
+    /// the sorted, deduplicated list of paths when all checks pass.
+    ///
+    /// `declared_paths` is the job's declared changed-set (R18/D23/S18
+    /// bidirectional authorisation): every actual changed path must
+    /// be `⊆ declared_paths` as well as `⊆ allowlist`. `job` is the
+    /// owning job identifier (e.g. unit id) embedded in an
+    /// [`ChangedPathRejection::OutsideDeclared`] rejection for
+    /// diagnostics.
     ///
     /// Checks (in this order):
     ///   1. No entry has `is_symlink == true`.
     ///   2. No entry has `is_submodule == true`.
     ///   3. No entry's first component is a forbidden prefix.
     ///   4. Every entry falls inside at least one allowlist root.
+    ///   5. Every entry falls inside at least one declared path
+    ///      (prefix match, same semantics as the allowlist check).
+    ///      Empty `declared_paths` + non-empty actual ⇒ fail closed.
     pub fn is_clean_within(
         &self,
         allowlist: &[PathBuf],
+        declared_paths: &[PathBuf],
+        job: &str,
     ) -> Result<Vec<PathBuf>, ChangedPathRejection> {
         let mut out: Vec<PathBuf> = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
@@ -213,6 +234,16 @@ impl ChangedPathSet {
                 return Err(ChangedPathRejection::OutsideAllowlist(
                     entry.path.display().to_string(),
                 ));
+            }
+            // U8 (R18/D23/S18): bidirectional authorisation. A job
+            // declaring `foo.rs` but writing `bar.rs` (still inside
+            // the lane allowlist) is rejected here. Empty declared
+            // set + non-empty actual ⇒ fail closed.
+            if !is_within_allowlist(&entry.path, declared_paths) {
+                return Err(ChangedPathRejection::OutsideDeclared {
+                    path: entry.path.display().to_string(),
+                    job: job.to_string(),
+                });
             }
             out.push(entry.path.clone());
         }
@@ -280,7 +311,7 @@ mod tests {
     fn changed_path_guard_rejects_forbidden_path() {
         let set = ChangedPathSet::from_diff_entries([entry(".git/HEAD", false, false)]).unwrap();
         let err = set
-            .is_clean_within(&allowlist(&[".git"]))
+            .is_clean_within(&allowlist(&[".git"]), &declared(&[".git"]), "U1")
             .expect_err("must reject");
         match err {
             ChangedPathRejection::ForbiddenPath(p) => assert_eq!(p, ".git/HEAD"),
@@ -316,7 +347,7 @@ mod tests {
         let set = ChangedPathSet::from_diff_entries([entry("src/link_to_thing", true, false)])
             .unwrap();
         let err = set
-            .is_clean_within(&allowlist(&["src"]))
+            .is_clean_within(&allowlist(&["src"]), &declared(&["src"]), "U1")
             .expect_err("symlink must be rejected");
         match err {
             ChangedPathRejection::SymlinkPath(p) => {
@@ -333,7 +364,7 @@ mod tests {
     fn changed_path_guard_rejects_submodule_change() {
         let set = ChangedPathSet::from_diff_entries([entry("external/lib", false, true)]).unwrap();
         let err = set
-            .is_clean_within(&allowlist(&["external"]))
+            .is_clean_within(&allowlist(&["external"]), &declared(&["external"]), "U1")
             .expect_err("submodule must be rejected");
         match err {
             ChangedPathRejection::SubmodulePath(p) => assert_eq!(p, "external/lib"),
@@ -348,7 +379,7 @@ mod tests {
         let set = ChangedPathSet::from_diff_paths(["src/a.rs", "src/b.rs", "src/a.rs"])
             .unwrap();
         let authorized = set
-            .is_clean_within(&allowlist(&["src"]))
+            .is_clean_within(&allowlist(&["src"]), &declared(&["src"]), "U1")
             .expect("must authorise");
         assert_eq!(
             authorized,
@@ -375,7 +406,7 @@ mod tests {
     fn is_clean_within_rejects_outside_allowlist() {
         let set = ChangedPathSet::from_diff_paths(["crates/ralph-x/src/lib.rs"]).unwrap();
         let err = set
-            .is_clean_within(&allowlist(&["src"]))
+            .is_clean_within(&allowlist(&["src"]), &declared(&["src"]), "U1")
             .expect_err("must reject");
         assert!(matches!(err, ChangedPathRejection::OutsideAllowlist(_)));
     }
@@ -386,7 +417,9 @@ mod tests {
     #[test]
     fn is_clean_within_empty_allowlist_rejects_all() {
         let set = ChangedPathSet::from_diff_paths(["src/a.rs"]).unwrap();
-        let err = set.is_clean_within(&[]).expect_err("must reject");
+        let err = set
+            .is_clean_within(&[], &declared(&["src"]), "U1")
+            .expect_err("must reject");
         assert!(matches!(err, ChangedPathRejection::OutsideAllowlist(_)));
     }
 
@@ -408,6 +441,91 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(set.len(), 1);
-        assert!(set.is_clean_within(&allowlist(&["src"])).is_ok());
+        assert!(set
+            .is_clean_within(&allowlist(&["src"]), &declared(&["src/a.rs"]), "U1")
+            .is_ok());
+    }
+
+    // =========================================================================
+    // U8 (R18/D23/S18) bidirectional authorisation: a job declaring
+    // `[foo.rs]` but writing `bar.rs` (inside the lane allowlist) must be
+    // rejected with `OutsideDeclared`. Before U8 the guard only checked
+    // `actual ⊆ lane-allowlist` (single-direction); the second check
+    // `actual ⊆ job-declared-paths` closes the A1 gap.
+    // =========================================================================
+
+    fn declared(paths: &[&str]) -> Vec<PathBuf> {
+        paths.iter().map(PathBuf::from).collect()
+    }
+
+    /// U8 happy path: actual `[src/a.rs]`, declared `[src/a.rs]`,
+    /// allowlist contains `src` → clean (authorised both ways).
+    #[test]
+    fn u8_clean_when_actual_matches_declared() {
+        let set = ChangedPathSet::from_diff_paths(["src/a.rs"]).unwrap();
+        let authorized = set
+            .is_clean_within(&allowlist(&["src"]), &declared(&["src/a.rs"]), "U1")
+            .expect("must authorise");
+        assert_eq!(authorized, vec![PathBuf::from("src/a.rs")]);
+    }
+
+    /// U8 happy path: a declared directory (`src/`) authorises any
+    /// actual path under it (`src/anything.rs`), mirroring the
+    /// allowlist prefix-matching semantics.
+    #[test]
+    fn u8_declared_directory_authorises_descendants() {
+        let set = ChangedPathSet::from_diff_paths(["src/a.rs", "src/sub/b.rs"]).unwrap();
+        let authorized = set
+            .is_clean_within(&allowlist(&["src"]), &declared(&["src"]), "U1")
+            .expect("must authorise");
+        assert_eq!(
+            authorized,
+            vec![PathBuf::from("src/a.rs"), PathBuf::from("src/sub/b.rs")]
+        );
+    }
+
+    /// A1 RED→GREEN: a job declaring `[src/a.rs]` but writing
+    /// `src/b.rs` (still inside the lane allowlist `["src"]`) is
+    /// rejected with `OutsideDeclared`. Before U8 this passed
+    /// (single-direction authorisation gap).
+    #[test]
+    fn u8_rejects_actual_inside_allowlist_but_outside_declared() {
+        let set = ChangedPathSet::from_diff_paths(["src/b.rs"]).unwrap();
+        let err = set
+            .is_clean_within(&allowlist(&["src"]), &declared(&["src/a.rs"]), "U1")
+            .expect_err("must reject undeclared path");
+        match err {
+            ChangedPathRejection::OutsideDeclared { path, job: _ } => {
+                assert_eq!(path, "src/b.rs");
+            }
+            other => panic!("expected OutsideDeclared, got {other:?}"),
+        }
+    }
+
+    /// U8 edge: actual path inside the lane-allowlist but NOT in the
+    /// declared set → `OutsideDeclared` (was clean before U8).
+    #[test]
+    fn u8_rejects_path_in_allowlist_not_in_declared() {
+        let set = ChangedPathSet::from_diff_paths(["src/c.rs"]).unwrap();
+        let err = set
+            .is_clean_within(
+                &allowlist(&["src"]),
+                &declared(&["src/a.rs", "src/b.rs"]),
+                "U1",
+            )
+            .expect_err("must reject");
+        assert!(matches!(err, ChangedPathRejection::OutsideDeclared { .. }));
+    }
+
+    /// U8 edge: empty `declared_paths` + non-empty actual →
+    /// `OutsideDeclared` (fail closed). A job that declared nothing
+    /// must not be authorised for any actual change.
+    #[test]
+    fn u8_empty_declared_with_nonempty_actual_fails_closed() {
+        let set = ChangedPathSet::from_diff_paths(["src/a.rs"]).unwrap();
+        let err = set
+            .is_clean_within(&allowlist(&["src"]), &declared(&[]), "U1")
+            .expect_err("must fail closed");
+        assert!(matches!(err, ChangedPathRejection::OutsideDeclared { .. }));
     }
 }

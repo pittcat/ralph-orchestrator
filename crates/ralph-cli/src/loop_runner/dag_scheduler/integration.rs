@@ -92,6 +92,12 @@ pub struct IntegrationRequest {
     /// Lane allowlist (e.g. `["crates/ralph-core",
     /// "crates/ralph-cli", ...]`). Re-checked at lock time.
     pub allowlist: Vec<PathBuf>,
+    /// U8 (R18/D23/S18): the job's declared changed-path set.
+    /// Every actual changed path must be `⊆ declared_paths`
+    /// (bidirectional authorisation) as well as `⊆ allowlist`.
+    /// Sourced from the job's declared changed-set. Re-checked
+    /// at lock time alongside the allowlist.
+    pub declared_paths: Vec<PathBuf>,
     pub created_at_ms: i64,
 }
 
@@ -169,7 +175,7 @@ where
         // symlink, submodule, or out-of-allowlist path
         // rejects the candidate.
         let set = ChangedPathSet::from_diff_entries(req.changed_paths.clone())?;
-        let _authorised = set.is_clean_within(&req.allowlist)?;
+        let _authorised = set.is_clean_within(&req.allowlist, &req.declared_paths, &req.unit_id)?;
 
         // Step 3: build the lane's `IntegrationCandidate` and
         // acquire the per-target lease.
@@ -307,6 +313,12 @@ mod tests {
             unit_commit: "UNIT_OID".to_string(),
             changed_paths: vec![entry("src/a.rs"), entry("src/b.rs")],
             allowlist: vec![PathBuf::from("src")],
+            // U8: declared changed-set authorises everything the base
+            // request actually changes (`src/a.rs`, `src/b.rs`); tests
+            // that mutate `changed_paths` outside the declared set
+            // (forbidden prefix, symlink) short-circuit at earlier
+            // checks before the declared-set gate runs.
+            declared_paths: vec![PathBuf::from("src")],
             created_at_ms: 1_700_000_000_000,
         }
     }
