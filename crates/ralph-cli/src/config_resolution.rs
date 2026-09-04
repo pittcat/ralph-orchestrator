@@ -659,7 +659,8 @@ event_loop:
 ",
         )
         .expect("preset snippet must parse");
-        let merged = merge_yaml_values(default_value, preset_value).expect("merge must succeed");
+        let merged =
+            merge_yaml_values(default_value.clone(), preset_value).expect("merge must succeed");
         let enabled = merged
             .get("event_loop")
             .and_then(|v| v.get("supervisor"))
@@ -681,6 +682,61 @@ event_loop:
             Some(16),
             "preset supervisor.max_concurrent_workers must reach merged value; got {:?}",
             max_workers
+        );
+
+        // 2026-09-03-0959 plan U1: `scheduler_mode` is a leaf
+        // under `supervisor`. The parent `supervisor` opt-in strip
+        // already removes the default placeholder, so a preset
+        // declaring `supervisor.scheduler_mode: dag` must reach
+        // the merged value (R1 / S1). Without this pin a future
+        // refactor that strips only the supervisor.* children but
+        // not the nested leaf would silently drop the DAG opt-in.
+        let preset_dag_value: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  supervisor:
+    enabled: true
+    scheduler_mode: dag
+",
+        )
+        .expect("preset snippet must parse");
+        let merged_dag =
+            merge_yaml_values(default_value.clone(), preset_dag_value).expect("merge must succeed");
+        let scheduler_mode = merged_dag
+            .get("event_loop")
+            .and_then(|v| v.get("supervisor"))
+            .and_then(|v| v.get("scheduler_mode"))
+            .and_then(|v| v.as_str());
+        assert_eq!(
+            scheduler_mode,
+            Some("dag"),
+            "preset supervisor.scheduler_mode must reach merged value; got {:?}",
+            scheduler_mode
+        );
+
+        // When the operator omits `supervisor.scheduler_mode`
+        // entirely, the merged view must leave the key absent so
+        // the typed `serde(default = ...)` deserialiser picks
+        // `Wave`. This pins the operator-omits side of the
+        // recursive merge contract.
+        let preset_no_scheduler_mode: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  supervisor:
+    enabled: true
+",
+        )
+        .expect("preset snippet must parse");
+        let merged_no_sched =
+            merge_yaml_values(default_value, preset_no_scheduler_mode).expect("merge must succeed");
+        let scheduler_mode_absent = merged_no_sched
+            .get("event_loop")
+            .and_then(|v| v.get("supervisor"))
+            .and_then(|v| v.get("scheduler_mode"));
+        assert!(
+            scheduler_mode_absent.is_none(),
+            "scheduler_mode must stay absent when preset omits it (so serde default = Wave); got {:?}",
+            scheduler_mode_absent
         );
     }
 }

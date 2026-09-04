@@ -2991,9 +2991,7 @@ hats:
             .map(|f| format!("{}:{:?}", f.id, f.details.get("topic")))
             .collect();
         assert!(
-            !gap_codes
-                .iter()
-                .any(|c| c.contains("work.failed.proposed")),
+            !gap_codes.iter().any(|c| c.contains("work.failed.proposed")),
             "proposed topic must not report publisher/subscriber gaps pre-normalize, got: {gap_codes:?}"
         );
 

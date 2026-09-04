@@ -17,6 +17,16 @@ base_commit: "<SHA_AFTER_FOUNDATION_OR_TBD>"
 # 下一个 wave 的 worktree 必须从该 SHA 懒创建，确保依赖代码可见。
 verified_base_commit: "<VERIFIED_BASE_COMMIT_OR_TBD>"
 
+# U2 (plan 2026-09-03-0959) §1.4 typed resource capacities: 每条 {key,capacity}
+# 声明一个全局资源的总许可数；unit.resource_claims[].key 必须引用这里的 key。
+# `capacity` 必须 ≥ 1；同名 key 出现两次会被 U2 canonical validator 拒。
+# U4 admission engine 会保证 unit.permits ≤ capacity，U2 不做单 claim 静态上限。
+resource_capacities: []
+  # - key: gpu
+  #   capacity: 1
+  # - key: cpu
+  #   capacity: 4
+
 units: []
   # - 将 unit.template.yml 的字段作为 YAML 对象逐项追加到 units[]
   # - depends_on / execution_wave / integration_order 必须形成无环 DAG

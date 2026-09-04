@@ -32,6 +32,7 @@ use ralph_core::RalphConfig;
 use ralph_core::config::profiles::ProfileSpec;
 use ralph_core::event_loop::PromptPreview;
 use ralph_core::profiles::ResolvedProfileFragments;
+use ralph_core::supervisor::SchedulerInspectSummary;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -511,6 +512,7 @@ pub async fn inspect_loop_command(
         schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
         loop_anchor,
         supervisor: build_supervisor_summary(&config, &root),
+        scheduler: build_scheduler_summary(&config),
         activation_registry,
     };
 
@@ -1036,6 +1038,16 @@ struct LoopInspectView {
     /// store can be opened. `None` → JSON has no `supervisor` key.
     #[serde(skip_serializing_if = "Option::is_none")]
     supervisor: Option<ralph_core::supervisor::SupervisorInspectSummary>,
+    /// U5 (plan 2026-09-03-0959): sanitized scheduler summary
+    /// surfaced when `event_loop.supervisor.scheduler_mode` is NOT
+    /// `wave` (the legacy default). `None` when `scheduler_mode =
+    /// wave` so the v2 JSON consumers see no field drift (R3). The
+    /// block is purely read-only — the inspect command never
+    /// mutates any shadow sink or store; it just reads the
+    /// bounded counts + `plan_keys` identifiers the agent already
+    /// knows via `task_id` / `plan_key` channels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scheduler: Option<SchedulerInspectSummary>,
     /// U3 (plan 2026-07-30-004): persistent activation registry summary.
     /// `None` when the registry file does not exist (no activations
     /// have been recorded yet). The key is omitted from JSON when absent.
@@ -1358,6 +1370,47 @@ fn build_supervisor_summary(
             ..ralph_core::supervisor::SupervisorInspectSummary::default()
         })
     }
+}
+
+/// U5 (plan 2026-09-03-0959): build the sanitized scheduler
+/// inspect summary. Surfaces a `scheduler` block in the
+/// `ralph inspect loop --format json` output when the configured
+/// `event_loop.supervisor.scheduler_mode` is NOT the legacy
+/// `wave` mode (R3 — Wave is the default, the key is omitted so
+/// the existing v2 JSON shape is unchanged for legacy consumers).
+///
+/// Output safety (R11 / E16):
+/// - The summary is sanitized: it never includes the raw event
+///   payload, the workspace path, DB paths, or any operator-host
+///   string. Only bounded counts + `plan_keys` surface.
+/// - The inspect command is **read-only** — it never opens the
+///   shadow sink for write, never mutates the receipt registry,
+///   and never spawns a backend. An empty sink is reported as an
+///   empty summary (zero counters, no `plan_keys`).
+///
+/// Returns `None` for `scheduler_mode = wave` so the JSON keeps
+/// the v2 shape. Returns `Some(empty summary)` for `dag_shadow`
+/// / `dag` so the agent / operator can confirm the new authority
+/// is wired without spawning a real `ralph run`.
+fn build_scheduler_summary(config: &RalphConfig) -> Option<SchedulerInspectSummary> {
+    let mode = config.event_loop.supervisor.scheduler_mode;
+    if mode.uses_legacy_authority() {
+        // Wave mode is the legacy default; the legacy JSON shape
+        // does not include a `scheduler` block (R3).
+        return None;
+    }
+    // DagShadow / Dag: surface an empty summary bounded to the
+    // public identifiers (mode label + zero counts + empty
+    // plan_keys). The actual `compute_shadow_observation` tick
+    // happens at runtime via the U5 driver seam wired in
+    // `loop_runner::dag_scheduler`; inspect itself does not drive
+    // any observation.
+    let mode_label = match mode {
+        ralph_core::config::SchedulerMode::Wave => "wave",
+        ralph_core::config::SchedulerMode::DagShadow => "dag_shadow",
+        ralph_core::config::SchedulerMode::Dag => "dag",
+    };
+    Some(SchedulerInspectSummary::for_mode(mode_label))
 }
 
 /// U3 (plan 2026-07-30-004): load and summarise the activation registry
@@ -2413,6 +2466,7 @@ mod tests {
             schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
             loop_anchor: None,
             supervisor: None,
+            scheduler: None,
             activation_registry: None,
         };
         assert!(view.loop_id.is_none());
@@ -2457,6 +2511,7 @@ mod tests {
             schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
             loop_anchor: None,
             supervisor: None,
+            scheduler: None,
             activation_registry: None,
         };
 
@@ -2876,6 +2931,7 @@ mod tests {
             schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
             loop_anchor: None,
             supervisor: None,
+            scheduler: None,
             activation_registry: None,
         };
         let json = serde_json::to_value(&view).expect("serialise");

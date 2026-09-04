@@ -107,9 +107,7 @@ pub(crate) fn prepare_normal_merge(
     let (merge_succeeded, merge_retried, merge_err) = match first_merge {
         Ok(()) => (true, false, None),
         Err(first_err) => {
-            let channel_still_present = channel_path
-                .as_deref()
-                .is_some_and(|path| path.exists());
+            let channel_still_present = channel_path.as_deref().is_some_and(|path| path.exists());
             if pre_bytes.unwrap_or(0) > 0 && channel_still_present {
                 #[cfg(test)]
                 run_merge_retry_test_hook();
@@ -150,8 +148,7 @@ pub(crate) fn prepare_normal_merge(
         if pre_bytes.unwrap_or(0) > 0
             && let Some(path) = channel_path.as_deref()
             && path.exists()
-            && let Err(qerr) =
-                crate::loop_runner::hat_channel::quarantine_failed_channel(ctx, path)
+            && let Err(qerr) = crate::loop_runner::hat_channel::quarantine_failed_channel(ctx, path)
         {
             warn!(
                 error = %qerr,

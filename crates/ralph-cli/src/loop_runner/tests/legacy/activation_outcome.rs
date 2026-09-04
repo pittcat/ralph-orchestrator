@@ -970,7 +970,9 @@ fn s42_merge_retry_still_fails_quarantines_channel() {
             .counts_toward_publish_obligation(),
         "S4.2: merge_failed still counts toward the publish-obligation gate"
     );
-    let quarantine_dir = ctx.workspace().join(".ralph/diagnostics/failed-activations");
+    let quarantine_dir = ctx
+        .workspace()
+        .join(".ralph/diagnostics/failed-activations");
     let quarantined = std::fs::read_dir(&quarantine_dir)
         .map(|rd| rd.filter_map(Result::ok).count())
         .unwrap_or(0);

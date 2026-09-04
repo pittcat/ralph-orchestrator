@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, ValueEnum};
+use ralph_core::config::validate_scheduler_mode;
 use ralph_core::{CheckResult, CheckStatus, PreflightReport, PreflightRunner, RalphConfig};
 use serde_yaml::{Mapping, Value};
 use std::path::{Path, PathBuf};
@@ -251,6 +252,8 @@ pub(crate) async fn load_config_for_preflight(
 
     crate::apply_config_overrides(&mut config, &overrides)?;
 
+    validate_scheduler_mode_for_config(&config)?;
+
     Ok(config)
 }
 
@@ -335,6 +338,8 @@ pub(crate) fn load_config_for_preflight_sync_with_missing_default_warning(
     }
 
     crate::apply_config_overrides(&mut config, &overrides)?;
+
+    validate_scheduler_mode_for_config(&config)?;
 
     Ok(config)
 }
@@ -740,6 +745,30 @@ fn validate_core_config_shape(value: &Value, label: &str) -> Result<()> {
         anyhow::bail!(ralph_core::ConfigError::DeprecatedProjectKey);
     }
 
+    Ok(())
+}
+
+/// 2026-09-03-0959 plan U1: after the merged `RalphConfig` is fully
+/// resolved, validate that the chosen `event_loop.supervisor.scheduler_mode`
+/// is compatible with `event_loop.supervisor.enabled` and
+/// `event_loop.execution_mode`. `DagShadow` and `Dag` are only legal when
+/// the supervisor is enabled and the execution mode is `Isolated`; any
+/// other combination is surfaced as a `preflight` failure so the loop
+/// never starts under an unrunnable authority (E12 / E17).
+///
+/// Pure function over the typed config — no I/O, no logging — so it is
+/// safe to call from both the async and sync loaders and from
+/// targeted unit tests below (`dag_scheduler_mode_*`).
+pub(crate) fn validate_scheduler_mode_for_config(config: &RalphConfig) -> Result<()> {
+    let mode = config.event_loop.supervisor.scheduler_mode;
+    let supervisor_enabled = config.event_loop.supervisor.enabled;
+    let execution_mode = config.event_loop.execution_mode.clone();
+    if let Err(err) = validate_scheduler_mode(mode, supervisor_enabled, execution_mode) {
+        anyhow::bail!(
+            "scheduler_mode validation failed: {err} \
+             (field path: event_loop.supervisor.scheduler_mode)"
+        );
+    }
     Ok(())
 }
 
@@ -2948,5 +2977,124 @@ hats:
         assert!(mapping_get(mapping, "event_loop").is_some());
         assert!(mapping_get(mapping, "cli").is_none());
         assert!(mapping_get(mapping, "core").is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 2026-09-03-0959 plan U1 acceptance: validate_scheduler_mode_for_config
+    // must be wired into preflight so mis-configured
+    // event_loop.supervisor.scheduler_mode values fail closed (E12 / E17)
+    // before the loop starts.
+    //
+    // Filter: `cargo nextest run -p ralph-cli --bin ralph -- dag_scheduler_mode`
+    // ─────────────────────────────────────────────────────────────
+
+    fn parse_ralph_config(yaml: &str) -> RalphConfig {
+        let value: Value = serde_yaml::from_str(yaml).expect("fixture YAML parses");
+        serde_yaml::from_value(value).expect("RalphConfig deserialises")
+    }
+
+    #[test]
+    fn dag_scheduler_mode_wave_default_passes() {
+        // No `scheduler_mode` declared anywhere → typed default is `Wave`.
+        // Wave is always legal (no supervisor, no isolated requirement),
+        // so preflight must accept the bare minimum ralph.yml.
+        let cfg = parse_ralph_config("event_loop: {}\n");
+        assert_eq!(
+            cfg.event_loop.supervisor.scheduler_mode,
+            ralph_core::config::SchedulerMode::Wave
+        );
+        assert!(validate_scheduler_mode_for_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn dag_scheduler_mode_dag_without_supervisor_fails() {
+        // DAG authority requires `supervisor.enabled = true`. The
+        // framework default is `enabled = false`, so any operator /
+        // preset that opts into `dag` without also enabling the
+        // supervisor must be rejected at preflight (R1 / E12).
+        let cfg = parse_ralph_config(
+            "event_loop:\n  execution_mode: isolated\n  supervisor:\n    scheduler_mode: dag\n",
+        );
+        let err = validate_scheduler_mode_for_config(&cfg).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("event_loop.supervisor.scheduler_mode"),
+            "error must point at the field path; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("event_loop.supervisor.enabled"),
+            "error must name the supervisor.enabled dependency; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("dag"),
+            "error must include the offending value; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn dag_scheduler_mode_dag_in_coordinator_mode_fails() {
+        // DAG authority requires `execution_mode: isolated`. With the
+        // supervisor enabled but execution_mode still coordinator,
+        // preflight must surface NotIsolated with the field path so the
+        // operator does not have to read runtime traces (R14 / E17).
+        let cfg = parse_ralph_config(
+            "event_loop:\n  execution_mode: coordinator\n  supervisor:\n    enabled: true\n    scheduler_mode: dag\n",
+        );
+        let err = validate_scheduler_mode_for_config(&cfg).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("event_loop.supervisor.scheduler_mode"),
+            "error must point at the field path; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("isolated"),
+            "error must name the required execution_mode; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("coordinator"),
+            "error must report the current execution_mode; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn dag_scheduler_mode_dag_with_supervisor_and_isolated_passes() {
+        // Happy path that the runtime-owned DAG scheduler needs to be
+        // runnable end-to-end. With supervisor enabled and execution
+        // mode isolated, dag must validate clean (no false positive).
+        let cfg = parse_ralph_config(
+            "event_loop:\n  execution_mode: isolated\n  supervisor:\n    enabled: true\n    scheduler_mode: dag\n",
+        );
+        assert!(validate_scheduler_mode_for_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn dag_scheduler_mode_dag_shadow_requires_isolated() {
+        // dag_shadow and dag share the same preconditions; pin both
+        // directions so the symmetry cannot drift. With the supervisor
+        // enabled but execution_mode still coordinator, dag_shadow
+        // must fail with NotIsolated.
+        let cfg = parse_ralph_config(
+            "event_loop:\n  execution_mode: coordinator\n  supervisor:\n    enabled: true\n    scheduler_mode: dag_shadow\n",
+        );
+        let err = validate_scheduler_mode_for_config(&cfg).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("event_loop.supervisor.scheduler_mode"),
+            "error must point at the field path; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("dag_shadow"),
+            "error must include the offending value; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("isolated"),
+            "error must name the required execution_mode; got: {rendered}"
+        );
+
+        // And the happy path: dag_shadow with supervisor + isolated.
+        let cfg_ok = parse_ralph_config(
+            "event_loop:\n  execution_mode: isolated\n  supervisor:\n    enabled: true\n    scheduler_mode: dag_shadow\n",
+        );
+        assert!(validate_scheduler_mode_for_config(&cfg_ok).is_ok());
     }
 }

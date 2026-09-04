@@ -1699,8 +1699,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
             // Group rows by (slot, attempt) preserving event_seq ordering.
             let mut grouped: BTreeMap<(u32, u32), Vec<crate::Event>> = BTreeMap::new();
             for row in rows {
-                let (slot_i, attempt_i, topic, payload, source, wave_index, wave_total, sys) =
-                    row?;
+                let (slot_i, attempt_i, topic, payload, source, wave_index, wave_total, sys) = row?;
                 let slot_index = u32::try_from(slot_i).map_err(|_| {
                     SupervisorStoreError::Storage(format!(
                         "slot_index {slot_i} out of range for u32"
@@ -3903,8 +3902,7 @@ mod tests {
                 system_injected: Some(false),
             },
         ];
-        s.record_slot_event_payloads(&wave, 0, 1, &events)
-            .unwrap();
+        s.record_slot_event_payloads(&wave, 0, 1, &events).unwrap();
 
         let loaded = s.load_slot_event_payloads(&wave).unwrap();
         assert_eq!(loaded.len(), 1);

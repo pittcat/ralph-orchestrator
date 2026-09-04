@@ -16,8 +16,341 @@
 use crate::artifact_canonicalizer::{ArtifactError, CanonicalArtifact, canonicalize};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+// ── U2 (plan 2026-09-03-0959) canonical artifact v2 ────────────────────
+//
+// Typed resource capacity/claim pairs + a canonical per-Unit `target_branch`
+// are added to the execution-plan schema. The canonical digest covers all of
+// them so identical logical plans always hash to the same value regardless
+// of input list order. See `compute_resource_aware_digest` for the
+// normalization rules and `validate_plan_v2` for the validation rules.
+
+/// Typed resource capacity declared at plan scope.
+///
+/// Each `ResourceClaim` made by a Unit must reference a `key` declared here
+/// (validated post-parse). The runtime admission engine (Unit 4) enforces
+/// that no Unit's claim exceeds the capacity declared here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceCapacity {
+    pub key: String,
+    pub capacity: u32,
+}
+
+/// Typed resource claim attached to a Unit.
+///
+/// `permits == 0` is rejected at parse time (D6: typed capacity+permits;
+/// zero is not meaningful). A claim whose `permits > capacity` is accepted
+/// at parse time and re-checked by the runtime admission engine in Unit 4.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceClaim {
+    pub key: String,
+    pub permits: u32,
+}
+
+/// Error from v2 validation (resources / target_branch / digest).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanV2Error {
+    /// A `ResourceClaim` references a capacity key that the plan does not
+    /// declare.
+    UnknownResource {
+        unit_id: String,
+        resource_key: String,
+    },
+    /// Two `ResourceCapacity` entries share the same `key`.
+    DuplicateCapacityKey { key: String },
+    /// Two `ResourceClaim` entries within one Unit share the same `key`.
+    DuplicateClaimKey {
+        unit_id: String,
+        resource_key: String,
+    },
+    /// A `ResourceClaim` has `permits == 0`.
+    ZeroPermits {
+        unit_id: String,
+        resource_key: String,
+    },
+    /// A `ResourceCapacity` has `capacity == 0`.
+    ZeroCapacity { resource_key: String },
+    /// A Unit's `target_branch` is empty.
+    EmptyTargetBranch { unit_id: String },
+    /// A Unit's `target_branch` violates the [`git check-ref-format
+    /// --branch`](https://git-scm.com/docs/git-check-ref-format) rules.
+    UnsafeTargetBranch {
+        unit_id: String,
+        branch: String,
+        reason: &'static str,
+    },
+}
+
+impl std::fmt::Display for PlanV2Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PlanV2Error::UnknownResource {
+                unit_id,
+                resource_key,
+            } => write!(
+                f,
+                "unit '{unit_id}' claims resource '{resource_key}' which is not declared in plan.resource_capacities"
+            ),
+            PlanV2Error::DuplicateCapacityKey { key } => {
+                write!(f, "plan.resource_capacities contains duplicate key '{key}'")
+            }
+            PlanV2Error::DuplicateClaimKey {
+                unit_id,
+                resource_key,
+            } => write!(
+                f,
+                "unit '{unit_id}' contains duplicate resource_claims entry for key '{resource_key}'"
+            ),
+            PlanV2Error::ZeroPermits {
+                unit_id,
+                resource_key,
+            } => write!(
+                f,
+                "unit '{unit_id}' declares resource_claims[{resource_key}] with permits=0; zero permits is rejected"
+            ),
+            PlanV2Error::ZeroCapacity { resource_key } => write!(
+                f,
+                "plan.resource_capacities[{resource_key}] has capacity=0; zero capacity is rejected"
+            ),
+            PlanV2Error::EmptyTargetBranch { unit_id } => {
+                write!(f, "unit '{unit_id}' has empty target_branch")
+            }
+            PlanV2Error::UnsafeTargetBranch {
+                unit_id,
+                branch,
+                reason,
+            } => write!(
+                f,
+                "unit '{unit_id}' has unsafe target_branch '{branch}': {reason}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PlanV2Error {}
+
+/// Validate a `git check-ref-format --branch`-style branch name. Mirrors the
+/// subset of rules that catch the unsafe patterns we care about (no spaces,
+/// no `..`/`~`/`^`/`:`/`?`/`*`/`[`/`/`, no leading `-`, no trailing `/`
+/// or `.lock`, no `@{`, no `//`, no trailing `.`, max 255 bytes). Anything
+/// else passes. The `(reason)` string explains which rule was violated.
+pub fn validate_target_branch(branch: &str) -> Result<(), &'static str> {
+    if branch.is_empty() {
+        return Err("target_branch must not be empty");
+    }
+    if branch.len() > 255 {
+        return Err("target_branch must be ≤ 255 bytes");
+    }
+    if branch.starts_with('-') {
+        return Err("target_branch must not start with '-'");
+    }
+    if branch.starts_with('/') {
+        return Err("target_branch must not start with '/'");
+    }
+    if branch.ends_with('/') {
+        return Err("target_branch must not end with '/'");
+    }
+    if branch.ends_with(".lock") {
+        return Err("target_branch must not end with '.lock'");
+    }
+    if branch.ends_with('.') {
+        return Err("target_branch must not end with '.'");
+    }
+    if branch.contains("//") {
+        return Err("target_branch must not contain '//'");
+    }
+    if branch.contains("..") {
+        return Err("target_branch must not contain '..'");
+    }
+    if branch.contains("@{") {
+        return Err("target_branch must not contain '@{'");
+    }
+    if branch.contains(' ') {
+        return Err("target_branch must not contain spaces");
+    }
+    if branch.contains('~') {
+        return Err("target_branch must not contain '~'");
+    }
+    if branch.contains('^') {
+        return Err("target_branch must not contain '^'");
+    }
+    if branch.contains(':') {
+        return Err("target_branch must not contain ':'");
+    }
+    if branch.contains('?') {
+        return Err("target_branch must not contain '?'");
+    }
+    if branch.contains('*') {
+        return Err("target_branch must not contain '*'");
+    }
+    if branch.contains('[') {
+        return Err("target_branch must not contain '['");
+    }
+    if branch.contains('\\') {
+        return Err("target_branch must not contain '\\'");
+    }
+    if branch.chars().any(|c| c.is_ascii_control()) {
+        return Err("target_branch must not contain ASCII control characters");
+    }
+    Ok(())
+}
+
+/// Compute the resource-aware canonical digest of a parsed v2 plan.
+///
+/// Normalization rules (per U2 spec):
+/// - `resource_capacities` are sorted by `key`.
+/// - `resource_claims` within each unit are sorted by `key`.
+/// - Units themselves are NOT sorted (their declared order is meaningful
+///   and is preserved by the YAML canonical form).
+/// - `target_branch` and `depends_on` participate in the digest verbatim.
+///
+/// The digest uses SHA-256 over a stable `|`-delimited textual form. Two
+/// plans that differ only in the order of `resource_capacities` entries
+/// (or the order of `resource_claims` within a unit) produce the same
+/// digest.
+pub fn compute_resource_aware_digest(
+    plan_key: &str,
+    capacities: &[ResourceCapacity],
+    units: &[ExecutionPlanUnitView<'_>],
+) -> String {
+    let mut sorted_caps: Vec<&ResourceCapacity> = capacities.iter().collect();
+    sorted_caps.sort_by(|a, b| a.key.cmp(&b.key));
+
+    let mut s = String::new();
+    s.push_str("plan_key=");
+    s.push_str(plan_key);
+    s.push('|');
+
+    for cap in &sorted_caps {
+        s.push_str("cap[");
+        s.push_str(&cap.key);
+        s.push_str("]=");
+        s.push_str(&cap.capacity.to_string());
+        s.push('|');
+    }
+
+    for unit in units {
+        s.push_str("unit[");
+        s.push_str(unit.id);
+        s.push_str("]|target_branch=");
+        s.push_str(unit.target_branch);
+        s.push('|');
+        s.push_str("depends_on=");
+        let mut deps: Vec<String> = unit.depends_on.to_vec();
+        deps.sort();
+        s.push_str(&deps.join(","));
+        s.push('|');
+
+        let mut sorted_claims: Vec<&ResourceClaim> = unit.resource_claims.iter().collect();
+        sorted_claims.sort_by(|a, b| a.key.cmp(&b.key));
+        for claim in sorted_claims {
+            s.push_str("claim[");
+            s.push_str(unit.id);
+            s.push(':');
+            s.push_str(&claim.key);
+            s.push_str("]=");
+            s.push_str(&claim.permits.to_string());
+            s.push('|');
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(s.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Borrowed view over the fields of an [`ExecutionPlanUnit`] that participate
+/// in the resource-aware canonical digest. Keeping the digest function in
+/// terms of a borrowed view lets callers pass parsed units without cloning.
+#[derive(Debug, Clone)]
+pub struct ExecutionPlanUnitView<'a> {
+    pub id: &'a str,
+    pub target_branch: &'a str,
+    pub depends_on: &'a [String],
+    pub resource_claims: &'a [ResourceClaim],
+}
+
+/// Validate and normalize a parsed v2 plan in place.
+///
+/// Normalization:
+/// - Sorts `plan.resource_capacities` by `key` (stable digest order).
+/// - Sorts each `unit.resource_claims` by `key` (stable digest order).
+///
+/// Validation (fail-closed, all errors returned, not just the first):
+/// - No duplicate `resource_capacities[].key`.
+/// - No duplicate `resource_claims[].key` within the same unit.
+/// - Every `resource_claims[].key` references a declared capacity.
+/// - No `permits == 0`.
+/// - No `capacity == 0`.
+/// - Every unit has a non-empty, `git check-ref-format --branch`-safe
+///   `target_branch`.
+// `ExecutionPlanArtifact` is intentionally crate-private; this validator is
+// exposed so callers can re-validate an already-parsed plan (e.g. tests).
+#[allow(private_interfaces)]
+pub fn validate_and_normalize_plan(plan: &mut ExecutionPlanArtifact) -> Result<(), PlanV2Error> {
+    let mut seen_capacity_keys: HashSet<String> = HashSet::new();
+    for cap in &plan.resource_capacities {
+        if cap.capacity == 0 {
+            return Err(PlanV2Error::ZeroCapacity {
+                resource_key: cap.key.clone(),
+            });
+        }
+        if !seen_capacity_keys.insert(cap.key.clone()) {
+            return Err(PlanV2Error::DuplicateCapacityKey {
+                key: cap.key.clone(),
+            });
+        }
+    }
+    plan.resource_capacities.sort_by(|a, b| a.key.cmp(&b.key));
+
+    let declared_keys: HashSet<&str> = plan
+        .resource_capacities
+        .iter()
+        .map(|cap| cap.key.as_str())
+        .collect();
+
+    for unit in &mut plan.units {
+        if unit.target_branch.is_empty() {
+            return Err(PlanV2Error::EmptyTargetBranch {
+                unit_id: unit.id.clone(),
+            });
+        }
+        validate_target_branch(&unit.target_branch).map_err(|reason| {
+            PlanV2Error::UnsafeTargetBranch {
+                unit_id: unit.id.clone(),
+                branch: unit.target_branch.clone(),
+                reason,
+            }
+        })?;
+
+        let mut seen_claim_keys: HashSet<String> = HashSet::new();
+        for claim in &unit.resource_claims {
+            if claim.permits == 0 {
+                return Err(PlanV2Error::ZeroPermits {
+                    unit_id: unit.id.clone(),
+                    resource_key: claim.key.clone(),
+                });
+            }
+            if !declared_keys.contains(claim.key.as_str()) {
+                return Err(PlanV2Error::UnknownResource {
+                    unit_id: unit.id.clone(),
+                    resource_key: claim.key.clone(),
+                });
+            }
+            if !seen_claim_keys.insert(claim.key.clone()) {
+                return Err(PlanV2Error::DuplicateClaimKey {
+                    unit_id: unit.id.clone(),
+                    resource_key: claim.key.clone(),
+                });
+            }
+        }
+        unit.resource_claims.sort_by(|a, b| a.key.cmp(&b.key));
+    }
+    Ok(())
+}
 
 /// Error from plan handoff verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,13 +591,15 @@ pub struct CanonicalPlanHandoff {
     pub wave_total: u32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ExecutionPlanArtifact {
     plan_key: String,
+    #[serde(default)]
+    resource_capacities: Vec<ResourceCapacity>,
     units: Vec<ExecutionPlanUnit>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ExecutionPlanUnit {
     id: String,
     title: String,
@@ -273,6 +608,10 @@ struct ExecutionPlanUnit {
     #[serde(rename = "execution_wave")]
     _execution_wave: u32,
     integration_order: u32,
+    #[serde(default)]
+    target_branch: String,
+    #[serde(default)]
+    resource_claims: Vec<ResourceClaim>,
 }
 
 /// Read, verify, and derive the canonical Parallel Forge task schedule.
@@ -305,12 +644,14 @@ fn derive_plan_handoff(
     payload: &Value,
     artifact: CanonicalArtifact,
 ) -> Result<CanonicalPlanHandoff, HandoffError> {
-    let plan: ExecutionPlanArtifact =
-        serde_yaml::from_slice(&artifact.canonical_bytes).map_err(|error| {
-            HandoffError::ParseError {
-                source: format!("invalid Parallel Forge execution plan: {error}"),
-            }
+    let mut plan: ExecutionPlanArtifact = serde_yaml::from_slice(&artifact.canonical_bytes)
+        .map_err(|error| HandoffError::ParseError {
+            source: format!("invalid Parallel Forge execution plan: {error}"),
         })?;
+
+    validate_and_normalize_plan(&mut plan).map_err(|error| HandoffError::ParseError {
+        source: error.to_string(),
+    })?;
 
     let payload_plan_key = payload
         .get("plan_key")
@@ -526,11 +867,13 @@ units:
     depends_on: []
     execution_wave: 1
     integration_order: 1
+    target_branch: feat/u1-foundation
   - id: U2
     title: Feature
     depends_on: []
     execution_wave: 1
     integration_order: 2
+    target_branch: feat/u2-feature
 "#;
 
     const SERIAL_PLAN_ARTIFACT: &[u8] = br#"version: 1
@@ -541,11 +884,13 @@ units:
     depends_on: []
     execution_wave: 1
     integration_order: 1
+    target_branch: feat/u1-foundation
   - id: U2
     title: Feature
     depends_on: [U1]
     execution_wave: 2
     integration_order: 2
+    target_branch: feat/u2-feature
 "#;
 
     const SERIAL_LAYOUT_ARTIFACT: &[u8] = br#"version: 1
@@ -556,11 +901,13 @@ units:
     depends_on: []
     execution_wave: 1
     integration_order: 1
+    target_branch: feat/u1-a
   - id: U2
     title: Feature B
     depends_on: []
     execution_wave: 2
     integration_order: 2
+    target_branch: feat/u2-b
 "#;
 
     const UNKNOWN_DEPENDENCY_ARTIFACT: &[u8] = br#"version: 1
@@ -571,11 +918,13 @@ units:
     depends_on: []
     execution_wave: 1
     integration_order: 1
+    target_branch: feat/u1-a
   - id: U2
     title: Feature B
     depends_on: [U9]
     execution_wave: 2
     integration_order: 2
+    target_branch: feat/u2-b
 "#;
 
     const DEPENDENCY_CYCLE_ARTIFACT: &[u8] = br#"version: 1
@@ -586,11 +935,13 @@ units:
     depends_on: [U2]
     execution_wave: 1
     integration_order: 1
+    target_branch: feat/u1-a
   - id: U2
     title: Feature B
     depends_on: [U1]
     execution_wave: 2
     integration_order: 2
+    target_branch: feat/u2-b
 "#;
 
     #[test]
@@ -800,5 +1151,473 @@ units:
             "unexpected error: {error:?}"
         );
         assert!(error.to_string().contains("cycle"));
+    }
+
+    // ── U2 (plan 2026-09-03-0959) resources + canonical digest v2 ──────
+
+    /// v2 happy-path plan: two independent Units, one capacity, one claim.
+    const V2_HAPPY_ARTIFACT: &[u8] = br#"version: 1
+plan_key: pf-v2
+resource_capacities:
+  - key: gpu
+    capacity: 1
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1
+    resource_claims:
+      - key: gpu
+        permits: 1
+  - id: U2
+    title: Feature
+    depends_on: []
+    execution_wave: 1
+    integration_order: 2
+    target_branch: feat/u2
+"#;
+
+    /// v1-shaped artifact (no resource_capacities, no target_branch, no claims):
+    /// shadow migration must parse to empty resources.
+    const V1_ABSENCE_ARTIFACT: &[u8] = br#"version: 1
+plan_key: pf-v1
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+  - id: U2
+    title: Feature
+    depends_on: []
+    execution_wave: 1
+    integration_order: 2
+"#;
+
+    #[test]
+    fn u2_happy_path_roundtrips_and_digest_is_stable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("execution-plan.yml"), V2_HAPPY_ARTIFACT)
+            .expect("write plan");
+        let payload = json!({
+            "execution_plan_path": "execution-plan.yml",
+            "plan_key": "pf-v2",
+        });
+
+        let first = load_plan_handoff(&payload, temp.path()).expect("v2 plan must load");
+        assert_eq!(first.tasks.len(), 2);
+
+        // Canonicalize the raw bytes a second time and confirm the digest
+        // matches the canonical artifact's digest.
+        let bytes = std::fs::read(temp.path().join("execution-plan.yml")).expect("read plan");
+        let canonical = crate::artifact_canonicalizer::canonicalize(&bytes).expect("canon");
+        assert_eq!(first.artifact.digest, canonical.digest);
+    }
+
+    #[test]
+    fn u2_unknown_resource_claim_is_rejected() {
+        let raw = br#"version: 1
+plan_key: pf-v2
+resource_capacities:
+  - key: cpu
+    capacity: 4
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1
+    resource_claims:
+      - key: gpu
+        permits: 1
+"#;
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("execution-plan.yml"), raw).expect("write plan");
+        let payload = json!({
+            "execution_plan_path": "execution-plan.yml",
+            "plan_key": "pf-v2",
+        });
+        let error = load_plan_handoff(&payload, temp.path())
+            .expect_err("unknown resource claim must be rejected");
+        assert!(matches!(error, HandoffError::ParseError { .. }));
+        assert!(
+            error.to_string().contains("claims resource 'gpu'"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn u2_duplicate_capacity_key_is_rejected() {
+        let raw = br#"version: 1
+plan_key: pf-v2
+resource_capacities:
+  - key: cpu
+    capacity: 1
+  - key: cpu
+    capacity: 2
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1
+"#;
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("execution-plan.yml"), raw).expect("write plan");
+        let payload = json!({
+            "execution_plan_path": "execution-plan.yml",
+            "plan_key": "pf-v2",
+        });
+        let error = load_plan_handoff(&payload, temp.path())
+            .expect_err("duplicate capacity key must be rejected");
+        assert!(matches!(error, HandoffError::ParseError { .. }));
+        assert!(
+            error.to_string().contains("duplicate key 'cpu'"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn u2_duplicate_claim_key_within_one_unit_is_rejected() {
+        let raw = br#"version: 1
+plan_key: pf-v2
+resource_capacities:
+  - key: cpu
+    capacity: 4
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1
+    resource_claims:
+      - key: cpu
+        permits: 1
+      - key: cpu
+        permits: 2
+"#;
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("execution-plan.yml"), raw).expect("write plan");
+        let payload = json!({
+            "execution_plan_path": "execution-plan.yml",
+            "plan_key": "pf-v2",
+        });
+        let error = load_plan_handoff(&payload, temp.path())
+            .expect_err("duplicate claim key must be rejected");
+        assert!(matches!(error, HandoffError::ParseError { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate resource_claims entry for key 'cpu'"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn u2_zero_permits_claim_is_rejected() {
+        let raw = br#"version: 1
+plan_key: pf-v2
+resource_capacities:
+  - key: cpu
+    capacity: 1
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1
+    resource_claims:
+      - key: cpu
+        permits: 0
+"#;
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("execution-plan.yml"), raw).expect("write plan");
+        let payload = json!({
+            "execution_plan_path": "execution-plan.yml",
+            "plan_key": "pf-v2",
+        });
+        let error =
+            load_plan_handoff(&payload, temp.path()).expect_err("permits=0 must be rejected");
+        assert!(matches!(error, HandoffError::ParseError { .. }));
+        assert!(
+            error.to_string().contains("permits=0"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn u2_zero_capacity_is_rejected() {
+        let raw = br#"version: 1
+plan_key: pf-v2
+resource_capacities:
+  - key: cpu
+    capacity: 0
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1
+"#;
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("execution-plan.yml"), raw).expect("write plan");
+        let payload = json!({
+            "execution_plan_path": "execution-plan.yml",
+            "plan_key": "pf-v2",
+        });
+        let error =
+            load_plan_handoff(&payload, temp.path()).expect_err("capacity=0 must be rejected");
+        assert!(matches!(error, HandoffError::ParseError { .. }));
+        assert!(
+            error.to_string().contains("capacity=0"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn u2_claim_exceeding_capacity_is_accepted_at_parse() {
+        // U2 only canonicalizes — single claim > capacity is U4's job to
+        // enforce at admission time. This test pins that contract.
+        // Two independent Units keep the wave size ≥ 2 so we don't trip
+        // parallel-forge's `NoParallelWave` gate before reaching validation.
+        let raw = br#"version: 1
+plan_key: pf-v2
+resource_capacities:
+  - key: cpu
+    capacity: 1
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1
+    resource_claims:
+      - key: cpu
+        permits: 4294967295
+  - id: U2
+    title: Feature
+    depends_on: []
+    execution_wave: 1
+    integration_order: 2
+    target_branch: feat/u2
+"#;
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("execution-plan.yml"), raw).expect("write plan");
+        let payload = json!({
+            "execution_plan_path": "execution-plan.yml",
+            "plan_key": "pf-v2",
+        });
+        let handoff = load_plan_handoff(&payload, temp.path())
+            .expect("U2 must accept permits > capacity; U4 enforces");
+        assert_eq!(handoff.tasks.len(), 2);
+    }
+
+    #[test]
+    fn u2_empty_target_branch_is_rejected() {
+        let raw = br#"version: 1
+plan_key: pf-v2
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: ""
+"#;
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("execution-plan.yml"), raw).expect("write plan");
+        let payload = json!({
+            "execution_plan_path": "execution-plan.yml",
+            "plan_key": "pf-v2",
+        });
+        let error = load_plan_handoff(&payload, temp.path())
+            .expect_err("empty target_branch must be rejected");
+        assert!(matches!(error, HandoffError::ParseError { .. }));
+        assert!(
+            error.to_string().contains("empty target_branch"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn u2_unsafe_target_branches_are_rejected() {
+        let unsafe_branches: &[&str] = &[
+            "..",
+            "-foo",
+            "foo/",
+            "foo//bar",
+            "foo/.lock",
+            "foo@{0}",
+            "foo bar",
+            "foo~bar",
+            "foo^bar",
+            "foo:bar",
+            "foo?bar",
+            "foo*bar",
+            "foo[bar",
+            "foo\\bar",
+            "foo.",
+        ];
+        for branch in unsafe_branches {
+            let yaml = format!(
+                "version: 1\nplan_key: pf-v2\nunits:\n  - id: U1\n    title: Foundation\n    depends_on: []\n    execution_wave: 1\n    integration_order: 1\n    target_branch: \"{branch}\"\n"
+            );
+            let temp = tempfile::tempdir().expect("tempdir");
+            std::fs::write(temp.path().join("execution-plan.yml"), yaml.as_bytes())
+                .expect("write plan");
+            let payload = json!({
+                "execution_plan_path": "execution-plan.yml",
+                "plan_key": "pf-v2",
+            });
+            match load_plan_handoff(&payload, temp.path()) {
+                Ok(_) => {
+                    panic!("unsafe target_branch '{branch}' was accepted; validator must reject it")
+                }
+                Err(error) => {
+                    assert!(
+                        matches!(error, HandoffError::ParseError { .. }),
+                        "unsafe target_branch '{branch}' produced wrong error variant: {error:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn u2_resource_aware_digest_is_stable_across_reorder() {
+        // Same logical plan, expressed twice with `resource_capacities` in
+        // a different Vec order, must produce the same resource-aware
+        // digest (digest normalizes by sorting capacities + per-unit claims).
+        let plan_alpha_yaml: &[u8] = br#"version: 1
+plan_key: pf-v2
+resource_capacities:
+  - key: gpu
+    capacity: 1
+  - key: cpu
+    capacity: 4
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1
+    resource_claims:
+      - key: gpu
+        permits: 1
+  - id: U2
+    title: Feature
+    depends_on: []
+    execution_wave: 1
+    integration_order: 2
+    target_branch: feat/u2
+    resource_claims:
+      - key: cpu
+        permits: 2
+"#;
+        let plan_bravo_yaml: &[u8] = br#"version: 1
+plan_key: pf-v2
+resource_capacities:
+  - key: cpu
+    capacity: 4
+  - key: gpu
+    capacity: 1
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1
+    resource_claims:
+      - key: gpu
+        permits: 1
+  - id: U2
+    title: Feature
+    depends_on: []
+    execution_wave: 1
+    integration_order: 2
+    target_branch: feat/u2
+    resource_claims:
+      - key: cpu
+        permits: 2
+"#;
+
+        let mut plan_alpha: ExecutionPlanArtifact =
+            serde_yaml::from_slice(plan_alpha_yaml).expect("alpha parses");
+        let mut plan_bravo: ExecutionPlanArtifact =
+            serde_yaml::from_slice(plan_bravo_yaml).expect("bravo parses");
+        validate_and_normalize_plan(&mut plan_alpha).expect("alpha validates");
+        validate_and_normalize_plan(&mut plan_bravo).expect("bravo validates");
+
+        let units_alpha: Vec<ExecutionPlanUnitView> = plan_alpha
+            .units
+            .iter()
+            .map(|u| ExecutionPlanUnitView {
+                id: &u.id,
+                target_branch: &u.target_branch,
+                depends_on: &u.depends_on,
+                resource_claims: &u.resource_claims,
+            })
+            .collect();
+        let units_bravo: Vec<ExecutionPlanUnitView> = plan_bravo
+            .units
+            .iter()
+            .map(|u| ExecutionPlanUnitView {
+                id: &u.id,
+                target_branch: &u.target_branch,
+                depends_on: &u.depends_on,
+                resource_claims: &u.resource_claims,
+            })
+            .collect();
+
+        let digest_alpha = compute_resource_aware_digest(
+            &plan_alpha.plan_key,
+            &plan_alpha.resource_capacities,
+            &units_alpha,
+        );
+        let digest_bravo = compute_resource_aware_digest(
+            &plan_bravo.plan_key,
+            &plan_bravo.resource_capacities,
+            &units_bravo,
+        );
+        assert_eq!(
+            digest_alpha, digest_bravo,
+            "reorder of resource_capacities must not change the resource-aware digest"
+        );
+
+        // Stability: same plan twice produces the same digest.
+        let digest_alpha2 = compute_resource_aware_digest(
+            &plan_alpha.plan_key,
+            &plan_alpha.resource_capacities,
+            &units_alpha,
+        );
+        assert_eq!(digest_alpha, digest_alpha2);
+    }
+
+    #[test]
+    fn u2_v1_absence_parses_to_empty_resources() {
+        let raw = V1_ABSENCE_ARTIFACT;
+        let plan: ExecutionPlanArtifact = serde_yaml::from_slice(raw)
+            .expect("v1-shaped plan without resource fields still parses");
+        assert!(plan.resource_capacities.is_empty());
+        for unit in &plan.units {
+            assert!(unit.resource_claims.is_empty());
+            assert_eq!(unit.target_branch, "");
+        }
+
+        // Note: validation REJECTS the v1 plan because target_branch is
+        // empty. This test only asserts the parser defaults, per the U2
+        // spec ("v1 absence maps empty resources for shadow migration
+        // only"). The handoff path must therefore refuse v1 plans without
+        // target_branch — see u2_empty_target_branch_is_rejected.
     }
 }

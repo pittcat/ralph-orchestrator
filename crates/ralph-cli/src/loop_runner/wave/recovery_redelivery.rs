@@ -104,7 +104,10 @@ fn process_snapshot(
     // deduplicating by event key, but skipping here avoids
     // even opening the JSONL file for waves that already
     // shipped their merge.
-    if snapshot.delivery_state.at_least(WaveDeliveryState::BusinessProjected) {
+    if snapshot
+        .delivery_state
+        .at_least(WaveDeliveryState::BusinessProjected)
+    {
         report.skipped.push(snapshot.wave_id.clone());
         return;
     }
@@ -178,7 +181,8 @@ fn process_snapshot(
                 && snapshot.completed_count == snapshot.expected_total
                 && snapshot.expected_total > 0
             {
-                if let Err(err) = inject_completed_coord(snapshot, &completed, store, bridge, main_events_file)
+                if let Err(err) =
+                    inject_completed_coord(snapshot, &completed, store, bridge, main_events_file)
                 {
                     tracing::warn!(
                         wave_id = %snapshot.wave_id,

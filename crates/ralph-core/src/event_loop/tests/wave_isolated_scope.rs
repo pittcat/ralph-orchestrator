@@ -183,9 +183,7 @@ fn test_supervisor_isolated_allows_multiple_independent_waves() {
         1,
     );
 
-    let processed = event_loop
-        .process_events_from_jsonl_with_waves()
-        .unwrap();
+    let processed = event_loop.process_events_from_jsonl_with_waves().unwrap();
     let mut wave_ids: Vec<_> = processed
         .wave_events
         .iter()

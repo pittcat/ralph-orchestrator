@@ -178,8 +178,11 @@ fn report_from_session_includes_bundle_fields() {
     let session = tmp.path().join("session");
     fs::create_dir_all(&session).expect("create session dir");
     write_pending_bundle(&session);
-    let bundle = DiagnosisInputBundle::new_pending(&session)
-        .with_finalized(vec![], vec!["single-chain".to_string()], Vec::new());
+    let bundle = DiagnosisInputBundle::new_pending(&session).with_finalized(
+        vec![],
+        vec!["single-chain".to_string()],
+        Vec::new(),
+    );
     let _ = write_input_bundle(&session, &bundle).expect("write_manifest");
     let data = load_session(&session);
     let report = Report::from_session(&data);
@@ -560,16 +563,16 @@ fn v1_manifest_reads_as_legacy_without_coverage() {
     trace.status = BundleStatus::Present;
     let mut feedback = ralph_core::diagnosis::FeedbackLifecycleReport::default();
     feedback.status = BundleStatus::Present;
-    let (suggestions, gaps) =
-        ralph_core::diagnosis::build_suggestions_and_gaps(
-            &report,
-            &trace,
-            &feedback,
-            &[],
-            Path::new("/tmp/x"),
-        );
+    let (suggestions, gaps) = ralph_core::diagnosis::build_suggestions_and_gaps(
+        &report,
+        &trace,
+        &feedback,
+        &[],
+        Path::new("/tmp/x"),
+    );
     assert!(
-        gaps.iter().all(|g| !g.affects.as_deref().unwrap_or("").starts_with("boundary:")),
+        gaps.iter()
+            .all(|g| !g.affects.as_deref().unwrap_or("").starts_with("boundary:")),
         "legacy v1 reader must not inject synthetic boundary gap evidence"
     );
     // Suggestions are still produced for the missing bundle path.
@@ -615,8 +618,11 @@ fn v2_gap_projects_evidence_gap_with_boundary_affects() {
         }
     }
 
-    let bundle = DiagnosisInputBundle::new_pending(&session)
-        .with_finalized(Vec::new(), Vec::new(), coverage);
+    let bundle = DiagnosisInputBundle::new_pending(&session).with_finalized(
+        Vec::new(),
+        Vec::new(),
+        coverage,
+    );
     write_input_bundle(&session, &bundle).expect("write v2 manifest");
 
     let report = read_input_bundle_report(&session);
@@ -638,14 +644,13 @@ fn v2_gap_projects_evidence_gap_with_boundary_affects() {
     trace.status = BundleStatus::Present;
     let mut feedback = ralph_core::diagnosis::FeedbackLifecycleReport::default();
     feedback.status = BundleStatus::Present;
-    let (suggestions, gaps) =
-        ralph_core::diagnosis::build_suggestions_and_gaps(
-            &report,
-            &trace,
-            &feedback,
-            &[],
-            Path::new("/tmp/x"),
-        );
+    let (suggestions, gaps) = ralph_core::diagnosis::build_suggestions_and_gaps(
+        &report,
+        &trace,
+        &feedback,
+        &[],
+        Path::new("/tmp/x"),
+    );
     let state_commit_gap = gaps
         .iter()
         .find(|g| g.affects.as_deref() == Some("boundary:state_commit"))
@@ -687,10 +692,7 @@ fn unknown_higher_version_is_schema_mismatch_not_present() {
                 ralph_core::diagnostics::DIAGNOSIS_INPUT_SCHEMA_VERSION
             );
         }
-        other => panic!(
-            "expected SchemaMismatch for v999 manifest, got {:?}",
-            other
-        ),
+        other => panic!("expected SchemaMismatch for v999 manifest, got {:?}", other),
     }
     // Boundary coverage must NOT be silently promoted to v2 data
     // when the schema version is unknown.

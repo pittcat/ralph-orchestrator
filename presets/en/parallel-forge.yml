@@ -195,6 +195,14 @@ event_loop:
     # same worktree, and only the third failure surfaces as a wave
     # failure for the correction path.
     slot_retry_budget: 2
+    # 2026-09-03-0959 plan U10: cut parallel-forge to the runtime-owned
+    # work-conserving DAG scheduler authority. The new driver owns per-Unit
+    # admission; `forge.exec.development.done` is emitted by runtime after
+    # all Units are integrated and projection-acknowledged, exactly once.
+    # Legacy WaveTracker authority (the previous `forge.wave.*` /
+    # `forge-dispatcher` wave-fan-in path) is retired via follow-up
+    # cleanup work; this commit only flips the gate per §13 minimum.
+    scheduler_mode: dag
   ephemeral_isolation: true
   enforce_current_unit: true
   enforce_hat_scope: true

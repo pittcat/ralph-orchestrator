@@ -422,7 +422,10 @@ fn u7_2026_09_01_disabled_collector_skips_all_rows() {
 
     let tmp = TempDir::new().expect("TempDir");
     let collector = DiagnosticsCollector::disabled();
-    assert!(collector.session_dir().is_none(), "U7: disabled collector has no session_dir");
+    assert!(
+        collector.session_dir().is_none(),
+        "U7: disabled collector has no session_dir"
+    );
     // Invoking log_runtime_trace on a disabled collector must be a
     // no-op (the logger is None and the early-return branch fires).
     // We intentionally do not assert file creation — there must

@@ -19,11 +19,13 @@ scenarios:
               depends_on: []
               execution_wave: 1
               integration_order: 1
+              target_branch: "feat/unit-u1"
             - id: U2
               title: Parallel verification unit
               depends_on: []
               execution_wave: 1
               integration_order: 2
+              target_branch: "feat/unit-u2"
       - path: .ralph/forge/pf/worktree-map.yml
         content: "units: []\n"
     responses:

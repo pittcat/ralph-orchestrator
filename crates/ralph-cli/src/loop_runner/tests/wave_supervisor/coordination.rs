@@ -865,8 +865,12 @@ fn test_u5_record_outcome_partial_timeout_stays_result() {
         wave_total: None,
         system_injected: None,
     };
-    let outcome: crate::loop_runner::wave::WaveWorkerOutcome =
-        Ok((vec![event], std::time::Duration::from_millis(5), false, None));
+    let outcome: crate::loop_runner::wave::WaveWorkerOutcome = Ok((
+        vec![event],
+        std::time::Duration::from_millis(5),
+        false,
+        None,
+    ));
     record_outcome(&mut tracker, "u5-partial-timeout", 0, outcome);
 
     let completed = tracker
@@ -1044,7 +1048,8 @@ fn u2_2026_09_01_redelivery_handles_legacy_remnant_with_warning() {
     );
     // Main ledger must be empty — no events were ever persisted.
     assert!(
-        !main_events_file.exists() || main_events_file.metadata().map(|m| m.len()).unwrap_or(0) == 0,
+        !main_events_file.exists()
+            || main_events_file.metadata().map(|m| m.len()).unwrap_or(0) == 0,
         "U2: legacy remnant must not write to the main ledger"
     );
 }
@@ -1121,11 +1126,8 @@ fn u3_2026_09_01_empty_injection_list_is_no_op() {
     let main_events_file = ralph_dir.join("events.jsonl");
 
     let store = Arc::new(InMemorySupervisorStore::new());
-    let injected = recovery_redelivery::inject_timed_out_failed_coord(
-        &[],
-        store.clone(),
-        &main_events_file,
-    );
+    let injected =
+        recovery_redelivery::inject_timed_out_failed_coord(&[], store.clone(), &main_events_file);
     assert!(injected.is_empty());
     assert!(
         !main_events_file.exists(),

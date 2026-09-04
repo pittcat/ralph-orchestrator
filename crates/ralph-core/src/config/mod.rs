@@ -20,6 +20,7 @@ mod notifications;
 mod precheck;
 mod preflight_ext;
 mod ralph_config;
+pub mod scheduler_mode;
 pub mod scope_topics;
 mod skills;
 mod state_files;
@@ -81,6 +82,11 @@ pub use precheck::resolve_precheck_emit_topic;
 pub use precheck::{PrecheckKillSwitchGuard, precheck_kill_switch_guard};
 pub use preflight_ext::{HookStage, PreflightExtensionsConfig, PreflightHook};
 pub use profiles::{ProfileScope, ProfileSpec, ProfilesConfig};
+// 2026-09-03-0959 plan U1: tri-state `scheduler_mode` gate re-exported
+// so the supervisor runtime and the CLI preflight can both pattern-match
+// on `SchedulerMode` without reaching into the `config::scheduler_mode`
+// private path.
+pub use scheduler_mode::{SchedulerMode, SchedulerModeError, validate_scheduler_mode};
 pub use skills::{SkillOverride, SkillsConfig};
 pub use state_files::{StateFileEntry, StateFileFormat, StateFilesConfig};
 pub use state_machine::{BusinessAfterTerminalAction, DuplicateTerminalAction, StateMachineConfig};

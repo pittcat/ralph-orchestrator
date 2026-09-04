@@ -148,6 +148,12 @@ fn build_supervisor_bridge_relative_db_path_resolves_under_ralph_dir() {
         // mirrors the documented historical default so this
         // relative-path characterization test stays green.
         slot_retry_budget: 1,
+        // 2026-09-03-0959 plan U1: tri-state scheduler_mode; this
+        // fixture exercises the legacy `WaveTracker` path so pin
+        // Wave explicitly rather than relying on `Default` (keeps
+        // the characterisation tight against accidental default
+        // drift on later fields).
+        scheduler_mode: ralph_core::config::SchedulerMode::Wave,
     };
     let bridge = crate::loop_runner::build_supervisor_bridge(
         &cfg,
@@ -180,6 +186,8 @@ fn build_supervisor_bridge_absolute_db_path_honoured_as_is() {
         // 2026-07-28-003 plan U4: default budget for the
         // absolute-path characterization test.
         slot_retry_budget: 1,
+        // 2026-09-03-0959 plan U1: legacy `WaveTracker` path.
+        scheduler_mode: ralph_core::config::SchedulerMode::Wave,
     };
     let bridge = crate::loop_runner::build_supervisor_bridge(
         &cfg,
