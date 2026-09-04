@@ -25,7 +25,11 @@
 //! - `activate_plan` on a `Pending` row → `Active`. On an
 //!   already-`Active` row → no-op (`Ok(())`). On an unknown
 //!   `plan_key` → `Err(UnknownPlan)`. On an already-`Closed`
-//!   row → `Err(InvalidTransition("plan is closed"))`.
+//!   row → `Err(InvalidTransition { ... "plan is closed" })`.
+//!   On a `Pending` OR `Active` row whose registered
+//!   `target_branch` does not match the request →
+//!   `Err(TargetMismatch)` and the status is left untouched
+//!   (R10/R17 fail-closed).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -92,18 +96,19 @@ impl DagSchedulerStore for InMemoryDagSchedulerStore {
             .get_mut(plan_key)
             .ok_or_else(|| DagStoreError::UnknownPlan(plan_key.to_string()))?;
         if entry.status == PlanStatus::Closed {
-            return Err(DagStoreError::DigestConflict {
+            return Err(DagStoreError::InvalidTransition {
                 plan_key: plan_key.to_string(),
                 expected: "active_or_pending".to_string(),
                 actual: format!("plan is {}", entry.status),
             });
         }
-        // Validate target_branch matches the registered one when
-        // activating from Pending. A re-activation (status already
-        // Active) with the same branch is a no-op; with a
-        // different branch is fail-closed.
-        if entry.target_branch != target_branch && entry.status == PlanStatus::Active {
-            return Err(DagStoreError::DigestConflict {
+        // Validate target_branch matches the registered one in BOTH
+        // Pending and Active states (R10/R17 fail-closed). A re-activation
+        // of an already-Active plan with the same branch is a no-op;
+        // a mismatched branch in either state fails closed and leaves
+        // the status untouched.
+        if entry.target_branch != target_branch {
+            return Err(DagStoreError::TargetMismatch {
                 plan_key: plan_key.to_string(),
                 expected: entry.target_branch.clone(),
                 actual: target_branch.to_string(),
@@ -248,5 +253,109 @@ mod tests {
         let fetched = store.get_plan("p1").expect("get").expect("exists");
         assert_eq!(fetched.unit_ids, vec!["U1".to_string(), "U2".to_string()]);
         assert_eq!(fetched.created_at_ms, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn activate_plan_fails_closed_on_pending_target_mismatch() {
+        // C3 + T3: a Pending entry activated with a mismatched
+        // target_branch MUST fail closed (TargetMismatch) and leave
+        // the status untouched (Pending), not silently flip to
+        // Active while keeping the stale registered branch.
+        let store = InMemoryDagSchedulerStore::new();
+        store
+            .register_plan(&CanonicalPlanRecord {
+                plan_key: "p1".to_string(),
+                artifact_digest: "d1".to_string(),
+                target_branch: "feat/test".to_string(),
+                unit_ids: vec!["U1".to_string()],
+                created_at_ms: 1_700_000_000_000,
+            })
+            .expect("register");
+        let err = store
+            .activate_plan("p1", "feat/OTHER")
+            .expect_err("mismatch must fail closed");
+        match err {
+            DagStoreError::TargetMismatch {
+                plan_key,
+                expected,
+                actual,
+            } => {
+                assert_eq!(plan_key, "p1");
+                assert_eq!(expected, "feat/test");
+                assert_eq!(actual, "feat/OTHER");
+            }
+            other => panic!("expected TargetMismatch, got {other:?}"),
+        }
+        // Status MUST stay Pending — not flipped to Active by the
+        // failed activation.
+        let fetched = store.get_plan("p1").expect("get").expect("exists");
+        assert_eq!(
+            fetched.status,
+            PlanStatus::Pending,
+            "status must stay Pending after fail-closed mismatch"
+        );
+        // And the registered target_branch MUST be unchanged.
+        assert_eq!(fetched.target_branch, "feat/test");
+    }
+
+    #[test]
+    fn activate_plan_fails_closed_on_active_target_mismatch() {
+        // C3: the mismatch check applies to Active entries too — a
+        // re-activation with a different branch must fail closed,
+        // not silently no-op with the stale branch.
+        let store = InMemoryDagSchedulerStore::new();
+        store.register_plan(&plan("p1", "d1")).expect("register");
+        store
+            .activate_plan("p1", "feat/test")
+            .expect("first activate");
+        let err = store
+            .activate_plan("p1", "feat/OTHER")
+            .expect_err("active mismatch must fail closed");
+        assert!(matches!(
+            err,
+            DagStoreError::TargetMismatch {
+                expected: ref e,
+                actual: ref a,
+                ..
+            } if e == "feat/test" && a == "feat/OTHER"
+        ));
+        // Status stays Active (the original activation is not
+        // rolled back), branch unchanged.
+        let fetched = store.get_plan("p1").expect("get").expect("exists");
+        assert_eq!(fetched.status, PlanStatus::Active);
+        assert_eq!(fetched.target_branch, "feat/test");
+    }
+
+    #[test]
+    fn activate_plan_on_closed_returns_invalid_transition() {
+        // C4: a Closed plan has no valid transition out of Closed;
+        // activate_plan must return InvalidTransition (not the
+        // semantically-wrong DigestConflict).
+        let store = InMemoryDagSchedulerStore::new();
+        store.register_plan(&plan("p1", "d1")).expect("register");
+        // Manually close the entry by mutating through the
+        // internal map — there is no public close API on the
+        // in-memory store (per contract, Closed is terminal).
+        {
+            let mut guard = store.plans.lock().expect("InMemoryDagSchedulerStore mutex");
+            guard.get_mut("p1").expect("entry").status = PlanStatus::Closed;
+        }
+        let err = store
+            .activate_plan("p1", "feat/test")
+            .expect_err("closed must reject activation");
+        match err {
+            DagStoreError::InvalidTransition {
+                plan_key,
+                expected,
+                actual,
+            } => {
+                assert_eq!(plan_key, "p1");
+                assert_eq!(expected, "active_or_pending");
+                assert_eq!(actual, "plan is closed");
+            }
+            other => panic!("expected InvalidTransition, got {other:?}"),
+        }
+        let fetched = store.get_plan("p1").expect("get").expect("exists");
+        assert_eq!(fetched.status, PlanStatus::Closed);
     }
 }

@@ -25,6 +25,11 @@ use thiserror::Error;
 /// same `plan_key` is re-registered with a DIFFERENT
 /// `artifact_digest` — fail closed so a stale event cannot
 /// silently overwrite an already-registered canonical plan.
+/// `TargetMismatch` is returned when `activate_plan` is called
+/// with a `target_branch` that does not match the registered one
+/// (in BOTH `Pending` and `Active` states — R10/R17 fail-closed).
+/// `InvalidTransition` is returned when `activate_plan` is called
+/// on a `Closed` plan (no valid transition out of `Closed`).
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum DagStoreError {
     #[error("plan key already registered with a different artifact digest: {0}")]
@@ -33,6 +38,20 @@ pub enum DagStoreError {
     UnknownPlan(String),
     #[error("artifact digest conflict for plan key {plan_key}: expected {expected}, got {actual}")]
     DigestConflict {
+        plan_key: String,
+        expected: String,
+        actual: String,
+    },
+    #[error(
+        "activate_plan target_branch mismatch for plan key {plan_key}: expected {expected}, got {actual}"
+    )]
+    TargetMismatch {
+        plan_key: String,
+        expected: String,
+        actual: String,
+    },
+    #[error("invalid plan transition for plan key {plan_key}: expected {expected}, got {actual}")]
+    InvalidTransition {
         plan_key: String,
         expected: String,
         actual: String,
