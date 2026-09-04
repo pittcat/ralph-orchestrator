@@ -19,7 +19,7 @@ use crate::supervisor::dag_shadow::ShadowSink;
 ///
 /// Fields (U5 S14 / D13):
 ///   - `scheduler_mode` — stringified `SchedulerMode`
-///     (`legacy_wave` / `runtime_dag` / `runtime_dag_shadow`).
+///     (`wave` / `dag_shadow` / `dag`).
 ///   - `plan_keys` — distinct `plan_key`s, deduped + sorted.
 ///   - `oldest_observation_ms` — min `observed_at_ms`, `None`
 ///     when sink is empty.
