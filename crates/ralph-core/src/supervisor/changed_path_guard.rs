@@ -111,8 +111,14 @@ pub struct ChangedPathSet {
 /// if its first component is one of these — even if it would
 /// otherwise fall inside the allowlist. The list is intentionally
 /// small and stable so it can be reviewed as policy.
-pub const FORBIDDEN_TOP_LEVEL_PREFIXES: &[&str] =
-    &[".git", "target", "node_modules", ".cargo", ".idea", ".vscode"];
+pub const FORBIDDEN_TOP_LEVEL_PREFIXES: &[&str] = &[
+    ".git",
+    "target",
+    "node_modules",
+    ".cargo",
+    ".idea",
+    ".vscode",
+];
 
 impl ChangedPathSet {
     /// Empty set — useful for tests + the no-op integration case.
@@ -179,7 +185,9 @@ impl ChangedPathSet {
     /// by sibling-detection logic to tell whether two Units
     /// share a touched file.
     pub fn intersects(&self, other: &[PathBuf]) -> bool {
-        other.iter().any(|p| self.entries.iter().any(|e| &e.path == p))
+        other
+            .iter()
+            .any(|p| self.entries.iter().any(|e| &e.path == p))
     }
 
     /// Authorise the changed-path set against the lane
@@ -323,8 +331,7 @@ mod tests {
     /// rejected at parse time.
     #[test]
     fn changed_path_guard_rejects_traversal() {
-        let err = ChangedPathSet::from_diff_paths(["src/../outside.rs"])
-            .expect_err("must reject");
+        let err = ChangedPathSet::from_diff_paths(["src/../outside.rs"]).expect_err("must reject");
         match err {
             ChangedPathError::BadPathShape(msg) => {
                 assert!(msg.contains("parent escape"), "msg: {msg}");
@@ -344,8 +351,8 @@ mod tests {
     /// to the allowlist.
     #[test]
     fn changed_path_guard_rejects_symlink_chain() {
-        let set = ChangedPathSet::from_diff_entries([entry("src/link_to_thing", true, false)])
-            .unwrap();
+        let set =
+            ChangedPathSet::from_diff_entries([entry("src/link_to_thing", true, false)]).unwrap();
         let err = set
             .is_clean_within(&allowlist(&["src"]), &declared(&["src"]), "U1")
             .expect_err("symlink must be rejected");
@@ -376,8 +383,7 @@ mod tests {
     /// and yields the sorted, deduplicated path list.
     #[test]
     fn changed_path_guard_authorizes_clean_allowlisted_diff() {
-        let set = ChangedPathSet::from_diff_paths(["src/a.rs", "src/b.rs", "src/a.rs"])
-            .unwrap();
+        let set = ChangedPathSet::from_diff_paths(["src/a.rs", "src/b.rs", "src/a.rs"]).unwrap();
         let authorized = set
             .is_clean_within(&allowlist(&["src"]), &declared(&["src"]), "U1")
             .expect("must authorise");
@@ -394,10 +400,7 @@ mod tests {
         let set = ChangedPathSet::from_diff_paths(["src/a.rs", "src/b.rs"]).unwrap();
         assert!(set.intersects(&[PathBuf::from("src/a.rs")]));
         assert!(!set.intersects(&[PathBuf::from("src/c.rs")]));
-        assert!(set.intersects(&[
-            PathBuf::from("src/c.rs"),
-            PathBuf::from("src/b.rs"),
-        ]));
+        assert!(set.intersects(&[PathBuf::from("src/c.rs"), PathBuf::from("src/b.rs"),]));
     }
 
     /// Path outside the allowlist is rejected with
@@ -441,9 +444,10 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(set.len(), 1);
-        assert!(set
-            .is_clean_within(&allowlist(&["src"]), &declared(&["src/a.rs"]), "U1")
-            .is_ok());
+        assert!(
+            set.is_clean_within(&allowlist(&["src"]), &declared(&["src/a.rs"]), "U1")
+                .is_ok()
+        );
     }
 
     // =========================================================================

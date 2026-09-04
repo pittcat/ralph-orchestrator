@@ -262,9 +262,8 @@ fn read_branch_tip(repo_root: &Path, branch: &str) -> UnitWorktreeResult<String>
 fn ensure_worktree_dir_excluded(repo_root: &Path) -> UnitWorktreeResult<()> {
     let exclude_path = repo_root.join(".git").join("info").join("exclude");
     if let Some(parent) = exclude_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            UnitWorktreeError::GitFailed(format!("create exclude dir: {e}"))
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| UnitWorktreeError::GitFailed(format!("create exclude dir: {e}")))?;
     }
     let existing = std::fs::read_to_string(&exclude_path).unwrap_or_default();
     // Match a precise line ".ralph/worktrees/" rather than a
@@ -281,9 +280,8 @@ fn ensure_worktree_dir_excluded(repo_root: &Path) -> UnitWorktreeResult<()> {
         content.push('\n');
     }
     content.push_str(".ralph/worktrees/\n");
-    std::fs::write(&exclude_path, content).map_err(|e| {
-        UnitWorktreeError::GitFailed(format!("write exclude: {e}"))
-    })?;
+    std::fs::write(&exclude_path, content)
+        .map_err(|e| UnitWorktreeError::GitFailed(format!("write exclude: {e}")))?;
     Ok(())
 }
 

@@ -165,7 +165,10 @@ pub enum WorktreeBindVerdict {
     Create,
     /// Existing branch tip differs from the verified base; the
     /// previous run raced against a stale base — fail-closed.
-    BaseMismatch { existing_tip: String, verified_base: String },
+    BaseMismatch {
+        existing_tip: String,
+        verified_base: String,
+    },
 }
 
 #[cfg(test)]
@@ -359,11 +362,17 @@ pub fn plan_terminal_emit_phase(current: u8, target: u8) -> PhaseAdvanceOutcome 
         };
     }
     if target > current {
-        PhaseAdvanceOutcome::Advance { from: current, to: target }
+        PhaseAdvanceOutcome::Advance {
+            from: current,
+            to: target,
+        }
     } else if target == current {
         PhaseAdvanceOutcome::Replay { at: current }
     } else {
-        PhaseAdvanceOutcome::Refuse { from: current, to: target }
+        PhaseAdvanceOutcome::Refuse {
+            from: current,
+            to: target,
+        }
     }
 }
 
@@ -620,17 +629,19 @@ mod tests {
     #[test]
     fn worktree_bind_rejects_tip_without_base() {
         let verdict = plan_worktree_bind(Some("tip"), None);
-        assert!(matches!(
-            verdict,
-            WorktreeBindVerdict::BaseMismatch { .. }
-        ));
+        assert!(matches!(verdict, WorktreeBindVerdict::BaseMismatch { .. }));
     }
 
     // ------------------------------------------------------------------
     // Integration record idempotency.
     // ------------------------------------------------------------------
 
-    fn fingerprint(unit: &str, base: &str, integrated: &str, expected: &str) -> MergeIntentFingerprint {
+    fn fingerprint(
+        unit: &str,
+        base: &str,
+        integrated: &str,
+        expected: &str,
+    ) -> MergeIntentFingerprint {
         MergeIntentFingerprint {
             unit_id: unit.to_string(),
             base_commit: base.to_string(),
@@ -792,10 +803,13 @@ mod tests {
     /// the commit cannot double-fire after a crash.
     #[test]
     fn phase_advance_same_phase_is_replay() {
-        let outcome = plan_terminal_emit_phase(PHASE_COORDINATION_WRITTEN, PHASE_COORDINATION_WRITTEN);
+        let outcome =
+            plan_terminal_emit_phase(PHASE_COORDINATION_WRITTEN, PHASE_COORDINATION_WRITTEN);
         assert_eq!(
             outcome,
-            PhaseAdvanceOutcome::Replay { at: PHASE_COORDINATION_WRITTEN }
+            PhaseAdvanceOutcome::Replay {
+                at: PHASE_COORDINATION_WRITTEN
+            }
         );
     }
 
@@ -1003,10 +1017,7 @@ mod tests {
 
         // 6. Terminal emit: same phase ⇒ Replay.
         assert_eq!(
-            plan_terminal_emit_phase(
-                PHASE_COORDINATION_WRITTEN,
-                PHASE_COORDINATION_WRITTEN
-            ),
+            plan_terminal_emit_phase(PHASE_COORDINATION_WRITTEN, PHASE_COORDINATION_WRITTEN),
             PhaseAdvanceOutcome::Replay { at: 3 }
         );
     }
@@ -1084,10 +1095,7 @@ mod tests {
         // 6. Terminal emit: out-of-range phase ⇒ Ambiguous
         //    ⇒ Blocked.
         assert!(matches!(
-            verdict_from_phase_advance(&plan_terminal_emit_phase(
-                PHASE_COUNT,
-                PHASE_PENDING
-            )),
+            verdict_from_phase_advance(&plan_terminal_emit_phase(PHASE_COUNT, PHASE_PENDING)),
             RecoveryVerdict::Blocked { .. }
         ));
     }

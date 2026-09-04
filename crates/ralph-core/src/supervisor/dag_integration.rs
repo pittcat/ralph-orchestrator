@@ -80,10 +80,18 @@ pub struct IntegrationInput {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IntegrationStoreError {
-    #[error("unit '{unit_id}' already integrated into target '{target_branch}' with a different candidate")]
-    DuplicateUnitForTarget { unit_id: String, target_branch: String },
+    #[error(
+        "unit '{unit_id}' already integrated into target '{target_branch}' with a different candidate"
+    )]
+    DuplicateUnitForTarget {
+        unit_id: String,
+        target_branch: String,
+    },
     #[error("unit '{unit_id}' not yet recorded on target '{target_branch}'")]
-    NotYetRecorded { unit_id: String, target_branch: String },
+    NotYetRecorded {
+        unit_id: String,
+        target_branch: String,
+    },
     #[error("commit fingerprint drift for unit '{unit_id}': expected {expected}, got {actual}")]
     FingerprintDrift {
         unit_id: String,

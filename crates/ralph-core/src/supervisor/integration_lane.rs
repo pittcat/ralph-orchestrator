@@ -92,10 +92,7 @@ pub enum CasOutcome {
     Advanced { new_head: String },
     /// Target moved under us; CAS refused; caller must
     /// re-read the head and retry.
-    StaleExpected {
-        expected: String,
-        actual: String,
-    },
+    StaleExpected { expected: String, actual: String },
     /// Lane refused to FF (e.g. non-FF ahead, dirty index,
     /// git plumbing error). Caller fails the candidate.
     Refused { reason: String },
@@ -341,14 +338,7 @@ impl GitIntegrationPort for RealGitIntegrationPort {
         //   git commit-tree <tree_oid> -p <base_commit> -m <msg>
         let commit_oid = run_git_capture(
             &self.repo_root,
-            &[
-                "commit-tree",
-                &tree_oid,
-                "-p",
-                base_commit,
-                "-m",
-                &message,
-            ],
+            &["commit-tree", &tree_oid, "-p", base_commit, "-m", &message],
         )?;
         Ok(SquashCandidate {
             unit_id: candidate.unit_id.clone(),
@@ -492,7 +482,8 @@ impl FakeGitIntegrationPort {
     /// claim as the squash tree).
     pub fn set_unit_tree(&self, unit_commit: &str, tree_oid: &str) {
         let mut g = self.inner.lock().expect("fake port mutex");
-        g.trees.insert(unit_commit.to_string(), tree_oid.to_string());
+        g.trees
+            .insert(unit_commit.to_string(), tree_oid.to_string());
     }
 
     /// Override the next `compare_and_swap_ff` outcome for
@@ -536,7 +527,8 @@ impl GitIntegrationPort for FakeGitIntegrationPort {
             .get(&candidate.unit_commit)
             .cloned()
             .unwrap_or_else(|| format!("tree-{}", candidate.unit_commit));
-        g.parents.insert(candidate.unit_commit.clone(), base_commit.to_string());
+        g.parents
+            .insert(candidate.unit_commit.clone(), base_commit.to_string());
         g.next_idx += 1;
         let idx = g.next_idx;
         let squash_commit = format!("squash-{}-{}", candidate.unit_id, idx);
@@ -598,7 +590,9 @@ mod tests {
         let core = Arc::new(LaneCore::new());
         let g1 = core.try_acquire("feat/test", "U1").expect("U1 takes lane");
         assert_eq!(g1.target_branch(), "feat/test");
-        let err = core.try_acquire("feat/test", "U2").expect_err("U2 must fail");
+        let err = core
+            .try_acquire("feat/test", "U2")
+            .expect_err("U2 must fail");
         assert!(matches!(err, LaneError::TargetBusy));
     }
 
@@ -631,9 +625,7 @@ mod tests {
         let core = Arc::new(LaneCore::new());
         let g = core.try_acquire("feat/test", "U1").expect("U1 takes");
         g.release();
-        assert!(core
-            .try_acquire("feat/test", "U2")
-            .is_ok());
+        assert!(core.try_acquire("feat/test", "U2").is_ok());
     }
 
     /// U7 contract: `select_eligible` sorts by

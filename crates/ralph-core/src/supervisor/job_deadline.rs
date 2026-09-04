@@ -160,13 +160,7 @@ pub const STRONG_KEYWORDS: &[&str] = &[
 ];
 
 pub const WEAK_KEYWORDS: &[&str] = &[
-    "...",
-    "thinking",
-    "spinner",
-    "loading",
-    "idle",
-    "waiting",
-    "retry",
+    "...", "thinking", "spinner", "loading", "idle", "waiting", "retry",
 ];
 
 /// Classify a raw heartbeat payload into one of the three
@@ -306,10 +300,7 @@ pub enum DeadlineVerdict {
     },
     /// Job exceeded the hard wall-clock cap. The kernel MUST
     /// cancel the port and surface `HeartbeatTimeout`.
-    HardCapExceeded {
-        elapsed_ms: u64,
-        cap_ms: u64,
-    },
+    HardCapExceeded { elapsed_ms: u64, cap_ms: u64 },
     /// Job sat silent (or weak-budget-exhausted) past the idle
     /// lease. The kernel MUST cancel the port and surface
     /// `HeartbeatTimeout` with reason = "idle lease expired".
@@ -779,21 +770,27 @@ mod tests {
 
     #[test]
     fn verdict_is_terminal_helper() {
-        assert!(DeadlineVerdict::HardCapExceeded {
-            elapsed_ms: 1,
-            cap_ms: 1
-        }
-        .is_terminal());
-        assert!(DeadlineVerdict::IdleLeaseExpired {
-            elapsed_since_strong_ms: 1,
-            idle_lease_ms: 1
-        }
-        .is_terminal());
-        assert!(!DeadlineVerdict::Alive {
-            last_strong_ms: 0,
-            weak_consumed_ms: 0
-        }
-        .is_terminal());
+        assert!(
+            DeadlineVerdict::HardCapExceeded {
+                elapsed_ms: 1,
+                cap_ms: 1
+            }
+            .is_terminal()
+        );
+        assert!(
+            DeadlineVerdict::IdleLeaseExpired {
+                elapsed_since_strong_ms: 1,
+                idle_lease_ms: 1
+            }
+            .is_terminal()
+        );
+        assert!(
+            !DeadlineVerdict::Alive {
+                last_strong_ms: 0,
+                weak_consumed_ms: 0
+            }
+            .is_terminal()
+        );
     }
 
     // ----- classify_runtime_job_error -------------------------------------

@@ -165,7 +165,12 @@ impl CorrectionMachine {
     /// would the next correction be dispatchable or exhausted?
     /// Does NOT mutate state. Tests use this to drive boundary
     /// conditions without committing to an advance.
-    pub fn peek_decision(&self, unit_key: &str, stage: CorrectionStage, reason: &str) -> CorrectionDecision {
+    pub fn peek_decision(
+        &self,
+        unit_key: &str,
+        stage: CorrectionStage,
+        reason: &str,
+    ) -> CorrectionDecision {
         let state = match self.states.get(unit_key) {
             Some(s) => s,
             None => {
@@ -321,7 +326,11 @@ mod tests {
             .advance_correction("U8-A", 0, CorrectionStage::Execute, "tests failing")
             .expect("ok");
         match d {
-            CorrectionDecision::DispatchRound { unit_key, round, stage } => {
+            CorrectionDecision::DispatchRound {
+                unit_key,
+                round,
+                stage,
+            } => {
                 assert_eq!(unit_key, "U8-A");
                 assert_eq!(round, 1);
                 assert_eq!(stage, CorrectionStage::Execute);
@@ -556,7 +565,10 @@ mod tests {
         m.advance_correction("U8-A", 3, CorrectionStage::Execute, "still failing")
             .expect("ok");
         let d = m.peek_decision("U8-A", CorrectionStage::Execute, "preview");
-        assert!(matches!(d, CorrectionDecision::ExhaustedSingleBlocked { .. }));
+        assert!(matches!(
+            d,
+            CorrectionDecision::ExhaustedSingleBlocked { .. }
+        ));
     }
 
     // ----- ensure --------------------------------------------------------

@@ -2075,7 +2075,20 @@ pub use job_deadline::{
 #[cfg(test)]
 mod attempt_tests;
 mod bridge;
+/// 2026-09-03-0959 plan U7 (R7; S8-S11; D7-D9; E10-E12):
+/// changed-path authorisation guard. Every Unit's reviewed
+/// diff is validated TWICE — once at review entry, once at
+/// integration lane lock acquire. This module owns the
+/// pure-data guard; the lane that *uses* it lives in
+/// [`integration_lane`].
+pub mod changed_path_guard;
 mod coordinator;
+/// 2026-09-03-0959 plan U8: bounded correction state machine.
+/// Max 3 correction rounds; on exhaust, a single typed
+/// `Blocked` is emitted (no further recovery, no looping).
+/// Fix resumes from the *failing stage* the correction's
+/// origin reports (CAS-pinned to the `(unit_key, round)` pair).
+pub mod correction;
 /// 2026-09-03-0959 plan U5 (R12; S14; D13; E16): sanitized
 /// shadow inspect summary that aggregates [`dag_shadow::ShadowSink`]
 /// into operator-facing JSON without leaking raw payload bytes,
@@ -2084,6 +2097,11 @@ mod coordinator;
 /// `SupervisorStore`; this new type is the runtime-owned DAG
 /// shadow's inspect surface.
 pub mod dag_inspect;
+/// 2026-09-03-0959 plan U7: integration store — idempotent
+/// integration records keyed on
+/// `(unit_id, base_commit, integrated_commit, expected_head_before)`,
+/// with SHA-256 fingerprint for drift detection.
+pub mod dag_integration;
 /// 2026-09-03-0959 plan U1: tri-state `scheduler_mode` gate that
 /// isolates the legacy `WaveTracker` authority from the new
 /// runtime-owned DAG scheduler authority. Public so the config +
@@ -2105,25 +2123,6 @@ pub mod dag_plan_receipt;
 /// runtime driver (U5+) calls this once per tick and applies
 /// the result inside its store transaction.
 pub mod dag_scheduler;
-/// 2026-09-03-0959 plan U7 (R7; S8-S11; D7-D9; E10-E12):
-/// changed-path authorisation guard. Every Unit's reviewed
-/// diff is validated TWICE — once at review entry, once at
-/// integration lane lock acquire. This module owns the
-/// pure-data guard; the lane that *uses* it lives in
-/// [`integration_lane`].
-pub mod changed_path_guard;
-/// 2026-09-03-0959 plan U7: per-target integration lease +
-/// compare-and-swap fast-forward pipeline. One active lease
-/// per target branch, deterministic eligibility order, CAS
-/// on expected head, RAII guard. Trait split between real
-/// (`RealGitIntegrationPort`) and fake (`FakeGitIntegrationPort`)
-/// ports.
-pub mod integration_lane;
-/// 2026-09-03-0959 plan U7: integration store — idempotent
-/// integration records keyed on
-/// `(unit_id, base_commit, integrated_commit, expected_head_before)`,
-/// with SHA-256 fingerprint for drift detection.
-pub mod dag_integration;
 /// 2026-09-03-0959 plan U5 (R11/R12; S13/S14; D1/D2/D13; E6/E7/E13/E16):
 /// observation-only shadow sink + pure decision function for the
 /// runtime-owned DAG scheduler. Records per-tick scheduler
@@ -2135,6 +2134,19 @@ pub mod dag_integration;
 pub mod dag_shadow;
 pub mod dag_store;
 pub mod dag_store_memory;
+/// 2026-09-03-0959 plan U7: per-target integration lease +
+/// compare-and-swap fast-forward pipeline. One active lease
+/// per target branch, deterministic eligibility order, CAS
+/// on expected head, RAII guard. Trait split between real
+/// (`RealGitIntegrationPort`) and fake (`FakeGitIntegrationPort`)
+/// ports.
+pub mod integration_lane;
+/// 2026-09-03-0959 plan U8 (R9; S8, S11; D11, D12; E2, E9, E11):
+/// pure deadline + idle lease logic with injectable clock.
+/// Every runtime job runs under a non-extendable hard cap.
+/// Idle lease renews only on strong progress; weak output
+/// consumes a bounded total budget (not per-renewal).
+pub mod job_deadline;
 mod memory;
 #[cfg(test)]
 mod memory_protocol_tests;
@@ -2184,18 +2196,6 @@ mod u3_atomic_terminal_tests;
 mod u4_descriptor_tests;
 pub mod worker_outcome;
 pub mod worktree_bind;
-/// 2026-09-03-0959 plan U8 (R9; S8, S11; D11, D12; E2, E9, E11):
-/// pure deadline + idle lease logic with injectable clock.
-/// Every runtime job runs under a non-extendable hard cap.
-/// Idle lease renews only on strong progress; weak output
-/// consumes a bounded total budget (not per-renewal).
-pub mod job_deadline;
-/// 2026-09-03-0959 plan U8: bounded correction state machine.
-/// Max 3 correction rounds; on exhaust, a single typed
-/// `Blocked` is emitted (no further recovery, no looping).
-/// Fix resumes from the *failing stage* the correction's
-/// origin reports (CAS-pinned to the `(unit_key, round)` pair).
-pub mod correction;
 
 // 2026-07-03-001 supervisor real-wiring: re-export the sunk-down
 // bridge surface so `ralph-cli` and the BDD scenarios can depend on

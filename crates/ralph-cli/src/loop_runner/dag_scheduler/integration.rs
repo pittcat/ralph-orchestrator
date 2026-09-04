@@ -148,10 +148,7 @@ where
     R: 'static,
     P: GitIntegrationPort + 'static,
 {
-    pub fn new(
-        lane: Arc<IntegrationLane<R, P>>,
-        store: Arc<InMemoryIntegrationStore>,
-    ) -> Self {
+    pub fn new(lane: Arc<IntegrationLane<R, P>>, store: Arc<InMemoryIntegrationStore>) -> Self {
         Self { lane, store }
     }
 
@@ -168,7 +165,10 @@ where
 
     /// Drive one Unit's integration end-to-end. See module
     /// docs for the 9-step flow.
-    pub fn integrate(&self, req: IntegrationRequest) -> Result<IntegrationOutcome, IntegrationError> {
+    pub fn integrate(
+        &self,
+        req: IntegrationRequest,
+    ) -> Result<IntegrationOutcome, IntegrationError> {
         // Step 2: re-authorise the changed-path set against
         // the same allowlist the reviewer used. The guard is
         // fail-closed: any forbidden top-level prefix,
@@ -187,7 +187,10 @@ where
             unit_commit: req.unit_commit.clone(),
             authorised_paths: req.allowlist.clone(),
         };
-        let guard: LaneGuard<'_> = self.lane.core.try_acquire(&req.target_branch, &req.unit_id)?;
+        let guard: LaneGuard<'_> = self
+            .lane
+            .core
+            .try_acquire(&req.target_branch, &req.unit_id)?;
 
         // Step 4: read the current target HEAD. Capture it
         // for the CAS check below.
@@ -213,10 +216,11 @@ where
 
         // Step 7: CAS FF. The lane refuses to advance the
         // target if the head moved between read and CAS.
-        let cas = self
-            .lane
-            .port
-            .compare_and_swap_ff(&req.target_branch, &expected_head_before, &squash)?;
+        let cas = self.lane.port.compare_and_swap_ff(
+            &req.target_branch,
+            &expected_head_before,
+            &squash,
+        )?;
         let new_head = match cas {
             CasOutcome::Advanced { new_head } => new_head,
             CasOutcome::StaleExpected { expected, actual } => {
@@ -280,9 +284,7 @@ pub use ralph_core::supervisor::integration_lane::RealRepo;
 mod tests {
     use super::*;
 
-    use ralph_core::supervisor::changed_path_guard::{
-        DiffPathEntry, FORBIDDEN_TOP_LEVEL_PREFIXES,
-    };
+    use ralph_core::supervisor::changed_path_guard::{DiffPathEntry, FORBIDDEN_TOP_LEVEL_PREFIXES};
     use ralph_core::supervisor::integration_lane::{
         CasOutcome, FakeGitIntegrationPort, FakeRepo, GateOutcome, IntegrationLane,
     };
@@ -336,7 +338,11 @@ mod tests {
 
         let outcome = orch.integrate(base_request()).expect("integrate");
         match outcome {
-            IntegrationOutcome::Integrated { record, target_branch, new_head } => {
+            IntegrationOutcome::Integrated {
+                record,
+                target_branch,
+                new_head,
+            } => {
                 assert_eq!(record.unit_id, "U1");
                 assert_eq!(target_branch, "feat/integration");
                 // Fake port's squash_commit format is
@@ -348,7 +354,13 @@ mod tests {
             other => panic!("expected Integrated, got {other:?}"),
         }
         // The lane is released.
-        assert!(orch.lane.core.current_holder("feat/integration").unwrap().is_none());
+        assert!(
+            orch.lane
+                .core
+                .current_holder("feat/integration")
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// U7 contract: a forbidden top-level prefix is rejected
@@ -374,7 +386,13 @@ mod tests {
             IntegrationError::ChangedPathRejected(ChangedPathRejection::ForbiddenPath(_))
         ));
         // Lane must still be free (we never acquired).
-        assert!(orch.lane.core.current_holder("feat/integration").unwrap().is_none());
+        assert!(
+            orch.lane
+                .core
+                .current_holder("feat/integration")
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// U7 contract: a symlink change is rejected on the
@@ -420,7 +438,13 @@ mod tests {
             }
             other => panic!("expected GateFailed, got {other:?}"),
         }
-        assert!(orch.lane.core.current_holder("feat/integration").unwrap().is_none());
+        assert!(
+            orch.lane
+                .core
+                .current_holder("feat/integration")
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(orch.store.len(), 0);
     }
 
@@ -452,7 +476,13 @@ mod tests {
             }
             other => panic!("expected StaleExpected, got {other:?}"),
         }
-        assert!(orch.lane.core.current_holder("feat/integration").unwrap().is_none());
+        assert!(
+            orch.lane
+                .core
+                .current_holder("feat/integration")
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(orch.store.len(), 0);
     }
 
