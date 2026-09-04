@@ -469,7 +469,15 @@ pub enum FailureClass {
 /// to depend on the kernel crate.
 pub fn classify_runtime_job_error(
     stage: &str,
-    exit_code: Option<i32>,
+    // `exit_code` is intentionally unused in the body: the pre-fix
+    // `exit_code == Some(0) => Permanent` short-circuit (C1) violated
+    // the `FailureClass::Retryable` doc contract (empty worker result
+    // / missing terminal ⇒ Retryable). The fix routes `Some(0)` into
+    // the stage match instead, so `exit_code` is no longer consulted.
+    // The parameter is retained (underscore-prefixed) to preserve the
+    // public 8-arg signature shared with the kernel's typed-error
+    // mirror and documented in this module's doc contract.
+    _exit_code: Option<i32>,
     payload_bytes: usize,
     payload_cap_bytes: usize,
     elapsed_ms: u64,
@@ -483,13 +491,23 @@ pub fn classify_runtime_job_error(
     if payload_bytes > payload_cap_bytes {
         return FailureClass::Permanent;
     }
-    if exit_code == Some(0) {
-        return FailureClass::Permanent;
-    }
+    // NOTE: no `exit_code == Some(0) => Permanent` short-circuit here.
+    // Per the `FailureClass::Retryable` doc contract (empty worker
+    // result / missing worker terminal ⇒ Retryable), an exit_code of
+    // `Some(0)` must fall through into the stage match so that stages
+    // representing empty worker result / missing terminal (the `_`
+    // arm) classify as `Retryable`. Explicit `Permanent` stages
+    // (policy_rejected etc.) stay `Permanent` regardless of exit
+    // code, which is correct (a policy reject is permanent even if
+    // the process exited 0). See the `_exit_code` param comment for
+    // why the value is no longer consulted.
     // Mirror `runtime_job::RuntimeJobError` variants by name.
     match stage {
-        "pre_fence_failed" | "policy_rejected" | "illegal_stage_transition"
-        | "token_mismatch" | "payload_too_large" => FailureClass::Permanent,
+        "pre_fence_failed"
+        | "policy_rejected"
+        | "illegal_stage_transition"
+        | "token_mismatch"
+        | "payload_too_large" => FailureClass::Permanent,
         "heartbeat_timeout" => FailureClass::Cancel,
         _ => FailureClass::Retryable,
     }
@@ -817,6 +835,73 @@ mod tests {
         assert_eq!(
             classify_runtime_job_error("execute", None, 0, 100, 0, 10_000, 0, 5_000),
             FailureClass::Retryable
+        );
+    }
+
+    // ----- C1+T1 regression: exit_code==Some(0) honoring the
+    // 454-456 doc contract (empty worker result / missing terminal
+    // ⇒ Retryable, not Permanent). The pre-fix `exit_code==Some(0) →
+    // Permanent` short-circuit (486-488) violated that contract for
+    // any stage falling into the `_ => Retryable` arm. These tests
+    // pin the fix so a future re-ordering cannot pass silently.
+
+    #[test]
+    fn classify_runtime_job_error_exit_zero_empty_worker_result_is_retryable() {
+        // (a) exit_code==Some(0) + a stage representing an empty
+        // worker result (falls into the `_` arm). Per the 454-456
+        // doc contract this is Retryable (was Permanent pre-fix).
+        assert_eq!(
+            classify_runtime_job_error("empty_worker_result", Some(0), 0, 100, 0, 10_000, 0, 5_000),
+            FailureClass::Retryable
+        );
+    }
+
+    #[test]
+    fn classify_runtime_job_error_exit_zero_missing_terminal_is_retryable() {
+        // (b) exit_code==Some(0) + a stage representing a missing
+        // worker terminal (a different `_`-arm stage). Per the
+        // 454-456 doc contract this is Retryable (was Permanent
+        // pre-fix).
+        assert_eq!(
+            classify_runtime_job_error("missing_terminal", Some(0), 0, 100, 0, 10_000, 0, 5_000),
+            FailureClass::Retryable
+        );
+    }
+
+    #[test]
+    fn classify_runtime_job_error_exit_zero_normal_terminal_is_retryable() {
+        // (c) exit_code==Some(0) + a stage representing a normal
+        // terminal success path (`execute` falls into the `_` arm;
+        // there is no dedicated "normal_terminal" stage string —
+        // `execute` is the representative success-with-terminal
+        // stage). It must NOT be classified as a Permanent error.
+        // Post-fix it lands in `_ => Retryable`, which honors the
+        // doc contract (a terminal-bearing success is not a
+        // Permanent failure). The assertion pins that it is not
+        // Permanent.
+        let class = classify_runtime_job_error("execute", Some(0), 0, 100, 0, 10_000, 0, 5_000);
+        assert_ne!(
+            class,
+            FailureClass::Permanent,
+            "exit_code==Some(0) normal terminal must not be Permanent"
+        );
+        assert_eq!(
+            class,
+            FailureClass::Retryable,
+            "exit_code==Some(0) normal terminal classifies as Retryable per doc contract"
+        );
+    }
+
+    #[test]
+    fn classify_runtime_job_error_exit_zero_permanent_stage_stays_permanent() {
+        // (d) genuinely permanent stage (`policy_rejected`) +
+        // exit_code==Some(0) ⇒ still Permanent. Proves the fix did
+        // not over-relax: explicit Permanent stages stay Permanent
+        // regardless of exit code (a policy reject is permanent even
+        // if the process exited 0).
+        assert_eq!(
+            classify_runtime_job_error("policy_rejected", Some(0), 0, 100, 0, 10_000, 0, 5_000),
+            FailureClass::Permanent
         );
     }
 
