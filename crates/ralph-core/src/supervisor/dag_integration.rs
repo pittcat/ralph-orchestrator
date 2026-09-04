@@ -172,6 +172,12 @@ impl InMemoryIntegrationStore {
     pub fn len(&self) -> usize {
         self.rows.lock().expect("integration store mutex").len()
     }
+
+    /// Test-only: whether the store holds zero records
+    /// (companion to `len` for the `len_without_is_empty` lint).
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl IntegrationStore for InMemoryIntegrationStore {

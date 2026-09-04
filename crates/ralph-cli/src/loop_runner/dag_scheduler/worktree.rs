@@ -246,7 +246,7 @@ fn read_branch_tip(repo_root: &Path, branch: &str) -> UnitWorktreeResult<String>
         .arg(repo_root)
         .arg("rev-parse")
         .arg("--verify")
-        .arg(&format!("refs/heads/{}", branch))
+        .arg(format!("refs/heads/{}", branch))
         .output()
         .map_err(|e| UnitWorktreeError::GitFailed(format!("git rev-parse: {e}")))?;
     if !out.status.success() {

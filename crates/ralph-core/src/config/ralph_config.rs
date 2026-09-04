@@ -186,7 +186,7 @@ impl RalphConfig {
             if let Some(flow) = self
                 .mechanism
                 .as_mut()
-                .or_else(|| self.event_loop.mechanism.as_mut())
+                .or(self.event_loop.mechanism.as_mut())
                 .and_then(|mechanism| mechanism.flow.as_mut())
             {
                 for step in &mut flow.steps {
