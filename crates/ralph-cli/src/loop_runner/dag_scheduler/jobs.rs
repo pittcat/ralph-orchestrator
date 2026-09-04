@@ -340,11 +340,11 @@ impl JobPipeline {
     /// Release a slot after `collect`. Decrements per-stage and
     /// global in-flight counters.
     pub fn release(&mut self, unit_key: &str) {
-        if let Some(u) = self.state.units.get_mut(unit_key) {
-            if u.in_flight > 0 {
-                u.in_flight -= 1;
-                self.state.in_flight.unbump(u.stage);
-            }
+        if let Some(u) = self.state.units.get_mut(unit_key)
+            && u.in_flight > 0
+        {
+            u.in_flight -= 1;
+            self.state.in_flight.unbump(u.stage);
         }
     }
 

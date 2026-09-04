@@ -2903,6 +2903,7 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                         // runs from memory so the healthy path is
                         // unaffected.
                         let mut persist_ok = true;
+                        #[allow(clippy::collapsible_if)]
                         if let Ok((events, _, _, _)) = &outcome.1 {
                             if let (Some(store), Some(wid)) = (
                                 slot_attempt_store.as_ref(),
@@ -3003,17 +3004,16 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                                 );
                                 let _ = std::fs::remove_file(&current_request.worker_events_path);
                             }
-                        } else if persist_ok {
-                            if let Err(err) =
+                        } else if persist_ok
+                            && let Err(err) =
                                 std::fs::remove_file(&current_request.worker_events_path)
-                            {
-                                tracing::debug!(
-                                    slot_index = slot_index_local,
-                                    path = %current_request.worker_events_path.display(),
-                                    error = %err,
-                                    "U6: failed to remove channel file after persistence (likely already absent)"
-                                );
-                            }
+                        {
+                            tracing::debug!(
+                                slot_index = slot_index_local,
+                                path = %current_request.worker_events_path.display(),
+                                error = %err,
+                                "U6: failed to remove channel file after persistence (likely already absent)"
+                            );
                         }
                         break outcome;
                     }
@@ -3156,20 +3156,20 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                             // or a store write failure all leave the
                             // pid NULL — the warn log lets operators
                             // notice the gap without blocking dispatch.
-                            if let Some(pid) = _pid {
-                                if let Err(error) = guard.bridge.record_slot_pid(
+                            if let Some(pid) = _pid
+                                && let Err(error) = guard.bridge.record_slot_pid(
                                     &guard.wave_id,
                                     guard.slot_index,
                                     *pid,
-                                ) {
-                                    warn!(
-                                        wave_id = %guard.wave_id,
-                                        slot_index = guard.slot_index,
-                                        pid = pid,
-                                        %error,
-                                        "U5: supervisor record_slot_pid failed"
-                                    );
-                                }
+                                )
+                            {
+                                warn!(
+                                    wave_id = %guard.wave_id,
+                                    slot_index = guard.slot_index,
+                                    pid = pid,
+                                    %error,
+                                    "U5: supervisor record_slot_pid failed"
+                                );
                             }
                             // 2026-07-26-004 plan U2/U3 (KTD3): persist
                             // bounded terminal evidence for the Completed

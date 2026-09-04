@@ -2146,7 +2146,10 @@ mod u4_crash_window_repair_tests {
         // Cold start #1 — the repair applies the outbox projection.
         let first = AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
             .expect("first cold-start repair must succeed");
-        assert_eq!(first, 1, "first cold start must repair exactly one projection");
+        assert_eq!(
+            first, 1,
+            "first cold start must repair exactly one projection"
+        );
         assert_eq!(
             sm_commit_count(&ledger),
             1,

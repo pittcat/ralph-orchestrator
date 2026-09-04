@@ -180,20 +180,18 @@ fn process_snapshot(
                 && snapshot.in_flight_count == 0
                 && snapshot.completed_count == snapshot.expected_total
                 && snapshot.expected_total > 0
-            {
-                if let Err(err) =
+                && let Err(err) =
                     inject_completed_coord(snapshot, &completed, store, bridge, main_events_file)
-                {
-                    tracing::warn!(
-                        wave_id = %snapshot.wave_id,
-                        error = %err,
-                        "U2: salvaged slot events but failed to inject wave.complete"
-                    );
-                    report.warnings.push(format!(
-                        "{}: wave.complete injection failed: {err}",
-                        snapshot.wave_id
-                    ));
-                }
+            {
+                tracing::warn!(
+                    wave_id = %snapshot.wave_id,
+                    error = %err,
+                    "U2: salvaged slot events but failed to inject wave.complete"
+                );
+                report.warnings.push(format!(
+                    "{}: wave.complete injection failed: {err}",
+                    snapshot.wave_id
+                ));
             }
             if let Err(err) = store.delete_slot_event_payloads(&snapshot.wave_id) {
                 tracing::warn!(

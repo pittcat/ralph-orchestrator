@@ -1080,7 +1080,7 @@ fn u3_2026_09_01_timed_out_wave_injects_exec_wave_failed() {
     // payload; the wave exists and is in Dispatch phase so
     // `delivery_state < CoordinationCommitted` holds.
     let injected = recovery_redelivery::inject_timed_out_failed_coord(
-        &[wave.clone()],
+        std::slice::from_ref(&wave),
         store.clone(),
         &main_events_file,
     );
@@ -1179,7 +1179,7 @@ fn s31_2026_09_01_salvage_precedes_timed_out_failed_inject() {
     assert_eq!(report.redelivered, vec![wave.clone()]);
 
     let injected = recovery_redelivery::inject_timed_out_failed_coord(
-        &[wave.clone()],
+        std::slice::from_ref(&wave),
         store.clone(),
         &main_events_file,
     );

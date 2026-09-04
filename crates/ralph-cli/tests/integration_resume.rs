@@ -1993,8 +1993,7 @@ hats:
             .unwrap_or(main_repo)
             .join("worktree")
             .join(main_repo.file_name().expect("repo must have a basename"));
-        fs::create_dir_all(&canonical_root)
-            .expect("create canonical worktree root");
+        fs::create_dir_all(&canonical_root).expect("create canonical worktree root");
         let canonical_path = canonical_root.join(loop_id);
 
         // Legacy gate location — where the gate looks first.
@@ -2038,8 +2037,7 @@ hats:
         // this helper returns.
         let legacy_ralph = legacy_path.join(".ralph");
         let legacy_agent = legacy_ralph.join("agent");
-        fs::create_dir_all(&legacy_agent)
-            .expect("create legacy .ralph/agent");
+        fs::create_dir_all(&legacy_agent).expect("create legacy .ralph/agent");
         let legacy_events = legacy_ralph.join("events.jsonl");
         fs::write(&legacy_events, "").expect("legacy events.jsonl");
         fs::write(
@@ -2047,15 +2045,10 @@ hats:
             legacy_events.to_str().expect("legacy events UTF-8"),
         )
         .expect("legacy current-events marker");
-        fs::write(
-            legacy_ralph.join("current-loop-id"),
-            format!("{loop_id}\n"),
-        )
-        .expect("legacy current-loop-id marker");
-        fs::write(legacy_agent.join("scratchpad.md"), "# scratch\n")
-            .expect("legacy scratchpad");
-        fs::write(legacy_ralph.join("history.jsonl"), "")
-            .expect("legacy history.jsonl");
+        fs::write(legacy_ralph.join("current-loop-id"), format!("{loop_id}\n"))
+            .expect("legacy current-loop-id marker");
+        fs::write(legacy_agent.join("scratchpad.md"), "# scratch\n").expect("legacy scratchpad");
+        fs::write(legacy_ralph.join("history.jsonl"), "").expect("legacy history.jsonl");
 
         canonical_path
     }
@@ -2224,8 +2217,7 @@ hats:
             "already-completed combined run must exit non-zero"
         );
         assert!(
-            stderr.contains("already completed")
-                || stderr.contains("completion_promise"),
+            stderr.contains("already completed") || stderr.contains("completion_promise"),
             "stderr must name the already-completed reason: {stderr}"
         );
         assert!(
@@ -2280,7 +2272,11 @@ hats:
         let events_file = ralph_dir.join("events.jsonl");
         let tasks_file = agent_dir.join("tasks.jsonl");
         fs::write(&events_file, "{\"line\":\"prior-event\"}\n").unwrap();
-        fs::write(&tasks_file, "{\"id\":\"u2-eligible-skip-cleanup:step-1\"}\n").unwrap();
+        fs::write(
+            &tasks_file,
+            "{\"id\":\"u2-eligible-skip-cleanup:step-1\"}\n",
+        )
+        .unwrap();
 
         let output = super::common::ralph_bin()
             .args([
@@ -2517,9 +2513,7 @@ hats:
         // behavior).
         let lock_path = ralph_dir.join("loop.lock");
         if lock_path.exists() {
-            let len = fs::metadata(&lock_path)
-                .expect("lock file stat")
-                .len();
+            let len = fs::metadata(&lock_path).expect("lock file stat").len();
             assert_eq!(
                 len, 0,
                 "lock file must be truncated (length 0) after parent exit, was {len}: {stderr}"
@@ -2573,8 +2567,8 @@ hats:
             || stderr.contains("Continuation gate cleared");
         let _gate_path = ralph_dir.join(".parent-cleared-gate");
         // Drift marker (U2 follow-up): surface in CI without failing.
-        let path_drift_reused = stdout.contains("Reusing worktree at")
-            || stderr.contains("Reusing worktree at");
+        let path_drift_reused =
+            stdout.contains("Reusing worktree at") || stderr.contains("Reusing worktree at");
         if gate_cleared && !path_drift_reused {
             eprintln!(
                 "U1 NOTE: parent gate cleared but `find_reusable_worktree_by_name` did \
@@ -2999,12 +2993,7 @@ hats:
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_millis();
-        seed_parent_cleared_gate(
-            &worktree_path,
-            loop_id,
-            "",
-            now_ms.saturating_sub(stale_ms),
-        );
+        seed_parent_cleared_gate(&worktree_path, loop_id, "", now_ms.saturating_sub(stale_ms));
 
         let output = super::common::ralph_bin()
             .args([
@@ -3031,8 +3020,7 @@ hats:
             output.status
         );
         assert!(
-            stderr.contains("combined --continue refused")
-                && stderr.contains("parent gate stale"),
+            stderr.contains("combined --continue refused") && stderr.contains("parent gate stale"),
             "stderr must name the stale-gate refusal reason: {stderr}"
         );
         assert!(
@@ -3172,9 +3160,7 @@ hats:
     fn checkpoint_repair_first_apply_second_noop() {
         use ralph_core::event_loop::accepted_transition::AcceptedTransition;
         use ralph_core::state::StateLedger;
-        use ralph_core::state_machine::{
-            StateMachineTransitionDelta, StateMachineTransitionId,
-        };
+        use ralph_core::state_machine::{StateMachineTransitionDelta, StateMachineTransitionId};
 
         let temp_dir = TempDir::new().expect("temp dir");
         let main_repo = temp_dir.path();
@@ -3201,10 +3187,7 @@ hats:
             "forge.plan.ready:planner",
             "deadbeef",
         );
-        let sm_id = StateMachineTransitionId(format!(
-            "sm-v2:{}",
-            &transition_id[..32]
-        ));
+        let sm_id = StateMachineTransitionId(format!("sm-v2:{}", &transition_id[..32]));
         let projection = StateMachineTransitionDelta {
             transition_id: sm_id.clone(),
             source_hat: Some("planner".to_string()),
@@ -3296,7 +3279,10 @@ hats:
         let outbox_after_run1 =
             fs::read_to_string(&outbox_path).expect("outbox readable after run #1");
         assert_eq!(
-            outbox_after_run1.lines().filter(|l| !l.trim().is_empty()).count(),
+            outbox_after_run1
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count(),
             1,
             "outbox must remain append-only — repair must NOT remove or rewrite entries"
         );
@@ -3304,10 +3290,9 @@ hats:
         // can confirm run #2 didn't append anything new to the
         // commit log (R6: re-running repair on a healthy ledger is
         // a no-op).
-        let ledger_jsonl_after_run1 = fs::read_to_string(
-            worktree_path.join(".ralph").join("ledger.jsonl"),
-        )
-        .unwrap_or_default();
+        let ledger_jsonl_after_run1 =
+            fs::read_to_string(worktree_path.join(".ralph").join("ledger.jsonl"))
+                .unwrap_or_default();
         let commits_after_run1 = ledger_jsonl_after_run1
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -3378,10 +3363,9 @@ hats:
         // The on-disk commit log must NOT have grown. R6: the
         // ledger's replayable commit history must stay stable across
         // idempotent repair runs.
-        let ledger_jsonl_after_run2 = fs::read_to_string(
-            worktree_path.join(".ralph").join("ledger.jsonl"),
-        )
-        .unwrap_or_default();
+        let ledger_jsonl_after_run2 =
+            fs::read_to_string(worktree_path.join(".ralph").join("ledger.jsonl"))
+                .unwrap_or_default();
         let commits_after_run2 = ledger_jsonl_after_run2
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -3398,7 +3382,10 @@ hats:
         let outbox_after_run2 =
             fs::read_to_string(&outbox_path).expect("outbox readable after run #2");
         assert_eq!(
-            outbox_after_run2.lines().filter(|l| !l.trim().is_empty()).count(),
+            outbox_after_run2
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count(),
             1,
             "outbox must still hold exactly one entry after run #2 (append-only)"
         );
@@ -3413,8 +3400,7 @@ hats:
         // StateLedger projection; it does not publish to the bus.
         let events_path = worktree_path.join(".ralph/events.jsonl");
         if events_path.exists() {
-            let events_body =
-                fs::read_to_string(&events_path).expect("events.jsonl readable");
+            let events_body = fs::read_to_string(&events_path).expect("events.jsonl readable");
             for line in events_body.lines() {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {

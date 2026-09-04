@@ -287,15 +287,12 @@ pub fn read_parent_cleared_gate(
 /// `0600` on Unix (only the parent that wrote it can read it again,
 /// matching the rest of `.ralph/`). Creates the parent `.ralph/`
 /// directory if missing.
-pub fn write_parent_cleared_gate(
-    path: &Path,
-    gate: &ParentClearedGate,
-) -> io::Result<()> {
+pub fn write_parent_cleared_gate(path: &Path, gate: &ParentClearedGate) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let body = serde_json::to_string(gate)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let body =
+        serde_json::to_string(gate).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(path, body)?;
     #[cfg(unix)]
     {
@@ -597,11 +594,11 @@ mod tests {
                         stack.push(e.path());
                     }
                 }
-            } else if meta.is_file() {
-                if let Ok(content) = std::fs::read(&p) {
-                    let rel = p.strip_prefix(root).unwrap_or(&p).to_path_buf();
-                    entries.push((rel, content));
-                }
+            } else if meta.is_file()
+                && let Ok(content) = std::fs::read(&p)
+            {
+                let rel = p.strip_prefix(root).unwrap_or(&p).to_path_buf();
+                entries.push((rel, content));
             }
         }
         entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -873,8 +870,8 @@ mod tests {
         };
         let path = gate_path(&workspace);
         write_parent_cleared_gate(&path, &gate).unwrap();
-        let read = read_parent_cleared_gate(&workspace, "loop-rt", gate.written_at_unix_ms)
-            .unwrap();
+        let read =
+            read_parent_cleared_gate(&workspace, "loop-rt", gate.written_at_unix_ms).unwrap();
         assert_eq!(read, gate);
     }
 

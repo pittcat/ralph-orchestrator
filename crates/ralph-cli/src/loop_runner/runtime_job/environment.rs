@@ -179,8 +179,8 @@ mod tests {
         let out = policy.filter_child_env(&candidate);
         assert_eq!(out.len(), 1);
         assert_eq!(out.get("PATH").map(String::as_str), Some("/usr/bin"));
-        assert!(out.get("HOME").is_none());
-        assert!(out.get("BEARER_TOKEN").is_none());
+        assert!(!out.contains_key("HOME"));
+        assert!(!out.contains_key("BEARER_TOKEN"));
     }
 
     /// Filter is name-only: values pass through verbatim.
@@ -209,7 +209,7 @@ mod tests {
         let candidate = map([("PATH", "/x")]);
         let out = policy.filter_child_env(&candidate);
         assert_eq!(out.len(), 1);
-        assert!(out.get("RALPH_DAG").is_none());
+        assert!(!out.contains_key("RALPH_DAG"));
     }
 
     /// The legacy marker is constructible and pinned (so a

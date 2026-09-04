@@ -1110,26 +1110,25 @@ pub async fn run_command(
             args.reuse_worktree,
         )
         .map_err(|e| anyhow::anyhow!("failed to classify run intent: {e}"))?;
-        let continue_recovery_ctx: Option<crate::commands::run_recovery::ContinueContext> =
-            if matches!(
-                intent,
-                crate::commands::run_recovery::RunIntent::ContinueReusedWorktree
-            ) {
-                let ctx = crate::commands::run_recovery::acquire_and_assess(
-                    args.worktree_name.as_deref(),
-                    args.plan.as_deref(),
-                    workspace_root,
-                    &prompt_summary,
-                )
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-                info!(
-                    "Continuation gate cleared for worktree '{}'; lock held until run exit",
-                    ctx.loop_id
-                );
-                Some(ctx)
-            } else {
-                None
-            };
+        let continue_recovery_ctx: Option<crate::commands::run_recovery::ContinueContext> = if matches!(
+            intent,
+            crate::commands::run_recovery::RunIntent::ContinueReusedWorktree
+        ) {
+            let ctx = crate::commands::run_recovery::acquire_and_assess(
+                args.worktree_name.as_deref(),
+                args.plan.as_deref(),
+                workspace_root,
+                &prompt_summary,
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            info!(
+                "Continuation gate cleared for worktree '{}'; lock held until run exit",
+                ctx.loop_id
+            );
+            Some(ctx)
+        } else {
+            None
+        };
         if args.reuse_worktree {
             debug!("Reusing worktree for explicit --worktree --reuse-worktree mode");
             match exact_worktree_name.as_deref() {
@@ -1213,7 +1212,10 @@ pub async fn run_command(
                             info!(
                                 "Skipping runtime-artifact cleanup on combined --continue --reuse-worktree \
                                  path; lock already held for worktree '{}'",
-                                continue_recovery_ctx.as_ref().map(|c| c.loop_id.as_str()).unwrap_or("?")
+                                continue_recovery_ctx
+                                    .as_ref()
+                                    .map(|c| c.loop_id.as_str())
+                                    .unwrap_or("?")
                             );
                             None
                         };
@@ -1318,7 +1320,7 @@ pub async fn run_command(
                         // unreachable for non-combined parent runs.
                         if continue_recovery_ctx.is_some() {
                             use ralph_core::recovery_checkpoint::{
-                                ParentClearedGate, PARENT_CLEARED_GATE_RELATIVE,
+                                PARENT_CLEARED_GATE_RELATIVE, ParentClearedGate,
                                 write_parent_cleared_gate,
                             };
                             use std::time::{SystemTime, UNIX_EPOCH};
@@ -1335,8 +1337,7 @@ pub async fn run_command(
                                 manifest_sha256,
                                 written_at_unix_ms,
                             };
-                            let gate_path =
-                                reusable.path.join(PARENT_CLEARED_GATE_RELATIVE);
+                            let gate_path = reusable.path.join(PARENT_CLEARED_GATE_RELATIVE);
                             write_parent_cleared_gate(&gate_path, &gate).map_err(|e| {
                                 anyhow::anyhow!(
                                     "failed to write parent-cleared gate at {}: {e}",
@@ -1400,8 +1401,7 @@ pub async fn run_command(
                         // and may reject a manifest that the parent's
                         // gate already cleared). Flag the child so it
                         // takes both paths.
-                        subprocess_tui_args.combined_continue =
-                            continue_recovery_ctx.is_some();
+                        subprocess_tui_args.combined_continue = continue_recovery_ctx.is_some();
                         (reused_ctx, None)
                     }
                     Ok(None) => {
@@ -1587,15 +1587,15 @@ pub async fn run_command(
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis())
                 .unwrap_or(0);
-            let gate = read_parent_cleared_gate(worktree_path, &loop_id, now_unix_ms)
-                .map_err(|e| {
+            let gate =
+                read_parent_cleared_gate(worktree_path, &loop_id, now_unix_ms).map_err(|e| {
                     let reason = match &e {
                         ParentGateReadError::Missing => "missing".to_string(),
                         ParentGateReadError::Unreadable(msg) => format!("unreadable: {msg}"),
                         ParentGateReadError::MalformedJson(msg) => format!("malformed: {msg}"),
-                        ParentGateReadError::LoopIdMismatch { expected, actual } => format!(
-                            "loop_id mismatch (expected '{expected}', actual '{actual}')"
-                        ),
+                        ParentGateReadError::LoopIdMismatch { expected, actual } => {
+                            format!("loop_id mismatch (expected '{expected}', actual '{actual}')")
+                        }
                         ParentGateReadError::Stale { age_ms, max_age_ms } => {
                             format!("stale ({age_ms}ms > {max_age_ms}ms)")
                         }

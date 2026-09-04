@@ -1862,12 +1862,8 @@ fn combined_cold_start_then_restart_no_double_apply() {
     // `StateLedger::new`), so the only durable signal we can read on
     // cold-start #2 is `snapshot.state_machine_runtime` plus the
     // `transition_id` dedup in `repair_state_machine_projection_from_outbox`.
-    use crate::event_loop::accepted_transition::{
-        AcceptedTransition, OutboxEntry,
-    };
-    use crate::state_machine::{
-        StateMachineTransitionDelta, StateMachineTransitionId,
-    };
+    use crate::event_loop::accepted_transition::{AcceptedTransition, OutboxEntry};
+    use crate::state_machine::{StateMachineTransitionDelta, StateMachineTransitionId};
     use std::fs;
     use tempfile::TempDir;
 
@@ -1899,7 +1895,7 @@ hats:
     event_loop.initialize("Test");
 
     // Cold start #1: build a fresh ledger from disk (no replay content yet).
-    let mut ledger = crate::state::StateLedger::new(&workspace, true);
+    let ledger = crate::state::StateLedger::new(&workspace, true);
     event_loop.install_state_ledger_for_test(ledger);
 
     // Simulate the crash-window: outbox durable, projection NOT applied
@@ -1947,11 +1943,12 @@ hats:
     // fresh ledger. The runtime must hydrate with the projection and
     // `.ralph/ledger.jsonl` must hold the durable commit.
     let mut ledger = crate::state::StateLedger::new(&workspace, true);
-    let first =
-        AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger).expect(
-            "first cold-start repair (outbox-only crash window) must succeed",
-        );
-    assert_eq!(first, 1, "first cold start must apply exactly one projection");
+    let first = AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
+        .expect("first cold-start repair (outbox-only crash window) must succeed");
+    assert_eq!(
+        first, 1,
+        "first cold start must apply exactly one projection"
+    );
     let ledger_path = workspace.join(".ralph").join("ledger.jsonl");
     assert!(
         ledger_path.exists(),
@@ -2038,12 +2035,8 @@ fn outbox_only_window_recovers_exactly_once() {
     // `commit_log` empty, so the durable signal is the snapshot's
     // `state_machine_runtime.accepted_transition_count` plus the
     // `transition_id` dedup in `repair_state_machine_projection_from_outbox`.
-    use crate::event_loop::accepted_transition::{
-        AcceptedTransition, OutboxEntry,
-    };
-    use crate::state_machine::{
-        StateMachineTransitionDelta, StateMachineTransitionId,
-    };
+    use crate::event_loop::accepted_transition::{AcceptedTransition, OutboxEntry};
+    use crate::state_machine::{StateMachineTransitionDelta, StateMachineTransitionId};
     use std::fs;
     use tempfile::TempDir;
 
@@ -2092,7 +2085,10 @@ fn outbox_only_window_recovers_exactly_once() {
     let mut ledger = crate::state::StateLedger::new(workspace, true);
     let first =
         AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger).unwrap();
-    assert_eq!(first, 1, "first cold start must apply the outbox projection");
+    assert_eq!(
+        first, 1,
+        "first cold start must apply the outbox projection"
+    );
 
     let snapshot_after_first = ledger.snapshot();
     let runtime_after_first = snapshot_after_first

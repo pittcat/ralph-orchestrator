@@ -940,7 +940,7 @@ async fn test_u1_2026_09_01_dispatcher_persists_slot_event_payloads() {
     );
     assert_eq!(
         events[0].payload.as_deref(),
-        Some(format!(r#"{{"slot":0,"seq":0}}"#).as_str()),
+        Some(r#"{"slot":0,"seq":0}"#),
         "U1: payload must round-trip byte-for-byte"
     );
 

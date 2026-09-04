@@ -519,7 +519,7 @@ mod tests {
             .record_integrated(&IntegrationInput {
                 unit_id: "U1".to_string(),
                 target_branch: "feat/integration".to_string(),
-                base_commit: base_commit,
+                base_commit,
                 integrated_commit: squash_commit,
                 expected_head_before: expected_head,
                 created_at_ms: 1_700_000_000_000,

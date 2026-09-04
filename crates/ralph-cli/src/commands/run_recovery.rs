@@ -50,6 +50,9 @@
 
 use std::path::{Path, PathBuf};
 
+// `clap::Parser` is only needed for `RunArgs::try_parse_from` inside the
+// `#[cfg(test)]` module below; the bin target never parses argv here.
+#[cfg(test)]
 use clap::Parser;
 
 use ralph_core::loop_lock::{LockError, LockGuard, LoopLock};
@@ -93,6 +96,7 @@ pub enum IntentError {
     /// loop and is reported as [`RunIntent::ContinuePrimary`], not an
     /// error; this variant only fires when the args are self-contradictory
     /// in a future extension. Currently a placeholder.
+    #[allow(dead_code)]
     #[error("intent invariant violated (reserved for future variants)")]
     Reserved,
 }
@@ -103,6 +107,7 @@ pub enum IntentError {
 /// delegates to [`classify_run_intent_flags`]. It exists so callers
 /// that own `RunArgs` by value can still classify intent without
 /// reconstructing the struct.
+#[allow(dead_code)]
 pub fn classify_run_intent(args: &RunArgs) -> Result<RunIntent, IntentError> {
     classify_run_intent_flags(args.continue_mode, args.worktree, args.reuse_worktree)
 }
@@ -148,6 +153,7 @@ pub fn classify_run_intent_flags(
 /// here so [`acquire_and_assess`] can refuse the combined path with a
 /// structured error when the operator did not pin a worktree name — the
 /// gate must know which worktree it is locking.
+#[allow(dead_code)]
 pub fn exact_worktree_name(args: &RunArgs) -> Option<String> {
     exact_worktree_name_from(args.worktree_name.as_deref(), args.plan.as_deref())
 }
@@ -160,17 +166,17 @@ pub fn exact_worktree_name_from(
     worktree_name: Option<&str>,
     plan: Option<&Path>,
 ) -> Option<String> {
-    if let Some(name) = worktree_name {
-        if !name.is_empty() {
-            return Some(name.to_string());
-        }
+    if let Some(name) = worktree_name
+        && !name.is_empty()
+    {
+        return Some(name.to_string());
     }
-    if let Some(plan) = plan {
-        if let Some(stem) = plan.file_stem().and_then(|s| s.to_str()) {
-            let stem = stem.trim();
-            if !stem.is_empty() && !stem.eq_ignore_ascii_case("prompt") {
-                return Some(stem.to_string());
-            }
+    if let Some(plan) = plan
+        && let Some(stem) = plan.file_stem().and_then(|s| s.to_str())
+    {
+        let stem = stem.trim();
+        if !stem.is_empty() && !stem.eq_ignore_ascii_case("prompt") {
+            return Some(stem.to_string());
         }
     }
     None
@@ -191,9 +197,15 @@ pub struct ContinueContext {
     /// The exact worktree name (also the loop id for the prior run).
     pub loop_id: String,
     /// Absolute path to the worktree's `.ralph/` root (the directory
-    /// that contains `loop.lock`, `current-loop-id`, etc.).
+    /// that contains `loop.lock`, `current-loop-id`, etc.). Stored so
+    /// the caller can introspect the bound worktree; not read by the
+    /// production run path, which only uses `loop_id`.
+    #[allow(dead_code)]
     pub worktree_path: PathBuf,
-    /// Held lock on `<worktree_path>/.ralph/loop.lock`.
+    /// Held lock on `<worktree_path>/.ralph/loop.lock`. Released only
+    /// when this guard drops (i.e. when `ContinueContext` goes out of
+    /// scope at run exit); intentionally never read.
+    #[allow(dead_code)]
     pub lock_guard: LockGuard,
 }
 
@@ -279,7 +291,8 @@ pub fn acquire_and_assess(
     // Step 0: pin the worktree name. Without it we cannot locate the
     // target worktree and a default would silently attach to the wrong
     // one.
-    let name = exact_worktree_name_from(worktree_name, plan).ok_or(GateError::NoExactWorktreeName)?;
+    let name =
+        exact_worktree_name_from(worktree_name, plan).ok_or(GateError::NoExactWorktreeName)?;
     let worktree_path = workspace_root.join(".worktrees").join(&name);
 
     // Step 0a: confirm the directory exists. The worktree must be on
@@ -342,7 +355,9 @@ pub fn acquire_and_assess(
 
     let eligible = match verdict {
         AssessmentVerdict::Eligible => true,
-        AssessmentVerdict::AlreadyCompleted { last_terminal_reason } => {
+        AssessmentVerdict::AlreadyCompleted {
+            last_terminal_reason,
+        } => {
             drop(lock_guard);
             return Err(GateError::Checkpoint {
                 detail: format!(
@@ -387,8 +402,7 @@ pub(crate) fn render_refusal(refusal: &AssessmentRefusal) -> String {
         AssessmentRefusal::MissingCurrentEventsTarget => ".ralph/current-events marker is missing \
              or its target is not a regular file"
             .to_string(),
-        AssessmentRefusal::MissingScratchpad => ".ralph/agent/scratchpad.md is missing"
-            .to_string(),
+        AssessmentRefusal::MissingScratchpad => ".ralph/agent/scratchpad.md is missing".to_string(),
         AssessmentRefusal::HistoryIoError(msg) => format!("history I/O error: {msg}"),
         AssessmentRefusal::OutboxIoError(msg) => format!("outbox I/O error: {msg}"),
         AssessmentRefusal::LoopLockedByOther { holder_pid } => format!(
@@ -449,9 +463,7 @@ mod tests {
                 // the parser happy.
                 Box::leak(format!("--worktree-name={n}").into_boxed_str()) as &str
             }))
-            .chain(plan.map(|p| {
-                Box::leak(format!("--plan={p}").into_boxed_str()) as &str
-            }))
+            .chain(plan.map(|p| Box::leak(format!("--plan={p}").into_boxed_str()) as &str))
             .collect();
         RunArgs::try_parse_from(argv).expect("argv should parse")
     }
@@ -474,10 +486,7 @@ mod tests {
     #[test]
     fn classify_reuse_fresh_when_worktree_reuse_without_continue() {
         let args = mk_args(false, true, true, Some("wt-x"), None);
-        assert_eq!(
-            classify_run_intent(&args).unwrap(),
-            RunIntent::ReuseFresh
-        );
+        assert_eq!(classify_run_intent(&args).unwrap(), RunIntent::ReuseFresh);
     }
 
     #[test]
@@ -504,10 +513,7 @@ mod tests {
     #[test]
     fn exact_worktree_name_from_explicit_flag() {
         let args = mk_args(true, true, true, Some("wt-explicit"), None);
-        assert_eq!(
-            exact_worktree_name(&args),
-            Some("wt-explicit".to_string())
-        );
+        assert_eq!(exact_worktree_name(&args), Some("wt-explicit".to_string()));
     }
 
     #[test]

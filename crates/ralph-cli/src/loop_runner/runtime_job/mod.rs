@@ -257,7 +257,7 @@ impl JobToken {
     /// Full 4-slot check used by the ingress: unit_key, stage,
     /// hat, attempt must ALL match.
     pub fn belongs_to_full(&self, unit_key: &str, stage: Stage, hat: &str, attempt: u64) -> bool {
-        &self.unit_key == unit_key
+        self.unit_key == unit_key
             && self.stage == stage
             && self.hat == hat
             && self.attempt == attempt

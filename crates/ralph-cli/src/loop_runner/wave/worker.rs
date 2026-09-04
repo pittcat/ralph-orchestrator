@@ -242,7 +242,7 @@ pub async fn run_wave_worker_pty(
     // expose one and the field stays `None`. The dispatcher's
     // record_slot_pid call accepts `None` and degrades to NULL
     // in the store (warning, not error).
-    let worker_pid = child.process_id().map(|id| id as u32);
+    let worker_pid = child.process_id();
     drop(pty_pair.slave);
 
     if let Some(input) = stdin_input

@@ -1388,7 +1388,11 @@ fn combined_reuse_worktree_does_not_create_archive_dir() {
     // --continue handler to clear. Write it directly here so this
     // test does not depend on config.workspace_root layout.
     fs::create_dir_all(main_repo.join(".ralph/agent")).unwrap();
-    fs::write(main_repo.join(".ralph/agent/scratchpad.md"), "# main scratch\n").unwrap();
+    fs::write(
+        main_repo.join(".ralph/agent/scratchpad.md"),
+        "# main scratch\n",
+    )
+    .unwrap();
 
     let output = common::ralph_bin()
         .args([
@@ -1491,7 +1495,11 @@ fn combined_reuse_worktree_does_not_rotate_current_events() {
     // Main-repo scratchpad for the pre-existing --continue handler
     // (same rationale as S1 above).
     fs::create_dir_all(main_repo.join(".ralph/agent")).unwrap();
-    fs::write(main_repo.join(".ralph/agent/scratchpad.md"), "# main scratch\n").unwrap();
+    fs::write(
+        main_repo.join(".ralph/agent/scratchpad.md"),
+        "# main scratch\n",
+    )
+    .unwrap();
 
     let marker_before = fs::read_to_string(ralph_dir.join("current-events")).unwrap();
 
