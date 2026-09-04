@@ -82,6 +82,8 @@ pub struct IntegrationInput {
 pub enum IntegrationStoreError {
     #[error("unit '{unit_id}' already integrated into target '{target_branch}' with a different candidate")]
     DuplicateUnitForTarget { unit_id: String, target_branch: String },
+    #[error("unit '{unit_id}' not yet recorded on target '{target_branch}'")]
+    NotYetRecorded { unit_id: String, target_branch: String },
     #[error("commit fingerprint drift for unit '{unit_id}': expected {expected}, got {actual}")]
     FingerprintDrift {
         unit_id: String,
@@ -225,7 +227,7 @@ impl IntegrationStore for InMemoryIntegrationStore {
         let key = (unit_id.to_string(), target_branch.to_string());
         let entry = rows
             .get_mut(&key)
-            .ok_or_else(|| IntegrationStoreError::DuplicateUnitForTarget {
+            .ok_or_else(|| IntegrationStoreError::NotYetRecorded {
                 unit_id: unit_id.to_string(),
                 target_branch: target_branch.to_string(),
             })?;
@@ -328,13 +330,44 @@ mod tests {
     #[test]
     fn ack_flips_acked_bit_and_is_idempotent() {
         let store = InMemoryIntegrationStore::new();
-        store
+        let rec = store
             .record_integrated(&input("U1", "b1", "i1", "h1"))
             .expect("record");
         let acked = store.ack("U1", "feat/test").expect("ack");
+        // Strengthened (T2): assert every field of the returned
+        // record, not just the acked bit. The ack must return the
+        // same row with only `acked` flipped — no field drift.
+        assert_eq!(acked.id, rec.id);
+        assert_eq!(acked.unit_id, "U1");
+        assert_eq!(acked.target_branch, "feat/test");
+        assert_eq!(acked.base_commit, "b1");
+        assert_eq!(acked.integrated_commit, "i1");
+        assert_eq!(acked.expected_head_before, "h1");
+        assert_eq!(acked.commit_fingerprint, rec.commit_fingerprint);
         assert!(acked.acked);
+        assert_eq!(acked.created_at_ms, rec.created_at_ms);
         let acked_again = store.ack("U1", "feat/test").expect("ack again");
-        assert!(acked_again.acked);
+        assert_eq!(acked_again, acked);
+    }
+
+    /// U7 contract (C2 fix): `ack` on a unit that was NEVER
+    /// recorded on this target returns `NotYetRecorded`, not
+    /// `DuplicateUnitForTarget`. "Never recorded" and
+    /// "recorded but candidate differs" are distinct failure
+    /// modes — only the latter is `DuplicateUnitForTarget`
+    /// (handled in `record_integrated`).
+    #[test]
+    fn ack_returns_not_yet_recorded_for_ghost_unit() {
+        let store = InMemoryIntegrationStore::new();
+        let err = store
+            .ack("ghost-unit", "feat/test")
+            .expect_err("ghost unit was never recorded");
+        assert!(
+            matches!(err, IntegrationStoreError::NotYetRecorded { .. }),
+            "expected NotYetRecorded for never-recorded unit, got {err:?}"
+        );
+        // Sanity: the store is still empty (ack never creates a row).
+        assert_eq!(store.len(), 0);
     }
 
     /// U7 contract: `list_unacked_for_target` returns only
