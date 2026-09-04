@@ -1329,3 +1329,203 @@ fn test_reuse_worktree_artifact_only_prior_run_fails_closed() {
     // nothing recreated it.
     assert!(!worktree_path.join(".ralph/events.jsonl").exists());
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// 2026-09-01-2102 U2: combined --continue --worktree --reuse-worktree
+// gate must skip the archive step entirely and leave live `.ralph/`
+// runtime artifacts untouched. These are end-to-end checks that the
+// fail-closed gate is wired correctly: `--continue` flips the intent
+// from `ReuseFresh` to `ContinueReusedWorktree`, which routes through
+// `acquire_and_assess` instead of `clean_worktree_runtime_artifacts`.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// S1: a combined --continue --worktree --reuse-worktree invocation
+/// MUST NOT create `.ralph/reuse-history/<ts>/` inside the worktree.
+/// The continuation contract reads the live events file to drive
+/// `task.resume`; the archive step would have rotated those events out
+/// before the resume ran. The two surfaces are mutually exclusive:
+/// either we are continuing (no archive) or we are cleaning for a
+/// fresh start (archive + manifest gate).
+#[test]
+fn combined_reuse_worktree_does_not_create_archive_dir() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let main_repo = temp_dir.path();
+    setup_git_repo(main_repo);
+    write_minimal_config(main_repo);
+
+    // Plan stem drives the exact worktree name.
+    let loop_id = "u2-archive-skip";
+    let plan_path = main_repo.join(format!("{loop_id}.md"));
+    fs::write(&plan_path, "# plan body\n").unwrap();
+
+    // Pre-stage a worktree with live runtime artifacts the resume
+    // contract depends on.
+    let worktree_path = precreate_worktree_with_artifacts(main_repo, loop_id);
+    write_completed_worktree_entry(main_repo, loop_id, &worktree_path);
+    assert!(worktree_path.join(".ralph/events.jsonl").exists());
+    assert!(worktree_path.join(".ralph/agent/tasks.jsonl").exists());
+
+    // Add the mandatory fixture pieces required by `assess_checkpoint`
+    // so the gate clears with `Eligible` and the gate does not
+    // short-circuit on MissingScratchpad / MissingCurrentEventsTarget.
+    //
+    // Also seed the main-repo scratchpad: the pre-existing `--continue`
+    // branch in run.rs reads `config.core.scratchpad.path` against the
+    // workspace root (main repo) before reaching our new gate, so the
+    // resume contract is gated on the MAIN repo scratchpad existing.
+    let ralph_dir = worktree_path.join(".ralph");
+    let agent_dir = ralph_dir.join("agent");
+    let events_file = ralph_dir.join("events.jsonl");
+    fs::write(agent_dir.join("scratchpad.md"), "# prior scratchpad\n").unwrap();
+    fs::write(
+        ralph_dir.join("current-events"),
+        events_file.to_str().expect("events_file must be UTF-8"),
+    )
+    .unwrap();
+    fs::write(ralph_dir.join("current-loop-id"), format!("{loop_id}\n")).unwrap();
+    fs::write(ralph_dir.join("history.jsonl"), "").unwrap();
+    // The main-repo scratchpad must exist for the pre-existing
+    // --continue handler to clear. Write it directly here so this
+    // test does not depend on config.workspace_root layout.
+    fs::create_dir_all(main_repo.join(".ralph/agent")).unwrap();
+    fs::write(main_repo.join(".ralph/agent/scratchpad.md"), "# main scratch\n").unwrap();
+
+    let output = common::ralph_bin()
+        .args([
+            "run",
+            "--continue",
+            "--worktree",
+            "--reuse-worktree",
+            "--no-tui",
+            "--skip-preflight",
+            "--plan",
+            plan_path.to_str().unwrap(),
+        ])
+        .current_dir(main_repo)
+        .output()
+        .expect("execute ralph");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("U2 archive-skip stderr: {stderr}");
+
+    // The combined gate succeeded (Eligible) — the loop continues,
+    // but the archive directory was never created.
+    let archive_root = worktree_path.join(".ralph/reuse-history");
+    assert!(
+        !archive_root.exists(),
+        "combined --continue --reuse-worktree must NOT create .ralph/reuse-history/, \
+         but {archive_root:?} exists. This indicates the gate failed to skip \
+         clean_worktree_runtime_artifacts."
+    );
+
+    // Live runtime artifacts the resume contract reads must still be
+    // present after the gate cleared. The loop WILL write to
+    // events.jsonl / tasks.jsonl as it runs — we only assert the
+    // archive step did not rotate or remove the gate-controlled
+    // fixtures a follow-up retry would need to re-assess the same
+    // checkpoint.
+    assert!(
+        worktree_path.join(".ralph/events.jsonl").exists(),
+        "events.jsonl must survive the combined run untouched"
+    );
+    assert!(
+        worktree_path.join(".ralph/agent/tasks.jsonl").exists(),
+        "tasks.jsonl must survive the combined run untouched"
+    );
+    assert!(
+        ralph_dir.join("current-loop-id").exists(),
+        "current-loop-id marker must survive the combined run"
+    );
+    assert!(
+        ralph_dir.join("current-events").exists(),
+        "current-events marker must survive the combined run"
+    );
+    assert!(
+        agent_dir.join("scratchpad.md").is_file(),
+        "scratchpad must survive the combined run"
+    );
+}
+
+/// S2: a combined --continue --worktree --reuse-worktree invocation
+/// MUST NOT rotate `.ralph/current-events` to a fresh per-run
+/// sentinel. The marker is how downstream hat activations locate the
+/// prior run's events file; rotating it would orphan the events the
+/// resume contract depends on. The gate must keep the existing
+/// sentinel stable when the combined path clears.
+#[test]
+fn combined_reuse_worktree_does_not_rotate_current_events() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let main_repo = temp_dir.path();
+    setup_git_repo(main_repo);
+    write_minimal_config(main_repo);
+
+    let loop_id = "u2-marker-stable";
+    let plan_path = main_repo.join(format!("{loop_id}.md"));
+    fs::write(&plan_path, "# plan body\n").unwrap();
+
+    let worktree_path = precreate_worktree_with_artifacts(main_repo, loop_id);
+    write_completed_worktree_entry(main_repo, loop_id, &worktree_path);
+
+    let ralph_dir = worktree_path.join(".ralph");
+    let agent_dir = ralph_dir.join("agent");
+
+    // Build the assess_checkpoint fixture with a CUSTOM current-events
+    // sentinel. This is intentionally NOT the default `events.jsonl`
+    // name — if the runtime rotated the marker we would see the
+    // sentinel change. The marker content must be the absolute path
+    // of a regular file (matches the unit-test fixture pattern in
+    // `recovery_checkpoint.rs`); a relative sentinel resolves against
+    // the worktree root, and the gate's `is_file` check then reads
+    // `<worktree>/events-sentinel-stable.jsonl` — we point it at the
+    // real file we just wrote so `assess_checkpoint` clears.
+    let sentinel_filename = "events-sentinel-stable.jsonl";
+    let events_file = ralph_dir.join(sentinel_filename);
+    fs::write(&events_file, "{\"line\":\"prior\"}\n").unwrap();
+    fs::write(agent_dir.join("scratchpad.md"), "# scratch\n").unwrap();
+    fs::write(
+        ralph_dir.join("current-events"),
+        events_file.to_str().expect("events_file must be UTF-8"),
+    )
+    .unwrap();
+    fs::write(ralph_dir.join("current-loop-id"), format!("{loop_id}\n")).unwrap();
+    fs::write(ralph_dir.join("history.jsonl"), "").unwrap();
+    // Main-repo scratchpad for the pre-existing --continue handler
+    // (same rationale as S1 above).
+    fs::create_dir_all(main_repo.join(".ralph/agent")).unwrap();
+    fs::write(main_repo.join(".ralph/agent/scratchpad.md"), "# main scratch\n").unwrap();
+
+    let marker_before = fs::read_to_string(ralph_dir.join("current-events")).unwrap();
+
+    let output = common::ralph_bin()
+        .args([
+            "run",
+            "--continue",
+            "--worktree",
+            "--reuse-worktree",
+            "--no-tui",
+            "--skip-preflight",
+            "--plan",
+            plan_path.to_str().unwrap(),
+        ])
+        .current_dir(main_repo)
+        .output()
+        .expect("execute ralph");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("U2 marker-stable stderr: {stderr}");
+
+    let marker_after = fs::read_to_string(ralph_dir.join("current-events")).unwrap();
+    assert_eq!(
+        marker_after, marker_before,
+        ".ralph/current-events must keep its pre-run sentinel verbatim on the combined path"
+    );
+    assert_eq!(
+        marker_after.trim(),
+        events_file.to_str().expect("events_file must be UTF-8"),
+        "marker must still point at the pre-run sentinel file's absolute path, \
+         not a freshly rotated target"
+    );
+    // The sentinel target file is still on disk.
+    assert!(
+        events_file.exists(),
+        "the sentinel target file must survive the combined run"
+    );
+}

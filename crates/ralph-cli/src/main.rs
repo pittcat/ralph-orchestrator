@@ -547,6 +547,7 @@ async fn main() -> Result<()> {
                 no_auto_merge: false,
                 worktree: false,
                 worktree_path: None,
+                combined_continue: false,
                 reuse_worktree: false,
                 plan: None,
                 worktree_name: None,

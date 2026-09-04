@@ -28,6 +28,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -387,12 +388,34 @@ impl LoopLock {
         }
     }
 
+    /// Redact a long operator prompt before persisting it into the lock
+    /// file. Short prompts pass through unchanged so a human reading the
+    /// lock can still see the task description at a glance. Long prompts
+    /// are truncated to 64 chars + `\u{2026}` and tagged with the full
+    /// SHA-256 digest (32 bytes → 64 hex chars) so a curious peer cannot
+    /// reconstruct the original text from the lock file alone, while an
+    /// operator can still confirm identity ("same fingerprint as before")
+    /// across re-acquisitions.
+    ///
+    /// This is the canonical on-disk form for `LockMetadata.prompt`. The
+    /// full plaintext is NOT recoverable from the lock file; if a future
+    /// feature needs the original for diagnostics, write a sidecar with
+    /// mode `0600` next to the lock file.
+    fn redact_prompt(prompt: &str) -> String {
+        if prompt.len() > 64 {
+            let digest = Sha256::digest(prompt.as_bytes());
+            format!("{}\u{2026}[sha256:{:x}]", &prompt[..64], digest)
+        } else {
+            prompt.to_string()
+        }
+    }
+
     /// Write lock metadata to the file.
     fn write_metadata(file: &File, prompt: &str) -> Result<(), LockError> {
         let metadata = LockMetadata {
             pid: process::id(),
             started: Utc::now(),
-            prompt: prompt.to_string(),
+            prompt: Self::redact_prompt(prompt),
         };
 
         // Use a mutable reference via clone for writing
@@ -445,6 +468,69 @@ mod tests {
         let metadata: LockMetadata = serde_json::from_str(&contents).unwrap();
         assert_eq!(metadata.pid, process::id());
         assert_eq!(metadata.prompt, "test prompt");
+    }
+
+    #[test]
+    fn test_prompt_redacted_when_long() {
+        // U3 (plan 2026-09-01-2102): long operator prompts must NOT be
+        // stored in plaintext in `.ralph/loop.lock`. The stored form is
+        // the first 64 chars + `\u{2026}[sha256:<64hex>]` (full digest).
+        let temp_dir = TempDir::new().unwrap();
+        let long_prompt: String = "a".repeat(200);
+
+        let _guard = LoopLock::try_acquire(temp_dir.path(), &long_prompt).unwrap();
+
+        let lock_path = temp_dir.path().join(".ralph/loop.lock");
+        let contents = fs::read_to_string(&lock_path).unwrap();
+        let metadata: LockMetadata = serde_json::from_str(&contents).unwrap();
+
+        // Stored prompt must NOT be the original 200-char plaintext.
+        assert_ne!(metadata.prompt, long_prompt);
+        assert!(metadata.prompt.len() < long_prompt.len());
+
+        // Must match the redacted form: prefix (≤ 64 chars) + ellipsis + sha256 tail.
+        // The full 32-byte digest is rendered as 64 hex chars via `{:x}`.
+        let re = regex::Regex::new(r"^.{0,64}\u{2026}\[sha256:[0-9a-f]{64}\]$").unwrap();
+        assert!(
+            re.is_match(&metadata.prompt),
+            "redacted form did not match expected pattern, got: {:?}",
+            metadata.prompt
+        );
+    }
+
+    #[test]
+    fn test_prompt_preserved_when_short() {
+        // U3 (plan 2026-09-01-2102): prompts ≤ 64 chars must pass through
+        // unchanged so short task descriptions remain human-readable.
+        let temp_dir = TempDir::new().unwrap();
+
+        let _guard = LoopLock::try_acquire(temp_dir.path(), "short prompt").unwrap();
+
+        let lock_path = temp_dir.path().join(".ralph/loop.lock");
+        let contents = fs::read_to_string(&lock_path).unwrap();
+        let metadata: LockMetadata = serde_json::from_str(&contents).unwrap();
+
+        assert_eq!(metadata.prompt, "short prompt");
+    }
+
+    #[test]
+    fn test_prompt_redaction_is_deterministic() {
+        // U3 (plan 2026-09-01-2102): same long prompt → same redacted form
+        // (SHA-256 is deterministic). Different temp dirs / different times
+        // must still produce the same stored `prompt` field.
+        let long_prompt: String = "z".repeat(200);
+
+        let temp_dir_a = TempDir::new().unwrap();
+        let _guard_a = LoopLock::try_acquire(temp_dir_a.path(), &long_prompt).unwrap();
+        let contents_a = fs::read_to_string(temp_dir_a.path().join(".ralph/loop.lock")).unwrap();
+        let metadata_a: LockMetadata = serde_json::from_str(&contents_a).unwrap();
+
+        let temp_dir_b = TempDir::new().unwrap();
+        let _guard_b = LoopLock::try_acquire(temp_dir_b.path(), &long_prompt).unwrap();
+        let contents_b = fs::read_to_string(temp_dir_b.path().join(".ralph/loop.lock")).unwrap();
+        let metadata_b: LockMetadata = serde_json::from_str(&contents_b).unwrap();
+
+        assert_eq!(metadata_a.prompt, metadata_b.prompt);
     }
 
     #[test]

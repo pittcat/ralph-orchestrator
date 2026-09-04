@@ -119,6 +119,81 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 
 `[CUSTOM_ARGS]...` are custom backend command and arguments, passed after `--`.
 
+#### Combined continuation (`--continue --worktree --reuse-worktree`)
+
+Use this combination to resume a prior loop **in place** inside a
+previously-completed worktree. The parent process:
+
+1. Acquires `LoopLock` on `<worktree>/.ralph/loop.lock` and runs the
+   recovery checkpoint assessment (`Eligible` verdict required).
+2. Reuses the completed worktree at its exact name (looked up from
+   `--plan` basename or `--worktree-name`).
+3. Skips `clean_worktree_runtime_artifacts` — the events file must
+   remain on disk because the resumed loop reads from it.
+4. Spawns the child RPC subprocess via `--worktree-path` and the
+   hidden `--combined-continue` flag.
+
+The child inherits the parent's lock (no re-acquisition, no deadlock)
+and skips the parallel-forge resume-manifest re-validation gate
+(the parent already cleared it). The resumed loop emits exactly one
+`loop.resume` event; no `starting` event, no `task.resume`
+bootstrap, no `reuse-history/` archive is written.
+
+Example:
+
+```bash
+ralph run --continue --worktree --reuse-worktree \
+  --plan docs/plans/2026-09-01-2102-feat-trusted-worktree-continuation-plan.md
+```
+
+Without `--continue`, `--reuse-worktree` alone starts a **new** loop in
+the reused worktree after archiving its `.ralph/` runtime state — see
+`--reuse-worktree` in the table above for the legacy non-continued
+reuse contract.
+
+#### Combined continuation trust boundary (U1 hardening)
+
+`--combined-continue` is a hidden flag (`hide = true`) and clap-enforced
+to require `--worktree-path` (`requires = "worktree-path"`). It is
+**only** valid as the parent's child spawn — a wrapper / Makefile
+that passes `--combined-continue=true` directly on a child `ralph run`
+without a parent run having cleared the gate is refused before the
+loop starts.
+
+The parent, after clearing the resume-manifest gate in its own scope,
+writes an out-of-band signature file at
+`<worktree>/.ralph/.parent-cleared-gate` (mode `0600` on Unix). The
+file is JSON with three fields:
+
+- `loop_id` — the parent's recorded loop id.
+- `manifest_sha256` — the SHA-256 hex digest of the archived resume
+  manifest the parent just cleared (empty string when no archive
+  exists, e.g. non-`parallel-forge` presets).
+- `written_at_unix_ms` — wall-clock millis when the parent wrote the
+  file.
+
+The child, when invoked with `--combined-continue`, **must** verify
+all of:
+
+1. The gate file exists and is readable.
+2. `loop_id` matches the parent's `loop_id` recorded in the lock.
+3. `written_at_unix_ms` is within the last **5 minutes** (constants
+   `recovery_checkpoint::PARENT_CLEARED_GATE_FRESHNESS_MS`).
+4. `manifest_sha256` matches the SHA-256 digest of the archived
+   resume manifest currently on disk (when one exists).
+
+Any failure refuses the run with an `anyhow` error prefixed
+`combined --continue refused: parent gate … — child MUST NOT skip
+parallel-forge manifest re-validation`. The error message identifies
+the specific reason: `missing`, `unreadable: …`, `malformed: …`,
+`loop_id mismatch (expected '…', actual '…')`,
+`stale (…ms > …ms)`, or
+`manifest_sha256 tampered (gate says '…', archived manifest digest '…')`.
+
+This closes the adversarial A1 hole where a wrapper could bypass the
+parallel-forge manifest re-validation gate by passing
+`--combined-continue=true` directly on a child invocation.
+
 ### ralph inspect
 
 Read-only diagnostics that do not modify runtime state.

@@ -2056,3 +2056,270 @@ mod u3_state_machine_projection_tests {
         assert_eq!(repaired_again, 0, "second restart must be no-op");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Plan 2026-09-01-2102 / Unit 4: crash-window repair durability.
+//
+// The combined `--continue --worktree --reuse-worktree` cold start goes
+// through the *same* durable repair path as a standalone `--continue`
+// (`acceptance_and_lifecycle.rs` bootstrap calls
+// `repair_state_machine_projection_from_outbox` before hydration). These
+// tests pin the three properties that path depends on, independent of
+// which CLI intent booted the loop:
+//
+//   1. outbox-only crash window repair is exactly-once across restarts
+//   2. an already-delivered (ack'd) transition never re-publishes
+//   3. with no StateMachine projection recorded (state machine disabled),
+//      every business transition is still accepted and persisted once,
+//      and the repair pass stays a no-op
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod u4_crash_window_repair_tests {
+    use super::tests::fixture;
+    use super::*;
+    use crate::state_machine::{StateMachineTransitionDelta, StateMachineTransitionId};
+    use std::sync::{Arc, Mutex};
+
+    fn delta(id: &str, instance_key: &str) -> StateMachineTransitionDelta {
+        StateMachineTransitionDelta {
+            transition_id: StateMachineTransitionId(format!("u4-2102|sm|{id}")),
+            source_hat: Some("executor".to_string()),
+            topic: "experiment.planned".to_string(),
+            instance_key: Some(instance_key.to_string()),
+            new_state: "planned".to_string(),
+            opens_instance: true,
+            closes_instance: false,
+            terminal_observed: false,
+            terminal_honored: false,
+        }
+    }
+
+    fn outbox_only_entry(
+        transition_id: &str,
+        projection: StateMachineTransitionDelta,
+    ) -> OutboxEntry {
+        OutboxEntry {
+            activation_id: "act-u4-2102".to_string(),
+            committed_at: "2026-09-01T21:02:00Z".to_string(),
+            contract_revision: "rev-u4-2102".to_string(),
+            delivered: false,
+            loop_id: "loop-u4-2102".to_string(),
+            payload_digest: "u4-2102-crash-window".to_string(),
+            state_machine_projection: Some(projection),
+            topic: "experiment.planned".to_string(),
+            transition_id: transition_id.to_string(),
+        }
+    }
+
+    fn sm_commit_count(ledger: &StateLedger) -> usize {
+        ledger
+            .commit_log()
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.delta,
+                    crate::state::CommitDelta::StateMachineTransition { .. }
+                )
+            })
+            .count()
+    }
+
+    /// Crash between the durable outbox write and the bus publish /
+    /// ledger projection: the first cold-start repair applies the
+    /// projection exactly once; the second cold-start (as happens when
+    /// the operator re-runs the combined continuation) is a no-op.
+    #[test]
+    fn combined_continue_crash_window_repair_is_idempotent() {
+        let (_dir, mut ledger, _bus, _store) = fixture();
+
+        let projection = delta("combined-1", "t-combined-1");
+        ledger
+            .append_outbox_unlocked(&outbox_only_entry("u4-2102-e1", projection.clone()))
+            .unwrap();
+
+        assert!(
+            ledger.snapshot().state_machine_runtime.is_none(),
+            "precondition: the crash left the ledger projection unapplied"
+        );
+
+        // Cold start #1 — the repair applies the outbox projection.
+        let first = AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
+            .expect("first cold-start repair must succeed");
+        assert_eq!(first, 1, "first cold start must repair exactly one projection");
+        assert_eq!(
+            sm_commit_count(&ledger),
+            1,
+            "first cold start must leave exactly one ledger projection commit"
+        );
+        assert!(
+            ledger
+                .snapshot()
+                .state_machine_runtime
+                .as_ref()
+                .expect("runtime hydrated after repair")
+                .has_applied_transition_id(&projection.transition_id),
+            "the repaired transition_id must be in the applied set"
+        );
+
+        // Cold start #2 on the same outbox + ledger — no-op.
+        let second = AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
+            .expect("second cold-start repair must succeed");
+        assert_eq!(second, 0, "second cold start must repair nothing");
+        assert_eq!(
+            sm_commit_count(&ledger),
+            1,
+            "second cold start must not add a duplicate projection commit"
+        );
+
+        // The durable receipt is still a single line (repair reads, never
+        // rewrites, the outbox).
+        let entries = read_outbox(ledger.workspace()).unwrap();
+        assert_eq!(entries.len(), 1, "repair must not duplicate outbox entries");
+    }
+
+    /// A transition already marked `delivered` (ack'd) must not
+    /// re-publish when the same identity is committed again. This is the
+    /// property that keeps a re-entered continuation from replaying
+    /// business events onto the bus.
+    #[test]
+    fn duplicate_delivered_transition_does_not_republish() {
+        let (_dir, ledger, mut bus, _store) = fixture();
+        let ws = ledger.workspace().to_path_buf();
+
+        let published = Arc::new(Mutex::new(0usize));
+        let published_clone = Arc::clone(&published);
+        bus.add_observer(move |_| *published_clone.lock().unwrap() += 1);
+
+        let event = Event::new("work.done", "u4 delivered dedup").with_source("executor");
+
+        let entry = AcceptedTransition::commit_idempotent(
+            &event,
+            "loop-u4-2102",
+            "act-u4-2102",
+            "rev-u4-2102",
+            &ledger,
+            &mut bus,
+            |_| Ok(()),
+            || {},
+        )
+        .expect("first commit must succeed");
+        assert_eq!(*published.lock().unwrap(), 1, "first commit publishes once");
+
+        // Mark it delivered, as the delivery tracker does after the bus
+        // routed the event.
+        AcceptedTransition::ack(&ws, &entry.transition_id).expect("ack must succeed");
+        let acked = read_outbox(&ws).unwrap();
+        assert_eq!(acked.len(), 1);
+        assert!(acked[0].delivered, "ack must set the delivered flag");
+
+        // Replay the identical transition (same loop / activation /
+        // revision / topic+source / payload).
+        let materialized = Arc::new(Mutex::new(false));
+        let materialized_clone = Arc::clone(&materialized);
+        let replay = AcceptedTransition::commit_idempotent(
+            &event,
+            "loop-u4-2102",
+            "act-u4-2102",
+            "rev-u4-2102",
+            &ledger,
+            &mut bus,
+            |_| Ok(()),
+            move || *materialized_clone.lock().unwrap() = true,
+        )
+        .expect("replay of a delivered transition must be accepted as a no-op");
+
+        assert_eq!(
+            replay.transition_id, entry.transition_id,
+            "replay must resolve to the same deterministic identity"
+        );
+        assert!(
+            replay.delivered,
+            "replay must return the delivered receipt, not a fresh one"
+        );
+        assert_eq!(
+            *published.lock().unwrap(),
+            1,
+            "a delivered transition must NOT be re-published"
+        );
+        assert!(
+            !*materialized.lock().unwrap(),
+            "a delivered transition must NOT re-run materialization"
+        );
+        assert_eq!(
+            read_outbox(&ws).unwrap().len(),
+            1,
+            "a delivered transition must NOT append a second outbox receipt"
+        );
+    }
+
+    /// With the state machine disabled there is no projection to record,
+    /// so every business transition still commits + publishes exactly
+    /// once, and the cold-start repair pass finds nothing to do.
+    #[test]
+    fn state_machine_disabled_accepts_all_business_topics() {
+        let (_dir, mut ledger, mut bus, _store) = fixture();
+        let ws = ledger.workspace().to_path_buf();
+
+        let published = Arc::new(Mutex::new(Vec::<String>::new()));
+        let published_clone = Arc::clone(&published);
+        bus.add_observer(move |e: &Event| {
+            published_clone
+                .lock()
+                .unwrap()
+                .push(e.topic.as_str().to_string())
+        });
+
+        // Three distinct business topics, no StateMachine projection
+        // (the `commit_idempotent` path never records one).
+        let topics = ["work.done", "work.failed", "work.progress"];
+        for (i, topic) in topics.iter().enumerate() {
+            let event = Event::new(*topic, format!("u4 sm-disabled #{i}")).with_source("executor");
+            AcceptedTransition::commit_idempotent(
+                &event,
+                "loop-u4-2102-sm-off",
+                &format!("act-{i}"),
+                "rev-u4-2102",
+                &ledger,
+                &mut bus,
+                |_| Ok(()),
+                || {},
+            )
+            .unwrap_or_else(|e| panic!("commit of {topic} must be accepted: {e:?}"));
+        }
+
+        assert_eq!(
+            *published.lock().unwrap(),
+            topics.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+            "all three business topics must be published once, in order"
+        );
+
+        let entries = read_outbox(&ws).unwrap();
+        assert_eq!(
+            entries.len(),
+            3,
+            "each accepted transition must leave exactly one durable receipt"
+        );
+        assert!(
+            entries.iter().all(|e| e.state_machine_projection.is_none()),
+            "with the state machine disabled no receipt carries a projection"
+        );
+        let mut ids: Vec<&str> = entries.iter().map(|e| e.transition_id.as_str()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 3, "the three identities must be distinct");
+
+        // Cold-start repair is a no-op: nothing to project.
+        let repaired = AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
+            .expect("repair must succeed on a projection-free outbox");
+        assert_eq!(
+            repaired, 0,
+            "state-machine-disabled receipts must not be repaired"
+        );
+        assert_eq!(
+            sm_commit_count(&ledger),
+            0,
+            "no StateMachineTransition commits with the state machine disabled"
+        );
+    }
+}

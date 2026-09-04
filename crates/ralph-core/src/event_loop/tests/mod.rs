@@ -51,6 +51,11 @@ mod isolated_complex_regression;
 mod isolated_over_emit_commit;
 mod isolated_wave_budget;
 mod loop_context;
+/// Plan 2026-09-01-2102 Unit 5: memory auto-injection must use
+/// `MarkdownMemoryStore::load_visible(Some(hat_id))` instead of
+/// `store.load()` to avoid leaking private memories across hats.
+/// Pinning tests live in `memory_visibility.rs`.
+mod memory_visibility;
 mod next_hat_topic_preemption;
 mod objective;
 mod origin_guard;
