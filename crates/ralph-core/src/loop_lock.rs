@@ -403,8 +403,12 @@ impl LoopLock {
     /// mode `0600` next to the lock file.
     fn redact_prompt(prompt: &str) -> String {
         if prompt.len() > 64 {
+            // Byte-64 may fall mid-character for multi-byte UTF-8 prompts
+            // (PMI-001): snap back to the nearest char boundary so lock
+            // writing never panics on its input (fail-closed ≠ crash).
+            let cut = crate::floor_char_boundary(prompt, 64);
             let digest = Sha256::digest(prompt.as_bytes());
-            format!("{}\u{2026}[sha256:{:x}]", &prompt[..64], digest)
+            format!("{}\u{2026}[sha256:{:x}]", &prompt[..cut], digest)
         } else {
             prompt.to_string()
         }
@@ -515,13 +519,16 @@ mod tests {
 
     #[test]
     fn test_prompt_redaction_never_panics_on_multibyte_utf8() {
-        // TG-S01 (PMI-001): `redact_prompt` slices `&prompt[..64]` at a
-        // *byte* index. For multi-byte UTF-8 prompts where byte 64 falls
-        // mid-character, that slice panics ("byte index 64 is not a char
-        // boundary") and `ralph run`'s primary lock acquisition crashes
-        // (run.rs calls `LoopLock::try_acquire(root, &prompt_summary)`).
-        // Lock writing is a formatting path and must never panic on its
-        // input (fail-closed ≠ crash). This test proves the panic.
+        // TG-S01 (PMI-001): `redact_prompt` used to slice `&prompt[..64]`
+        // at a *byte* index; for multi-byte UTF-8 prompts where byte 64
+        // falls mid-character, that slice panicked ("byte index 64 is not
+        // a char boundary") and `ralph run`'s primary lock acquisition
+        // crashed (run.rs calls `LoopLock::try_acquire(root,
+        // &prompt_summary)`). Fixed by snapping the cut back to the
+        // nearest char boundary (`floor_char_boundary`). Lock writing is a
+        // formatting path and must never panic on its input (fail-closed
+        // ≠ crash). This test pins the fix: no panic, valid lock, and the
+        // redacted prefix stays a clean char-boundary prefix.
         let multibyte_inputs: Vec<String> = vec![
             "中".repeat(40),                   // 3-byte CJK; byte 64 lands inside char 22
             "a".repeat(30) + &"中".repeat(20), // ASCII prefix makes byte 64 land mid-CJK
@@ -530,6 +537,7 @@ mod tests {
         ];
 
         for input in &multibyte_inputs {
+            let input_len = input.len();
             // The invariant under test: acquiring a lock with a prompt
             // whose 64th byte is not a char boundary must not panic. A
             // panic here fails this test directly.
@@ -542,12 +550,25 @@ mod tests {
                 let _ = guard;
                 contents
             }));
+            let contents = result.expect(
+                "lock acquisition must not panic on multibyte prompt with \
+                 non-boundary byte 64 (PMI-001 fixed via floor_char_boundary); \
+                 input bytes = {input_len}",
+            );
+
+            // Metadata stays parseable and the stored prefix is a valid
+            // char-boundary prefix of the original prompt.
+            let metadata: LockMetadata = serde_json::from_str(&contents).unwrap();
+            let stored = metadata.prompt;
             assert!(
-                result.is_err(),
-                "expected `redact_prompt` to panic for multibyte prompt with non-boundary byte 64 \
-                 (PMI-001 repro; fix = char-boundary truncation, e.g. `floor_char_boundary`), \
-                 input bytes = {}",
-                input.len()
+                input.starts_with(stored.split('\u{2026}').next().unwrap_or("")),
+                "stored redacted prefix must be a prefix of the original \
+                 prompt (input bytes = {input_len}): stored = {stored:?}",
+            );
+            assert!(
+                stored.contains("[sha256:"),
+                "long multibyte prompt must still be redacted with digest \
+                 tail (input bytes = {input_len}): stored = {stored:?}",
             );
         }
     }
