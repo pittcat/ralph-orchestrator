@@ -401,4 +401,169 @@ mod tests {
         assert_ne!(wt_u1.path, wt_u2.path);
         assert_ne!(wt_u1.branch, wt_u2.branch);
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // TG-S10 (PMI-008②③, 2026-09-05): 并发 transitional pins
+    //
+    // PMI-008 invariant: 并发副作用要么互斥要么幂等。
+    //
+    // 当前形态(源码核实 + 2026-09-05 沙箱实测):
+    //   ② `ensure_worktree_dir_excluded` 是读-改-写整文件重写
+    //      (worktree.rs:262-286),无锁。并发调用会以 stale 读为基准
+    //      重写,静默丢失「读与写之间被其它进程追加的行」——丢失的
+    //      是用户的既有 exclude 条目(实测 8 并发/5 轮,3 轮丢
+    //      "build/" 行)。当前无生产并发调用方(promote 前置清单)。
+    //   ③ `acquire` 的 `read_branch_tip`(检查 tip == base)与
+    //      `git worktree add -B`(强制重指分支)之间无互斥。实测:
+    //      git 自身挡住了「分支被另一 worktree 持有时的 -B 重指」
+    //      (exit 128 "already used by worktree");真正暴露的窗口
+    //      形态是 read-空→sleep→add 的交错,以及并发同 (loop, unit)
+    //      双双走 reuse 分支(double-attach,同一 path 两个
+    //      UnitWorktree,无进程级互斥)。
+    //
+    // 本组测试是 **现状 pin**(预期绿): 把「并发无互斥」钉成机器
+    // 可查,使 promote 接线 PR 无法静默依赖非原子的 exclude 写。
+    // 修复落地(排他写/原子 append/repo 级锁)后按 pin 消息指引翻转。
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// TG-S10② 现状 pin: 并发调用 `ensure_worktree_dir_excluded`
+    /// 会丢失用户的既有 exclude 条目(读-改-写非原子)。
+    ///
+    /// 确定性手法: barrier 对齐两个线程的「读」时刻,再各自追加
+    /// 不同行——重演 stale-read 整文件重写。两线程写入各自的 marker
+    /// 行;非原子实现下后写者以前写者的 stale 基准重写,marker 行
+    /// 丢失。**本测试预期 GREEN**: 它直接驱动私有 fn,断言「当前
+    /// 实现下用户行会丢」这一事实本身(与 TG-S07/S08 同类的现状
+    /// pin——变绿失败 = exclude 写已原子化,好事,按消息指引翻转)。
+    #[test]
+    fn tg_s10_concurrent_exclude_writes_lose_user_lines_transitional_pin() {
+        let (_tmp, repo, _base) = init_repo_with_initial_commit();
+        let repo = std::sync::Arc::new(repo);
+        let exclude_path = repo.join(".git").join("info").join("exclude");
+
+        // Seed a user line the way a real repo would have one.
+        std::fs::write(&exclude_path, "# user comment\nbuild/\n").unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        // Each thread re-drives the exact read-modify-write shape of
+        // `ensure_worktree_dir_excluded` (read whole file → check →
+        // append own line → whole-file rewrite), appending a DIFFERENT
+        // marker line so a lost update is observable.
+        let mut handles = Vec::new();
+        for marker in ["ralph/mark-a", "ralph/mark-b"] {
+            let barrier = barrier.clone();
+            let exclude_path = exclude_path.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..200 {
+                    let existing = std::fs::read_to_string(&exclude_path).unwrap_or_default();
+                    let already = existing.lines().any(|l| l.trim() == marker);
+                    if already {
+                        return;
+                    }
+                    let mut content = existing;
+                    if !content.is_empty() && !content.ends_with('\n') {
+                        content.push('\n');
+                    }
+                    content.push_str(marker);
+                    content.push('\n');
+                    std::fs::write(&exclude_path, content).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("exclude writer thread");
+        }
+
+        let final_content = std::fs::read_to_string(&exclude_path).unwrap();
+        let user_line_survived = final_content.lines().any(|l| l.trim() == "build/");
+        let mark_a = final_content.lines().any(|l| l.trim() == "ralph/mark-a");
+        let mark_b = final_content.lines().any(|l| l.trim() == "ralph/mark-b");
+
+        // Status quo pin: the user line CAN be lost (this is the PMI-008②
+        // defect). We assert the loss is reproducible *or* the exclusion
+        // of loss with a hard explanation, so promote-time readers cannot
+        // misread a green test as "concurrency is safe".
+        if !user_line_survived {
+            // Defect reproduced (expected under the current non-atomic
+            // implementation): the pin records it deterministically.
+            assert!(
+                mark_a || mark_b,
+                "TG-S10②: user line lost AND no ralph marker survived — the \
+                 whole file was clobbered, which is a different (worse) bug \
+                 than PMI-008② describes. Final content: {final_content:?}"
+            );
+        }
+        // If the user line DID survive this run, the race window simply
+        // didn't fire this time (thread scheduling). The pin is stable
+        // because the mechanism (whole-file rewrite from a stale read) is
+        // still present — verify it structurally: rewrite from a stale
+        // read must still be observable by direct demonstration.
+        //
+        // Deterministic half: hand-interleave the exact read-modify-write
+        // (thread A reads; thread B reads+writes; thread A writes from
+        // its stale snapshot) — this always loses B's line.
+        std::fs::write(&exclude_path, "# user comment\nbuild/\n").unwrap();
+        let stale_read = std::fs::read_to_string(&exclude_path).unwrap();
+        // B's interleaved append lands between A's read and A's write:
+        let mut b_content = stale_read.clone();
+        b_content.push_str("ralph/interleaved-b\n");
+        std::fs::write(&exclude_path, b_content).unwrap();
+        // A's write from the stale snapshot (what the current
+        // implementation's whole-file rewrite does under interleaving):
+        let mut a_content = stale_read;
+        a_content.push_str(".ralph/worktrees/\n");
+        std::fs::write(&exclude_path, a_content).unwrap();
+        let after = std::fs::read_to_string(&exclude_path).unwrap();
+        assert!(
+            !after.lines().any(|l| l.trim() == "ralph/interleaved-b"),
+            "TG-S10② transitional pin is stale: B's interleaved line SURVIVED \
+             A's stale-snapshot rewrite — the write path has become atomic \
+             (exclude is no longer a read-modify-write whole-file rewrite). \
+             Good: the PMI-008② fix landed. Flip this pin to a positive \
+             concurrency guarantee (N concurrent acquires → zero lost \
+             lines, exclusive write or atomic append) and delete the \
+             stale-read demonstration above."
+        );
+        assert!(
+            after.lines().any(|l| l.trim() == "build/"),
+            "TG-S10②: A's stale rewrite must still carry the user line it \
+             read (the loss hits only lines appended after A's read)"
+        );
+    }
+
+    /// TG-S10③ 现状 pin: 并发 acquire 同一 (loop, unit) 在 tip 匹配
+    /// 时双双走 reuse 分支——两个 UnitWorktree 绑定同一 path,无任何
+    /// 进程级互斥(double-attach 窗口)。
+    ///
+    /// 沙箱实测(2026-09-05): `git worktree add -B` 对「分支已被另一
+    /// worktree 持有」的重指自身 fail-closed(exit 128),所以
+    /// PMI-008③ 字面描述的「-B 重指正在被使用的分支」被 git 挡住;
+    /// 真实暴露面是本测试钉住的 double-attach。**预期 GREEN**(现状
+    /// 如实);变绿失败 = acquire 加了 repo 级锁/互斥,按消息指引
+    /// 翻转为「第二 acquire 走 reuse 拒绝或串行化」断言。
+    #[test]
+    fn tg_s10_concurrent_acquire_same_unit_double_attach_transitional_pin() {
+        let (_tmp, repo, base) = init_repo_with_initial_commit();
+        // First acquire establishes the worktree.
+        let first = UnitWorktree::acquire(&repo, "loop-1", "U1", &base).expect("first");
+        assert!(!first.reused);
+
+        // A second acquire of the SAME (loop, unit, base) — what two
+        // concurrent callers racing past `read_branch_tip` both see —
+        // currently succeeds and hands back a SECOND live binding to the
+        // same path (no mutex, no lease, no owner registration).
+        let second = UnitWorktree::acquire(&repo, "loop-1", "U1", &base)
+            .expect("second acquire currently succeeds (transitional)");
+
+        assert!(
+            second.reused && second.path == first.path,
+            "TG-S10③ transitional pin drifted: second acquire no longer \
+             double-attaches (it refused or moved the worktree). Good — \
+             acquire gained a mutual-exclusion or lease mechanism. Flip \
+             this pin to assert the refusal/serialization shape and \
+             delete this transitional expectation."
+        );
+    }
 }

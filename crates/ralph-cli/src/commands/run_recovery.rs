@@ -607,4 +607,126 @@ mod tests {
             assert_eq!(a, b, "mismatch for c={c} w={w} r={r}");
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // TG-S09 (PMI-008①, 2026-09-05): LoopLockedByOther 渲染缺恢复指引
+    //
+    // PMI-008 invariant: 崩溃恢复的每条 typed 拒绝都必须给出操作员可
+    // 执行的下一步（WorktreeLive 说 wait/stop、AlreadyCompleted 说 drop
+    // --continue）。`render_refusal` 的 LoopLockedByOther 分支
+    // (run_recovery.rs:408-412) 只解释「prior holder crashed before
+    // releasing the flock」而不给任何动作——与 primary 路径
+    // (run.rs:1741-1748: LockStatus::Stale → remove_file + 重取) 的
+    // stale 自动清理不对称。本测试把缺口钉成机器可查: 修复(消息补
+    // 「删除 .ralph/loop.lock 后重试」指引或对死 PID 自动降级)落地后
+    // 断言翻转。
+    //
+    // 附注(行为级实测, 2026-09-05 沙箱): PMI-008① trigger 描述的
+    // 「combined path 撞死 PID 残锁 → LoopLockedByOther」不可达——
+    // acquire_and_assess 的 Step1 try_acquire 先把死 PID metadata 覆写
+    // 为自身 pid,Step6 的 is_loop_lock_held 过滤自身 → 永远 Eligible。
+    // LoopLockedByOther 只在直接调 assess_checkpoint 的路径(或极窄的
+    // 并发窗口)可达;缺口因此是「渲染质量」而非「每次崩溃都撞」。
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tg_s09_loop_locked_by_other_render_gives_no_recovery_action() {
+        let refusal = AssessmentRefusal::LoopLockedByOther { holder_pid: 999999 };
+        let msg = render_refusal(&refusal);
+
+        // The message must still explain the situation (diagnostic half).
+        assert!(
+            msg.contains("999999"),
+            "TG-S09: the rendered refusal must name the holder PID: {msg}"
+        );
+
+        // PMI-008① pin — the message must give the operator an executable
+        // next step. Currently it does NOT: it only names the lock file as
+        // the *subject* of the sentence ("`.ralph/loop.lock` indicates
+        // another live loop"), never as the *object* of an action. We
+        // therefore check only for imperative-verb keywords — a bare
+        // `loop.lock` mention (already present, as the subject) does not
+        // count. When the fix lands (message gains guidance or the
+        // assessor auto-degrades dead PIDs like the primary path's Stale
+        // cleanup), this assertion flips to green.
+        let actionable = ["remove", "delete", "retry", "wait", "stop", "clean"]
+            .iter()
+            .any(|kw| msg.to_lowercase().contains(kw));
+        assert!(
+            actionable,
+            "TG-S09 (PMI-008①): LoopLockedByOther render gives a dead-PID \
+             explanation but NO executable recovery action. The primary \
+             path (run.rs Stale branch) auto-cleans the stale lock and \
+             retries; the combined --continue path only explains. Rendered: \
+             {msg:?}. Fix directions: (a) extend the message with the \
+             recovery action (delete the worktree's .ralph/loop.lock and \
+             re-run), or (b) auto-degrade dead-PID metadata in \
+             is_loop_lock_held/assess_checkpoint (flock probe) so the \
+             refusal never fires for crashed holders."
+        );
+    }
+
+    /// TG-S09 对照半边: GateError 的其它 typed 拒绝都带动作指引
+    /// (WorktreeLive → "Stop the other loop or wait"),证明「每个
+    /// 拒绝都给下一步」是本模块既有语义,LoopLockedByOther 的渲染
+    /// 是缺口而非新约定。
+    #[test]
+    fn tg_s09_worktree_live_render_does_give_recovery_action() {
+        let err = GateError::WorktreeLive {
+            name: "wt-x".to_string(),
+            pid: 4242,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("wait"),
+            "TG-S09 control: WorktreeLive render must keep its actionable \
+             guidance (stop/wait): {msg}"
+        );
+    }
+
+    /// TG-S09 直接调 assess_checkpoint (绕过 acquire_and_assess 的
+    /// try_acquire 覆写)证明: 带死 PID metadata 的 loop.lock 在纯
+    /// assessment 视角下确实产出 LoopLockedByOther 拒绝——这正是
+    /// render_refusal 缺指引的场景本体 (is_loop_lock_held 只读
+    /// metadata, pid != 0 且 != current → Some(pid))。
+    #[test]
+    fn tg_s09_assess_checkpoint_refuses_dead_pid_lock_metadata() {
+        use ralph_core::recovery_checkpoint::assess_checkpoint;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path();
+        let ralph_dir = workspace.join(".ralph");
+        let agent_dir = ralph_dir.join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let events_file = ralph_dir.join("events.jsonl");
+        std::fs::write(&events_file, "").unwrap();
+        std::fs::write(
+            ralph_dir.join("current-events"),
+            events_file.to_str().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(ralph_dir.join("current-loop-id"), "tg-s09\n").unwrap();
+        std::fs::write(agent_dir.join("scratchpad.md"), "# s\n").unwrap();
+        std::fs::write(ralph_dir.join("history.jsonl"), "").unwrap();
+        // Dead-PID crash residue: flock NOT held (file written directly,
+        // no flock), metadata JSON intact.
+        std::fs::write(
+            ralph_dir.join("loop.lock"),
+            r#"{"pid": 999999, "started": "2026-09-05T10:00:00Z", "prompt": "crashed"}"#,
+        )
+        .unwrap();
+
+        let verdict = assess_checkpoint(workspace, "tg-s09").expect("assessment IO");
+        match verdict {
+            ralph_core::recovery_checkpoint::AssessmentVerdict::Refused(
+                AssessmentRefusal::LoopLockedByOther { holder_pid },
+            ) => {
+                assert_eq!(holder_pid, 999999);
+            }
+            other => panic!(
+                "TG-S09: expected Refused(LoopLockedByOther) for dead-PID lock \
+                 metadata, got {other:?}"
+            ),
+        }
+    }
 }
