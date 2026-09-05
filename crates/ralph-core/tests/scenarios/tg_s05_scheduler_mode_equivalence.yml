@@ -1,0 +1,128 @@
+# TG-S05 (P2 / system-config 等价性) — scheduler_mode dag ≡ wave 行为等价
+# pin（PMI-002, .ralph/post-merge/findings/PMI-002.md）。
+#
+# 场景来源: 09-test-gap-plan §1 TG-S05。目标: 钉住 PMI-002 过渡契约——
+# `dag` 与 `wave` 在当前 runtime 上行为完全一致,任何差异都是未声明的
+# 行为变更（升 P0 处理）。
+#
+# 拓扑仿照 parallel_forge_exec_wave_branch.yml（最小 supervisor 波次链:
+# dispatch → 2×unit.done → fan-in 注入 exec.wave.complete → work.done）,
+# 但额外开启 core.event_projection 把**全部已接受事件**按序落盘到
+# projected-events.jsonl——这是 scenarios runner 里唯一按序记录接受流的
+# 磁盘面,由真实 acceptance 路径(process_parse_result → validated_events
+# → apply_projection)写入,两份配置变体跑完 diff 该文件即 TG-S05 的
+# 「事件序列逐条相等」断言。
+#
+# 测试入口: scenarios.rs `tg_s05_scheduler_mode_dag_wave_equivalence`。
+# 同一 YAML 跑两遍: 一遍默认 wave（本文件 supervisor 块不写
+# scheduler_mode）,一遍由测试代码覆写 scheduler_mode: dag（满足
+# dag 的 fail-closed 组合: supervisor.enabled + isolated,本文件已具备）。
+# 预期: 绿——当前 runtime 零接线,两变体行为必然一致
+# （uses_legacy_authority 生产消费点仅 inspect.rs:1397 与校验自身）。
+
+name: tg_s05_scheduler_mode_equivalence
+description: TG-S05 - scheduler_mode dag vs wave behavior equivalence pin (PMI-002)
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  event_loop:
+    execution_mode: isolated
+    supervisor:
+      enabled: true
+      aggregate_timeout_secs: 60
+  # event_projection: 全部业务 topic 按序投影。trigger_events 逐个列出
+  # （apply_projection 只做精确字符串匹配,不支持通配符,见
+  # event_projection.rs apply_projection）。
+  core:
+    event_projection:
+      enabled: true
+      rules:
+        - name: "tg-s05-accepted-stream"
+          trigger_events:
+            - exec.unit.ready
+            - exec.unit.done
+            - exec.wave.complete
+            - work.done
+          fields:
+            - "topic"
+            - "payload"
+          target_file: ".ralph/projected-events.jsonl"
+  hats:
+    exec-coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - exec.unit.ready
+    unit-executor:
+      subscribes_to:
+        - exec.unit.ready
+      publishes:
+        - exec.unit.done
+    exec-integrator:
+      subscribes_to:
+        - exec.wave.complete
+      publishes:
+        - work.done
+
+mock_responses:
+  # Iter 1: dispatch slot 0
+  - text: |
+      <event topic="exec.unit.ready">
+      wave_id: "tg-s05-wave"
+      slot_index: 0
+      complexity: "small"
+      </event>
+    hat: exec-coordinator
+  # Iter 2: slot 0 done
+  - text: |
+      <event topic="exec.unit.done">
+      wave_id: "tg-s05-wave"
+      slot_index: 0
+      content_hash: "tg-s05-h0"
+      </event>
+    hat: unit-executor
+  # Iter 3: dispatch slot 1
+  - text: |
+      <event topic="exec.unit.ready">
+      wave_id: "tg-s05-wave"
+      slot_index: 1
+      complexity: "small"
+      </event>
+    hat: exec-coordinator
+  # Iter 4: slot 1 done → supervisor fan-in injects exec.wave.complete
+  - text: |
+      <event topic="exec.unit.done">
+      wave_id: "tg-s05-wave"
+      slot_index: 1
+      content_hash: "tg-s05-h1"
+      </event>
+    hat: unit-executor
+  # Iter 5: integrator closes the wave
+  - text: |
+      <event topic="work.done">{"task_id":"tg-s05-wave","status":"complete","wave_id":"tg-s05-wave"}</event>
+    hat: exec-integrator
+
+supervisor_fan_in:
+  expected_slots: 2
+
+expected:
+  iterations: 5
+  events:
+    - topic: exec.unit.ready
+    - topic: exec.unit.done
+    - topic: exec.unit.ready
+    - topic: exec.unit.done
+    - topic: exec.wave.complete
+    - topic: work.done
+  absent_events:
+    - topic: exec.wave.failed
+    - topic: plan.blocked
+  event_topic_counts:
+    - topic: exec.unit.done
+      count: 2
+    - topic: exec.wave.complete
+      count: 1
+    - topic: work.done
+      count: 1
+  completion: false

@@ -2985,6 +2985,125 @@ fn test_parallel_forge_exec_wave_branch() {
     run_workflow_guard_scenario(yaml);
 }
 
+// TG-S05 (P2 / system-config 等价性, PMI-002): scheduler_mode `dag` ≡
+// `wave` 行为等价 pin。同一 scenario YAML 跑两遍——一遍默认 wave、
+// 一遍覆写 `scheduler_mode: dag`(满足 dag 的 fail-closed 组合:
+// supervisor.enabled + isolated,场景 YAML 已具备)——diff 两份
+// projected-events.jsonl(由真实 acceptance 路径按序写入的全量已接受
+// 事件流)。
+//
+// 预期: 绿。当前 runtime 对 scheduler_mode 零行为接线
+// (`uses_legacy_authority` 生产消费点仅 inspect.rs 的 JSON 渲染与
+// scheduler_mode.rs 的校验自身;dispatcher / inner / worker / 全部
+// wave 路径零分支),两变体行为必然一致。
+//
+// 失败证明(变红即升 P0): 事件序列出现差异 = 有调度路径被部分接线
+// 而未走完整 cutover(含 BDD×9 + E2E + docs 的 U10 follow-up 义务)。
+//
+// 附加差异面(粗粒度): 两份临时 workspace 的 `.ralph` 文件清单必须
+// 相同——防止某个模式静默多/少写 ledger 文件。
+#[test]
+fn tg_s05_scheduler_mode_dag_wave_equivalence() {
+    let yaml_path = "tests/scenarios/tg_s05_scheduler_mode_equivalence.yml";
+
+    // 变体 1: 默认 wave(scenario YAML 的 supervisor 块不写
+    // scheduler_mode → serde 默认 Wave)。
+    let wave_yaml = load_scenario(yaml_path);
+    let wave_dir = run_scenario_with_snapshots(&wave_yaml, |config, yaml| {
+        apply_yaml_hats(yaml, config);
+        if !yaml.config.event_loop.is_null() {
+            config.event_loop = serde_yaml::from_value(yaml.config.event_loop.clone()).unwrap();
+        }
+        if !yaml.config.core.is_null() {
+            config.core = serde_yaml::from_value(yaml.config.core.clone()).unwrap();
+        }
+        // 双保险: 显式钉 Wave,避免未来 scenario YAML 改动把变体 1
+        // 悄悄变成非 wave 基线。
+        config.event_loop.supervisor.scheduler_mode = ralph_core::config::SchedulerMode::Wave;
+        config.normalize();
+    });
+
+    // 变体 2: 覆写 dag。仅这一个字段不同。
+    let dag_yaml = load_scenario(yaml_path);
+    let dag_dir = run_scenario_with_snapshots(&dag_yaml, |config, yaml| {
+        apply_yaml_hats(yaml, config);
+        if !yaml.config.event_loop.is_null() {
+            config.event_loop = serde_yaml::from_value(yaml.config.event_loop.clone()).unwrap();
+        }
+        if !yaml.config.core.is_null() {
+            config.core = serde_yaml::from_value(yaml.config.core.clone()).unwrap();
+        }
+        config.event_loop.supervisor.scheduler_mode = ralph_core::config::SchedulerMode::Dag;
+        config.normalize();
+    });
+
+    // 事件序列逐条相等(TG-S05 步骤 3): projected-events.jsonl 是
+    // scenarios runner 里唯一按序落盘的已接受事件流。
+    let wave_stream = read_projection_stream(&wave_dir);
+    let dag_stream = read_projection_stream(&dag_dir);
+    assert_eq!(
+        wave_stream, dag_stream,
+        "TG-S05 (PMI-002): scheduler_mode dag 与 wave 的事件序列出现差异 \
+         ——有调度路径被部分接线而未走完整 cutover(升 P0 处理)。\
+         wave 变体: {wave_stream:?};dag 变体: {dag_stream:?}"
+    );
+    // 非空自证: 等价性断言对两条空流恒真,必须先证明基线本身产出了
+    // 事件流(6 个业务 topic: 2×ready + 2×done + wave.complete 注入
+    // 不入投影 + work.done → 投影捕获 5 条 mock 产线)。
+    assert!(
+        !wave_stream.is_empty(),
+        "TG-S05 前置失效: wave 基线的 projected-events.jsonl 为空 \
+         (投影未捕获任何已接受事件),等价性断言退化为空==空"
+    );
+
+    // 粗粒度磁盘面: 两份 workspace 的 .ralph 文件清单相同。
+    let wave_files = list_ralph_files(&wave_dir);
+    let dag_files = list_ralph_files(&dag_dir);
+    assert_eq!(
+        wave_files, dag_files,
+        "TG-S05 (PMI-002): scheduler_mode dag 与 wave 的 .ralph 落盘文件 \
+         清单不一致——某模式静默多/少写状态文件。\
+         wave: {wave_files:?};dag: {dag_files:?}"
+    );
+}
+
+/// TG-S05 helper: 读 projected-events.jsonl,按行返回(topic 前的原始
+/// 行保持顺序)。文件缺失返回空 Vec(由调用方的非空断言兜底)。
+fn read_projection_stream(dir: &tempfile::TempDir) -> Vec<String> {
+    let path = dir.path().join(".ralph/projected-events.jsonl");
+    match std::fs::read_to_string(&path) {
+        Ok(body) => body
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_string)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// TG-S05 helper: 列出 `.ralph` 下全部相对文件路径(排序去重),
+/// 用于两个 scheduler_mode 变体的落盘面一致性断言。
+fn list_ralph_files(dir: &tempfile::TempDir) -> Vec<String> {
+    fn walk(base: &std::path::Path, rel: &std::path::Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(base.join(rel)) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let child = rel.join(&name);
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                walk(base, &child, out);
+            } else {
+                out.push(child.to_string_lossy().to_string());
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(dir.path(), std::path::Path::new(".ralph"), &mut files);
+    files.sort();
+    files
+}
+
 // A force-terminalled exec wave must inject `exec.wave.failed` AND find
 // a subscriber. The failure arm was previously injected into a preset
 // where no hat listened for it, so a silent worker ended the run with
