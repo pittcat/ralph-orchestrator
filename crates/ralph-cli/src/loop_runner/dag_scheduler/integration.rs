@@ -641,4 +641,137 @@ mod tests {
         assert!(FORBIDDEN_TOP_LEVEL_PREFIXES.contains(&".git"));
         assert!(FORBIDDEN_TOP_LEVEL_PREFIXES.contains(&"target"));
     }
+
+    // ===================================================================
+    // TG-S04 (PMI-006, P1, post-merge-converge): DAG 状态族无持久权威
+    // ——现状 pin。Invariant: exactly-once / crash-window recovery 承诺
+    // 以持久化状态为前提;`real_orchestrator` 每次调用
+    // `InMemoryIntegrationStore::new()`（integration.rs 的构造函数体）,
+    // 跨「进程重启」（第二个实例）集成记录即蒸发。
+    //
+    // 本组测试是**过渡 pin**（expected GREEN at HEAD）:
+    //   - 步骤 2 变绿 = durable store 已落地 → 按 TG-S12 升级全量验证;
+    //   - 步骤 3 变红 = 有人在没改 `real_orchestrator` 的情况下加了
+    //     rusqlite 层（半接线）→ 本 pin 强制同步改 `real_orchestrator`。
+    // ===================================================================
+
+    /// TG-S04 步骤 1+2: 实例 A 对 `(unit-u1, feat/target-a)` 执行
+    /// `record_integrated`（幂等自然键）;实例 B（同一 repo_root、模拟
+    /// 进程重启）查询同 tuple → 断言**查不到**（返回空/不存在,而非
+    /// 返回 A 的记录）——内存 store 跨进程即丢,行为如实反映现状。
+    #[test]
+    fn tg_s04_real_orchestrator_store_is_process_local_transitional_pin() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().to_path_buf();
+
+        // 实例 A: 同一 repo_root 构造两个独立 orchestrator,
+        // 模拟「进程 A 运行 → 退出 → 进程 B 重启后查询」。
+        let orch_a = real_orchestrator(repo_root.clone());
+        let input_a = IntegrationInput {
+            unit_id: "unit-u1".to_string(),
+            target_branch: "feat/target-a".to_string(),
+            base_commit: "BASE_A".to_string(),
+            integrated_commit: "SQUASH_A".to_string(),
+            expected_head_before: "HEAD_A".to_string(),
+            created_at_ms: 1_700_000_000_000,
+        };
+        let recorded_a = orch_a
+            .store
+            .record_integrated(&input_a)
+            .expect("instance A records the integration");
+        assert_eq!(recorded_a.unit_id, "unit-u1");
+        assert_eq!(recorded_a.target_branch, "feat/target-a");
+        // 幂等自然键: 同一实例内同 tuple 重放返回同一行。
+        let replay_a = orch_a
+            .store
+            .record_integrated(&input_a)
+            .expect("same-instance replay is idempotent");
+        assert_eq!(replay_a.id, recorded_a.id);
+
+        // 实例 B（同 repo_root,模拟进程重启）: 同 tuple 查询。
+        let orch_b = real_orchestrator(repo_root.clone());
+        let rows_b = orch_b
+            .store
+            .list_for_unit("unit-u1")
+            .expect("instance B queries the same unit tuple");
+        assert!(
+            rows_b.is_empty(),
+            "TG-S04 transitional pin: instance B (same repo_root, simulated \
+             process restart) must NOT see instance A's integration records \
+             for (unit-u1, feat/target-a) — got {} row(s): {rows_b:?}. \
+             If this assertion FAILS, the durable DAG integration store has \
+             landed (good news): follow TG-S12 in \
+             .ralph/post-merge/09-test-gap-plan.md to upgrade to the full \
+             crash-window / exactly-once verification matrix, and update \
+             this pin to assert persistence instead.",
+            rows_b.len()
+        );
+        // 步骤 2 的另一半: store 整体为空（len()=0）,连「行存在但
+        // 状态漂移」都不存在——冷启动语义而非重放语义。
+        assert_eq!(
+            orch_b.store.len(),
+            0,
+            "instance B's store must be cold-empty (len=0), not carry \
+             over instance A's rows"
+        );
+    }
+
+    /// TG-S04 步骤 3: `crates/ralph-core/src/supervisor/` 不存在
+    /// `dag_store_rusqlite.rs`、`migrations/` 无 dag 表——过渡 pin;
+    /// promote 落 rusqlite 时本断言必红,强制同步改 `real_orchestrator`
+    /// （防止「加了 durable 层但 real 路径仍用内存 store」的半接线）。
+    #[test]
+    fn tg_s04_no_durable_dag_store_layer_transitional_pin_delete_when_durable_store_lands() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        // CARGO_MANIFEST_DIR = .../crates/ralph-cli → repo root
+        // 两级父目录（与 crates/ralph-cli/tests/repro_pmi_005.rs 的
+        // repo_root() 同一推导）。
+        let repo_root = manifest_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("CARGO_MANIFEST_DIR must be at crates/ralph-cli")
+            .to_path_buf();
+
+        let supervisor_dir = repo_root.join("crates/ralph-core/src/supervisor");
+        let rusqlite_variant = supervisor_dir.join("dag_store_rusqlite.rs");
+        assert!(
+            !rusqlite_variant.exists(),
+            "TG-S04 transitional pin: {rusqlite_variant:?} now exists. A durable \
+             DAG store layer landed WITHOUT rewiring `real_orchestrator` to \
+             use it (or this pin was not updated alongside the cutover). \
+             Per PMI-006 / TG-S04 步骤 3: promote 落 rusqlite 时必须同步改 \
+             real_orchestrator（integration.rs real_orchestrator 构造的 \
+             InMemoryIntegrationStore 换成 durable 变体）,并按 TG-S12 执行 \
+             全量 crash-window / exactly-once 验证;删除本 pin 与 \
+             tg_s04_real_orchestrator_store_is_process_local_transitional_pin。"
+        );
+
+        // migrations/ 无 dag 表: 现有 v1–v12 的 SQL DDL 全文零命中
+        // `dag`（当前 grep 实测为 0 命中;迁移文件命名与 DDL 表名都会
+        // 携带 dag 字样,直接全文扫描足够钉住「无 DAG 表」）。
+        let migrations_dir = supervisor_dir.join("migrations");
+        let migration_files: Vec<PathBuf> = std::fs::read_dir(&migrations_dir)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", migrations_dir.display()))
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "sql"))
+            .collect();
+        assert!(
+            !migration_files.is_empty(),
+            "supervisor migrations dir unexpectedly empty — the v1–v12 SQL \
+             set must be present for this pin to mean anything"
+        );
+        for path in &migration_files {
+            let body = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+            assert!(
+                !body.to_ascii_lowercase().contains("dag"),
+                "TG-S04 transitional pin: migration {} mentions `dag` — a DAG \
+                 table landed in migrations/ while real_orchestrator still \
+                 constructs InMemoryIntegrationStore. Half-wiring detected; \
+                 see PMI-006 / TG-S04 步骤 3 for the promote checklist.",
+                path.display()
+            );
+        }
+    }
 }
