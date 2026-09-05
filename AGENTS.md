@@ -138,7 +138,7 @@ User YAML → RalphConfig → EventLoopConfig → HatConfig overrides → effect
 - **三态**：`wave`（默认，legacy WaveTracker 执行面） / `dag_shadow`（legacy 路径执行 + DAG 调度器旁路观察，dry-run 无副作用） / `dag`（声明运行时自有 work-conserving DAG 调度器）。
 - **fail-closed 组合**：`dag_shadow` / `dag` 要求 `event_loop.supervisor.enabled: true` **且** `event_loop.execution_mode: isolated`；不满足的组合在 `ralph preset check` / preflight / `ralph run` 启动即被拒（错误信息含字段路径 `event_loop.supervisor.scheduler_mode`，不会静默降级回 wave）。`wave` 任意组合恒合法。
 - **inspect 可见性**：`ralph inspect loop --format json` 在 mode ≠ `wave` 时输出 `scheduler` 块（`scheduler_mode` / `plan_keys` / `total_observations` / `admitted_total` / `blocked_total`，只读且脱敏）；`wave` 模式无该键（v2 JSON shape 不变）。
-- **当前语义（过渡态）**：builtin `parallel-forge` 已声明 `scheduler_mode: dag`（配置先行 cutover），但调度行为当前与 `wave` 模式完全一致（forge-dispatcher wave fan-out + supervisor wave 账本 + `forge.wave.*` 事件链原样运行）——DAG 调度器执行面接线属后续 follow-up。因此本文件对 parallel-forge 的「forge-dispatcher 波次调度」描述即现行执行面事实，与 preset yml 内「DAG scheduler authority」注释的关系是「wave 为现行执行面、dag 为配置先行过渡态」，不构成矛盾双权威。
+- **当前语义（过渡态）**：builtin `parallel-forge` 已声明 `scheduler_mode: dag`（配置先行 cutover），但调度行为当前与 `wave` 模式完全一致（forge-dispatcher wave fan-out + supervisor wave 账本 + `forge.wave.*` 事件链原样运行）——DAG 调度器执行面接线属后续 follow-up（义务清单 git-tracked 认领于 `presets/en/parallel-forge-preset-author-notes.md`「Scheduler Mode 过渡态记录」段，PMI-002 收口）。preset yml `scheduler_mode: dag` 上方注释已按同一事实改写：`forge.exec.development.done` 现仍由 forge-dispatcher hat 发射（schema field_docs 为准），runtime 发射属 promote 后目标态。因此本文件对 parallel-forge 的「forge-dispatcher 波次调度」描述即现行执行面事实，与 preset 注释不再构成矛盾双权威。
 
 ### Multi-Hat Isolation Policy（强制）
 

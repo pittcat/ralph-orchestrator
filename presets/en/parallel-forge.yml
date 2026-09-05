@@ -195,13 +195,21 @@ event_loop:
     # same worktree, and only the third failure surfaces as a wave
     # failure for the correction path.
     slot_retry_budget: 2
-    # 2026-09-03-0959 plan U10: cut parallel-forge to the runtime-owned
-    # work-conserving DAG scheduler authority. The new driver owns per-Unit
-    # admission; `forge.exec.development.done` is emitted by runtime after
-    # all Units are integrated and projection-acknowledged, exactly once.
-    # Legacy WaveTracker authority (the previous `forge.wave.*` /
-    # `forge-dispatcher` wave-fan-in path) is retired via follow-up
-    # cleanup work; this commit only flips the gate per §13 minimum.
+    # 2026-09-03-0959 plan U10 §13 minimum: this preset declares
+    # `scheduler_mode: dag` as a config-first cutover. Transitional
+    # state (honest, per PMI-002): the DAG execution surface is NOT
+    # wired yet — scheduling behaviour is identical to `wave`
+    # (forge-dispatcher wave fan-out + supervisor wave ledger +
+    # `forge.wave.*` events all run unchanged). Until the follow-up
+    # promote lands (driver wiring into the EventLoop + per-Unit
+    # admission + BDD + E2E, tracked in
+    # `presets/en/parallel-forge-preset-author-notes.md`):
+    # - `forge.exec.development.done` is still emitted by the
+    #   forge-dispatcher hat (NOT by the runtime), exactly as the
+    #   schema field_docs state.
+    # - The legacy WaveTracker authority (the `forge.wave.*` /
+    #   forge-dispatcher wave-fan-in path) remains the actual
+    #   scheduling authority.
     scheduler_mode: dag
   ephemeral_isolation: true
   enforce_current_unit: true
