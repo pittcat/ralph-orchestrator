@@ -257,6 +257,20 @@ review 命中时按上表 `finding_id` + `default_severity` + 默认 confidence 
 
 > **预留能力**：`max_concurrent_waves` 当前未在 runtime 实现（`SupervisorConfig` 无此字段），多 wave 并发上限由 dispatcher instructions 约定控制。若未来 runtime 实现该字段，review 需同步检查 `event_loop.supervisor.max_concurrent_waves` 的 YAML 配置。
 
+
+### Scheduler mode audit（`event_loop.supervisor.scheduler_mode`，2026-09-03-0959 plan U1/U10）
+
+> **触发条件**：YAML 声明 `event_loop.supervisor.scheduler_mode`（三态 `wave` 默认 / `dag_shadow` / `dag`）。**capability-triggered**，禁止按 preset 名称点名门控。
+> **未触发**：author 把本段记为 N/A。
+> **fail-closed 组合（runtime 已强制）**：`dag_shadow` / `dag` 要求 `event_loop.supervisor.enabled: true` 且 `event_loop.execution_mode: isolated`；违反组合在 `ralph preset check` / preflight 启动即拒（错误信息含字段路径 `event_loop.supervisor.scheduler_mode`），无静默降级。因此下表不重复该组合检查，只列 runtime 不覆盖的审查缺口。
+
+| 缺口 | Severity | category | aaf_question | finding_id |
+|---|---|---|---|---|
+| hat `instructions` 描述 / 依赖 DAG 调度器行为（per-Unit admission、`forge.exec.development.done` 由 runtime 发射等），而这些行为当前未接线（调度与 `wave` 完全等价，由 dispatcher wave fan-out 驱动） | P0 | payload-content | Q4 | review-only（`scheduler_mode_instructions_describe_unwired_behavior`） |
+| preset 注释 / notes 声称 `scheduler_mode: dag` 已改变调度行为（「DAG authority 已接管」），与过渡态事实矛盾 | P1 | payload-content | Q4 | review-only（`scheduler_mode_overstates_cutover`） |
+| `dag_shadow` / `dag` 模式下 preset 未在 author notes 记录「行为当前等价 wave」的过渡态事实 | P1 | feasibility | Q3 | review-only（`scheduler_mode_transitional_state_undocumented`） |
+
+命中按上表 `finding_id` + default severity + 默认 confidence 起点 60 入主表。**过渡态现状**：builtin `parallel-forge` 已声明 `scheduler_mode: dag`，调度行为与 `wave` 完全等价（DAG 执行面未接线）；`ralph inspect loop --format json` 在非 `wave` 模式输出只读 `scheduler` 块。DAG 执行面接线落地后本表第 1 行降级为 N/A。
 ### Agent skill audit（review-only，由 review SKILL Workflow 0a 弹窗默认跳过、选审触发）
 
 按 `references/agent-skill-audit.md` 的规程，对注入给 agent 的 skill 文档（`crates/ralph-core/data/*.md` / 外仓二进制内嵌）做内容级审计。**默认不审**，review SKILL 第 0a 步必须弹出交互选择菜单，默认选项是「仅审查 preset YAML（推荐）」。命中按上表 `default_severity` + `default_confidence` 入主表（与 `ralph preset check --strict` 输出的 lint ID 分开——本表 ID 不带 `lint.` 前缀，也**不**出现在 `ralph preset check` JSON）。
@@ -354,6 +368,7 @@ review 在放过此类双事件时，应在 Remediation Plan / 报告「AAF Deci
 
 <!-- anchor: wave-emit -->
 <!-- anchor: supervisor-emit -->
+<!-- anchor: scheduler-mode -->
 <!-- anchor: task-id-live -->
 <!-- anchor: artifact-first -->
 <!-- anchor: payload-consistency -->

@@ -510,3 +510,20 @@ preset 作者**不需要**手动把 `aggregate_timeout_secs` 乘以尝试次数�
 - ❌ 单 wave 失败导致其它 active wave 被错误重放或阻断
 
 **预留能力**：`max_concurrent_waves` 当前未在 runtime 实现（`SupervisorConfig` 无此字段）；多 wave 并发上限由 dispatcher instructions 约定控制。若未来 runtime 实现该字段，preset 应显式配置 `event_loop.supervisor.max_concurrent_waves` 并同步更新本段。
+
+## Scheduler mode 过渡态 pattern（`event_loop.supervisor.scheduler_mode`）
+
+适用于声明 `scheduler_mode: dag_shadow` / `dag` 的 supervisor preset（触发条件与审查口径见 `finding-rubric.md`「Scheduler mode audit」段；`wave` 缺省不触发）。
+
+**核心语义：**
+
+- **三态选择器**：`wave`（默认，legacy WaveTracker 执行面） / `dag_shadow`（legacy 照常执行 + DAG 调度器 dry-run 观察，无副作用） / `dag`（声明运行时自有 work-conserving DAG 调度器）。
+- **fail-closed 组合（runtime 强制）**：`dag_shadow` / `dag` 要求 `event_loop.supervisor.enabled: true` ∧ `event_loop.execution_mode: isolated`；违反组合在 `ralph preset check` / preflight 启动即拒（错误含字段路径 `event_loop.supervisor.scheduler_mode`），无静默降级。
+- **过渡态事实（2026-09-03-0959 plan U10 cutover 后）**：builtin `parallel-forge` 已声明 `scheduler_mode: dag`，但调度行为当前与 `wave` **完全等价**（DAG 执行面未接线；调度仍由 dispatcher wave fan-out 驱动）。preset 注释与 author notes 必须如实记录这一点。
+- **inspect 核对**：`ralph inspect loop --format json` 在非 `wave` 模式输出只读 `scheduler` 块（`scheduler_mode` / `plan_keys` / 观测计数）——配置生效与否用这个核对，不要从行为反推。
+
+**反模式：**
+
+- ❌ hat `instructions:` 描述 / 依赖 DAG 调度器行为（per-Unit admission、`forge.exec.development.done` 由 runtime 发射等）——当前未接线，agent 不可见
+- ❌ preset 注释声称「DAG authority 已接管调度」，与过渡态事实矛盾
+- ❌ 把 `scheduler_mode: dag` 当成行为开关写进 hat 触发逻辑 / payload 字段

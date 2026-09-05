@@ -1,0 +1,47 @@
+# Scheduler mode negative fixture — NOT a builtin preset. For ralph-preset-review acceptance only.
+#
+# Anti-pattern axes (2026-09-03-0959 plan U1/U10 — scheduler_mode audit):
+#   (a) hat instructions describe/depend on unwired DAG scheduler behavior
+#       (per-Unit admission, runtime-emitted forge.exec.development.done)
+#       while scheduling is actually wave-equivalent               → scheduler_mode_instructions_describe_unwired_behavior
+#   (b) preset comment claims the dag cutover already changed dispatch
+#       behavior ("DAG authority now owns dispatch") — contradicts the
+#       transitional state                                      → scheduler_mode_overstates_cutover
+#   (c) dag_shadow/dag declared but author notes do not record the
+#       "behavior currently equivalent to wave" transitional fact   → scheduler_mode_transitional_state_undocumented
+#
+# The fail-closed combination check itself (supervisor.enabled ∧ isolated)
+# is runtime-enforced by preflight and NOT duplicated here — this fixture
+# keeps supervisor.enabled: true + isolated so the lint focus stays on the
+# review-only axes above.
+#
+# Not registered in presets/manifest.yml; intentionally anonymous.
+event_loop:
+  # Axis (b): comment overstates the cutover
+  # "The DAG scheduler authority now owns dispatch; wave paths are dead."
+  execution_mode: isolated
+  supervisor:
+    enabled: true
+    scheduler_mode: dag
+  starting_event: work.start
+  completion_promise: work.done
+  max_iterations: 12
+hats:
+  integrator:
+    name: Integrator
+    description: Waits for runtime per-Unit admission decisions.
+    triggers:
+      - work.start
+    publishes:
+      - work.done
+    instructions: |
+      ## INTEGRATOR MODE
+
+      Wait for the runtime-owned DAG scheduler to grant per-Unit
+      admission before integrating. `forge.exec.development.done`
+      is emitted by the runtime after all Units are integrated and
+      projection-acknowledged, exactly once — do not emit it
+      yourself; just wait for the scheduler to hand you the final
+      admission result.
+    terminal_events:
+      - work.done

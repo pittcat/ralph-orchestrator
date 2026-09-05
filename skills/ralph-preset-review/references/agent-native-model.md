@@ -281,6 +281,7 @@ Reviewer 必须从真实 topology capability 独立重建关键位置，再把 `
 
 <!-- anchor: wave-emit -->
 <!-- anchor: supervisor-emit -->
+<!-- anchor: scheduler-mode -->
 <!-- anchor: task-id-live -->
 <!-- anchor: artifact-first -->
 <!-- anchor: payload-consistency -->

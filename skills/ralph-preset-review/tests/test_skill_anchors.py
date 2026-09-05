@@ -79,6 +79,28 @@ ANCHORS: tuple[tuple[str, str], ...] = (
     ("skills/ralph-preset-review/references/commands.md", "ralph preset verify"),
     ("skills/ralph-preset-author/references/finding-rubric.md", "verify.dynamic_evidence_missing"),
     ("skills/ralph-preset-review/references/finding-rubric.md", "verify.dynamic_evidence_missing"),
+    # Scheduler mode anchors (2026-09-03-0959 plan U1/U10, PMI-005
+    # TG-S03 closure). Both author and review commands.md must surface
+    # the `event_loop.supervisor.scheduler_mode` config field mapping,
+    # and both finding-rubric.md files must contain the scheduler-mode
+    # audit finding ids so reviewers can pair unwired DAG-behavior
+    # claims with the rubric entry.
+    (
+        "skills/ralph-preset-author/references/commands.md",
+        "event_loop.supervisor.scheduler_mode",
+    ),
+    (
+        "skills/ralph-preset-review/references/commands.md",
+        "event_loop.supervisor.scheduler_mode",
+    ),
+    (
+        "skills/ralph-preset-author/references/finding-rubric.md",
+        "scheduler_mode_instructions_describe_unwired_behavior",
+    ),
+    (
+        "skills/ralph-preset-review/references/finding-rubric.md",
+        "scheduler_mode_instructions_describe_unwired_behavior",
+    ),
     ("skills/ralph-preset-author/references/finding-rubric.md", "verify.scenario_coverage_gap"),
     ("skills/ralph-preset-review/references/finding-rubric.md", "verify.scenario_coverage_gap"),
     # Activation exit protocol anchors (plan 2026-08-16-1015).
@@ -180,6 +202,14 @@ CAPABILITY_FIXTURES: tuple[tuple[str, str], ...] = (
     (
         "runtime-verify-negative-fixture.yml",
         "verify.dynamic_evidence_missing",
+    ),
+    # Scheduler mode negative fixture (2026-09-03-0959 plan U1/U10,
+    # PMI-005 TG-S03 closure). Anchors the new scheduler-mode audit
+    # axes: instructions describing unwired DAG behavior, overstate
+    # cutover, transitional state undocumented.
+    (
+        "scheduler-mode-negative-fixture.yml",
+        "scheduler_mode_instructions_describe_unwired_behavior",
     ),
 )
 

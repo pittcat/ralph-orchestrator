@@ -69,6 +69,7 @@ const fn doc_has_anchor(haystack: &str, needle: &str) -> bool {
 // Pre-computed anchor strings per capability id.
 const ANCHOR_WAVE_EMIT: &str = "<!-- anchor: wave-emit -->";
 const ANCHOR_SUPERVISOR_EMIT: &str = "<!-- anchor: supervisor-emit -->";
+const ANCHOR_SCHEDULER_MODE: &str = "<!-- anchor: scheduler-mode -->";
 const ANCHOR_TASK_ID_LIVE: &str = "<!-- anchor: task-id-live -->";
 const ANCHOR_ARTIFACT_FIRST: &str = "<!-- anchor: artifact-first -->";
 const ANCHOR_PAYLOAD_CONSISTENCY: &str = "<!-- anchor: payload-consistency -->";
@@ -153,6 +154,30 @@ pub fn capability_inventory() -> Vec<Capability> {
             ),
         },
         Capability {
+            // 2026-09-03-0959 plan U1/U10: tri-state scheduler authority
+            // selector. Runtime fail-closed validation
+            // (`validate_scheduler_mode`) covers the config combination;
+            // this capability flags the author/review-side transitional
+            // audit axes (instructions must not describe unwired DAG
+            // behavior; notes must not overstate the cutover).
+            id: "scheduler-mode",
+            trigger_signal: "preset sets event_loop.supervisor.scheduler_mode",
+            applies_when: "preset declares scheduler_mode dag_shadow | dag (or documents the transition)",
+            evidence_sources: &[
+                "skills/ralph-preset-author/references/finding-rubric.md",
+                "crates/ralph-core/src/config/scheduler_mode.rs",
+            ],
+            recommended_evidence_level: "runtime",
+            source: "binary_embedded",
+            covered_in_author_review: compute_coverage(
+                doc_has_anchor(AGENT_NATIVE_MODEL, ANCHOR_SCHEDULER_MODE)
+                    || doc_has_anchor(COMMANDS_DOC, ANCHOR_SCHEDULER_MODE),
+                doc_has_anchor(REVIEW_AGENT_NATIVE_MODEL, ANCHOR_SCHEDULER_MODE)
+                    || doc_has_anchor(REVIEW_COMMANDS_DOC, ANCHOR_SCHEDULER_MODE)
+                    || doc_has_anchor(REVIEW_FINDING_RUBRIC, ANCHOR_SCHEDULER_MODE),
+            ),
+        },
+        Capability {
             id: "task-id-live",
             trigger_signal: "any preset that emits work.done",
             applies_when: "task_id is required for any work.done emit",
@@ -234,8 +259,8 @@ mod tests {
     #[test]
     fn capability_inventory_is_non_empty() {
         assert!(
-            capability_inventory().len() >= 6,
-            "expected at least 6 capabilities"
+            capability_inventory().len() >= 7,
+            "expected at least 7 capabilities"
         );
     }
 
@@ -305,6 +330,7 @@ mod tests {
         let anchors = [
             ANCHOR_WAVE_EMIT,
             ANCHOR_SUPERVISOR_EMIT,
+            ANCHOR_SCHEDULER_MODE,
             ANCHOR_TASK_ID_LIVE,
             ANCHOR_ARTIFACT_FIRST,
             ANCHOR_PAYLOAD_CONSISTENCY,

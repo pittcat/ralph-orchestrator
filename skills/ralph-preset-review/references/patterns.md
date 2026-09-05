@@ -480,3 +480,14 @@ attempt 的代码、提交与报告，新进程 `cwd` 不变，且 prompt 末尾
 
 **聚合期限**：启用重试后 wave 的聚合期限会按预算内的多次尝试自动放宽，
 preset 作者**不需要**手动把 `aggregate_timeout_secs` 乘以尝试次数。
+
+## Scheduler mode 过渡态 pattern（`event_loop.supervisor.scheduler_mode`）
+
+适用于声明 `scheduler_mode: dag_shadow` / `dag` 的 supervisor preset（触发条件与 finding 口径见 `finding-rubric.md`「Scheduler mode audit」段；`wave` 缺省不触发）。
+
+**Reviewer 核对点：**
+
+- **fail-closed 组合由 runtime 强制**（`validate_scheduler_mode`，preflight / `ralph preset check` 启动即拒），review 不重复检查该组合，重点在 runtime 不覆盖的三条 review-only 缺口（见 rubric 表）。
+- **instructions 与接线事实对账**：hat `instructions:` 不得描述 / 依赖 DAG 调度器行为（per-Unit admission、`forge.exec.development.done` 由 runtime 发射等）；当前调度与 `wave` 完全等价，由 dispatcher wave fan-out 驱动。发现即按 `scheduler_mode_instructions_describe_unwired_behavior`（P0）入主表。
+- **叙述诚实性**：preset 注释 / notes 声称「DAG authority 已接管调度」而实际未接线 → `scheduler_mode_overstates_cutover`（P1）；`dag_shadow` / `dag` 声明但 notes 无「行为当前等价 wave」过渡态记录 → `scheduler_mode_transitional_state_undocumented`（P1）。
+- **inspect 证据**：配置生效核对用 `ralph inspect loop --format json` 的只读 `scheduler` 块（非 `wave` 模式才出现），不要求跑真 loop。

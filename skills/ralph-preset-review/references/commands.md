@@ -181,11 +181,26 @@ JSON 输出结构：
 
 <!-- anchor: wave-emit -->
 <!-- anchor: supervisor-emit -->
+<!-- anchor: scheduler-mode -->
 <!-- anchor: task-id-live -->
 <!-- anchor: artifact-first -->
 <!-- anchor: payload-consistency -->
 <!-- anchor: trigger-context -->
 <!-- anchor: key-stage-event-gate --><!-- anchor: evidence-bound --><!-- anchor: scope-handoff -->
+
+## Scheduler Mode 配置字段（`event_loop.supervisor.scheduler_mode`）
+
+supervisor 块下的三态调度权威选择器（serde `snake_case`，缺省 `wave`）：
+
+| 值 | 语义 |
+|---|---|
+| `wave`（默认） | legacy `WaveTracker` 执行面 |
+| `dag_shadow` | legacy 路径执行 + DAG 调度器 dry-run 观察（无副作用） |
+| `dag` | 声明运行时自有 work-conserving DAG 调度器 |
+
+- **fail-closed 组合**：`dag_shadow` / `dag` 要求 `event_loop.supervisor.enabled: true` **且** `event_loop.execution_mode: isolated`；违反组合在 `ralph preset check --strict` / preflight 启动即拒（错误信息含字段路径 `event_loop.supervisor.scheduler_mode`），不会静默降级回 `wave`。`wave` 任意组合恒合法。
+- **inspect 可见性**：`ralph inspect loop --format json` 在 mode ≠ `wave` 时输出只读 `scheduler` 块（`scheduler_mode` / `plan_keys` / 观测计数）。
+- **过渡态现状**：builtin `parallel-forge` 已声明 `scheduler_mode: dag`，但调度行为当前与 `wave` 完全等价（DAG 执行面未接线）。author 起草 supervisor preset 时按上述 fail-closed 组合写配置；不要在 hat `instructions` 中描述 DAG 调度行为（agent 不可见的内部权威切换）。
 
 ## Wave 子命令
 

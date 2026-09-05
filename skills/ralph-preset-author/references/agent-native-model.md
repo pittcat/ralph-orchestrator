@@ -281,6 +281,7 @@ Skill doc 不复述 `ralph-tools*.md` 的命令参数表；需要时**引用章�
 
 <!-- anchor: wave-emit -->
 <!-- anchor: supervisor-emit -->
+<!-- anchor: scheduler-mode -->
 <!-- anchor: task-id-live -->
 <!-- anchor: artifact-first -->
 <!-- anchor: payload-consistency -->
