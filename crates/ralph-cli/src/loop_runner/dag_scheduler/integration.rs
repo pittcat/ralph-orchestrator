@@ -69,8 +69,8 @@ use ralph_core::supervisor::dag_integration::{
 #[cfg(feature = "supervisor-db")]
 use ralph_core::supervisor::dag_store_rusqlite::RusqliteIntegrationStore;
 use ralph_core::supervisor::integration_lane::{
-    CasOutcome, GateOutcome, GitIntegrationPort, IntegrationCandidate, IntegrationLane, LaneCore,
-    LaneError, LaneGuard, RealGitIntegrationPort, select_eligible,
+    CasOutcome, GateCommandSpec, GateOutcome, GitIntegrationPort, IntegrationCandidate,
+    IntegrationLane, LaneCore, LaneError, LaneGuard, RealGitIntegrationPort, select_eligible,
 };
 
 #[allow(unused_imports)]
@@ -275,11 +275,21 @@ where
 /// the typed error, never a silent fallback to the in-memory
 /// variant (that would resurrect the process-local store
 /// PMI-006 closed).
+///
+/// PMI-004①: `gate_commands` is the per-target gate command set
+/// the real port executes against the squash tree. **Empty list
+/// fails closed**: the orchestrator a caller gets from this
+/// constructor never carries the unconditional-Pass placeholder
+/// — an unconfigured gate rejects candidates at Step 6 instead
+/// of clearing them to FF. Declare a real command set (e.g. the
+/// project's targeted test subset) here.
 pub fn real_orchestrator(
     repo_root: PathBuf,
+    gate_commands: Vec<GateCommandSpec>,
 ) -> Result<Arc<IntegrationOrchestrator<RealRepo, RealGitIntegrationPort>>, DagStoreOpenError> {
     let core = Arc::new(LaneCore::new());
-    let port = Arc::new(RealGitIntegrationPort::new(repo_root.clone()));
+    let port =
+        Arc::new(RealGitIntegrationPort::new(repo_root.clone()).with_gate_commands(gate_commands));
     let lane = Arc::new(IntegrationLane::<RealRepo, _>::new(core, port));
     let db_path = dag_store_path(&repo_root);
     #[cfg(feature = "supervisor-db")]
@@ -753,8 +763,11 @@ mod tests {
 
         // 实例 A: 同一 repo_root 构造两个独立 orchestrator,
         // 模拟「进程 A 运行 → 退出 → 进程 B 重启后查询」。
-        let orch_a =
-            real_orchestrator(repo_root.clone()).expect("instance A opens the durable DAG store");
+        // (PMI-004① 后 real_orchestrator 需要显式 gate 命令集;
+        //  本测试只动 store,直接给空的 gate spec——空集对 store
+        //  语义无影响,fail-closed 也不触发 integrate 路径。)
+        let orch_a = real_orchestrator(repo_root.clone(), Vec::new())
+            .expect("instance A opens the durable DAG store");
         let input_a = IntegrationInput {
             unit_id: "unit-u1".to_string(),
             target_branch: "feat/target-a".to_string(),
@@ -778,8 +791,8 @@ mod tests {
 
         // 实例 B（同 repo_root,模拟进程重启）: 同 tuple 查询。
         // durable store 落地后,实例 B 必须读回 A 的记录(重放语义)。
-        let orch_b =
-            real_orchestrator(repo_root.clone()).expect("instance B reopens the durable DAG store");
+        let orch_b = real_orchestrator(repo_root.clone(), Vec::new())
+            .expect("instance B reopens the durable DAG store");
         let rows_b = orch_b
             .store
             .list_for_unit("unit-u1")
@@ -1012,31 +1025,26 @@ mod tests {
     }
 
     // ===================================================================
-    // TG-S07 (PMI-004①, P2, post-merge-converge): real 路径门禁恒
-    // Pass——现状 pin。Invariant: 「门禁」类型签名存在 ≠ 行为存在;
-    // real_orchestrator() 用裸 RealGitIntegrationPort 构造 lane(无
-    // wrapped gate port),任何「gate fail → 不 FF」的语义在 real 路径
-    // 上都不可达(Fake port 的 force_gate(Fail) 只有测试态)。
-    //
-    // 本组测试是**过渡 pin**(expected GREEN at HEAD):
-    //   - 变红 = real gate / wrapped port 已实现 → 按 TG-S13 补全
-    //     「gate fail → GateFailed + lane 释放 + store 零行」的故障
-    //     注入族(Fake 语义参照: orchestrator_gate_fail_releases_
-    //     lane_and_writes_no_record 已钉),否则恒 Pass 假绿流入生产。
+    // TG-S07 (PMI-004①, P2, post-merge-converge) — FLIPPED per the
+    // pin's own built-in upgrade guidance (TG-S13): the real gate
+    // landed. This family now asserts the flip semantics the pin
+    // demanded — gate fail → `IntegrationOutcome::GateFailed` +
+    // lane released + store zero rows (Fake 语义参照:
+    // orchestrator_gate_fail_releases_lane_and_writes_no_record),
+    // plus the empty-gate-spec fail-closed contract and the
+    // passing-gate integration path.
     // ===================================================================
 
-    /// TG-S07 orchestrator 级: `real_orchestrator()` 构造的整合流水线
-    /// 在「门禁应当失败」的 repo 形态下仍把 gate-fail squash **FF 进
-    /// target 分支**——恒 Pass 假绿的端到端实证(不是只测 port 方法,
-    /// 而是测 orchestrator.integrate 的真实决策流)。
+    /// TG-S07 orchestrator 级（翻转后）: gate-hostile squash + 真实
+    /// gate 命令集 → `IntegrationOutcome::GateFailed`,main HEAD 未
+    /// 移动、store 零行、lane 释放。端到端决策流级实证(非仅 port
+    /// 方法): 恒 Pass 假绿(P0 级危害——未过门禁的 squash 被 FF 进
+    /// target)已不可达。
     ///
     /// fixture: main 带 `base.txt`;unit 分支删掉 `base.txt`(
-    /// gate-hostile 形态——任何跑真实门禁命令集的实现都应拒)。真实
-    /// 门禁落地的翻转语义(见 TG-S13): 期望 `IntegrationOutcome::
-    /// GateFailed`,且 main HEAD 未移动、store 零行。当前(H):恒
-    /// Pass → `Integrated`,main 被 FF 到 squash——现状如实。
+    /// gate-hostile 形态);gate 命令集 = `sh -c 'test -f base.txt'`。
     #[test]
-    fn tg_s07_real_orchestrator_ffs_gate_hostile_squash_placeholder_pass() {
+    fn tg_s07_real_orchestrator_rejects_gate_hostile_squash() {
         use std::process::Command as StdCommand;
 
         fn git(root: &std::path::Path, args: &[&str]) -> String {
@@ -1069,9 +1077,8 @@ mod tests {
         git(root, &["commit", "-q", "-m", "base"]);
         let main_oid = git(root, &["rev-parse", "HEAD"]);
 
-        // Gate-hostile unit branch: DROP base.txt. A real targeted
-        // gate (per-target gate command set, U7 promote contract)
-        // would fail this squash; the placeholder passes it.
+        // Gate-hostile unit branch: DROP base.txt. The real gate
+        // command below (`test -f base.txt`) fails this squash.
         git(root, &["checkout", "-q", "-b", "feat/u1"]);
         std::fs::remove_file(root.join("base.txt")).unwrap();
         git(root, &["add", "-A"]);
@@ -1079,8 +1086,14 @@ mod tests {
         let unit_commit = git(root, &["rev-parse", "HEAD"]);
         git(root, &["checkout", "-q", "main"]);
 
-        let orch =
-            real_orchestrator(root.to_path_buf()).expect("TG-S07 opens the durable DAG store");
+        let orch = real_orchestrator(
+            root.to_path_buf(),
+            vec![GateCommandSpec {
+                program: "sh".to_string(),
+                args: vec!["-c".to_string(), "test -f base.txt".to_string()],
+            }],
+        )
+        .expect("TG-S07 opens the durable DAG store");
         let outcome = orch
             .integrate(IntegrationRequest {
                 unit_id: "U1".to_string(),
@@ -1097,36 +1110,227 @@ mod tests {
                 declared_paths: vec![PathBuf::from("base.txt")],
                 created_at_ms: 1_700_000_000_000,
             })
-            .expect("integrate must not error (placeholder gate cannot fail)");
+            .expect("integrate runs the decision flow");
+
+        match outcome {
+            IntegrationOutcome::GateFailed { reason } => {
+                // Reason carries the failing command (bounded stderr tail).
+                assert!(
+                    reason.contains("base.txt") || reason.contains("exited"),
+                    "GateFailed reason must carry the failing gate command, got: {reason}"
+                );
+            }
+            IntegrationOutcome::Integrated { .. } => panic!(
+                "TG-S07 flipped pin: gate-hostile squash was FF'd into main — the \
+                 unconditional-Pass placeholder has regressed (PMI-004①). See \
+                 .ralph/post-merge/09-test-gap-plan.md §TG-S07/TG-S13."
+            ),
+            other => panic!("TG-S07 flipped pin: expected GateFailed, got {other:?}"),
+        }
+
+        // main HEAD 未移动 (git 断言,非仅退出码)。
+        assert_eq!(
+            git(root, &["rev-parse", "refs/heads/main"]),
+            main_oid,
+            "gate failure must leave the target branch unmoved"
+        );
+        // store 零行 (TG-S13 fail-injection 语义)。
+        let rows = orch
+            .store
+            .list_for_unit("U1")
+            .expect("store readable after gate failure");
+        assert!(
+            rows.is_empty(),
+            "gate failure must write no integration record, got {} row(s)",
+            rows.len()
+        );
+        // lane 释放 (lane 可重新 acquire)。
+        assert!(
+            orch.lane
+                .core
+                .current_holder("main")
+                .expect("lane readable")
+                .is_none(),
+            "gate failure must release the lane lease"
+        );
+    }
+
+    /// TG-S07 orchestrator 级（翻转后）——对照路径: gate 通过 → 正常
+    /// Integrated。gate 命令集真实执行(exit 0)且 CAS FF 落地,证明
+    /// 翻转没有把 real 路径推向「恒拒绝」的反向退化。
+    #[test]
+    fn tg_s07_real_orchestrator_integrates_when_gate_passes() {
+        use std::process::Command as StdCommand;
+
+        fn git(root: &std::path::Path, args: &[&str]) -> String {
+            let out = StdCommand::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("git {args:?}: spawn {e}"));
+            assert!(
+                out.status.success(),
+                "git {args:?} exited {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        git(root, &["init", "-q", "--initial-branch=main"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test"]);
+        git(root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        git(root, &["add", "base.txt"]);
+        git(root, &["commit", "-q", "-m", "base"]);
+        let main_oid = git(root, &["rev-parse", "HEAD"]);
+
+        // Benign unit branch: keeps base.txt, adds u1.txt.
+        git(root, &["checkout", "-q", "-b", "feat/u1"]);
+        std::fs::write(root.join("u1.txt"), "unit-1\n").unwrap();
+        git(root, &["add", "u1.txt"]);
+        git(root, &["commit", "-q", "-m", "add u1.txt"]);
+        let unit_commit = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["checkout", "-q", "main"]);
+
+        let orch = real_orchestrator(
+            root.to_path_buf(),
+            vec![GateCommandSpec {
+                program: "sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "test -f base.txt && test -f u1.txt".to_string(),
+                ],
+            }],
+        )
+        .expect("TG-S07 opens the durable DAG store");
+        let outcome = orch
+            .integrate(IntegrationRequest {
+                unit_id: "U1".to_string(),
+                integration_order: 1,
+                target_branch: "main".to_string(),
+                base_commit: main_oid.clone(),
+                unit_commit,
+                changed_paths: vec![DiffPathEntry {
+                    path: PathBuf::from("u1.txt"),
+                    is_symlink: false,
+                    is_submodule: false,
+                }],
+                allowlist: vec![PathBuf::from("u1.txt")],
+                declared_paths: vec![PathBuf::from("u1.txt")],
+                created_at_ms: 1_700_000_000_000,
+            })
+            .expect("integrate must succeed for a passing gate");
 
         match outcome {
             IntegrationOutcome::Integrated { new_head, .. } => {
-                // 现状如实: 恒 Pass gate → squash 被 FF 进 main。
                 let tip = git(root, &["rev-parse", "refs/heads/main"]);
-                assert_eq!(
-                    tip, new_head,
-                    "gate-hostile squash WAS fast-forwarded into main — the \
-                     placeholder Pass has no behavioural gate (TG-S07 pin)"
-                );
-                // and the squash tree genuinely lacks base.txt — the
-                // "should-fail" premise of the fixture is real.
+                assert_eq!(tip, new_head, "passing gate → FF into main");
                 let tree_files = git(root, &["ls-tree", "--name-only", "HEAD"]);
                 assert!(
-                    !tree_files.lines().any(|f| f == "base.txt"),
-                    "fixture premise: integrated tree must lack base.txt"
+                    tree_files.lines().any(|f| f == "base.txt")
+                        && tree_files.lines().any(|f| f == "u1.txt"),
+                    "integrated tree must carry both files"
                 );
             }
-            IntegrationOutcome::GateFailed { .. } => {
-                panic!(
-                    "TG-S07 transitional pin: real_orchestrator returned GateFailed — \
-                     a real targeted gate has landed. Flip this pin per TG-S13: add \
-                     the fail-injection family (GateFailed + lane released + store \
-                     zero rows, Fake 语义参照 orchestrator_gate_fail_releases_lane_\
-                     and_writes_no_record), then delete this pin. See \
-                     .ralph/post-merge/09-test-gap-plan.md §TG-S07 and PMI-004."
-                );
-            }
-            other => panic!("TG-S07 pin: expected Integrated (placeholder Pass), got {other:?}"),
+            IntegrationOutcome::GateFailed { reason } => panic!(
+                "TG-S07 flipped pin (contrast path): a PASSING gate command set must \
+                 not reject the candidate, got GateFailed: {reason}"
+            ),
+            other => panic!("TG-S07 flipped pin: expected Integrated, got {other:?}"),
         }
+        // Store carries exactly one row (integration recorded).
+        let rows = orch.store.list_for_unit("U1").expect("store readable");
+        assert_eq!(rows.len(), 1, "integrated record persisted exactly once");
+    }
+
+    /// TG-S07 orchestrator 级（翻转后）——fail-closed 路径: 空的 gate
+    /// 命令集 = 无门禁配置,`real_orchestrator` 的整合流水线对任何
+    /// candidate 都拒绝(GateFailed),绝不回到「恒 Pass 无门禁」。
+    /// 这是 PMI-004① 关闭后防止半接线复活的常驻断言。
+    #[test]
+    fn tg_s07_real_orchestrator_empty_gate_spec_fails_closed() {
+        use std::process::Command as StdCommand;
+
+        fn git(root: &std::path::Path, args: &[&str]) -> String {
+            let out = StdCommand::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("git {args:?}: spawn {e}"));
+            assert!(
+                out.status.success(),
+                "git {args:?} exited {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        git(root, &["init", "-q", "--initial-branch=main"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test"]);
+        git(root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        git(root, &["add", "base.txt"]);
+        git(root, &["commit", "-q", "-m", "base"]);
+        let main_oid = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["checkout", "-q", "-b", "feat/u1"]);
+        std::fs::write(root.join("u1.txt"), "unit-1\n").unwrap();
+        git(root, &["add", "u1.txt"]);
+        git(root, &["commit", "-q", "-m", "add u1.txt"]);
+        let unit_commit = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["checkout", "-q", "main"]);
+
+        // Empty gate command set — the constructor contract says
+        // this FAILS CLOSED at Step 6.
+        let orch = real_orchestrator(root.to_path_buf(), Vec::new())
+            .expect("orchestrator still constructs (store path is independent)");
+        let outcome = orch
+            .integrate(IntegrationRequest {
+                unit_id: "U1".to_string(),
+                integration_order: 1,
+                target_branch: "main".to_string(),
+                base_commit: main_oid.clone(),
+                unit_commit,
+                changed_paths: vec![DiffPathEntry {
+                    path: PathBuf::from("u1.txt"),
+                    is_symlink: false,
+                    is_submodule: false,
+                }],
+                allowlist: vec![PathBuf::from("u1.txt")],
+                declared_paths: vec![PathBuf::from("u1.txt")],
+                created_at_ms: 1_700_000_000_000,
+            })
+            .expect("integrate runs the decision flow");
+        match outcome {
+            IntegrationOutcome::GateFailed { reason } => {
+                assert!(
+                    reason.contains("fail-closed") || reason.contains("no commands"),
+                    "empty gate spec must explain the fail-closed refusal, got: {reason}"
+                );
+            }
+            IntegrationOutcome::Integrated { .. } => panic!(
+                "TG-S07 flipped pin: empty gate spec must FAIL CLOSED — an \
+                 unconfigured gate clearing a candidate to FF is the fake-green \
+                 gate PMI-004① closed."
+            ),
+            other => panic!("TG-S07 flipped pin: expected GateFailed, got {other:?}"),
+        }
+        // Branch + store both untouched.
+        assert_eq!(
+            git(root, &["rev-parse", "refs/heads/main"]),
+            main_oid,
+            "fail-closed refusal must leave the target branch unmoved"
+        );
+        let rows = orch.store.list_for_unit("U1").expect("store readable");
+        assert!(rows.is_empty(), "fail-closed refusal must write no rows");
     }
 }

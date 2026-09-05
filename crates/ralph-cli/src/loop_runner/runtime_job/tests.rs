@@ -282,7 +282,8 @@ fn prompt_does_not_carry_changed_paths() {
         vec!["PATH".to_string()],
     )
     .with_changed_paths(vec![PathBuf::from("/repo/src/lib.rs")]);
-    let ctx = build_prompt_context(&d);
+    let policy = DagEnvPolicy::from_declared(Vec::<&str>::new());
+    let ctx = build_prompt_context(&d, &policy, &HashMap::new());
     assert!(ctx.allowed_paths.contains(&PathBuf::from("/repo/src")));
     assert!(ctx.forbidden_paths.contains(&PathBuf::from("/repo/.git")));
     assert!(ctx.env_allowlist_keys.contains(&"PATH".to_string()));
@@ -298,7 +299,8 @@ fn prompt_does_not_carry_changed_paths() {
 fn fake_port_lifecycle_round_trip() {
     let port = FakeJobProcessPort::new("test");
     let d = JobDescriptor::new("U6-001", "j-1", "executor", Stage::Execute);
-    let ctx = build_prompt_context(&d);
+    let policy = DagEnvPolicy::from_declared(Vec::<&str>::new());
+    let ctx = build_prompt_context(&d, &policy, &HashMap::new());
     let h = port.launch(&ctx).expect("launch");
     port.enqueue_result(
         h.pid(),

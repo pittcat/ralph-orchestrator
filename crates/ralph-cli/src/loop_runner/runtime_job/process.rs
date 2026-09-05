@@ -236,6 +236,7 @@ mod tests {
             allowed_paths: Vec::new(),
             forbidden_paths: Vec::new(),
             env_allowlist_keys: Vec::new(),
+            child_env: std::collections::HashMap::new(),
         }
     }
 

@@ -295,6 +295,20 @@ pub fn select_eligible(candidates: &[IntegrationCandidate]) -> Vec<&IntegrationC
 // Real git-backed port. Spawns the real `git` binary.
 // ===========================================================================
 
+/// One command in the targeted gate's command set (PMI-004①).
+/// The real port executes these against a throwaway worktree
+/// checked out at the squash commit; the FIRST non-zero exit
+/// fails the gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateCommandSpec {
+    /// Program to execute (resolved via PATH of the lane's
+    /// process, run with the gate worktree as CWD).
+    pub program: String,
+    /// Verbatim arguments. No shell interpolation — the spec is
+    /// an argv vector, never a shell string.
+    pub args: Vec<String>,
+}
+
 /// Real git-backed [`GitIntegrationPort`]. Uses
 /// `git rev-parse --verify refs/heads/<target_branch>` for
 /// the head (resolves both loose refs and `.git/packed-refs`
@@ -303,11 +317,80 @@ pub fn select_eligible(candidates: &[IntegrationCandidate]) -> Vec<&IntegrationC
 /// `git update-ref` with the CAS check for the FF.
 pub struct RealGitIntegrationPort {
     pub repo_root: PathBuf,
+    /// Per-target gate command set (PMI-004①). Empty set is
+    /// FAIL-CLOSED in `run_targeted_gate` — the placeholder
+    /// unconditional Pass is gone.
+    gate_commands: Vec<GateCommandSpec>,
 }
 
 impl RealGitIntegrationPort {
+    /// Construct the port with NO gate commands. Note this is
+    /// NOT the old placeholder behaviour: with an empty command
+    /// set `run_targeted_gate` returns `GateOutcome::Fail`
+    /// (fail-closed), so lane-level unit tests that want a
+    /// passing gate must declare a trivially-passing command
+    /// via [`Self::with_gate_commands`].
     pub fn new(repo_root: PathBuf) -> Self {
-        Self { repo_root }
+        Self {
+            repo_root,
+            gate_commands: Vec::new(),
+        }
+    }
+
+    /// Replace the gate command set. Builder-style: consumes and
+    /// returns the port so `real_orchestrator` can compose it
+    /// with the caller's per-target spec in one expression.
+    pub fn with_gate_commands(mut self, commands: Vec<GateCommandSpec>) -> Self {
+        self.gate_commands = commands;
+        self
+    }
+
+    /// Read-only view of the gate command set.
+    pub fn gate_commands(&self) -> &[GateCommandSpec] {
+        &self.gate_commands
+    }
+
+    /// Execute the gate command spec inside the throwaway
+    /// worktree at `worktree_path`. Every command runs with the
+    /// worktree as CWD; the FIRST non-zero exit FAILS the gate
+    /// (short-circuit). Stdout/stderr of the failing command is
+    /// truncated into the Fail reason (bounded, no env echo).
+    fn run_gate_commands_in(&self, worktree_path: &str, unit_id: &str) -> LaneResult<GateOutcome> {
+        for spec in &self.gate_commands {
+            let mut cmd = std::process::Command::new(&spec.program);
+            cmd.args(&spec.args);
+            cmd.current_dir(worktree_path);
+            // Read-only hygiene: strip inherited env so the gate
+            // observes only the squash tree, not host secrets or
+            // host git config (plan U7 #14 controlled-environment
+            // rule). PATH is re-seeded from the lane's own process
+            // so the gate commands resolve their programs.
+            cmd.env_clear();
+            cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
+            let out = cmd
+                .output()
+                .map_err(|e| LaneError::StateError(format!("gate {}: spawn: {e}", spec.program)))?;
+            if !out.status.success() {
+                let stderr_tail = {
+                    let s = String::from_utf8_lossy(&out.stderr);
+                    // Char-boundary-safe tail: `floor_char_boundary`
+                    // avoids slicing inside a multi-byte character
+                    // (same fix family as PMI-001).
+                    let floor = crate::text::floor_char_boundary(&s, s.len().saturating_sub(500));
+                    s[floor..].to_string()
+                };
+                return Ok(GateOutcome::Fail {
+                    reason: format!(
+                        "targeted gate command {:?} (unit {}) exited {:?}: {}",
+                        spec.program,
+                        unit_id,
+                        out.status.code(),
+                        stderr_tail
+                    ),
+                });
+            }
+        }
+        Ok(GateOutcome::Pass)
     }
 }
 
@@ -350,15 +433,73 @@ impl GitIntegrationPort for RealGitIntegrationPort {
         })
     }
 
-    fn run_targeted_gate(&self, _squash: &SquashCandidate) -> LaneResult<GateOutcome> {
-        // The targeted gate's actual command list is wired by
-        // the integration use site (U7 integration.rs); this
-        // trait method is the abstract pass/fail surface. The
-        // real impl here returns Pass as a placeholder so
-        // unit tests of the lane itself can run without a
-        // full gate. The integration orchestrator replaces
-        // this with a wrapped port that runs the gate.
-        Ok(GateOutcome::Pass)
+    fn run_targeted_gate(&self, squash: &SquashCandidate) -> LaneResult<GateOutcome> {
+        // PMI-004①: the real targeted gate. The gate commands
+        // are owned by the caller (the integration orchestrator
+        // declares the per-target command set; the lane itself
+        // stays command-agnostic). `gate_commands` on the port
+        // holds that spec — an empty spec FAILS CLOSED: a lane
+        // with no gate must never clear a candidate to FF
+        // (the unconditional-Pass placeholder PMI-004 closed).
+        if self.gate_commands.is_empty() {
+            return Ok(GateOutcome::Fail {
+                reason: "targeted gate has no commands configured: refusing to clear the \
+                         candidate without running a gate (PMI-004 fail-closed)"
+                    .to_string(),
+            });
+        }
+        // The gate must be read-only against the workspace and
+        // must NOT advance the target: run it against a throwaway
+        // worktree checked out at the SQUASH COMMIT (not the
+        // branch), so the commands observe exactly the tree the
+        // CAS would fast-forward to. The worktree is detached
+        // (`--detach`, no `-B`) so no ref is created or moved.
+        let worktree_dir = tempfile::tempdir_in(&self.repo_root)
+            .map_err(|e| LaneError::StateError(format!("gate worktree tempdir: {e}")))?;
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+        let checkout = run_git_capture(
+            &self.repo_root,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                "--quiet",
+                &worktree_path,
+                &squash.squash_commit,
+            ],
+        );
+        if let Err(lane_err) = checkout {
+            // Worktree add failure could leave a half-registered
+            // worktree behind; `git worktree prune` cleans the
+            // stale registration. The candidate is REJECTED
+            // (gate Fail), not the lane: fail-closed direction.
+            let _ = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&self.repo_root)
+                .args(["worktree", "prune"])
+                .output();
+            return Ok(GateOutcome::Fail {
+                reason: format!(
+                    "gate worktree checkout failed for squash {}: {lane_err}",
+                    squash.squash_commit
+                ),
+            });
+        }
+        // Collect the outcome before removing the worktree.
+        let outcome = self.run_gate_commands_in(&worktree_path, &squash.unit_id);
+        // Explicit removal: unregister the worktree + delete the
+        // directory. `worktree remove` also handles the tempdir
+        // leftover; the TempDir Drop then only removes an empty
+        // or missing dir.
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.repo_root)
+            .args(["worktree", "remove", "--force", &worktree_path])
+            .output();
+        if !worktree_dir.path().exists() {
+            let _ = std::fs::remove_dir_all(worktree_dir.path());
+        }
+        outcome
     }
 
     fn compare_and_swap_ff(
@@ -1031,33 +1172,140 @@ mod tests_real_port {
         );
     }
 
-    /// TG-S07 (PMI-004①, P2, post-merge-converge): the REAL port's
-    /// targeted gate is an unconditional placeholder Pass. This pin
-    /// asserts the transitional contract: even when the repo is
-    /// deliberately shaped so the gate *should* fail (the squash
-    /// tree removes a file the base branch needs), the real port
-    /// still returns `Ok(GateOutcome::Pass)`.
-    ///
-    /// 本断言是**过渡 pin**(expected GREEN at HEAD)。替换 real gate
-    /// 实现时本断言必红——翻转语义按 TG-S13:gate fail → 断言
-    /// `GateOutcome::Fail` + lane 释放 + store 零行(Fake port 的
-    /// `force_gate(Fail)` 行为是语义参照,`fake_port_gate_fail_
-    /// short_circuits_lane` 已钉)。恒 Pass 假绿流入生产 = 未过测试的
-    /// squash 被 FF 进 target(P0 级危害,见 PMI-004 §impact)。
+    /// TG-S07 (PMI-004①, P2, post-merge-converge) — FLIPPED per the
+    /// pin's own built-in upgrade guidance (TG-S13): the real port's
+    /// targeted gate now EXECUTES the configured gate command set
+    /// against a throwaway worktree checked out at the squash commit.
+    /// This is the fail-injection family the pin demanded:
+    ///   1. gate command fails → `GateOutcome::Fail` (reason carries
+    ///      the failing command, NOT a Pass);
+    ///   2. gate command passes → `GateOutcome::Pass`;
+    ///   3. empty command set → `GateOutcome::Fail` (fail-closed —
+    ///      the unconditional-Pass placeholder PMI-004 closed).
     #[test]
-    fn tg_s07_real_port_gate_is_unconditional_placeholder_pass() {
+    fn tg_s07_real_port_gate_runs_commands_and_fails_closed() {
         // Fixture: main carries `base.txt`; feat/u1 adds `u1.txt`.
-        // Build a "should-fail" squash: the unit branch's tree does
-        // NOT contain base.txt (simulate by committing a deletion
-        // of base.txt on the unit branch), so any gate that ran a
-        // real check (e.g. "squash tree must contain the base
-        // contract files") would fail. The current real port runs
-        // no check at all — this test pins that honestly.
         let (dir, main_oid, _unit_commit) = fixture_repo();
         let root = dir.path();
 
-        // Shape the repo so a real gate would plausibly fail:
-        // remove `base.txt` in a follow-up commit on feat/u1.
+        // Branch advance guard: the gate must be read-only — no
+        // branch may move, and no worktree registration may remain.
+        let worktree_list_before = git(root, &["worktree", "list", "--porcelain"]);
+
+        let squash = {
+            let port = RealGitIntegrationPort::new(root.to_path_buf());
+            port.prepare_squash_candidate(&candidate(&_unit_commit, &main_oid), &main_oid)
+                .unwrap()
+        };
+
+        // 1. FAIL path: a gate command that exits non-zero.
+        let port_fail = RealGitIntegrationPort::new(root.to_path_buf()).with_gate_commands(vec![
+            GateCommandSpec {
+                program: "sh".to_string(),
+                args: vec!["-c".to_string(), "exit 42".to_string()],
+            },
+        ]);
+        let outcome = port_fail.run_targeted_gate(&squash).unwrap();
+        match &outcome {
+            GateOutcome::Fail { reason } => {
+                assert!(
+                    reason.contains("exited") && reason.contains("42"),
+                    "Fail reason must carry the failing command + exit code, got: {reason}"
+                );
+            }
+            GateOutcome::Pass => panic!(
+                "TG-S07 flipped pin: a failing gate command MUST yield GateOutcome::Fail — \
+                 the unconditional-Pass placeholder has regressed (PMI-004①). See \
+                 .ralph/post-merge/09-test-gap-plan.md §TG-S07/TG-S13."
+            ),
+        }
+
+        // 2. PASS path: the same command set, exit zero.
+        let port_pass = RealGitIntegrationPort::new(root.to_path_buf()).with_gate_commands(vec![
+            GateCommandSpec {
+                program: "sh".to_string(),
+                args: vec!["-c".to_string(), "exit 0".to_string()],
+            },
+        ]);
+        let outcome = port_pass.run_targeted_gate(&squash).unwrap();
+        assert!(
+            matches!(outcome, GateOutcome::Pass),
+            "TG-S07 flipped pin: passing gate commands must yield Pass, got {outcome:?}"
+        );
+
+        // 3. FAIL-CLOSED path: no commands configured.
+        let port_empty = RealGitIntegrationPort::new(root.to_path_buf());
+        let outcome = port_empty.run_targeted_gate(&squash).unwrap();
+        match &outcome {
+            GateOutcome::Fail { reason } => {
+                assert!(
+                    reason.contains("fail-closed") || reason.contains("no commands"),
+                    "empty gate spec must fail closed with an explanatory reason, got: {reason}"
+                );
+            }
+            GateOutcome::Pass => panic!(
+                "TG-S07 flipped pin: an EMPTY gate command set must FAIL CLOSED — \
+                 an unconfigured gate clearing a candidate to FF is exactly the \
+                 'fake green gate' PMI-004① closed."
+            ),
+        }
+
+        // 4. Read-only + hygiene guards: branch unmoved, no
+        //    leftover worktree registration (gate worktree cleaned).
+        assert_eq!(
+            git(root, &["rev-parse", "refs/heads/main"]),
+            main_oid,
+            "run_targeted_gate must not advance any branch"
+        );
+        let worktree_list_after = git(root, &["worktree", "list", "--porcelain"]);
+        assert_eq!(
+            worktree_list_before, worktree_list_after,
+            "gate worktree must be fully unregistered after the gate runs"
+        );
+    }
+
+    /// TG-S07 companion (PMI-004①): the gate commands observe the
+    /// SQUASH TREE, not the checked-out branch. A command that
+    /// greps for a file only the unit branch carries must PASS
+    /// while the main checkout still lacks it — proving the gate
+    /// ran against a worktree at the squash commit.
+    #[test]
+    fn tg_s07_real_port_gate_observes_squash_tree() {
+        let (dir, main_oid, unit_commit) = fixture_repo();
+        let root = dir.path();
+        let port = RealGitIntegrationPort::new(root.to_path_buf()).with_gate_commands(vec![
+            GateCommandSpec {
+                program: "sh".to_string(),
+                args: vec!["-c".to_string(), "test -f u1.txt".to_string()],
+            },
+        ]);
+        let squash = port
+            .prepare_squash_candidate(&candidate(&unit_commit, &main_oid), &main_oid)
+            .unwrap();
+        // The MAIN checkout (repo root, on main) does NOT carry
+        // u1.txt — only the squash tree does.
+        assert!(
+            !root.join("u1.txt").exists(),
+            "fixture premise: main checkout must lack u1.txt"
+        );
+        let outcome = port.run_targeted_gate(&squash).unwrap();
+        assert!(
+            matches!(outcome, GateOutcome::Pass),
+            "gate must run inside a worktree at the squash commit (u1.txt present \
+             there, absent in the main checkout), got {outcome:?}"
+        );
+    }
+
+    /// TG-S07 companion (PMI-004①): gate-hostile squash + a real
+    /// gate command → Fail, and the branch is untouched. This is
+    /// the exact scenario the pre-flip pin documented as
+    /// "gate-hostile shape would be FF'd into main".
+    #[test]
+    fn tg_s07_gate_hostile_squash_rejected_by_real_gate() {
+        let (dir, main_oid, _unit_commit) = fixture_repo();
+        let root = dir.path();
+
+        // Gate-hostile: unit branch DROPS base.txt.
         git(root, &["checkout", "-q", "feat/u1"]);
         std::fs::remove_file(root.join("base.txt")).unwrap();
         git(root, &["add", "-A"]);
@@ -1068,32 +1316,34 @@ mod tests_real_port {
         let hostile_unit_commit = git(root, &["rev-parse", "HEAD"]);
         git(root, &["checkout", "-q", "main"]);
 
-        let port = RealGitIntegrationPort::new(root.to_path_buf());
+        let port = RealGitIntegrationPort::new(root.to_path_buf()).with_gate_commands(vec![
+            GateCommandSpec {
+                program: "sh".to_string(),
+                args: vec!["-c".to_string(), "test -f base.txt".to_string()],
+            },
+        ]);
         let squash = port
             .prepare_squash_candidate(&candidate(&hostile_unit_commit, &main_oid), &main_oid)
             .unwrap();
-
-        // PMI-004① invariant: 「门禁」类型签名存在 ≠ 行为存在。
-        // The gate must NOT even read the squash content — the
-        // hostile shape above is irrelevant to the placeholder.
-        let outcome = port.run_targeted_gate(&squash).unwrap();
-        assert!(
-            matches!(outcome, GateOutcome::Pass),
-            "TG-S07 transitional pin: real port's run_targeted_gate must stay an \
-             unconditional Pass placeholder until the real gate lands. Got \
-             {outcome:?}. If you just implemented the real gate: flip this \
-             pin per TG-S13 (fail-injection family: gate fail → GateOutcome::\
-             Fail + lane released + store row count 0), then delete this pin. \
-             See .ralph/post-merge/09-test-gap-plan.md §TG-S07 and PMI-004."
-        );
-
-        // Anchor: the squashed tree genuinely lacks base.txt, so the
-        // "should-fail" premise of the fixture is real (keeps the pin
-        // honest if prepare_squash_candidate semantics change).
+        // Premise anchor: the squash tree genuinely lacks base.txt.
         let tree_files = git(root, &["ls-tree", "--name-only", &squash.tree_oid]);
         assert!(
             !tree_files.lines().any(|f| f == "base.txt"),
             "fixture premise: squash tree must lack base.txt, got: {tree_files}"
+        );
+
+        let outcome = port.run_targeted_gate(&squash).unwrap();
+        assert!(
+            matches!(outcome, GateOutcome::Fail { .. }),
+            "gate-hostile squash (drops base.txt) must FAIL the real gate — this is \
+             the P0-grade hazard PMI-004① closed (untested squash FF'd into target). \
+             Got {outcome:?}"
+        );
+        // Branch untouched: the refusal happens BEFORE the CAS.
+        assert_eq!(
+            git(root, &["rev-parse", "refs/heads/main"]),
+            main_oid,
+            "gate failure must leave the target branch unmoved"
         );
     }
 }

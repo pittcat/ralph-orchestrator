@@ -4,12 +4,23 @@
 //! to the subprocess port.
 //!
 //! The slice is intentionally **plain data** — no trait objects,
-//! no file handles, no env vars. The kernel builds it once per
-//! invocation and the port may inspect, log (with sanitised
-//! redaction — see `dag_inspect`'s forbidden-substring list for
-//! the style), or serialise it. The legacy wave worker keeps its
-//! own prompt builder; this type is DAG-only.
+//! no file handles. The kernel builds it once per invocation and
+//! the port may inspect, log (with sanitised redaction — see
+//! `dag_inspect`'s forbidden-substring list for the style), or
+//! serialise it. The legacy wave worker keeps its own prompt
+//! builder; this type is DAG-only.
+//!
+//! PMI-004②: the context also carries the FILTERED child env map
+//! (`child_env`). The kernel computes it once (allowlist ∩ host
+//! env) and the port's launch MUST use it as the child's ONLY
+//! env source — a real port applies it with
+//! `Command::env_clear().envs(&child_env)` so undeclared host
+//! secrets never reach the child. Before this field existed the
+//! kernel's filter result was discarded (`let _ =`), which is the
+//! gap PMI-004② closed.
 
+#[cfg(test)]
+use std::collections::HashMap;
 #[cfg(test)]
 use std::path::PathBuf;
 
@@ -17,10 +28,12 @@ use std::path::PathBuf;
 use super::JobDescriptor;
 
 /// Plain-data prompt context. Stable, `Clone`, `PartialEq`,
-/// `Eq` — every field is `String` or `Vec<PathBuf>`. The
-/// descriptor's `changed_paths` is intentionally **omitted** from
-/// the prompt context: it is part of the integration authorisation
-/// surface (U7's concern), not the worker prompt.
+/// `Eq` — every field is `String`, `Vec<PathBuf>`, or the
+/// plain `HashMap<String, String>` child env map. The
+/// descriptor's `changed_paths` is intentionally **omitted**
+/// from the prompt context: it is part of the integration
+/// authorisation surface (U7's concern), not the worker
+/// prompt.
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptContext {
@@ -31,6 +44,11 @@ pub struct PromptContext {
     pub allowed_paths: Vec<PathBuf>,
     pub forbidden_paths: Vec<PathBuf>,
     pub env_allowlist_keys: Vec<String>,
+    /// PMI-004②: the env-allowlist-filtered child env map. This
+    /// is the **only** env surface a real port may hand to the
+    /// child process. `env_allowlist_keys` stays as the declared
+    /// (name-only) contract; this map is the resolved values.
+    pub child_env: HashMap<String, String>,
 }
 
 #[cfg(test)]
@@ -50,16 +68,28 @@ impl PromptContext {
     }
 }
 
-/// Build a prompt context from a descriptor. Pure function: same
-/// descriptor always yields the same prompt context. `stage` is
-/// rendered as the stable `Stage::as_str` so downstream consumers
-/// can branch on the value without re-implementing the mapping.
+/// Build a prompt context from a descriptor, resolving the
+/// child env map from `host_env` via the allowlist. Pure with
+/// respect to `(descriptor, host_env)`: same inputs always
+/// yield the same context. `stage` is rendered as the stable
+/// `Stage::as_str` so downstream consumers can branch on the
+/// value without re-implementing the mapping.
+///
+/// PMI-004②: `child_env` =
+/// `env_policy.filter_child_env(host_env)` — the filter's
+/// output is the child's ONLY env source. The kernel no longer
+/// computes it just to throw it away.
 ///
 /// `#[cfg(test)]` because the only consumers are the per-module
 /// `tests` mod and the integration tests in `runtime_job::tests`.
 /// U7 will promote it once a real subprocess backend is wired.
 #[cfg(test)]
-pub fn build_prompt_context(descriptor: &JobDescriptor) -> PromptContext {
+pub fn build_prompt_context(
+    descriptor: &JobDescriptor,
+    env_policy: &super::environment::DagEnvPolicy,
+    host_env: &HashMap<String, String>,
+) -> PromptContext {
+    let child_env = env_policy.filter_child_env(host_env);
     PromptContext {
         unit_key: descriptor.unit_key.clone(),
         job_id: descriptor.job_id.clone(),
@@ -68,16 +98,20 @@ pub fn build_prompt_context(descriptor: &JobDescriptor) -> PromptContext {
         allowed_paths: descriptor.allowed_paths.clone(),
         forbidden_paths: descriptor.forbidden_paths.clone(),
         env_allowlist_keys: descriptor.env_allowlist_keys.clone(),
+        child_env,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::environment::DagEnvPolicy;
     use super::*;
     use crate::loop_runner::runtime_job::Stage;
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
-    /// Build is a pure function: same descriptor → same context.
+    /// Build is a pure function: same (descriptor, env) → same
+    /// context.
     #[test]
     fn build_is_pure() {
         let d = JobDescriptor::new_full(
@@ -89,8 +123,10 @@ mod tests {
             vec![PathBuf::from("/repo/.git")],
             vec!["PATH".to_string(), "HOME".to_string()],
         );
-        let a = build_prompt_context(&d);
-        let b = build_prompt_context(&d);
+        let host_env: HashMap<String, String> = [("PATH".to_string(), "/bin".to_string())].into();
+        let policy = DagEnvPolicy::from_declared(["PATH", "HOME"]);
+        let a = build_prompt_context(&d, &policy, &host_env);
+        let b = build_prompt_context(&d, &policy, &host_env);
         assert_eq!(a, b);
     }
 
@@ -100,7 +136,9 @@ mod tests {
     #[test]
     fn stage_uses_stable_short_string() {
         let d = JobDescriptor::new("U6-001", "exec", "executor", Stage::Review);
-        let ctx = build_prompt_context(&d);
+        let policy = DagEnvPolicy::from_declared(Vec::<&str>::new());
+        let host_env: HashMap<String, String> = HashMap::new();
+        let ctx = build_prompt_context(&d, &policy, &host_env);
         assert_eq!(ctx.stage(), "review");
         assert_eq!(ctx.unit_key(), "U6-001");
         assert_eq!(ctx.job_id(), "exec");
@@ -123,9 +161,43 @@ mod tests {
             forbidden.clone(),
             env.clone(),
         );
-        let ctx = build_prompt_context(&d);
+        let host_env: HashMap<String, String> = [
+            ("PATH".to_string(), "/a:/b".to_string()),
+            ("UNRELATED".to_string(), "noise".to_string()),
+        ]
+        .into();
+        let policy = DagEnvPolicy::from_declared(["PATH", "RALPH_DAG"]);
+        let ctx = build_prompt_context(&d, &policy, &host_env);
         assert_eq!(ctx.allowed_paths, allowed);
         assert_eq!(ctx.forbidden_paths, forbidden);
         assert_eq!(ctx.env_allowlist_keys, env);
+    }
+
+    /// PMI-004②: `child_env` carries exactly the allowlist ∩
+    /// host-env intersection — the filter result is the child's
+    /// ONLY env source. `UNRELATED` (undeclared) must be absent.
+    #[test]
+    fn child_env_carries_filtered_map_not_host_env() {
+        let d = JobDescriptor::new_full(
+            "U6-003",
+            "exec-w-3-1",
+            "executor",
+            Stage::Execute,
+            Vec::new(),
+            Vec::new(),
+            vec!["PATH".to_string()],
+        );
+        let host_env: HashMap<String, String> = [
+            ("PATH".to_string(), "/a:/b".to_string()),
+            ("UNRELATED".to_string(), "noise".to_string()),
+            ("FAKE_SECRET_TOKEN".to_string(), "sentinel".to_string()),
+        ]
+        .into();
+        let policy = DagEnvPolicy::from_declared(["PATH"]);
+        let ctx = build_prompt_context(&d, &policy, &host_env);
+        assert_eq!(ctx.child_env.len(), 1);
+        assert_eq!(ctx.child_env.get("PATH").map(String::as_str), Some("/a:/b"));
+        assert!(!ctx.child_env.contains_key("UNRELATED"));
+        assert!(!ctx.child_env.contains_key("FAKE_SECRET_TOKEN"));
     }
 }
