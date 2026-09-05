@@ -1030,4 +1030,70 @@ mod tests_real_port {
             "spawn failure must surface as StateError, got {err:?}"
         );
     }
+
+    /// TG-S07 (PMI-004①, P2, post-merge-converge): the REAL port's
+    /// targeted gate is an unconditional placeholder Pass. This pin
+    /// asserts the transitional contract: even when the repo is
+    /// deliberately shaped so the gate *should* fail (the squash
+    /// tree removes a file the base branch needs), the real port
+    /// still returns `Ok(GateOutcome::Pass)`.
+    ///
+    /// 本断言是**过渡 pin**(expected GREEN at HEAD)。替换 real gate
+    /// 实现时本断言必红——翻转语义按 TG-S13:gate fail → 断言
+    /// `GateOutcome::Fail` + lane 释放 + store 零行(Fake port 的
+    /// `force_gate(Fail)` 行为是语义参照,`fake_port_gate_fail_
+    /// short_circuits_lane` 已钉)。恒 Pass 假绿流入生产 = 未过测试的
+    /// squash 被 FF 进 target(P0 级危害,见 PMI-004 §impact)。
+    #[test]
+    fn tg_s07_real_port_gate_is_unconditional_placeholder_pass() {
+        // Fixture: main carries `base.txt`; feat/u1 adds `u1.txt`.
+        // Build a "should-fail" squash: the unit branch's tree does
+        // NOT contain base.txt (simulate by committing a deletion
+        // of base.txt on the unit branch), so any gate that ran a
+        // real check (e.g. "squash tree must contain the base
+        // contract files") would fail. The current real port runs
+        // no check at all — this test pins that honestly.
+        let (dir, main_oid, _unit_commit) = fixture_repo();
+        let root = dir.path();
+
+        // Shape the repo so a real gate would plausibly fail:
+        // remove `base.txt` in a follow-up commit on feat/u1.
+        git(root, &["checkout", "-q", "feat/u1"]);
+        std::fs::remove_file(root.join("base.txt")).unwrap();
+        git(root, &["add", "-A"]);
+        git(
+            root,
+            &["commit", "-q", "-m", "drop base.txt (gate-hostile shape)"],
+        );
+        let hostile_unit_commit = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["checkout", "-q", "main"]);
+
+        let port = RealGitIntegrationPort::new(root.to_path_buf());
+        let squash = port
+            .prepare_squash_candidate(&candidate(&hostile_unit_commit, &main_oid), &main_oid)
+            .unwrap();
+
+        // PMI-004① invariant: 「门禁」类型签名存在 ≠ 行为存在。
+        // The gate must NOT even read the squash content — the
+        // hostile shape above is irrelevant to the placeholder.
+        let outcome = port.run_targeted_gate(&squash).unwrap();
+        assert!(
+            matches!(outcome, GateOutcome::Pass),
+            "TG-S07 transitional pin: real port's run_targeted_gate must stay an \
+             unconditional Pass placeholder until the real gate lands. Got \
+             {outcome:?}. If you just implemented the real gate: flip this \
+             pin per TG-S13 (fail-injection family: gate fail → GateOutcome::\
+             Fail + lane released + store row count 0), then delete this pin. \
+             See .ralph/post-merge/09-test-gap-plan.md §TG-S07 and PMI-004."
+        );
+
+        // Anchor: the squashed tree genuinely lacks base.txt, so the
+        // "should-fail" premise of the fixture is real (keeps the pin
+        // honest if prepare_squash_candidate semantics change).
+        let tree_files = git(root, &["ls-tree", "--name-only", &squash.tree_oid]);
+        assert!(
+            !tree_files.lines().any(|f| f == "base.txt"),
+            "fixture premise: squash tree must lack base.txt, got: {tree_files}"
+        );
+    }
 }

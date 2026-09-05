@@ -774,4 +774,122 @@ mod tests {
             );
         }
     }
+
+    // ===================================================================
+    // TG-S07 (PMI-004①, P2, post-merge-converge): real 路径门禁恒
+    // Pass——现状 pin。Invariant: 「门禁」类型签名存在 ≠ 行为存在;
+    // real_orchestrator() 用裸 RealGitIntegrationPort 构造 lane(无
+    // wrapped gate port),任何「gate fail → 不 FF」的语义在 real 路径
+    // 上都不可达(Fake port 的 force_gate(Fail) 只有测试态)。
+    //
+    // 本组测试是**过渡 pin**(expected GREEN at HEAD):
+    //   - 变红 = real gate / wrapped port 已实现 → 按 TG-S13 补全
+    //     「gate fail → GateFailed + lane 释放 + store 零行」的故障
+    //     注入族(Fake 语义参照: orchestrator_gate_fail_releases_
+    //     lane_and_writes_no_record 已钉),否则恒 Pass 假绿流入生产。
+    // ===================================================================
+
+    /// TG-S07 orchestrator 级: `real_orchestrator()` 构造的整合流水线
+    /// 在「门禁应当失败」的 repo 形态下仍把 gate-fail squash **FF 进
+    /// target 分支**——恒 Pass 假绿的端到端实证(不是只测 port 方法,
+    /// 而是测 orchestrator.integrate 的真实决策流)。
+    ///
+    /// fixture: main 带 `base.txt`;unit 分支删掉 `base.txt`(
+    /// gate-hostile 形态——任何跑真实门禁命令集的实现都应拒)。真实
+    /// 门禁落地的翻转语义(见 TG-S13): 期望 `IntegrationOutcome::
+    /// GateFailed`,且 main HEAD 未移动、store 零行。当前(H):恒
+    /// Pass → `Integrated`,main 被 FF 到 squash——现状如实。
+    #[test]
+    fn tg_s07_real_orchestrator_ffs_gate_hostile_squash_placeholder_pass() {
+        use std::process::Command as StdCommand;
+
+        fn git(root: &std::path::Path, args: &[&str]) -> String {
+            let out = StdCommand::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("git {args:?}: spawn {e}"));
+            assert!(
+                out.status.success(),
+                "git {args:?} exited {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        // Build the throwaway repo (mirrors ralph-core's
+        // tests_real_port::fixture_repo shape, local copy because the
+        // core fixture helper is not exported across crates).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        git(root, &["init", "-q", "--initial-branch=main"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test"]);
+        git(root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        git(root, &["add", "base.txt"]);
+        git(root, &["commit", "-q", "-m", "base"]);
+        let main_oid = git(root, &["rev-parse", "HEAD"]);
+
+        // Gate-hostile unit branch: DROP base.txt. A real targeted
+        // gate (per-target gate command set, U7 promote contract)
+        // would fail this squash; the placeholder passes it.
+        git(root, &["checkout", "-q", "-b", "feat/u1"]);
+        std::fs::remove_file(root.join("base.txt")).unwrap();
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", "drop base.txt"]);
+        let unit_commit = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["checkout", "-q", "main"]);
+
+        let orch = real_orchestrator(root.to_path_buf());
+        let outcome = orch
+            .integrate(IntegrationRequest {
+                unit_id: "U1".to_string(),
+                integration_order: 1,
+                target_branch: "main".to_string(),
+                base_commit: main_oid.clone(),
+                unit_commit,
+                changed_paths: vec![DiffPathEntry {
+                    path: PathBuf::from("base.txt"),
+                    is_symlink: false,
+                    is_submodule: false,
+                }],
+                allowlist: vec![PathBuf::from("base.txt")],
+                declared_paths: vec![PathBuf::from("base.txt")],
+                created_at_ms: 1_700_000_000_000,
+            })
+            .expect("integrate must not error (placeholder gate cannot fail)");
+
+        match outcome {
+            IntegrationOutcome::Integrated { new_head, .. } => {
+                // 现状如实: 恒 Pass gate → squash 被 FF 进 main。
+                let tip = git(root, &["rev-parse", "refs/heads/main"]);
+                assert_eq!(
+                    tip, new_head,
+                    "gate-hostile squash WAS fast-forwarded into main — the \
+                     placeholder Pass has no behavioural gate (TG-S07 pin)"
+                );
+                // and the squash tree genuinely lacks base.txt — the
+                // "should-fail" premise of the fixture is real.
+                let tree_files = git(root, &["ls-tree", "--name-only", "HEAD"]);
+                assert!(
+                    !tree_files.lines().any(|f| f == "base.txt"),
+                    "fixture premise: integrated tree must lack base.txt"
+                );
+            }
+            IntegrationOutcome::GateFailed { .. } => {
+                panic!(
+                    "TG-S07 transitional pin: real_orchestrator returned GateFailed — \
+                     a real targeted gate has landed. Flip this pin per TG-S13: add \
+                     the fail-injection family (GateFailed + lane released + store \
+                     zero rows, Fake 语义参照 orchestrator_gate_fail_releases_lane_\
+                     and_writes_no_record), then delete this pin. See \
+                     .ralph/post-merge/09-test-gap-plan.md §TG-S07 and PMI-004."
+                );
+            }
+            other => panic!("TG-S07 pin: expected Integrated (placeholder Pass), got {other:?}"),
+        }
+    }
 }
