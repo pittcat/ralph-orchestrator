@@ -64,8 +64,10 @@ use ralph_core::supervisor::changed_path_guard::{
 // pull it in there directly to avoid an `unused_imports` warning
 // at the bin target.
 use ralph_core::supervisor::dag_integration::{
-    InMemoryIntegrationStore, IntegrationInput, IntegrationRecord, IntegrationStore,
+    IntegrationInput, IntegrationRecord, IntegrationStore,
 };
+#[cfg(feature = "supervisor-db")]
+use ralph_core::supervisor::dag_store_rusqlite::RusqliteIntegrationStore;
 use ralph_core::supervisor::integration_lane::{
     CasOutcome, GateOutcome, GitIntegrationPort, IntegrationCandidate, IntegrationLane, LaneCore,
     LaneError, LaneGuard, RealGitIntegrationPort, select_eligible,
@@ -133,14 +135,17 @@ pub enum IntegrationError {
 
 /// Per-target integration orchestrator. Composes the lane +
 /// port + integration store. Generic over the lane's repo
-/// marker (Real/Fake) and the git port.
+/// marker (Real/Fake) and the git port. The store is the
+/// `IntegrationStore` TRAIT object so the durable (rusqlite)
+/// and in-memory variants are interchangeable; `real_orchestrator`
+/// wires the durable variant (PMI-006).
 pub struct IntegrationOrchestrator<R, P>
 where
     R: 'static,
     P: GitIntegrationPort + 'static,
 {
     pub lane: Arc<IntegrationLane<R, P>>,
-    pub store: Arc<InMemoryIntegrationStore>,
+    pub store: Arc<dyn IntegrationStore>,
 }
 
 impl<R, P> IntegrationOrchestrator<R, P>
@@ -148,7 +153,7 @@ where
     R: 'static,
     P: GitIntegrationPort + 'static,
 {
-    pub fn new(lane: Arc<IntegrationLane<R, P>>, store: Arc<InMemoryIntegrationStore>) -> Self {
+    pub fn new(lane: Arc<IntegrationLane<R, P>>, store: Arc<dyn IntegrationStore>) -> Self {
         Self { lane, store }
     }
 
@@ -260,14 +265,79 @@ where
 /// Convenience constructor for the live, git-backed
 /// orchestrator. The `repo_root` is what every git call
 /// resolves against.
+///
+/// PMI-006: the integration store is the DURABLE rusqlite
+/// variant persisted at `<repo_root>/.ralph/dag.db` (override
+/// with `RALPH_DAG_STORE_PATH`). Integration records survive
+/// process restarts; a reopened orchestrator replays the same
+/// rows (idempotent natural-key semantics) instead of cold
+/// starting. Store-open failure fails closed — the caller sees
+/// the typed error, never a silent fallback to the in-memory
+/// variant (that would resurrect the process-local store
+/// PMI-006 closed).
 pub fn real_orchestrator(
     repo_root: PathBuf,
-) -> Arc<IntegrationOrchestrator<RealRepo, RealGitIntegrationPort>> {
+) -> Result<Arc<IntegrationOrchestrator<RealRepo, RealGitIntegrationPort>>, DagStoreOpenError> {
     let core = Arc::new(LaneCore::new());
-    let port = Arc::new(RealGitIntegrationPort::new(repo_root));
+    let port = Arc::new(RealGitIntegrationPort::new(repo_root.clone()));
     let lane = Arc::new(IntegrationLane::<RealRepo, _>::new(core, port));
-    let store = Arc::new(InMemoryIntegrationStore::new());
-    Arc::new(IntegrationOrchestrator::new(lane, store))
+    let db_path = dag_store_path(&repo_root);
+    #[cfg(feature = "supervisor-db")]
+    let store: Arc<dyn IntegrationStore> = {
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| DagStoreOpenError {
+                path: db_path.clone(),
+                source_msg: format!("create parent dir: {err}"),
+            })?;
+        }
+        Arc::new(
+            RusqliteIntegrationStore::open(&db_path).map_err(|err| DagStoreOpenError {
+                path: db_path.clone(),
+                source_msg: err.to_string(),
+            })?,
+        )
+    };
+    #[cfg(not(feature = "supervisor-db"))]
+    let store: Arc<dyn IntegrationStore> = {
+        // Fail closed, mirroring build_supervisor_bridge: a build
+        // without the `supervisor-db` feature must not silently
+        // degrade the durable promise to the process-local store.
+        let _ = db_path;
+        return Err(DagStoreOpenError {
+            path: db_path,
+            source_msg: "supervisor-db cargo feature is off in this build; rebuild \
+                     ralph-cli with --features supervisor-db (or the default \
+                     features) to use the durable DAG integration store"
+                .to_string(),
+        });
+    };
+    Ok(Arc::new(IntegrationOrchestrator::new(lane, store)))
+}
+
+/// Typed error for a failed durable DAG store open. Fail-closed
+/// surface: the caller decides how to surface it; no silent
+/// fallback.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("durable DAG store unavailable at {path}: {source_msg}")]
+pub struct DagStoreOpenError {
+    pub path: PathBuf,
+    pub source_msg: String,
+}
+
+/// Resolve the durable DAG store path for `repo_root`:
+/// `RALPH_DAG_STORE_PATH` (absolute) when set, else
+/// `<repo_root>/.ralph/dag.db`. The DAG state family deliberately
+/// keeps its own file: the wave supervisor store
+/// (`.ralph/supervisor.db`) stays the single wave authority
+/// (04 audit); the DAG scheduler owns its tables in its own
+/// database so neither store's migrations or lock window wedges
+/// the other.
+pub fn dag_store_path(repo_root: &std::path::Path) -> PathBuf {
+    std::env::var("RALPH_DAG_STORE_PATH")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root.join(".ralph").join("dag.db"))
 }
 
 /// Real-repo marker for the orchestrator's generic param.
@@ -285,6 +355,7 @@ mod tests {
     use super::*;
 
     use ralph_core::supervisor::changed_path_guard::{DiffPathEntry, FORBIDDEN_TOP_LEVEL_PREFIXES};
+    use ralph_core::supervisor::dag_integration::InMemoryIntegrationStore;
     use ralph_core::supervisor::integration_lane::{
         CasOutcome, FakeGitIntegrationPort, FakeRepo, GateOutcome, IntegrationLane,
     };
@@ -302,7 +373,7 @@ mod tests {
     ) -> Arc<IntegrationOrchestrator<FakeRepo, FakeGitIntegrationPort>> {
         let core = Arc::new(LaneCore::new());
         let lane = Arc::new(IntegrationLane::<FakeRepo, _>::new(core, port.clone()));
-        let store = Arc::new(InMemoryIntegrationStore::new());
+        let store: Arc<dyn IntegrationStore> = Arc::new(InMemoryIntegrationStore::new());
         Arc::new(IntegrationOrchestrator::new(lane, store))
     }
 
@@ -445,7 +516,13 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(orch.store.len(), 0);
+        assert!(
+            orch.store
+                .list_for_unit("U1")
+                .expect("store readable after gate failure")
+                .is_empty(),
+            "gate failure must write no integration record"
+        );
     }
 
     /// U7 contract: when the target moves between read and
@@ -483,7 +560,13 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(orch.store.len(), 0);
+        assert!(
+            orch.store
+                .list_for_unit("U1")
+                .expect("store readable after stale CAS")
+                .is_empty(),
+            "stale CAS must write no integration record"
+        );
     }
 
     /// U7 contract: integration records are idempotent on the
@@ -527,7 +610,14 @@ mod tests {
             .expect("idempotent");
         assert_eq!(again.id, record_1.id);
         assert_eq!(again.commit_fingerprint, record_1.commit_fingerprint);
-        assert_eq!(orch.store.len(), 1);
+        assert_eq!(
+            orch.store
+                .list_for_unit("U1")
+                .expect("store readable")
+                .len(),
+            1,
+            "idempotent replay must not create a second row"
+        );
     }
 
     /// U7 contract: select_eligible returns candidates in
@@ -643,30 +733,28 @@ mod tests {
     }
 
     // ===================================================================
-    // TG-S04 (PMI-006, P1, post-merge-converge): DAG 状态族无持久权威
-    // ——现状 pin。Invariant: exactly-once / crash-window recovery 承诺
-    // 以持久化状态为前提;`real_orchestrator` 每次调用
-    // `InMemoryIntegrationStore::new()`（integration.rs 的构造函数体）,
-    // 跨「进程重启」（第二个实例）集成记录即蒸发。
-    //
-    // 本组测试是**过渡 pin**（expected GREEN at HEAD）:
-    //   - 步骤 2 变绿 = durable store 已落地 → 按 TG-S12 升级全量验证;
-    //   - 步骤 3 变红 = 有人在没改 `real_orchestrator` 的情况下加了
-    //     rusqlite 层（半接线）→ 本 pin 强制同步改 `real_orchestrator`。
+    // TG-S04 (PMI-006, P1, post-merge-converge): durable DAG store
+    // ——持久化断言(原过渡 pin 于 durable store 落地后翻转,fixer
+    // activation 2026-09-05)。Invariant: exactly-once / crash-window
+    // recovery 承诺以持久化状态为前提;`real_orchestrator` 必须把
+    // integration 记录写进 rusqlite durable 变体,「进程重启」(第二
+    // 个实例)经同 repo_root 的 dag store reopen 读到 A 的记录——
+    // 重放语义而非冷启动语义。
     // ===================================================================
 
     /// TG-S04 步骤 1+2: 实例 A 对 `(unit-u1, feat/target-a)` 执行
     /// `record_integrated`（幂等自然键）;实例 B（同一 repo_root、模拟
-    /// 进程重启）查询同 tuple → 断言**查不到**（返回空/不存在,而非
-    /// 返回 A 的记录）——内存 store 跨进程即丢,行为如实反映现状。
+    /// 进程重启）查询同 tuple → 断言**读回 A 的记录**（重放语义,
+    /// 非冷启动空态）。
     #[test]
-    fn tg_s04_real_orchestrator_store_is_process_local_transitional_pin() {
+    fn tg_s04_real_orchestrator_store_survives_process_restart() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo_root = tmp.path().to_path_buf();
 
         // 实例 A: 同一 repo_root 构造两个独立 orchestrator,
         // 模拟「进程 A 运行 → 退出 → 进程 B 重启后查询」。
-        let orch_a = real_orchestrator(repo_root.clone());
+        let orch_a =
+            real_orchestrator(repo_root.clone()).expect("instance A opens the durable DAG store");
         let input_a = IntegrationInput {
             unit_id: "unit-u1".to_string(),
             target_branch: "feat/target-a".to_string(),
@@ -689,39 +777,45 @@ mod tests {
         assert_eq!(replay_a.id, recorded_a.id);
 
         // 实例 B（同 repo_root,模拟进程重启）: 同 tuple 查询。
-        let orch_b = real_orchestrator(repo_root.clone());
+        // durable store 落地后,实例 B 必须读回 A 的记录(重放语义)。
+        let orch_b =
+            real_orchestrator(repo_root.clone()).expect("instance B reopens the durable DAG store");
         let rows_b = orch_b
             .store
             .list_for_unit("unit-u1")
             .expect("instance B queries the same unit tuple");
-        assert!(
-            rows_b.is_empty(),
-            "TG-S04 transitional pin: instance B (same repo_root, simulated \
-             process restart) must NOT see instance A's integration records \
-             for (unit-u1, feat/target-a) — got {} row(s): {rows_b:?}. \
-             If this assertion FAILS, the durable DAG integration store has \
-             landed (good news): follow TG-S12 in \
-             .ralph/post-merge/09-test-gap-plan.md to upgrade to the full \
-             crash-window / exactly-once verification matrix, and update \
-             this pin to assert persistence instead.",
+        assert_eq!(
+            rows_b.len(),
+            1,
+            "TG-S04 durable assertion: instance B (same repo_root, simulated \
+             process restart) MUST see instance A's integration record for \
+             (unit-u1, feat/target-a) — got {} row(s): {rows_b:?}. \
+             If this assertion FAILS, real_orchestrator has regressed to a \
+             process-local store (half-wiring / durability loss): restore \
+             the rusqlite-backed store in real_orchestrator per PMI-006.",
             rows_b.len()
         );
-        // 步骤 2 的另一半: store 整体为空（len()=0）,连「行存在但
-        // 状态漂移」都不存在——冷启动语义而非重放语义。
-        assert_eq!(
-            orch_b.store.len(),
-            0,
-            "instance B's store must be cold-empty (len=0), not carry \
-             over instance A's rows"
-        );
+        assert_eq!(rows_b[0].unit_id, "unit-u1");
+        assert_eq!(rows_b[0].target_branch, "feat/target-a");
+        assert_eq!(rows_b[0].base_commit, "BASE_A");
+        assert_eq!(rows_b[0].integrated_commit, "SQUASH_A");
+        assert_eq!(rows_b[0].expected_head_before, "HEAD_A");
+        // 同 tuple 幂等重放(跨进程): B 以 A 的原始输入重放,必须
+        // 返回同一行(fingerprint 一致,零 DuplicateUnitForTarget)。
+        let replay_b = orch_b
+            .store
+            .record_integrated(&input_a)
+            .expect("cross-instance replay is idempotent");
+        assert_eq!(replay_b.id, recorded_a.id);
+        assert_eq!(replay_b.commit_fingerprint, recorded_a.commit_fingerprint);
     }
 
-    /// TG-S04 步骤 3: `crates/ralph-core/src/supervisor/` 不存在
-    /// `dag_store_rusqlite.rs`、`migrations/` 无 dag 表——过渡 pin;
-    /// promote 落 rusqlite 时本断言必红,强制同步改 `real_orchestrator`
-    /// （防止「加了 durable 层但 real 路径仍用内存 store」的半接线）。
+    /// TG-S04 步骤 3: `crates/ralph-core/src/supervisor/dag_store_rusqlite.rs`
+    /// 存在、`migrations/` v13 覆盖 DAG 表——durable 层与 real_orchestrator
+    /// 改线必须同 PR 落地(防半接线)。原「无 durable 层」过渡 pin 于
+    /// durable store 落地时翻转为本断言。
     #[test]
-    fn tg_s04_no_durable_dag_store_layer_transitional_pin_delete_when_durable_store_lands() {
+    fn tg_s04_durable_dag_store_layer_exists_and_migrations_cover_dag_tables() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         // CARGO_MANIFEST_DIR = .../crates/ralph-cli → repo root
         // 两级父目录（与 crates/ralph-cli/tests/repro_pmi_005.rs 的
@@ -735,20 +829,16 @@ mod tests {
         let supervisor_dir = repo_root.join("crates/ralph-core/src/supervisor");
         let rusqlite_variant = supervisor_dir.join("dag_store_rusqlite.rs");
         assert!(
-            !rusqlite_variant.exists(),
-            "TG-S04 transitional pin: {rusqlite_variant:?} now exists. A durable \
-             DAG store layer landed WITHOUT rewiring `real_orchestrator` to \
-             use it (or this pin was not updated alongside the cutover). \
-             Per PMI-006 / TG-S04 步骤 3: promote 落 rusqlite 时必须同步改 \
-             real_orchestrator（integration.rs real_orchestrator 构造的 \
-             InMemoryIntegrationStore 换成 durable 变体）,并按 TG-S12 执行 \
-             全量 crash-window / exactly-once 验证;删除本 pin 与 \
-             tg_s04_real_orchestrator_store_is_process_local_transitional_pin。"
+            rusqlite_variant.exists(),
+            "TG-S04 durable assertion: {rusqlite_variant:?} no longer exists — \
+             the durable DAG store layer was removed. Per PMI-006, \
+             real_orchestrator depends on the rusqlite DAG store; removing \
+             it requires a deliberate revert decision, not silent deletion."
         );
 
-        // migrations/ 无 dag 表: 现有 v1–v12 的 SQL DDL 全文零命中
-        // `dag`（当前 grep 实测为 0 命中;迁移文件命名与 DDL 表名都会
-        // 携带 dag 字样,直接全文扫描足够钉住「无 DAG 表」）。
+        // migrations/ 覆盖 DAG 表: v13 DDL 必须命中 dag_plans /
+        // dag_integrations 两张表(与 real_orchestrator 的 durable store
+        // 同 PR 落地,防「store 在、schema 漂移」)。
         let migrations_dir = supervisor_dir.join("migrations");
         let migration_files: Vec<PathBuf> = std::fs::read_dir(&migrations_dir)
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", migrations_dir.display()))
@@ -758,21 +848,167 @@ mod tests {
             .collect();
         assert!(
             !migration_files.is_empty(),
-            "supervisor migrations dir unexpectedly empty — the v1–v12 SQL \
+            "supervisor migrations dir unexpectedly empty — the SQL \
              set must be present for this pin to mean anything"
         );
+        let mut combined_ddl = String::new();
         for path in &migration_files {
             let body = std::fs::read_to_string(path)
                 .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+            combined_ddl.push_str(&body);
+        }
+        let ddl_lower = combined_ddl.to_ascii_lowercase();
+        for table in ["dag_plans", "dag_integrations"] {
             assert!(
-                !body.to_ascii_lowercase().contains("dag"),
-                "TG-S04 transitional pin: migration {} mentions `dag` — a DAG \
-                 table landed in migrations/ while real_orchestrator still \
-                 constructs InMemoryIntegrationStore. Half-wiring detected; \
-                 see PMI-006 / TG-S04 步骤 3 for the promote checklist.",
-                path.display()
+                ddl_lower.contains(table),
+                "TG-S04 durable assertion: migration DDL no longer covers the \
+                 `{table}` table — the DAG schema drifted from the rusqlite \
+                 store. Restore the table (v13+) or update this pin \
+                 alongside a deliberate schema decision (PMI-006)."
             );
         }
+    }
+
+    // ===================================================================
+    // TG-S12 (PMI-006, P1, promote-time 全量恢复验证): durable DAG
+    // store 落地后的 crash-window / exactly-once 验收矩阵。
+    // 场景(09-test-gap-plan §TG-S12):
+    //   1. 进程 A 注册 plan + record_integrated(unit, target) → 退出
+    //      (kill -9 由「实例 drop 后重开」模拟——SQLite 的 WAL 保证
+    //      已 commit 的行跨进程存活,这正是被验证的机制本体)。
+    //   2. 进程 B(同 repo)reopen store → 断言 plan 行/integration
+    //      记录可读。
+    //   3. recovery planner 对同 tuple 输入 → Idempotent(而非
+    //      Commit)——重放零不可逆副作用(不重复 FF/squash)。
+    //   4. 异 tuple → DuplicateUnitForTarget fail-closed 不变。
+    // invariant: 崩溃后 reopen 走「重放/幂等」而非「冷启动」。
+    // ===================================================================
+    #[cfg(feature = "supervisor-db")]
+    #[test]
+    fn tg_s12_crash_restart_replays_idempotent_not_cold_start() {
+        use ralph_core::supervisor::dag_store::{
+            CanonicalPlanRecord, DagSchedulerStore, PlanStatus,
+        };
+        use ralph_core::supervisor::dag_store_rusqlite::RusqliteDagSchedulerStore;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("dag.db");
+        let plan_record = CanonicalPlanRecord {
+            plan_key: "plan-key-x".to_string(),
+            artifact_digest: "digest-x".to_string(),
+            target_branch: "feat/target-a".to_string(),
+            unit_ids: vec!["unit-u1".to_string(), "unit-u2".to_string()],
+            created_at_ms: 1_700_000_000_000,
+        };
+        let input = IntegrationInput {
+            unit_id: "unit-u1".to_string(),
+            target_branch: "feat/target-a".to_string(),
+            base_commit: "BASE_A".to_string(),
+            integrated_commit: "SQUASH_A".to_string(),
+            expected_head_before: "HEAD_A".to_string(),
+            created_at_ms: 1_700_000_000_000,
+        };
+
+        // 步骤 1: 进程 A 注册 plan + activate + record_integrated,
+        // 然后整实例 drop(模拟 kill -9:连接关闭,WAL 落盘)。
+        {
+            let plans_a =
+                RusqliteDagSchedulerStore::open(&db_path).expect("process A opens plan store");
+            let reg = plans_a
+                .register_plan(&plan_record)
+                .expect("process A registers the plan");
+            assert_eq!(reg.status, PlanStatus::Pending);
+            plans_a
+                .activate_plan("plan-key-x", "feat/target-a")
+                .expect("process A activates the plan");
+            let integration_a = plans_a.shared_with_integration();
+            integration_a
+                .record_integrated(&input)
+                .expect("process A records the integration");
+            // 实例 A 到此结束——不再持有任何 handle。
+        }
+
+        // 步骤 2: 进程 B(同 repo)reopen store → plan 行 + integration
+        // 记录可读(重放语义,非冷启动)。
+        let plans_b =
+            RusqliteDagSchedulerStore::open(&db_path).expect("process B reopens the store");
+        let reg_b = plans_b
+            .get_plan("plan-key-x")
+            .expect("process B reads the plan")
+            .expect("plan row survives the restart");
+        assert_eq!(reg_b.artifact_digest, "digest-x");
+        assert_eq!(reg_b.target_branch, "feat/target-a");
+        assert_eq!(reg_b.status, PlanStatus::Active, "activation survives");
+        assert_eq!(
+            reg_b.unit_ids,
+            vec!["unit-u1".to_string(), "unit-u2".to_string()]
+        );
+        let integration_b = plans_b.shared_with_integration();
+        let rows = integration_b
+            .list_for_unit("unit-u1")
+            .expect("process B lists the unit");
+        assert_eq!(rows.len(), 1, "integration record survives the restart");
+        assert_eq!(rows[0].integrated_commit, "SQUASH_A");
+        assert!(!rows[0].acked, "ack state round-trips as false");
+        // 重放读出的记录与 recovery planner 的 persisted 输入对齐。
+        let persisted = super::super::recovery::MergeIntentFingerprint {
+            unit_id: rows[0].unit_id.clone(),
+            base_commit: rows[0].base_commit.clone(),
+            integrated_commit: rows[0].integrated_commit.clone(),
+            expected_head_before: rows[0].expected_head_before.clone(),
+        };
+
+        // 步骤 3: recovery planner 对同 tuple 输入 → Idempotent
+        // (而非 Commit)——重放零不可逆副作用。
+        let candidate = super::super::recovery::MergeIntentFingerprint {
+            unit_id: input.unit_id.clone(),
+            base_commit: input.base_commit.clone(),
+            integrated_commit: input.integrated_commit.clone(),
+            expected_head_before: input.expected_head_before.clone(),
+        };
+        use super::super::recovery::{IntegrationRecordDecision, plan_integration_record};
+        assert_eq!(
+            plan_integration_record(Some(&persisted), &candidate),
+            IntegrationRecordDecision::Idempotent,
+            "TG-S12 step 3: same-tuple replay after crash must plan as \
+             Idempotent, not Commit — otherwise recovery would re-FF/re-squash"
+        );
+
+        // 步骤 4: 异 tuple → DuplicateUnitForTarget fail-closed 不变。
+        let drift_candidate = super::super::recovery::MergeIntentFingerprint {
+            unit_id: input.unit_id.clone(),
+            base_commit: "DIFFERENT_BASE".to_string(),
+            integrated_commit: input.integrated_commit.clone(),
+            expected_head_before: input.expected_head_before.clone(),
+        };
+        assert!(
+            matches!(
+                plan_integration_record(Some(&persisted), &drift_candidate),
+                IntegrationRecordDecision::DuplicateUnitForTarget { .. }
+            ),
+            "TG-S12 step 4: different tuple for the same unit must stay \
+             fail-closed (DuplicateUnitForTarget)"
+        );
+        // 同一语义在 store 层直接验证(持久化行存在,replay 路径)。
+        let mut drifted = input.clone();
+        drifted.base_commit = "DIFFERENT_BASE".to_string();
+        let err = integration_b
+            .record_integrated(&drifted)
+            .expect_err("different tuple must fail closed");
+        assert!(matches!(
+            err,
+            ralph_core::supervisor::dag_integration::IntegrationStoreError::DuplicateUnitForTarget { .. }
+        ));
+        // 同 tuple 幂等重放(跨进程): plan 侧同样幂等。
+        let reg_replay = plans_b
+            .register_plan(&plan_record)
+            .expect("cross-process plan re-register is idempotent");
+        assert_eq!(reg_replay.id, reg_b.id);
+        let replay = integration_b
+            .record_integrated(&input)
+            .expect("cross-process replay is idempotent");
+        assert_eq!(replay.id, rows[0].id);
+        assert_eq!(replay.commit_fingerprint, rows[0].commit_fingerprint);
     }
 
     // ===================================================================
@@ -843,7 +1079,8 @@ mod tests {
         let unit_commit = git(root, &["rev-parse", "HEAD"]);
         git(root, &["checkout", "-q", "main"]);
 
-        let orch = real_orchestrator(root.to_path_buf());
+        let orch =
+            real_orchestrator(root.to_path_buf()).expect("TG-S07 opens the durable DAG store");
         let outcome = orch
             .integrate(IntegrationRequest {
                 unit_id: "U1".to_string(),

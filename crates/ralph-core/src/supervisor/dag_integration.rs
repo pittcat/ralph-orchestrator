@@ -100,6 +100,12 @@ pub enum IntegrationStoreError {
     },
     #[error("integration store mutex poisoned")]
     StorePoisoned,
+    /// Durable-backend (rusqlite) IO error: database open
+    /// failure, migration failure, SQL execution error, or a
+    /// poisoned connection mutex. Fail closed — the caller must
+    /// NOT retry the write blindly.
+    #[error("integration store storage IO error: {0}")]
+    StorageIo(String),
 }
 
 pub type IntegrationStoreResult<T> = Result<T, IntegrationStoreError>;

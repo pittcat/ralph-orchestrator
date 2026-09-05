@@ -2046,6 +2046,8 @@ pub use coordinator::{CoordinatorAction, SupervisorCoordinator};
 // between the runtime-owned shadow sink and the operator-facing JSON.
 pub use dag_inspect::SchedulerInspectSummary;
 pub use dag_mode::{SchedulerMode, SchedulerModeError, validate_scheduler_mode};
+#[cfg(feature = "supervisor-db")]
+pub use dag_store_rusqlite::{RusqliteDagSchedulerStore, RusqliteIntegrationStore};
 pub use memory::InMemorySupervisorStore;
 pub use merge_sink::{EventMergeSink, FileEventMergeSink, InMemoryMergeSink, MergeSinkError};
 pub use phase::{FailedReason, PhaseDecision, PhaseInputs, evaluate_phase};
@@ -2134,6 +2136,15 @@ pub mod dag_scheduler;
 pub mod dag_shadow;
 pub mod dag_store;
 pub mod dag_store_memory;
+/// PMI-006 / 2026-09-03-0959 plan U3 (R2 / R17 / E9): durable
+/// rusqlite variants of the DAG state family. Runs migrations
+/// (v1..=13) on open; the DAG tables are additive to the wave
+/// tables so a wave-authority database and a DAG store may share
+/// one file. The memory variants (`dag_store_memory` /
+/// `dag_integration`) keep the same contract suites for
+/// non-`supervisor-db` builds.
+#[cfg(feature = "supervisor-db")]
+pub mod dag_store_rusqlite;
 /// 2026-09-03-0959 plan U7: per-target integration lease +
 /// compare-and-swap fast-forward pipeline. One active lease
 /// per target branch, deterministic eligibility order, CAS

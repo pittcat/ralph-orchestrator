@@ -47,8 +47,13 @@ mod imp {
     /// Crash recovery (U2 / U3) replays these rows through the
     /// existing salvage seam to bring the main ledger back to
     /// the same state a healthy fan-in would have produced.
+    /// v13 (PMI-006 / B2 2026-09-03-0959 plan U3) adds the
+    /// `dag_plans` / `dag_integrations` tables so the DAG
+    /// scheduler's plan registrations and integration records
+    /// survive process restarts (durable DAG store in
+    /// `dag_store_rusqlite.rs`).
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 12;
+    pub const CURRENT_VERSION: i64 = 13;
 
     /// Apply migrations sequentially. Each migration is a
     /// closure that performs the SQL DDL and bumps the
@@ -390,6 +395,22 @@ mod imp {
                 ddl: include_str!("migrations/v12.sql"),
                 column_probe: None,
             },
+            // PMI-006 / 2026-09-03-0959 plan U3 (R2 / R17 / E9):
+            // adds the `dag_plans` / `dag_integrations` tables
+            // backing the durable DAG store
+            // (`dag_store_rusqlite.rs`). Forward-only `CREATE
+            // TABLE`; no ALTERs against existing tables, so the
+            // column-probe path is unnecessary. `plan_key` /
+            // `(unit_id, target_branch)` UNIQUE constraints keep
+            // registration and integration idempotency at the
+            // schema level; semantic checks (digest conflict /
+            // duplicate-unit-for-target / fingerprint drift)
+            // fail closed in the store layer.
+            Migration {
+                version: 13,
+                ddl: include_str!("migrations/v13.sql"),
+                column_probe: None,
+            },
         ]
     }
 }
@@ -461,6 +482,13 @@ mod tests {
             // existence so a future DDL drop would surface
             // before runtime.
             "slot_attempts",
+            // U1 (2026-09-01-001 plan U1): accepted slot event
+            // payload ledger for crash recovery replay.
+            "slot_event_payloads",
+            // PMI-006 / B2 (2026-09-03-0959 plan U3): durable
+            // DAG state family.
+            "dag_plans",
+            "dag_integrations",
         ];
         for table in tables {
             let count: i64 = conn
@@ -626,7 +654,7 @@ mod tests {
         assert_eq!(
             user_version(&conn).unwrap(),
             CURRENT_VERSION,
-            "user_version must be 11 after the upgrade"
+            "user_version must be CURRENT_VERSION after the upgrade"
         );
 
         // v11 table exists.
@@ -690,5 +718,88 @@ mod tests {
             attempt_rows, 0,
             "slot_attempts starts empty for legacy wave"
         );
+    }
+
+    /// PMI-006 / B2 plan U3 §14: a v12 fixture upgraded to v13
+    /// keeps every wave row intact and gains the (empty) DAG
+    /// tables. Mirrors the v10→v11 differential technique: run
+    /// migrations on a fresh DB, drop the v13 tables, rewind
+    /// `user_version` to 12, seed a representative wave row,
+    /// reopen, upgrade.
+    #[test]
+    fn migration_v12_to_v13_preserves_existing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor.db");
+
+        // Phase 1: fresh DB at CURRENT_VERSION, then rewind to a
+        // "real" v12 instance (drop the v13 tables + rewind the
+        // version so the v13 migration re-fires).
+        {
+            let conn = Connection::open(&path).unwrap();
+            run(&conn).unwrap();
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS dag_integrations;
+                 DROP TABLE IF EXISTS dag_plans;
+                 DROP INDEX IF EXISTS dag_integrations_target_idx;
+                 DROP INDEX IF EXISTS dag_plans_status_idx;",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 12_i64).unwrap();
+        }
+
+        // Phase 2: seed a representative v12 dataset (one wave +
+        // one slot — the wave-family state the upgrade must not
+        // disturb).
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "INSERT INTO waves (wave_id, idempotency_key, kind, phase, expected_total, slot_retry_budget)
+                   VALUES ('w-v12-legacy', 'idem-v12-legacy', 'exec', 'dispatch', 2, 1);
+                 INSERT INTO wave_slots (wave_id, slot_index, status, isolation, attempt_count, max_attempts)
+                   VALUES ('w-v12-legacy', 0, 'pending', 'worktree', 0, 1);",
+            )
+            .unwrap();
+        }
+
+        // Phase 3: reopen → v13 migration applies; every v12 row
+        // is unchanged; the DAG tables exist and start empty.
+        let conn = Connection::open(&path).unwrap();
+        run(&conn).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), CURRENT_VERSION);
+
+        for table in ["dag_plans", "dag_integrations"] {
+            let table_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(table_count, 1, "{table} must exist after upgrade");
+            let row_count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(row_count, 0, "{table} starts empty for legacy DB");
+        }
+
+        // Legacy wave row preserved.
+        let wave_kind: String = conn
+            .query_row(
+                "SELECT kind FROM waves WHERE wave_id = 'w-v12-legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(wave_kind, "exec", "wave row preserved across v13");
+        let slot_status: String = conn
+            .query_row(
+                "SELECT status FROM wave_slots WHERE wave_id = 'w-v12-legacy' AND slot_index = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(slot_status, "pending", "slot row preserved across v13");
     }
 }
