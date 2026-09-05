@@ -774,3 +774,100 @@ tasks:
         "RPC parent process should not hang after fatal loop termination; elapsed={elapsed:?}\nstdout: {stdout}\nstderr: {stderr}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn test_run_primary_lock_survives_cjk_prompt_at_non_boundary_byte_64() {
+    // TG-S02 (PMI-001): the real `ralph run` primary lock-acquisition path
+    // (`run.rs` calls `LoopLock::try_acquire(root, &prompt_summary)` before
+    // preflight/backend) must not panic when the prompt summary's 64th byte
+    // falls mid-character. `prompt_summary = truncate(&prompt, 100)` (100
+    // *chars*, ≈300 bytes for CJK), so a CJK prompt longer than ~21 chars
+    // is always >64 bytes; byte 64 lands mid-CJK for the constructed input.
+    //
+    // Construction: 6 ASCII bytes ("plan: ") + 50 × "中" (3 bytes each) =
+    // 156 bytes. Byte 64 sits 58 bytes into the CJK run, and 58 % 3 != 0,
+    // so it is deterministically inside a 3-byte character.
+    //
+    // This is the failing-automation repro for PMI-001 at the integration
+    // level (expected RED until `redact_prompt` becomes char-boundary safe,
+    // e.g. via `floor_char_boundary`); TG-S01 is the unit-level twin.
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+
+    // Minimal backend that completes immediately. The lock is acquired
+    // (or the panic happens) before preflight/backend execution; the
+    // backend lets the run finish cleanly once the bug is fixed.
+    let backend_script = temp_path.join("backend-complete.sh");
+    std::fs::write(
+        &backend_script,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\n\"{}\" emit LOOP_COMPLETE cjk-lock-test-done\n",
+            env!("CARGO_BIN_EXE_ralph")
+        ),
+    )
+    .expect("write backend script");
+    let mut permissions = std::fs::metadata(&backend_script)
+        .expect("metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&backend_script, permissions).expect("set permissions");
+
+    std::fs::write(
+        temp_path.join("ralph.yml"),
+        r#"
+cli:
+  backend: custom
+  command: "./backend-complete.sh"
+  prompt_mode: stdin
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 1
+  max_runtime_seconds: 10
+topic_format_whitelist:
+  - LOOP_COMPLETE
+tasks:
+  enabled: false
+"#,
+    )
+    .expect("write config");
+
+    let cjk_prompt = format!("plan: {}", "中".repeat(50));
+
+    let output = run_ralph(
+        temp_path,
+        &[
+            "run",
+            "--no-tui",
+            "--skip-preflight",
+            "--prompt",
+            &cjk_prompt,
+        ],
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // PMI-001 invariant: primary `ralph run` startup must not panic on
+    // non-ASCII prompt content. A panic surfaces as exit code 101 plus a
+    // `not a char boundary` / `panicked at` message on stderr.
+    assert_ne!(
+        output.status.code(),
+        Some(101),
+        "primary ralph run panicked during lock acquisition on a CJK prompt \
+         (PMI-001: `redact_prompt` slices `&prompt[..64]` at a non-boundary \
+         byte). Lock writing is a formatting path — fail-closed ≠ crash. \
+         Fix direction: char-boundary truncation (`floor_char_boundary`). \
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("not a char boundary"),
+        "char-boundary panic leaked to stderr (PMI-001): {stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked at"),
+        "unexpected panic in primary run startup: {stderr}"
+    );
+}

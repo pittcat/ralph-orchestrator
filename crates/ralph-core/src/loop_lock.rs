@@ -514,6 +514,61 @@ mod tests {
     }
 
     #[test]
+    fn test_prompt_redaction_never_panics_on_multibyte_utf8() {
+        // TG-S01 (PMI-001): `redact_prompt` slices `&prompt[..64]` at a
+        // *byte* index. For multi-byte UTF-8 prompts where byte 64 falls
+        // mid-character, that slice panics ("byte index 64 is not a char
+        // boundary") and `ralph run`'s primary lock acquisition crashes
+        // (run.rs calls `LoopLock::try_acquire(root, &prompt_summary)`).
+        // Lock writing is a formatting path and must never panic on its
+        // input (fail-closed ≠ crash). This test proves the panic.
+        let multibyte_inputs: Vec<String> = vec![
+            "中".repeat(40),                   // 3-byte CJK; byte 64 lands inside char 22
+            "a".repeat(30) + &"中".repeat(20), // ASCII prefix makes byte 64 land mid-CJK
+            "🙂".repeat(30),                   // 4-byte emoji
+            "é".repeat(100),                   // 2-byte Latin-1
+        ];
+
+        for input in &multibyte_inputs {
+            // The invariant under test: acquiring a lock with a prompt
+            // whose 64th byte is not a char boundary must not panic. A
+            // panic here fails this test directly.
+            let temp_dir = TempDir::new().unwrap();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let guard = LoopLock::try_acquire(temp_dir.path(), input);
+                // Hold the guard until the file has been read back.
+                let lock_path = temp_dir.path().join(".ralph/loop.lock");
+                let contents = fs::read_to_string(&lock_path).unwrap();
+                let _ = guard;
+                contents
+            }));
+            assert!(
+                result.is_err(),
+                "expected `redact_prompt` to panic for multibyte prompt with non-boundary byte 64 \
+                 (PMI-001 repro; fix = char-boundary truncation, e.g. `floor_char_boundary`), \
+                 input bytes = {}",
+                input.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_prompt_redaction_preserves_short_multibyte_verbatim() {
+        // TG-S01 (PMI-001) companion: prompts ≤ 64 *bytes* that are
+        // multi-byte must be preserved verbatim (no redaction branch).
+        let temp_dir = TempDir::new().unwrap();
+        let prompt = "中文提示词".to_string(); // 5 chars, 15 bytes < 64
+        assert!(prompt.len() <= 64);
+
+        let _guard = LoopLock::try_acquire(temp_dir.path(), &prompt).unwrap();
+
+        let lock_path = temp_dir.path().join(".ralph/loop.lock");
+        let contents = fs::read_to_string(&lock_path).unwrap();
+        let metadata: LockMetadata = serde_json::from_str(&contents).unwrap();
+        assert_eq!(metadata.prompt, prompt);
+    }
+
+    #[test]
     fn test_prompt_redaction_is_deterministic() {
         // U3 (plan 2026-09-01-2102): same long prompt → same redacted form
         // (SHA-256 is deterministic). Different temp dirs / different times
