@@ -3541,6 +3541,136 @@ mod tests {
         assert_eq!(resolved, None);
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // TG-S14 (PMI-007): reuse-key resolution dual implementation divergence
+    // ─────────────────────────────────────────────────────────────────────
+    //
+    // PMI-007 (.ralph/post-merge/findings/PMI-007.md): the same concept —
+    // "the exact worktree name for --reuse-worktree" — has two parallel
+    // implementations with different exclusion rules:
+    //
+    //   * run.rs production chain:
+    //     `worktree_file_name_prefix` (plan branch: NO `prompt` sentinel
+    //     filter, run.rs:746-753) → `resolve_exact_worktree_name`
+    //     (name passthrough: NO empty-string filter, run.rs:777).
+    //   * run_recovery.rs gate chain:
+    //     `exact_worktree_name_from` (plan stem DOES exclude the `prompt`
+    //     sentinel case-insensitively; empty `--worktree-name` is treated
+    //     as missing, run_recovery.rs:165-183).
+    //
+    // The two chains agree on the well-formed inputs every existing test
+    // covers (that is what PMI-007's "当前行为一致" claim rests on), but
+    // they diverge on two reachable input shapes. These tests drive BOTH
+    // chains with the SAME inputs a real `ralph run --worktree
+    // --reuse-worktree` invocation would supply, and assert the invariant
+    // PMI-007 §expected states: the reuse-key resolution entry point must
+    // be single-source — both chains resolve identical inputs to identical
+    // keys.
+    //
+    // Expected RED until the fix consolidates the two resolvers (e.g.
+    // `resolve_exact_worktree_name` delegating to `exact_worktree_name_from`
+    // with the prefix fallback appended at the tail, so the sentinel and
+    // empty-name rules live in exactly one place).
+
+    /// Drive the full run.rs production chain (`worktree_file_name_prefix`
+    /// → `resolve_exact_worktree_name`) exactly like `run_command` does at
+    /// run.rs:1055-1064, with a config whose `prompt_file` is the default
+    /// sentinel (the `--plan PROMPT.md` scenario never goes through the
+    /// -P prompt-file fallback branch).
+    fn tg_s14_production_chain(
+        worktree_name: Option<&str>,
+        plan_file: Option<&Path>,
+    ) -> Option<String> {
+        // `--plan <p>` sets `config.event_loop.prompt_file = <p>` (run.rs:
+        // 895-899) and the default config's prompt_file stays "PROMPT.md"
+        // when --plan is absent; both shapes are what production sees.
+        let prompt_file = plan_file
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "PROMPT.md".to_string());
+        let prefix = worktree_file_name_prefix(&prompt_file, "[no prompt]", plan_file);
+        resolve_exact_worktree_name(worktree_name, plan_file, prefix.as_deref())
+    }
+
+    /// Drive the run_recovery.rs gate chain (`exact_worktree_name_from`)
+    /// exactly like `acquire_and_assess` does at run_recovery.rs:295.
+    fn tg_s14_gate_chain(worktree_name: Option<&str>, plan_file: Option<&Path>) -> Option<String> {
+        crate::commands::run_recovery::exact_worktree_name_from(worktree_name, plan_file)
+    }
+
+    #[test]
+    fn tg_s14_prompt_sentinel_plan_resolves_identically_in_both_chains() {
+        // `ralph run --worktree --reuse-worktree --plan PROMPT.md`:
+        // the plan stem IS the default prompt-file sentinel. The gate
+        // chain refuses it as a reuse key (sentinel must not become a
+        // worktree name — it would collide with the default
+        // prompt-file contract, see run_recovery.rs
+        // `exact_worktree_name_rejects_prompt_stem`); the production
+        // chain currently hands back `Some("PROMPT")` because the plan
+        // branch of `worktree_file_name_prefix` has no sentinel filter.
+        // Behavioral evidence (2026-09-05 sandbox run): the real CLI
+        // created a worktree literally named "PROMPT" on branch
+        // "ralph/PROMPT".
+        let prompt_plan = Path::new("PROMPT.md");
+        let production = tg_s14_production_chain(None, Some(prompt_plan));
+        let gate = tg_s14_gate_chain(None, Some(prompt_plan));
+
+        assert_eq!(
+            production, gate,
+            "PMI-007: --plan PROMPT.md must resolve to the SAME reuse key in the \
+             production chain (worktree_file_name_prefix → \
+             resolve_exact_worktree_name) and the gate chain \
+             (exact_worktree_name_from). The gate excludes the `prompt` \
+             sentinel stem; the production chain does not — the two \
+             parallel resolvers have drifted. Fix direction: consolidate \
+             into one resolver so the sentinel rule lives in a single place."
+        );
+    }
+
+    #[test]
+    fn tg_s14_prompt_sentinel_is_case_insensitive_in_both_chains() {
+        // The sentinel comparison in the gate chain is
+        // `eq_ignore_ascii_case("prompt")`, so `Prompt.md` / `prompt.md`
+        // are equally sentinel. The production chain must match — a
+        // case variant sneaking through one resolver but not the other
+        // would be the same divergence under a different spelling.
+        let prompt_plan = Path::new("prompt.md");
+        let production = tg_s14_production_chain(None, Some(prompt_plan));
+        let gate = tg_s14_gate_chain(None, Some(prompt_plan));
+
+        assert_eq!(
+            production, gate,
+            "PMI-007: the prompt sentinel must match case-insensitively in BOTH \
+             reuse-key resolvers; `--plan prompt.md` currently diverges the \
+             same way as PROMPT.md (gate: None, production: Some(\"prompt\"))."
+        );
+    }
+
+    #[test]
+    fn tg_s14_empty_worktree_name_resolves_identically_in_both_chains() {
+        // `ralph run --worktree --worktree-name "" --reuse-worktree`:
+        // clap accepts an empty value (no value_parser guard on the arg,
+        // run.rs:206-214). The gate chain treats an empty name as
+        // missing and falls back to the plan stem; the production chain
+        // passes `Some("")` through `worktree_name.map(str::to_owned)`
+        // verbatim — no empty filter anywhere in the three-arg resolver
+        // (run.rs:772-784). On the plan-less shape the production chain
+        // then hands `Some("")` to `find_reusable_worktree_by_name`,
+        // which quietly returns `Ok(None)` (worktree.rs:546-548), so the
+        // operator's run falls into "creating the first exact-name
+        // worktree" with an empty name instead of being told to supply
+        // a real reuse key.
+        let production = tg_s14_production_chain(Some(""), None);
+        let gate = tg_s14_gate_chain(Some(""), None);
+
+        assert_eq!(
+            production, gate,
+            "PMI-007: an empty --worktree-name must resolve to the SAME reuse key \
+             in both chains. The gate treats it as missing (falls back / \
+             refuses); the production chain passes Some(\"\") through — the \
+             empty-string filter exists only in the two-arg resolver."
+        );
+    }
+
     #[test]
     fn resolve_plan_arg_uses_exact_path_when_it_exists() {
         let temp_dir = tempfile::tempdir().unwrap();
