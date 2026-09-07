@@ -69,6 +69,27 @@ hats:
     std::fs::create_dir_all(workspace.join(".ralph")).unwrap();
 }
 
+/// Step 4: same fail-closed combo for `scheduler_mode: dag`.
+fn write_dag_ralph_yml(workspace: &std::path::Path) {
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: false
+    mode: enforce
+  execution_mode: isolated
+  supervisor:
+    enabled: true
+    scheduler_mode: dag
+hats:
+  coordinator:
+    name: "Coordinator"
+    publishes:
+      - review.wave.ready
+"#;
+    std::fs::write(workspace.join("ralph.yml"), yaml).unwrap();
+    std::fs::create_dir_all(workspace.join(".ralph")).unwrap();
+}
+
 fn run_ralph(
     workspace: &std::path::Path,
     args: &[&str],
@@ -295,4 +316,151 @@ fn inspect_loop_with_polluted_agent_env_still_returns_clean_scheduler_block() {
             "polluted agent env value {forbidden:?} leaked into scheduler block: {scheduler_rendered}"
         );
     }
+}
+
+// =============================================================================
+// Step 4 (2026-09-03-0959 DAG 接线): real-data scheduler block.
+//
+// The `dag` runtime persists bounded registration receipts into
+// `<workspace>/.ralph/dag.db` at the accepted `forge.plan.ready` /
+// `forge.concurrency.approved` boundaries. `ralph inspect loop` reads
+// that store when the file exists: real plan keys / counts / oldest
+// wait. When the file is absent the empty-block semantics are
+// preserved (covered by the DagShadow tests above, which never create
+// a dag.db).
+// =============================================================================
+
+#[test]
+fn inspect_loop_dag_mode_without_db_keeps_empty_scheduler_block() {
+    let tmp = TempDir::new().unwrap();
+    let ws = tmp.path();
+    write_dag_ralph_yml(ws);
+    let (code, stdout, _stderr) = run_ralph(ws, &["inspect", "loop", "--format", "json"], &[]);
+    assert_eq!(code, 0, "inspect loop must succeed without a dag.db");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("inspect loop --format json must produce JSON");
+    let scheduler = json
+        .get("scheduler")
+        .unwrap_or_else(|| panic!("dag mode must surface a `scheduler` block: {json}"));
+    assert_eq!(scheduler["scheduler_mode"], "dag");
+    assert_eq!(scheduler["total_observations"], 0u64);
+    assert_eq!(scheduler["admitted_total"], 0u64);
+    assert_eq!(scheduler["blocked_total"], 0u64);
+    assert!(
+        scheduler["plan_keys"].as_array().expect("array").is_empty(),
+        "no dag.db → no plan keys"
+    );
+}
+
+/// With a real dag.db on disk the scheduler block surfaces the
+/// store's real counts: one activated receipt (admitted) plus one
+/// pending receipt (blocked), both plan keys, and the oldest
+/// recorded timestamp.
+#[cfg(feature = "supervisor-db")]
+#[test]
+fn inspect_loop_dag_mode_reads_real_counts_from_store() {
+    use ralph_core::supervisor::dag_plan_receipt::{DagPlanReceipt, DagPlanReceiptRegistry};
+
+    let tmp = TempDir::new().unwrap();
+    let ws = tmp.path();
+    write_dag_ralph_yml(ws);
+
+    // Seed the durable DAG store the same way the runtime seam does:
+    // one receipt recorded + activated (approved plan), one still
+    // pending (awaiting approval).
+    let db_path = ws.join(".ralph").join("dag.db");
+    let registry = DagPlanReceiptRegistry::open(&db_path).expect("open receipt registry");
+    registry
+        .record(DagPlanReceipt::new(
+            "pf-alpha",
+            ".ralph/forge/pf-alpha/execution-plan.yml",
+            "digest-alpha",
+            "feat/alpha",
+            1_000,
+        ))
+        .expect("record alpha");
+    registry
+        .activate("pf-alpha", 1_500)
+        .expect("activate alpha");
+    registry
+        .record(DagPlanReceipt::new(
+            "pf-beta",
+            ".ralph/forge/pf-beta/execution-plan.yml",
+            "digest-beta",
+            "feat/beta",
+            2_000,
+        ))
+        .expect("record beta");
+    drop(registry);
+    assert!(db_path.exists());
+
+    let (code, stdout, _stderr) = run_ralph(ws, &["inspect", "loop", "--format", "json"], &[]);
+    assert_eq!(code, 0, "inspect loop must succeed with a dag.db present");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("inspect loop --format json must produce JSON");
+    let scheduler = json
+        .get("scheduler")
+        .unwrap_or_else(|| panic!("dag mode must surface a `scheduler` block: {json}"));
+    assert_eq!(scheduler["scheduler_mode"], "dag");
+    assert_eq!(scheduler["total_observations"], 2u64);
+    assert_eq!(
+        scheduler["admitted_total"], 1u64,
+        "activated receipt counts as admitted"
+    );
+    assert_eq!(
+        scheduler["blocked_total"], 1u64,
+        "pending receipt counts as blocked"
+    );
+    assert_eq!(scheduler["oldest_observation_ms"], 1_000u64);
+    let plan_keys: Vec<&str> = scheduler["plan_keys"]
+        .as_array()
+        .expect("plan_keys array")
+        .iter()
+        .map(|v| v.as_str().expect("string"))
+        .collect();
+    assert_eq!(plan_keys, vec!["pf-alpha", "pf-beta"]);
+
+    // Sanitization still holds with real data: no artifact path,
+    // digest, branch, or db path surfaces.
+    let rendered = serde_json::to_string(scheduler).expect("scheduler must serialize");
+    for forbidden in [
+        "digest-alpha",
+        "digest-beta",
+        "feat/alpha",
+        "feat/beta",
+        ".yml",
+        ".db",
+        "dag.db",
+        "execution-plan",
+    ] {
+        assert!(
+            !rendered.contains(forbidden),
+            "scheduler JSON must not contain {forbidden:?}: {rendered}"
+        );
+    }
+}
+
+/// A corrupt dag.db keeps the old empty-block semantics instead of
+/// aborting the read-only inspect command.
+#[cfg(feature = "supervisor-db")]
+#[test]
+fn inspect_loop_dag_mode_with_corrupt_db_keeps_empty_block() {
+    let tmp = TempDir::new().unwrap();
+    let ws = tmp.path();
+    write_dag_ralph_yml(ws);
+    std::fs::write(ws.join(".ralph").join("dag.db"), b"not a sqlite db").unwrap();
+
+    let (code, stdout, _stderr) = run_ralph(ws, &["inspect", "loop", "--format", "json"], &[]);
+    assert_eq!(code, 0, "corrupt dag.db must not abort inspect");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("inspect loop --format json must produce JSON");
+    let scheduler = json
+        .get("scheduler")
+        .expect("dag mode must surface a `scheduler` block");
+    assert_eq!(scheduler["scheduler_mode"], "dag");
+    assert_eq!(scheduler["total_observations"], 0u64);
+    assert!(
+        scheduler["plan_keys"].as_array().expect("array").is_empty(),
+        "corrupt db falls back to the empty block"
+    );
 }

@@ -512,7 +512,7 @@ pub async fn inspect_loop_command(
         schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
         loop_anchor,
         supervisor: build_supervisor_summary(&config, &root),
-        scheduler: build_scheduler_summary(&config),
+        scheduler: build_scheduler_summary(&config, &root),
         activation_registry,
     };
 
@@ -1379,38 +1379,83 @@ fn build_supervisor_summary(
 /// `wave` mode (R3 — Wave is the default, the key is omitted so
 /// the existing v2 JSON shape is unchanged for legacy consumers).
 ///
+/// Step 4 (2026-09-03-0959 DAG 接线): when the durable DAG store
+/// (`<root>/.ralph/dag.db`) exists, the summary is built from the
+/// store's real receipt rows — the `dag` runtime persists one
+/// bounded registration receipt per accepted `forge.plan.ready` and
+/// activates it at the accepted `forge.concurrency.approved`
+/// boundary, so plan counts / admitted / blocked / oldest wait all
+/// reflect what the loop actually recorded. When the db is missing
+/// (no DAG-observed run yet, or `dag_shadow` mode which keeps its
+/// store in-process) or cannot be opened, the previous empty-block
+/// semantics are preserved (zero counters, no `plan_keys`).
+///
 /// Output safety (R11 / E16):
 /// - The summary is sanitized: it never includes the raw event
-///   payload, the workspace path, DB paths, or any operator-host
-///   string. Only bounded counts + `plan_keys` surface.
+///   payload, the workspace path, DB paths, digests, artifact paths,
+///   target branches, or any operator-host string. Only bounded
+///   counts + `plan_keys` surface.
 /// - The inspect command is **read-only** — it never opens the
 ///   shadow sink for write, never mutates the receipt registry,
-///   and never spawns a backend. An empty sink is reported as an
-///   empty summary (zero counters, no `plan_keys`).
+///   and never spawns a backend.
 ///
 /// Returns `None` for `scheduler_mode = wave` so the JSON keeps
-/// the v2 shape. Returns `Some(empty summary)` for `dag_shadow`
-/// / `dag` so the agent / operator can confirm the new authority
-/// is wired without spawning a real `ralph run`.
-fn build_scheduler_summary(config: &RalphConfig) -> Option<SchedulerInspectSummary> {
+/// the v2 shape.
+fn build_scheduler_summary(
+    config: &RalphConfig,
+    workspace_root: &std::path::Path,
+) -> Option<SchedulerInspectSummary> {
     let mode = config.event_loop.supervisor.scheduler_mode;
     if mode.uses_legacy_authority() {
         // Wave mode is the legacy default; the legacy JSON shape
         // does not include a `scheduler` block (R3).
         return None;
     }
-    // DagShadow / Dag: surface an empty summary bounded to the
-    // public identifiers (mode label + zero counts + empty
-    // plan_keys). The actual `compute_shadow_observation` tick
-    // happens at runtime via the U5 driver seam wired in
-    // `loop_runner::dag_scheduler`; inspect itself does not drive
-    // any observation.
     let mode_label = match mode {
         ralph_core::config::SchedulerMode::Wave => "wave",
         ralph_core::config::SchedulerMode::DagShadow => "dag_shadow",
         ralph_core::config::SchedulerMode::Dag => "dag",
     };
-    Some(SchedulerInspectSummary::for_mode(mode_label))
+    // Real data path (Step 4): the runtime's DAG ledger on disk is
+    // the cross-process authority for what the observation seam
+    // recorded. Best-effort open — a missing or corrupt db keeps the
+    // empty-block semantics rather than aborting the read-only
+    // inspect command.
+    let db_path = crate::loop_runner::dag_scheduler::integration::dag_store_path(workspace_root);
+    if !db_path.exists() {
+        return Some(SchedulerInspectSummary::for_mode(mode_label));
+    }
+    #[cfg(feature = "supervisor-db")]
+    {
+        use ralph_core::supervisor::dag_plan_receipt::DagPlanReceiptStore as _;
+        match ralph_core::supervisor::dag_store_rusqlite::RusqliteDagPlanReceiptStore::open(
+            &db_path,
+        ) {
+            Ok(store) => match store.list_receipts() {
+                Ok(receipts) => Some(SchedulerInspectSummary::from_receipt_rows(
+                    &receipts, mode_label,
+                )),
+                Err(err) => {
+                    tracing::debug!(
+                        error = %err,
+                        "dag receipt listing failed; surfacing empty scheduler block"
+                    );
+                    Some(SchedulerInspectSummary::for_mode(mode_label))
+                }
+            },
+            Err(err) => {
+                tracing::debug!(
+                    error = %err,
+                    "dag store open failed; surfacing empty scheduler block"
+                );
+                Some(SchedulerInspectSummary::for_mode(mode_label))
+            }
+        }
+    }
+    #[cfg(not(feature = "supervisor-db"))]
+    {
+        Some(SchedulerInspectSummary::for_mode(mode_label))
+    }
 }
 
 /// U3 (plan 2026-07-30-004): load and summarise the activation registry

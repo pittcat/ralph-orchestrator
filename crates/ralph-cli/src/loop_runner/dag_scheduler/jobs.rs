@@ -428,6 +428,19 @@ impl JobPipeline {
         self.advance(unit_key, stage)
     }
 
+    /// Read-only access to the pool caps — the Step 4 observation
+    /// tick translates them into `AdmissionCaps`.
+    pub fn pools(&self) -> &DagPools {
+        &self.pools
+    }
+
+    /// Read-only access to a Unit's current stage. Used by the
+    /// Step 4 seam's test introspection.
+    #[cfg(test)]
+    pub fn stage_of(&self, unit_key: &str) -> Option<Stage> {
+        self.state.units.get(unit_key).map(|u| u.stage)
+    }
+
     /// Mark a Unit as `StillExecuting` — used by the driver
     /// when the kernel's `collect_with_deadline` returns
     /// `CollectFailed` (i.e. the subprocess has not yet exited).

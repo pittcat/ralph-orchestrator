@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 
+use crate::supervisor::dag_plan_receipt::{DagPlanReceipt, ReceiptStatus};
 use crate::supervisor::dag_shadow::ShadowSink;
 
 /// Sanitized shadow summary. Counts + plan_keys only — all
@@ -74,6 +75,53 @@ impl SchedulerInspectSummary {
             plan_keys: plan_keys.into_iter().collect(),
             oldest_observation_ms: oldest,
             total_observations,
+            admitted_total,
+            blocked_total,
+        }
+    }
+
+    /// Aggregate from durable receipt rows (Step 4, 2026-09-03-0959
+    /// DAG 接线). The `dag` runtime persists one bounded registration
+    /// receipt per accepted `forge.plan.ready` and activates it at the
+    /// accepted `forge.concurrency.approved` boundary, so the receipt
+    /// table is the inspect-visible record of plan admissions:
+    ///   - `plan_keys` — distinct receipt `plan_key`s, deduped + sorted.
+    ///   - `oldest_observation_ms` — min `created_at_ms` (oldest
+    ///     recorded plan wait), `None` when no receipt exists.
+    ///   - `total_observations` — receipt row count.
+    ///   - `admitted_total` — receipts that reached `Active` (or the
+    ///     post-admission terminal `Consumed`).
+    ///   - `blocked_total` — receipts still `Pending` (recorded but
+    ///     not yet approved/activated).
+    ///
+    /// Same sanitization contract as [`Self::from_shadow_sink`]: only
+    /// counts, timestamps, and operator-known plan keys surface —
+    /// never artifact paths, digests, or target branches.
+    pub fn from_receipt_rows(receipts: &[DagPlanReceipt], scheduler_mode: &str) -> Self {
+        let mut plan_keys: BTreeSet<String> = BTreeSet::new();
+        let mut oldest: Option<u64> = None;
+        let mut admitted_total: u64 = 0;
+        let mut blocked_total: u64 = 0;
+        for receipt in receipts {
+            plan_keys.insert(receipt.plan_key.clone());
+            oldest = Some(match oldest {
+                Some(prev) => prev.min(receipt.created_at_ms),
+                None => receipt.created_at_ms,
+            });
+            match receipt.status {
+                ReceiptStatus::Active | ReceiptStatus::Consumed => {
+                    admitted_total = admitted_total.saturating_add(1);
+                }
+                ReceiptStatus::Pending => {
+                    blocked_total = blocked_total.saturating_add(1);
+                }
+            }
+        }
+        Self {
+            scheduler_mode: scheduler_mode.to_string(),
+            plan_keys: plan_keys.into_iter().collect(),
+            oldest_observation_ms: oldest,
+            total_observations: receipts.len() as u64,
             admitted_total,
             blocked_total,
         }
@@ -160,5 +208,39 @@ mod tests {
             assert_eq!(zero.scheduler_mode, mode);
             assert_eq!(zero.total_observations, 0);
         }
+    }
+
+    /// Step 4: receipt rows aggregate into real counts — pending
+    /// receipts count as blocked (awaiting approval), active/consumed
+    /// as admitted, oldest `created_at_ms` is the oldest wait.
+    #[test]
+    fn receipt_rows_aggregate_into_real_counts() {
+        let pending = DagPlanReceipt::new("plan-b", ".ralph/f/p.yml", "d-b", "feat/x", 500);
+        let mut active = DagPlanReceipt::new("plan-a", ".ralph/f/a.yml", "d-a", "feat/x", 100);
+        active.status = ReceiptStatus::Active;
+        active.activated_at_ms = Some(150);
+        let summary = SchedulerInspectSummary::from_receipt_rows(&[pending, active], "runtime_dag");
+        assert_eq!(summary.plan_keys, vec!["plan-a", "plan-b"]);
+        assert_eq!(summary.total_observations, 2);
+        assert_eq!(summary.admitted_total, 1);
+        assert_eq!(summary.blocked_total, 1);
+        assert_eq!(summary.oldest_observation_ms, Some(100));
+        // Sanitization: no artifact path / digest / branch surfaces.
+        let json = serde_json::to_string(&summary).expect("serialize");
+        for forbidden in [".yml", "d-a", "d-b", "feat/x", ".ralph"] {
+            assert!(
+                !json.contains(forbidden),
+                "receipt-derived summary must not contain {forbidden:?}: {json}"
+            );
+        }
+    }
+
+    /// Step 4: empty receipt set behaves like the empty sink.
+    #[test]
+    fn receipt_rows_empty_yields_zero_counts() {
+        let summary = SchedulerInspectSummary::from_receipt_rows(&[], "runtime_dag");
+        assert!(summary.plan_keys.is_empty());
+        assert_eq!(summary.total_observations, 0);
+        assert_eq!(summary.oldest_observation_ms, None);
     }
 }
