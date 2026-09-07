@@ -397,7 +397,8 @@ pub const LOOP_RUNNER_INTERNAL_TOPICS: &[&str] = &[
 use crate::config::ConfigError;
 use crate::config::ConfigWarning;
 use crate::event_origin::{
-    is_supervisor_coordination_topic, is_supervisor_slot_topic, is_wave_coordination_topic,
+    is_dag_runtime_unit_topic, is_supervisor_coordination_topic, is_supervisor_slot_topic,
+    is_wave_coordination_topic,
 };
 use crate::hat_registry::HatRegistry;
 use crate::payload_contract::{
@@ -457,6 +458,27 @@ pub fn is_wave_coordination_topic_trigger(
         return false;
     }
     preset_uses_wave_runtime(config)
+}
+
+/// 2026-09-07 dag-scheduler lint sync: returns `true` when the typed
+/// `RalphConfig` opts into the runtime-owned DAG scheduler authority —
+/// `event_loop.supervisor.enabled == true` AND
+/// `event_loop.supervisor.scheduler_mode ∈ {dag, dag_shadow}`.
+///
+/// In that mode the DAG runtime driver (not a hat) consumes the five
+/// per-unit result topics (`forge.unit.{executed, execution_failed,
+/// reviewed, verified, verification_failed}`) and publishes
+/// `forge.unit.integrated`, so the topology/orphan checks must not
+/// demand a hat publisher/subscriber for
+/// [`is_dag_runtime_unit_topic`] topics. Capability-triggered (config
+/// field gated), never preset-name pinned; `wave` mode presets see
+/// zero behaviour change.
+pub fn preset_uses_dag_runtime(config: &crate::config::RalphConfig) -> bool {
+    config.event_loop.supervisor.enabled
+        && matches!(
+            config.event_loop.supervisor.scheduler_mode,
+            crate::config::SchedulerMode::Dag | crate::config::SchedulerMode::DagShadow
+        )
 }
 use crate::preset_validator::{
     TopologyError, TopologyErrorKind, TopologyValidationResult, validate_preset_topology,
@@ -878,6 +900,14 @@ pub fn detect_orphan_topics(
             {
                 continue;
             }
+            // 2026-09-07 dag-scheduler lint sync: the dag runtime
+            // driver is the consumer of the per-unit `forge.unit.*`
+            // result topics; the absence of a hat subscriber is by
+            // design. Same dual gate as `detect_required_topic_gaps`
+            // (exact allowlist AND dag config).
+            if preset_uses_dag_runtime(config) && is_dag_runtime_unit_topic(topic) {
+                continue;
+            }
             if is_precheck_rejected_topic(config, topic) {
                 continue;
             }
@@ -1003,6 +1033,19 @@ pub fn detect_required_topic_gaps(
         if (topic.ends_with(".unit.done") || topic.ends_with(".unit.failed"))
             && preset_uses_wave_runtime(config)
         {
+            continue;
+        }
+        // 2026-09-07 dag-scheduler lint sync: in dag / dag_shadow
+        // mode the runtime DAG driver consumes the five per-unit
+        // result topics and publishes `forge.unit.integrated` — no
+        // hat publisher/subscriber exists by design. Exempt the six
+        // exact topics (both no_publisher and no_subscriber arms) so
+        // a dag-mode preset declaring them in `event_policy.schemas`
+        // does not falsely report gaps. The exemption requires BOTH
+        // the exact topic allowlist AND the dag config gate, so a
+        // wave-mode preset declaring same-named topics is still
+        // checked normally.
+        if is_dag_runtime_unit_topic(topic) && preset_uses_dag_runtime(config) {
             continue;
         }
         // plan 2026-08-27-1430 U4: `<X>.proposed` topics derived from a
@@ -3031,6 +3074,162 @@ event_loop:
         assert!(
             codes.contains(&"required.no_subscriber"),
             "missing subscriber must surface required.no_subscriber, got: {codes:?}"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // 2026-09-07 dag-scheduler lint sync: `forge.unit.*` exemptions
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Topology fixture: three hats publish the five per-unit result
+    /// topics; `forge.unit.integrated` is declared as required (via
+    /// `event_policy.schemas`) but has no hat publisher — in dag mode
+    /// the runtime DAG driver is both the consumer of the five and the
+    /// publisher of the sixth. `scheduler_mode` is parameterized so
+    /// the same YAML body serves the dag / dag_shadow / wave cases.
+    fn dag_unit_topology(scheduler_block: &str) -> (RalphConfig, HatRegistry) {
+        let yaml = format!(
+            r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["exec.unit.ready"]
+    publishes: ["forge.unit.executed", "forge.unit.execution_failed"]
+  reviewer:
+    name: "Reviewer"
+    triggers: ["review.unit.ready"]
+    publishes: ["forge.unit.reviewed"]
+  verifier:
+    name: "Verifier"
+    triggers: ["verify.unit.ready"]
+    publishes: ["forge.unit.verified", "forge.unit.verification_failed"]
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  starting_event: "exec.unit.ready"
+  supervisor:
+{scheduler_block}
+  event_policy:
+    enabled: true
+    mode: enforce
+    schemas:
+      forge.unit.executed:
+        required_fields: [unit_id]
+      forge.unit.execution_failed:
+        required_fields: [unit_id]
+      forge.unit.reviewed:
+        required_fields: [unit_id]
+      forge.unit.verified:
+        required_fields: [unit_id]
+      forge.unit.verification_failed:
+        required_fields: [unit_id]
+      forge.unit.integrated:
+        required_fields: [unit_id]
+"#
+        );
+        let config: RalphConfig = serde_yaml::from_str(&yaml).expect("parse dag unit topology");
+        let registry = HatRegistry::from_runtime_config(&config);
+        (config, registry)
+    }
+
+    fn dag_unit_findings(
+        config: &RalphConfig,
+        registry: &HatRegistry,
+    ) -> Vec<(String, Option<String>)> {
+        let mut out: Vec<(String, Option<String>)> = detect_required_topic_gaps(config, registry)
+            .iter()
+            .chain(detect_orphan_topics(config, registry).iter())
+            .map(|f| (f.id.clone(), f.details.get("topic").cloned()))
+            .filter(|(_, topic)| {
+                topic
+                    .as_deref()
+                    .is_some_and(crate::event_origin::is_dag_runtime_unit_topic)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn dag_mode_exempts_forge_unit_topics_from_gap_and_orphan_checks() {
+        for mode in ["dag", "dag_shadow"] {
+            let (config, registry) =
+                dag_unit_topology(&format!("    enabled: true\n    scheduler_mode: {mode}"));
+            assert!(
+                preset_uses_dag_runtime(&config),
+                "scheduler_mode={mode} with enabled supervisor must select the dag runtime"
+            );
+            let findings = dag_unit_findings(&config, &registry);
+            assert!(
+                findings.is_empty(),
+                "dag mode ({mode}) must exempt all six forge.unit.* topics, got: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wave_mode_still_flags_forge_unit_topics() {
+        let (config, registry) = dag_unit_topology("    enabled: true\n    scheduler_mode: wave");
+        assert!(
+            !preset_uses_dag_runtime(&config),
+            "wave mode must not select the dag runtime"
+        );
+        let findings = dag_unit_findings(&config, &registry);
+
+        for topic in [
+            "forge.unit.executed",
+            "forge.unit.execution_failed",
+            "forge.unit.reviewed",
+            "forge.unit.verified",
+            "forge.unit.verification_failed",
+            "forge.unit.integrated",
+        ] {
+            assert!(
+                findings
+                    .iter()
+                    .any(|(id, t)| id == "required.no_subscriber" && t.as_deref() == Some(topic)),
+                "wave mode must still flag required.no_subscriber for {topic}, got: {findings:?}"
+            );
+        }
+        assert!(
+            findings.iter().any(|(id, t)| id == "required.no_publisher"
+                && t.as_deref() == Some("forge.unit.integrated")),
+            "wave mode must still flag required.no_publisher for forge.unit.integrated, got: {findings:?}"
+        );
+        // orphan.no_subscriber (Warn) still fires for the five
+        // hat-published topics that nobody subscribes to.
+        for topic in [
+            "forge.unit.executed",
+            "forge.unit.execution_failed",
+            "forge.unit.reviewed",
+            "forge.unit.verified",
+            "forge.unit.verification_failed",
+        ] {
+            assert!(
+                findings
+                    .iter()
+                    .any(|(id, t)| id == "orphan.no_subscriber" && t.as_deref() == Some(topic)),
+                "wave mode must still flag orphan.no_subscriber for {topic}, got: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dag_scheduler_mode_without_supervisor_enabled_does_not_exempt() {
+        // serde accepts `scheduler_mode: dag` with a disabled
+        // supervisor (the cross-field reject lives in preflight); the
+        // lint gate must still require `enabled: true` so a
+        // half-configured preset cannot slip through.
+        let (config, registry) = dag_unit_topology("    enabled: false\n    scheduler_mode: dag");
+        assert!(
+            !preset_uses_dag_runtime(&config),
+            "disabled supervisor must not select the dag runtime"
+        );
+        let findings = dag_unit_findings(&config, &registry);
+        assert!(
+            findings
+                .iter()
+                .any(|(id, _)| id == "required.no_subscriber"),
+            "disabled-supervisor dag mode must keep the gap checks, got: {findings:?}"
         );
     }
 

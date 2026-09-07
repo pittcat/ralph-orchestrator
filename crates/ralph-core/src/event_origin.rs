@@ -180,6 +180,33 @@ pub fn is_supervisor_slot_topic(topic: &str) -> bool {
         || (matches!(prefix, "exec" | "fix" | "review") && topic.ends_with(".unit.failed"))
 }
 
+/// 2026-09-07 dag-scheduler lint sync: the exact allowlist of
+/// `forge.unit.*` topics whose producer/consumer is the runtime DAG
+/// scheduler driver (not a hat) when
+/// `event_loop.supervisor.scheduler_mode ∈ {dag, dag_shadow}`.
+///
+/// Exact-match (no prefix wildcard) on purpose: a preset in `wave`
+/// mode that happens to declare a same-named topic must still be
+/// checked normally, and no other preset may escape lint by adding a
+/// new `forge.unit.*` topic.
+pub const DAG_RUNTIME_UNIT_TOPICS: &[&str] = &[
+    "forge.unit.executed",
+    "forge.unit.execution_failed",
+    "forge.unit.reviewed",
+    "forge.unit.verified",
+    "forge.unit.verification_failed",
+    "forge.unit.integrated",
+];
+
+/// `true` when `topic` is one of the six DAG-runtime-driven
+/// `forge.unit.*` topics in [`DAG_RUNTIME_UNIT_TOPICS`]. Callers must
+/// additionally gate on the dag scheduler mode (see
+/// [`crate::runtime_contract::preset_uses_dag_runtime`]) — topic name
+/// alone is not sufficient for an exemption.
+pub fn is_dag_runtime_unit_topic(topic: &str) -> bool {
+    DAG_RUNTIME_UNIT_TOPICS.contains(&topic)
+}
+
 /// U7 (2026-07-23-001, R10 / KTD-7): the canonical identifier of the
 /// **virtual supervisor** runtime consumer.
 ///
@@ -538,6 +565,31 @@ mod tests {
     fn registry_with_hats(yaml: &str) -> HatRegistry {
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         HatRegistry::from_config(&config)
+    }
+
+    #[test]
+    fn test_is_dag_runtime_unit_topic_exact_match_only() {
+        for topic in DAG_RUNTIME_UNIT_TOPICS {
+            assert!(
+                is_dag_runtime_unit_topic(topic),
+                "{topic} must be recognized as a dag runtime unit topic"
+            );
+        }
+        // Same-prefix but unknown topics must NOT escape lint, and
+        // neither must the supervisor slot topics or near-misses.
+        for topic in [
+            "forge.unit.done",
+            "forge.unit.failed",
+            "forge.unit.unknown",
+            "forge.unit.executed.extra",
+            "exec.unit.done",
+            "forge.wave.complete",
+        ] {
+            assert!(
+                !is_dag_runtime_unit_topic(topic),
+                "{topic} must not be treated as a dag runtime unit topic"
+            );
+        }
     }
 
     #[test]
