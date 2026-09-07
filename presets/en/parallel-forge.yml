@@ -39,6 +39,11 @@
 
 topic_format_whitelist:
   - LOOP_COMPLETE
+  # Step 2(2026-09-03-0959 DAG 接线):dag 模式 per-unit topic 族的两个
+  # typed failure topic 使用下划线结尾(方案 (b) 钦定命名),比照
+  # LOOP_COMPLETE 先例加入白名单。
+  - forge.unit.execution_failed
+  - forge.unit.verification_failed
 
 mechanism:
   flow:
@@ -1177,8 +1182,11 @@ hats:
     # regular `idle_heartbeat_secs` window takes over.
     startup_grace_secs: 300
     triggers: [exec.unit.ready]
-    publishes: [exec.unit.done, exec.unit.failed]
-    exempt_topics: [exec.unit.done, exec.unit.failed]
+    # Step 2(2026-09-03-0959 DAG 接线):追加 dag 模式 per-unit topic
+    # `forge.unit.executed` / `forge.unit.execution_failed`(wave 路径的
+    # exec.unit.* 暂留,退休属后续 Step 8);triggers/instructions 不动。
+    publishes: [exec.unit.done, exec.unit.failed, forge.unit.executed, forge.unit.execution_failed]
+    exempt_topics: [exec.unit.done, exec.unit.failed, forge.unit.executed, forge.unit.execution_failed]
     terminal_events: [exec.unit.done, exec.unit.failed]
     event_filter:
       enabled: true
@@ -1273,8 +1281,10 @@ hats:
     name: "Reviewer"
     description: "Per-wave independent review after supervisor fan-in; emits forge.wave.reviewed (accept) or forge.wave.review.failed (reject)."
     triggers: [exec.wave.complete, forge.correction.done]
-    publishes: [forge.wave.reviewed, forge.wave.review.failed, forge.units.reviewed, forge.plan.blocked]
-    exempt_topics: [forge.wave.reviewed, forge.wave.review.failed, forge.units.reviewed, forge.plan.blocked]
+    # Step 2(2026-09-03-0959 DAG 接线):追加 dag 模式 per-unit topic
+    # `forge.unit.reviewed`(verdict 值域 ACCEPTED/REJECTED)。
+    publishes: [forge.wave.reviewed, forge.wave.review.failed, forge.units.reviewed, forge.plan.blocked, forge.unit.reviewed]
+    exempt_topics: [forge.wave.reviewed, forge.wave.review.failed, forge.units.reviewed, forge.plan.blocked, forge.unit.reviewed]
     terminal_events: [forge.wave.reviewed, forge.wave.review.failed, forge.units.reviewed, forge.plan.blocked]
     event_filter:
       enabled: true
@@ -1436,8 +1446,10 @@ hats:
     name: "Verifier"
     description: "Per-wave verification on candidate HEAD; emits forge.wave.verified (pass) or forge.verification.failed (fail)."
     triggers: [forge.wave.integrated, forge.integration.done]
-    publishes: [forge.wave.verified, forge.verification.failed]
-    exempt_topics: [forge.wave.verified, forge.verification.failed]
+    # Step 2(2026-09-03-0959 DAG 接线):追加 dag 模式 per-unit topic
+    # `forge.unit.verified` / `forge.unit.verification_failed`。
+    publishes: [forge.wave.verified, forge.verification.failed, forge.unit.verified, forge.unit.verification_failed]
+    exempt_topics: [forge.wave.verified, forge.verification.failed, forge.unit.verified, forge.unit.verification_failed]
     terminal_events: [forge.wave.verified, forge.verification.failed]
     event_filter:
       enabled: true

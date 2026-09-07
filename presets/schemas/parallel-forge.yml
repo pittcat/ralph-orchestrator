@@ -655,6 +655,229 @@ schemas:
         source: Basename of operator plan without .md, or path parent of execution_plan_path.
         fill_rule: Must match .ralph/forge/<plan-key>/ directory name.
 
+  # ──────────────────────────────────────────────────────────────────────
+  # DAG 模式 per-unit typed topic 族(2026-09-03-0959 plan DAG 接线
+  # Step 2,方案 (b))。scheduler_mode: dag 下由 runtime 驱动的 per-unit
+  # worker(executor/reviewer/verifier hat)发射;wave 路径的
+  # exec.unit.done / forge.wave.reviewed 不动,退休属后续 Step。
+  # `forge.unit.integrated` 由 runtime 在 lane CAS FF 后发射(D25),
+  # 无 hat 发射方——比照 exec.wave.failed 的 runtime-injected 先例。
+  # ──────────────────────────────────────────────────────────────────────
+  forge.unit.executed:
+    required_fields:
+      - unit_id
+      - plan_key
+      - task_id
+      - task_key
+      - content_hash
+      - unit_report_path
+    payload: json_object
+    field_docs:
+      unit_id:
+        meaning: Unit id whose Execute stage reached a successful terminal.
+        source: DAG runtime job context (unit registration / JobDescriptor).
+        fill_rule: Exact id string from execution plan; never hand-invented.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: DAG runtime job context.
+        fill_rule: Must match .ralph/forge/<plan-key>/ directory name.
+      task_id:
+        meaning: Live runtime task id for this unit.
+        source: ralph tools task list for the matching task_key.
+        fill_rule: Never hand-write; copy the live id from task list.
+      task_key:
+        meaning: Stable task key registered by planner.
+        source: ralph tools task list / execution-plan unit id mapping.
+        fill_rule: Must match forge:<plan-key>:<unit-id> key form used at registration.
+      content_hash:
+        meaning: Hash of the unit worktree diff or commit content for idempotency.
+        source: Computed from unit commit / tree.
+        fill_rule: Non-empty hex or stable digest string.
+      unit_report_path:
+        meaning: Unit Completion Report artifact for this unit.
+        source: File at .ralph/forge/<plan-key>/units/<unit-id>-completion.md.
+        fill_rule: Written before emit; path repo-relative.
+        examples: [".ralph/<plan>/units/<unit>-completion.md"]
+
+  forge.unit.execution_failed:
+    required_fields:
+      - unit_id
+      - plan_key
+      - task_id
+      - task_key
+      - reason
+      - failure_class
+    payload: json_object
+    field_docs:
+      unit_id:
+        meaning: Unit id whose Execute stage failed.
+        source: DAG runtime job context (unit registration / JobDescriptor).
+        fill_rule: Exact id string from execution plan.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: DAG runtime job context.
+        fill_rule: Must match .ralph/forge/<plan-key>/ directory name.
+      task_id:
+        meaning: Live runtime task id for this unit.
+        source: ralph tools task list for the matching task_key.
+        fill_rule: Never hand-write; copy the live id from task list.
+      task_key:
+        meaning: Stable task key registered by planner.
+        source: ralph tools task list / execution-plan unit id mapping.
+        fill_rule: Must match forge:<plan-key>:<unit-id> key form used at registration.
+      reason:
+        meaning: Why this unit's execution failed.
+        source: Executor failure evidence this activation.
+        fill_rule: Non-empty; no fabricated upstream blame.
+      failure_class:
+        meaning: >-
+          Typed failure classification the failure handler triages on
+          (timeout / orphan_or_empty_result / identity_mismatch /
+          cancel / required_slot_failure / unknown), aligned with the
+          exec.wave.failed slot_failures vocabulary.
+        source: DAG runtime job kernel classification of the job terminal.
+        fill_rule: One of the listed class labels; identical failures reuse the same class.
+
+  forge.unit.reviewed:
+    required_fields:
+      - unit_id
+      - plan_key
+      - task_id
+      - task_key
+      - verdict
+      - review_report_path
+    payload: json_object
+    allowed_values:
+      verdict: [ACCEPTED, REJECTED]
+    field_docs:
+      unit_id:
+        meaning: Unit id whose Review stage concluded.
+        source: DAG runtime job context (unit registration / JobDescriptor).
+        fill_rule: Exact id string from execution plan.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: DAG runtime job context.
+        fill_rule: Must match .ralph/forge/<plan-key>/ directory name.
+      task_id:
+        meaning: Live runtime task id for this unit.
+        source: ralph tools task list for the matching task_key.
+        fill_rule: Never hand-write; copy the live id from task list.
+      task_key:
+        meaning: Stable task key registered by planner.
+        source: ralph tools task list / execution-plan unit id mapping.
+        fill_rule: Must match forge:<plan-key>:<unit-id> key form used at registration.
+      verdict:
+        meaning: Per-unit review verdict consumed by the DAG driver.
+        source: Reviewer six-dimension audit of this unit.
+        fill_rule: One of ACCEPTED, REJECTED (aligned with the preset-wide verdict vocabulary).
+      review_report_path:
+        meaning: Repo-relative path to the per-unit review artifact.
+        source: File at .ralph/forge/<plan-key>/units/<unit-id>-review.md.
+        fill_rule: Must exist before emit.
+        examples: [".ralph/<plan>/units/<unit>-review.md"]
+
+  forge.unit.verified:
+    required_fields:
+      - unit_id
+      - plan_key
+      - task_id
+      - task_key
+      - content_hash
+      - verification_log_path
+    payload: json_object
+    field_docs:
+      unit_id:
+        meaning: Unit id whose Verify stage passed.
+        source: DAG runtime job context (unit registration / JobDescriptor).
+        fill_rule: Exact id string from execution plan.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: DAG runtime job context.
+        fill_rule: Must match .ralph/forge/<plan-key>/ directory name.
+      task_id:
+        meaning: Live runtime task id for this unit.
+        source: ralph tools task list for the matching task_key.
+        fill_rule: Never hand-write; copy the live id from task list.
+      task_key:
+        meaning: Stable task key registered by planner.
+        source: ralph tools task list / execution-plan unit id mapping.
+        fill_rule: Must match forge:<plan-key>:<unit-id> key form used at registration.
+      content_hash:
+        meaning: Hash of the verified unit commit content for idempotency.
+        source: Computed from the verified unit commit / tree.
+        fill_rule: Non-empty hex or stable digest string.
+      verification_log_path:
+        meaning: Repo-relative path to the per-unit verification log.
+        source: File at .ralph/forge/<plan-key>/units/<unit-id>-verification.md.
+        fill_rule: Must list every gate command run and its outcome.
+        examples: [".ralph/<plan>/units/<unit>-verification.md"]
+
+  forge.unit.verification_failed:
+    required_fields:
+      - unit_id
+      - plan_key
+      - task_id
+      - task_key
+      - reason
+      - verification_failure_path
+    payload: json_object
+    field_docs:
+      unit_id:
+        meaning: Unit id whose Verify stage failed.
+        source: DAG runtime job context (unit registration / JobDescriptor).
+        fill_rule: Exact id string from execution plan.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: DAG runtime job context.
+        fill_rule: Must match .ralph/forge/<plan-key>/ directory name.
+      task_id:
+        meaning: Live runtime task id for this unit.
+        source: ralph tools task list for the matching task_key.
+        fill_rule: Never hand-write; copy the live id from task list.
+      task_key:
+        meaning: Stable task key registered by planner.
+        source: ralph tools task list / execution-plan unit id mapping.
+        fill_rule: Must match forge:<plan-key>:<unit-id> key form used at registration.
+      reason:
+        meaning: Why this unit's verification failed.
+        source: Verifier failure evidence this activation.
+        fill_rule: Non-empty; name the failing gate commands.
+      verification_failure_path:
+        meaning: Per-unit verification failure log artifact.
+        source: File at .ralph/forge/<plan-key>/units/<unit-id>-verification-failure.md.
+        fill_rule: Must list commands run and the failure manifest.
+        examples: [".ralph/<plan>/units/<unit>-verification-failure.md"]
+
+  forge.unit.integrated:
+    required_fields:
+      - unit_id
+      - plan_key
+      - task_id
+      - task_key
+      - integrated_commit
+    payload: json_object
+    field_docs:
+      unit_id:
+        meaning: Unit id whose lane CAS fast-forward landed.
+        source: "Runtime DAG scheduler (scheduler_mode: dag), emitted after the lane CAS FF persisted the integrated commit (plan D25)."
+        fill_rule: Read-only for hats; never emitted by an agent.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Runtime DAG scheduler.
+        fill_rule: Read-only for hats; never emitted by an agent.
+      task_id:
+        meaning: Live runtime task id the idempotent projection closes.
+        source: Runtime DAG scheduler task registry read.
+        fill_rule: Read-only for hats; never emitted by an agent.
+      task_key:
+        meaning: Stable task key registered by planner.
+        source: Runtime DAG scheduler task registry read.
+        fill_rule: Read-only for hats; never emitted by an agent; must match forge:<plan-key>:<unit-id>.
+      integrated_commit:
+        meaning: Commit SHA on the integration lane after this unit's CAS fast-forward.
+        source: Runtime DAG scheduler lane CAS FF result (persisted before emit).
+        fill_rule: 40-char git SHA; read-only for hats; never emitted by an agent.
+
   exec.unit.ready:
     required_fields:
       - wave_id

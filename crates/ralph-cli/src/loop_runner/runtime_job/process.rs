@@ -23,23 +23,27 @@
 //!   - `cancel` — kill a running child by pid; the kernel uses
 //!     this on `HeartbeatTimeout`.
 //!
-//! Production code outside tests uses the `JobProcessPort` trait
-//! only. The concrete fakes (`FakeJobProcessPort`,
-//! `PidHandle`, `RecordingJobProcessPort`) are `#[cfg(test)]` —
-//! they exist to drive the pipeline deterministically without
-//! spawning a real subprocess. U7 will introduce a real backend
-//! port (PTY / tokio / etc.) that lives outside `#[cfg(test)]`.
+//! Step 1+2(2026-09-03-0959 DAG 接线):`JobProcessHandle` /
+//! `JobProcessPort` trait 已 promote 为生产可见;具体 fakes
+//! (`FakeJobProcessPort`、`PidHandle`、`RecordingJobProcessPort`)
+//! 保持 `#[cfg(test)]` —— 它们只用于确定性地驱动 pipeline 测试,
+//! 不 spawn 真实子进程。真实 backend port(PTY / tokio 等)在后续
+//! 接线 Step 引入。
 
-#[cfg(test)]
 use super::prompt::PromptContext;
-#[cfg(test)]
 use super::{JobDescriptor, ProcessResult, RuntimeJobError};
 
 /// Opaque handle the kernel uses to collect a launched child.
 /// Implementations MUST expose `pid` so the kernel can record it
 /// for cancellation and so the per-attempt PID-tracking test can
 /// assert.
-#[cfg(test)]
+///
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;真实
+/// backend port 落地前无 bin 侧实现/消费方,item 级
+/// `#[allow(dead_code)]`——promote 义务见
+/// `presets/en/parallel-forge-preset-author-notes.md`「promote 前置
+/// 义务清单」#1/#2,接线落地后移除。
+#[allow(dead_code)]
 pub trait JobProcessHandle: Send {
     fn pid(&self) -> i32;
 }
@@ -47,7 +51,11 @@ pub trait JobProcessHandle: Send {
 /// Subprocess port the kernel drives. One impl per host backend
 /// (PTY / pipe / tokio). The kernel is *only* coupled to this
 /// trait.
-#[cfg(test)]
+///
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;真实
+/// backend port 落地前无 bin 侧实现/消费方,item 级
+/// `#[allow(dead_code)]`(同 `JobProcessHandle` 的 promote 注释)。
+#[allow(dead_code)]
 pub trait JobProcessPort: Send {
     /// Pre-launch fence. Called BEFORE `launch`. The default
     /// `FakeJobProcessPort` impl treats every descriptor as

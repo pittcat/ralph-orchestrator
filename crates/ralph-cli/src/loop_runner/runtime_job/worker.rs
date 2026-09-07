@@ -22,35 +22,38 @@
 //! `env_clear().envs(...)`). `EnvSeedProvider` supplies the
 //! host env snapshot the filter runs against.
 
-#[cfg(test)]
 use std::collections::HashMap;
-#[cfg(test)]
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
 use super::environment::DagEnvPolicy;
-#[cfg(test)]
-use super::process::{JobProcessHandle, JobProcessPort};
-#[cfg(test)]
+use super::process::JobProcessPort;
 use super::prompt::build_prompt_context;
-#[cfg(test)]
 use super::{JobDescriptor, ProcessResult, RuntimeJobError};
 
 /// Default kernel deadline. Matches the plan §7 U6 "hard
 /// timeout" requirement. The pipeline may override per-stage.
-#[cfg(test)]
+///
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;
+/// EventLoop 接线落地前无 bin 侧消费方,item 级
+/// `#[allow(dead_code)]`——promote 义务见
+/// `presets/en/parallel-forge-preset-author-notes.md`「promote 前置
+/// 义务清单」#1/#2,接线落地后移除。
+#[allow(dead_code)]
 pub const DEFAULT_KERNEL_DEADLINE_MS: u64 = 60_000;
 
 /// Source of the env map the kernel hands to the port. Real
 /// callers pass a closure that reads from a controlled store;
 /// tests pass a literal `HashMap` to exercise the allowlist
 /// assertion.
-#[cfg(test)]
+///
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;无 bin 侧
+/// 生产调用方,item 级 `#[allow(dead_code)]`(同
+/// `DEFAULT_KERNEL_DEADLINE_MS` 的 promote 注释)。
+#[allow(dead_code)]
 pub trait EnvSeedProvider: Send {
     fn host_env(&self) -> HashMap<String, String>;
 }
 
-#[cfg(test)]
 impl<F> EnvSeedProvider for F
 where
     F: Fn() -> HashMap<String, String> + Send,
@@ -63,7 +66,11 @@ where
 /// Run one kernel invocation. Returns the port's
 /// `ProcessResult`. Errors are typed (`RuntimeJobError`); the
 /// pipeline branches on them.
-#[cfg(test)]
+///
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;无 bin 侧
+/// 生产调用方,item 级 `#[allow(dead_code)]`(同
+/// `DEFAULT_KERNEL_DEADLINE_MS` 的 promote 注释)。
+#[allow(dead_code)]
 pub fn run_job<P>(
     descriptor: &JobDescriptor,
     port: &P,
@@ -130,7 +137,7 @@ where
 /// abstraction honest. Test-only — the bin target does not need
 /// this guard.
 #[cfg(test)]
-fn _assert_handle_object_safe(_: Box<dyn JobProcessHandle>) {}
+fn _assert_handle_object_safe(_: Box<dyn super::process::JobProcessHandle>) {}
 
 #[cfg(test)]
 mod tests {

@@ -4,11 +4,18 @@
 //! when a worker-emitted event passes the existing acceptance
 //! gate. The driver routes the event into the right pipeline
 //! slot:
-//!   - `forge.exec.unit.completed` → `JobPipeline::advance(unit, Review)`
-//!   - `forge.review.verdict` (approve) → `JobPipeline::advance(unit, Verify)`
-//!   - `forge.review.verdict` (request_changes) →
+//!   - `forge.unit.executed` → `JobPipeline::advance(unit, Review)`
+//!   - `forge.unit.reviewed` (ACCEPTED) → `JobPipeline::advance(unit, Verify)`
+//!   - `forge.unit.reviewed` (REJECTED) →
 //!     `JobPipeline::bump_attempt_and_advance(unit, Review)`
 //!   - any other topic → ignored (driver is observation-only)
+//!
+//! Step 1+2(DAG 接线)起 driver 消费 `forge.unit.*` per-unit typed
+//! topic 族(映射决策方案 (b):dag 模式新增 per-unit topic,wave
+//! 路径的 `exec.unit.done` / `forge.wave.reviewed` 不动)。`Stage`
+//! 枚举只有 Execute/Review/Verify——verified 之后的 integration
+//! 推进(`forge.unit.integrated` 由 runtime 在 lane CAS FF 后发射)
+//! 属后续 Step,driver 暂不消费。
 //!
 //! On `Block`, the driver returns the typed reason so the caller
 //! can publish `forge.plan.blocked` (or `forge.final.correction.settled`,
@@ -19,40 +26,38 @@
 //! kernel (`runtime_job::worker`), which the runtime invokes
 //! after the driver returns `Admitted`.
 
-#[cfg(test)]
 use serde_json::Value;
 
-#[cfg(test)]
 use super::jobs::{AdvanceOutcome, JobPipeline};
-#[cfg(test)]
 use crate::loop_runner::runtime_job::JobToken;
-#[cfg(test)]
 use crate::loop_runner::runtime_job::{RuntimeJobError, Stage};
 
 /// Topics the driver recognises. The list is intentionally
 /// narrow — anything outside it is a no-op so the driver never
 /// silently corrupts a pipeline slot.
 ///
-/// `#[cfg(test)]` for U6: only the driver test mod and the
-/// `inspect` integration test reference these constants.
-/// U7 promotes them to pub once the integration half hands the
-/// driver to the live runtime.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;EventLoop
+/// acceptance 路径接线前无 bin 侧消费方,item 级
+/// `#[allow(dead_code)]`——promote 义务见
+/// `presets/en/parallel-forge-preset-author-notes.md`「promote 前置
+/// 义务清单」#1/#2,接线落地后移除。
+#[allow(dead_code)]
 pub mod topics {
-    pub const EXEC_UNIT_COMPLETED: &str = "forge.exec.unit.completed";
-    pub const REVIEW_VERDICT: &str = "forge.review.verdict";
+    pub const UNIT_EXECUTED: &str = "forge.unit.executed";
+    pub const UNIT_REVIEWED: &str = "forge.unit.reviewed";
 }
 
-/// `#[cfg(test)]` for U6 — see `topics` rationale. U7 promotes
-/// it.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;verdict
+/// 值域与 preset 词汇对齐为 `ACCEPTED` / `REJECTED`。无 bin 侧生产
+/// 调用方,item 级 `#[allow(dead_code)]`(同 `topics` 的注释)。
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewVerdict {
-    Approve,
-    RequestChanges,
+    Accepted,
+    Rejected,
 }
 
-#[cfg(test)]
+#[allow(dead_code)] // 同 `topics` 的 Step 1+2 promote 注释。
 impl ReviewVerdict {
     /// Parse from the event payload's `verdict` field. Returns
     /// `None` if the field is missing or unrecognised — the
@@ -61,8 +66,8 @@ impl ReviewVerdict {
     pub fn from_payload(payload: &Value) -> Option<Self> {
         let s = payload.get("verdict")?.as_str()?;
         match s {
-            "approve" => Some(Self::Approve),
-            "request_changes" => Some(Self::RequestChanges),
+            "ACCEPTED" => Some(Self::Accepted),
+            "REJECTED" => Some(Self::Rejected),
             _ => None,
         }
     }
@@ -70,9 +75,9 @@ impl ReviewVerdict {
 
 /// Outcome of a single `observe_accepted` call.
 ///
-/// `#[cfg(test)]` for U6 — see `topics` rationale. U7 promotes
-/// it.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;无 bin 侧
+/// 生产调用方,item 级 `#[allow(dead_code)]`(同 `topics` 的注释)。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriverOutcome {
     /// Driver routed the event into the pipeline; the caller
@@ -100,14 +105,15 @@ pub enum DriverOutcome {
 /// `EventLoop` can hand accepted events to it without owning
 /// the pipeline's mutable state.
 ///
-/// `#[cfg(test)]` for U6 — see `topics` rationale. U7 promotes
-/// it once the live runtime drives the driver.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;live
+/// runtime 驱动 driver 前无 bin 侧生产调用方,item 级
+/// `#[allow(dead_code)]`(同 `topics` 的注释)。
+#[allow(dead_code)]
 pub struct DagSchedulerDriver<'a> {
     pipeline: &'a mut JobPipeline,
 }
 
-#[cfg(test)]
+#[allow(dead_code)] // 同 `topics` 的 Step 1+2 promote 注释。
 impl<'a> DagSchedulerDriver<'a> {
     pub fn new(pipeline: &'a mut JobPipeline) -> Self {
         Self { pipeline }
@@ -121,7 +127,7 @@ impl<'a> DagSchedulerDriver<'a> {
         payload: &Value,
     ) -> DriverOutcome {
         match topic {
-            topics::EXEC_UNIT_COMPLETED => {
+            topics::UNIT_EXECUTED => {
                 // Executor finished — advance to Review.
                 match self.pipeline.advance(unit_key, Stage::Review) {
                     AdvanceOutcome::Admitted { token } => DriverOutcome::Routed {
@@ -138,8 +144,8 @@ impl<'a> DagSchedulerDriver<'a> {
                     },
                 }
             }
-            topics::REVIEW_VERDICT => match ReviewVerdict::from_payload(payload) {
-                Some(ReviewVerdict::Approve) => {
+            topics::UNIT_REVIEWED => match ReviewVerdict::from_payload(payload) {
+                Some(ReviewVerdict::Accepted) => {
                     match self.pipeline.advance(unit_key, Stage::Verify) {
                         AdvanceOutcome::Admitted { token } => DriverOutcome::Routed {
                             unit_key: unit_key.to_string(),
@@ -155,7 +161,7 @@ impl<'a> DagSchedulerDriver<'a> {
                         },
                     }
                 }
-                Some(ReviewVerdict::RequestChanges) => {
+                Some(ReviewVerdict::Rejected) => {
                     match self
                         .pipeline
                         .bump_attempt_and_advance(unit_key, Stage::Review)
@@ -205,7 +211,7 @@ mod tests {
         let _ = pipeline.advance("U-1", Stage::Execute);
         pipeline.release("U-1");
         let mut driver = DagSchedulerDriver::new(&mut pipeline);
-        let out = driver.observe_accepted(topics::EXEC_UNIT_COMPLETED, "U-1", &json!({}));
+        let out = driver.observe_accepted(topics::UNIT_EXECUTED, "U-1", &json!({}));
         match out {
             DriverOutcome::Routed {
                 unit_key,
@@ -219,9 +225,9 @@ mod tests {
         }
     }
 
-    /// Review-approve routes to Verify.
+    /// Review-Accepted routes to Verify.
     #[test]
-    fn review_approve_routes_to_verify() {
+    fn review_accepted_routes_to_verify() {
         let (_pools, mut pipeline) = driver_fixture();
         pipeline.ensure_unit("U-2", "j-2", "executor", Stage::Execute);
         let _ = pipeline.advance("U-2", Stage::Execute);
@@ -229,9 +235,9 @@ mod tests {
         let _ = pipeline.advance("U-2", Stage::Review);
         let mut driver = DagSchedulerDriver::new(&mut pipeline);
         let out = driver.observe_accepted(
-            topics::REVIEW_VERDICT,
+            topics::UNIT_REVIEWED,
             "U-2",
-            &json!({"verdict": "approve"}),
+            &json!({"verdict": "ACCEPTED"}),
         );
         match out {
             DriverOutcome::Routed { next_stage, .. } => {
@@ -241,10 +247,10 @@ mod tests {
         }
     }
 
-    /// Review-request_changes bumps attempt and re-routes to
+    /// Review-Rejected bumps attempt and re-routes to
     /// Review with a fresh token.
     #[test]
-    fn review_request_changes_bumps_attempt() {
+    fn review_rejected_bumps_attempt() {
         let (_pools, mut pipeline) = driver_fixture();
         pipeline.ensure_unit("U-3", "j-3", "executor", Stage::Execute);
         let _ = pipeline.advance("U-3", Stage::Execute);
@@ -253,9 +259,9 @@ mod tests {
         pipeline.release("U-3");
         let mut driver = DagSchedulerDriver::new(&mut pipeline);
         let out = driver.observe_accepted(
-            topics::REVIEW_VERDICT,
+            topics::UNIT_REVIEWED,
             "U-3",
-            &json!({"verdict": "request_changes"}),
+            &json!({"verdict": "REJECTED"}),
         );
         match out {
             DriverOutcome::Routed { token, .. } => {
@@ -278,7 +284,7 @@ mod tests {
     /// feeds `ReviewVerdict::from_payload` end-to-end. The
     /// ingress unwraps the worker payload's `verdict` string so
     /// the accepted event is FLAT (`payload.verdict ==
-    /// "approve"`); the driver must route it to Verify instead
+    /// "ACCEPTED"`); the driver must route it to Verify instead
     /// of returning `Ignored` (which would silently drop the
     /// review event and wedge the pipeline in Review forever).
     #[test]
@@ -295,12 +301,16 @@ mod tests {
         // Real ingress output: the worker payload nests the
         // verdict; the receipt must carry it unwrapped.
         let descriptor = JobDescriptor::new("U-ing", "j-ing", "executor", Stage::Review);
-        let result =
-            ProcessResult::new(json!({"verdict": "approve", "notes": "ok"}), Some(0), 42, 7);
+        let result = ProcessResult::new(
+            json!({"verdict": "ACCEPTED", "notes": "ok"}),
+            Some(0),
+            42,
+            7,
+        );
         let receipt = submit_accepted_result(&descriptor, &result).expect("ingress accepts");
 
         let mut driver = DagSchedulerDriver::new(&mut pipeline);
-        let out = driver.observe_accepted(topics::REVIEW_VERDICT, "U-ing", receipt.payload());
+        let out = driver.observe_accepted(topics::UNIT_REVIEWED, "U-ing", receipt.payload());
         match out {
             DriverOutcome::Routed { next_stage, .. } => {
                 assert_eq!(next_stage, Stage::Verify);
@@ -337,10 +347,10 @@ mod tests {
         );
 
         // Same tick: U-done runs to its durable terminal through
-        // the driver (exec-complete → Review, approve → Verify).
+        // the driver (exec-complete → Review, ACCEPTED → Verify).
         {
             let mut driver = DagSchedulerDriver::new(&mut pipeline);
-            let out = driver.observe_accepted(topics::EXEC_UNIT_COMPLETED, "U-done", &json!({}));
+            let out = driver.observe_accepted(topics::UNIT_EXECUTED, "U-done", &json!({}));
             assert!(
                 matches!(
                     out,
@@ -352,9 +362,9 @@ mod tests {
                 "exec-complete must route U-done to Review, got {out:?}"
             );
             let out = driver.observe_accepted(
-                topics::REVIEW_VERDICT,
+                topics::UNIT_REVIEWED,
                 "U-done",
-                &json!({"verdict": "approve"}),
+                &json!({"verdict": "ACCEPTED"}),
             );
             assert!(
                 matches!(
@@ -364,7 +374,7 @@ mod tests {
                         ..
                     }
                 ),
-                "approve must route U-done to Verify, got {out:?}"
+                "ACCEPTED must route U-done to Verify, got {out:?}"
             );
             // No premature refill while U-done still holds its
             // (migrated) slot.
@@ -387,92 +397,28 @@ mod tests {
     }
 
     // =====================================================================
-    // TG-S06 (P2 / interface-topic, PMI-002 §4 + PMI-003): driver 平行
-    // topic 宇宙与真实拓扑不相交 pin。真实体系的 topic 名是
-    // `exec.unit.done` / `forge.wave.reviewed`(presets/schemas/
-    // parallel-forge.yml 声明,dispatcher/reviewer 实际发布);driver
-    // 期望的是 `forge.exec.unit.completed` / `forge.review.verdict`
-    // ——两套命名不相交。本组测试钉住: 真实 topic 喂 driver 时必须
-    // 全部 `Ignored` 且 pipeline 状态零推进;静态断言两套 topic 集合
-    // 交集为空。promote 焊接时若直接把真实事件流接进 driver(无映射
-    // 决策),事件会被静默丢弃(driver 对未知 topic 是 no-op,fail-safe
-    // 但静默)——届时本组测试变红,强制先做映射决策。
+    // TG-S06 (P2 / interface-topic, PMI-002 §4 + PMI-003) — 已按 pin 内建
+    // 指引翻转(2026-09-03-0959 plan DAG 接线 Step 1+2):topic 映射决策
+    // 已做(方案 (b):dag 模式新增 `forge.unit.*` per-unit typed topic 族,
+    // wave 路径的 `exec.unit.done` / `forge.wave.reviewed` 不动),verdict
+    // 值域统一为 ACCEPTED/REJECTED。原「真实 topic 喂 driver 必须
+    // Ignored」pin 随映射决策落地删除;保留的静态 pin 翻转为正包含:
+    // driver 消费的 topic 必须全部声明在 schema 的 `forge.unit.*` 族内,
+    // 且该族必须恰好是本测试钉住的 6 个成员(族增删 → 本测试红,强制
+    // 同步 driver / schema / preset publishes / BDD)。PMI-003 的两个
+    // 平行定义检查(compute_resource_aware_digest 零生产消费、PHASE_*
+    // 无 as u8 绑定)不属于 topic 映射,保持原样。
     // =====================================================================
 
-    /// TG-S06 步骤 1+2: 用真实 topology topic(`exec.unit.done` /
-    /// `forge.wave.reviewed` 的 payload 形态——exec.unit.done 带
-    /// wave_id/slot_index/content_hash;forge.wave.reviewed 带
-    /// unit_verdicts/aggregate_verdict,verdict 值为
-    /// ACCEPTED/REJECTED,driver 的 `ReviewVerdict::from_payload`
-    /// 读的是 `verdict` 字符串字段)喂 driver → 断言 `Ignored` 且
-    /// pipeline 状态零推进(用 `still_executing` 探测 unit 仍在
-    /// Execute 初始 stage)。
+    /// TG-S06(翻转后): driver topic 集合与 preset schema 声明的
+    /// `forge.unit.*` per-unit topic 族正包含 + 族成员精确钉住。附带
+    /// PMI-003 的两个平行定义检查: `compute_resource_aware_digest` 零
+    /// 生产消费、`PHASE_*` 无 `WaveDeliveryState` 枚举绑定断言——一旦
+    /// 有人接线,此静态断言红,提示先做权威关系决策。
     #[test]
-    fn tg_s06_real_topology_topics_are_ignored_by_driver() {
-        let (_pools, mut pipeline) = driver_fixture();
-        pipeline.ensure_unit("U-real", "j-real", "executor", Stage::Execute);
-        let mut driver = DagSchedulerDriver::new(&mut pipeline);
-
-        // 真实 exec.unit.done payload 形态(schema: wave_id/slot_index/
-        // content_hash/unit_id/plan_key...)。
-        let exec_done = json!({
-            "wave_id": "tg-s06-wave",
-            "slot_index": 0,
-            "content_hash": "tg-s06-h0",
-            "unit_id": "unit-u1",
-            "plan_key": "tg-s06"
-        });
-        let out = driver.observe_accepted("exec.unit.done", "U-real", &exec_done);
-        assert!(
-            matches!(out, DriverOutcome::Ignored { .. }),
-            "TG-S06: 真实 topic `exec.unit.done` 被 driver 消费了({out:?})\
-             ——真实事件流被直接接进 driver,review 语义错位。promote 前\
-             必须先做 forge.exec.unit.completed ↔ exec.unit.done 映射决策"
-        );
-
-        // 真实 forge.wave.reviewed payload 形态(schema: wave_id/
-        // wave_index/unit_verdicts/aggregate_verdict;verdict 值为
-        // ACCEPTED/REJECTED,而 driver 的 ReviewVerdict 读
-        // `verdict: "approve"` ——字段名与值域都不相交)。
-        let wave_reviewed = json!({
-            "wave_id": "tg-s06-wave",
-            "wave_index": 0,
-            "unit_verdicts": {"unit-u1": "ACCEPTED"},
-            "aggregate_verdict": "ACCEPTED",
-            "plan_key": "tg-s06"
-        });
-        let out = driver.observe_accepted("forge.wave.reviewed", "U-real", &wave_reviewed);
-        assert!(
-            matches!(out, DriverOutcome::Ignored { .. }),
-            "TG-S06: 真实 topic `forge.wave.reviewed` 被 driver 消费了({out:?})\
-             ——promote 前必须先做 forge.review.verdict ↔ \
-             forge.wave.reviewed 映射决策"
-        );
-
-        // pipeline 状态零推进: U-real 仍在 Execute(初始注册 stage)。
-        // `still_executing` 返回 unit 的当前 stage——若 driver 曾把
-        // unit 推进到 Review,这里会返回 Review。
-        match pipeline.still_executing("U-real") {
-            AdvanceOutcome::StillExecuting { stage, .. } => {
-                assert_eq!(
-                    stage,
-                    Stage::Execute,
-                    "TG-S06: driver 对真实 topic 产生了 pipeline 状态推进\
-                     (U-real 已离开 Execute)"
-                );
-            }
-            other => panic!("TG-S06: still_executing 应返回 StillExecuting,得到 {other:?}"),
-        }
-    }
-
-    /// TG-S06 步骤 3(静态一致性): driver 引用的 topic 字符串集合与
-    /// preset schema topic 集合交集为空。附带 PMI-003 的两个平行定义
-    /// 检查: `compute_resource_aware_digest` 零生产消费、`PHASE_*`
-    /// 无 `WaveDeliveryState` 枚举绑定断言——一旦有人接线,此静态
-    /// 断言红,提示先做映射决策。
-    #[test]
-    fn tg_s06_driver_topics_disjoint_from_real_topology_and_parallel_defs_unwired() {
-        // ── 1. driver topic 宇宙 vs preset schema topic 宇宙 ──
+    fn tg_s06_driver_topics_match_schema_unit_family_and_parallel_defs_unwired() {
+        // ── 1. driver topic 集合 ⊆ schema 的 forge.unit.* 族,且族成员
+        //    精确等于钉住的 6 个 topic ──
         // schema 文件里 `schemas:` 块下的顶层 topic 键(两空格缩进、
         // 形如 `xxx.yyy:` 的行)。
         let schema_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -504,17 +450,42 @@ mod tests {
             "TG-S06 前置失效: preset schema topic 提取为空——schema 文件\
              结构可能已改,需同步本测试的解析规则"
         );
-        // 证据自检: 真实体系的两个 topic 必须在 schema 集合里。
+        // 证据自检: wave 路径的两个 topic 必须仍在 schema 集合里(wave
+        // 路径不动,退休属后续 Step 8)。
         assert!(schema_topics.contains(&"exec.unit.done"));
         assert!(schema_topics.contains(&"forge.wave.reviewed"));
 
-        let driver_topics = [topics::EXEC_UNIT_COMPLETED, topics::REVIEW_VERDICT];
+        // 族成员精确钉住: 6 个 per-unit topic(方案 (b))。族增删 →
+        // 本断言红,强制同步 driver / preset publishes / BDD。
+        let mut schema_unit_topics: Vec<&str> = schema_topics
+            .iter()
+            .copied()
+            .filter(|t| t.starts_with("forge.unit."))
+            .collect();
+        schema_unit_topics.sort_unstable();
+        assert_eq!(
+            schema_unit_topics,
+            vec![
+                "forge.unit.executed",
+                "forge.unit.execution_failed",
+                "forge.unit.integrated",
+                "forge.unit.reviewed",
+                "forge.unit.verification_failed",
+                "forge.unit.verified",
+            ],
+            "TG-S06: schema 的 forge.unit.* 族成员漂移——per-unit topic 的\
+             增删必须同批同步 driver / preset publishes / BDD(方案 (b) \
+             topic 族是 DAG 接线的单一事实源)"
+        );
+
+        // 正包含: driver 消费的每个 topic 都已声明在 schema 族内。
+        let driver_topics = [topics::UNIT_EXECUTED, topics::UNIT_REVIEWED];
         for dt in driver_topics {
             assert!(
-                !schema_topics.contains(&dt),
-                "TG-S06: driver topic `{dt}` 已出现在 preset schema topic 集\
-                 合中——两套命名开始焊接。焊接前必须先做显式映射决策\
-                 (PMI-002 §4),否则真实事件流按错误命名被 driver 静默消费"
+                schema_unit_topics.contains(&dt),
+                "TG-S06: driver topic `{dt}` 未声明在 schema 的 \
+                 forge.unit.* 族中——driver 与 schema 失配,accepted \
+                 事件会被 emit_schema_gate 拒绝或静默无消费者"
             );
         }
 

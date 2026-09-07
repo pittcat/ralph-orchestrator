@@ -47,7 +47,6 @@ pub mod worker;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
 use std::path::PathBuf;
 
 /// Stages the runtime drives a Unit through in `scheduler_mode: dag`.
@@ -56,7 +55,13 @@ use std::path::PathBuf;
 /// `Review → Execute` and `Execute → Verify` are illegal — both
 /// are fail-closed in `Stage::can_advance_to` and in
 /// `JobPipeline::advance` (see `dag_scheduler::jobs`).
-#[cfg(test)]
+///
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见。当前无
+/// bin 侧生产调用方(EventLoop 接线属后续 Step),故用 item 级
+/// `#[allow(dead_code)]`;promote 义务见
+/// `presets/en/parallel-forge-preset-author-notes.md`「promote 前置
+/// 义务清单」#1/#2,接线落地后移除。
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Stage {
     Execute,
@@ -64,7 +69,7 @@ pub enum Stage {
     Verify,
 }
 
-#[cfg(test)]
+#[allow(dead_code)] // 同 `Stage` 的 Step 1+2 promote 注释。
 impl Stage {
     /// Strict next-stage gate. `Execute → Review` and
     /// `Review → Verify` are the only legal forward moves; same
@@ -88,7 +93,6 @@ impl Stage {
     }
 }
 
-#[cfg(test)]
 impl std::fmt::Display for Stage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -110,7 +114,11 @@ impl std::fmt::Display for Stage {
 /// `attempt` is the monotonic per-Unit counter incremented on every
 /// review rejection. `JobPipeline` reads it back when minting the
 /// next attempt's token.
-#[cfg(test)]
+///
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;无 bin 侧
+/// 生产调用方,item 级 `#[allow(dead_code)]`(同 `Stage` 的 promote
+/// 注释)。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobDescriptor {
     pub unit_key: String,
@@ -124,7 +132,7 @@ pub struct JobDescriptor {
     pub attempt: u64,
 }
 
-#[cfg(test)]
+#[allow(dead_code)] // 同 `Stage` 的 Step 1+2 promote 注释。
 impl JobDescriptor {
     /// Minimal constructor used by tests and the legacy stub. Use
     /// `new_full` when the kernel needs the path / env policy.
@@ -211,7 +219,11 @@ impl JobDescriptor {
 /// here as a 2-arg mint that defaults `attempt = 0`. Production
 /// callers (the pipeline) use `mint_attempt` so the attempt
 /// counter is explicit.
-#[cfg(test)]
+///
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;无 bin 侧
+/// 生产调用方,item 级 `#[allow(dead_code)]`(同 `Stage` 的 promote
+/// 注释)。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobToken {
     pub unit_key: String,
@@ -221,7 +233,7 @@ pub struct JobToken {
     pub attempt: u64,
 }
 
-#[cfg(test)]
+#[allow(dead_code)] // 同 `Stage` 的 Step 1+2 promote 注释。
 impl JobToken {
     /// Production mint: pins every CAS slot so the guard can
     /// reject cross-unit / cross-stage / cross-hat / cross-attempt
@@ -284,7 +296,11 @@ impl JobToken {
 /// `payload_bytes` is the byte length of the rendered payload
 /// JSON; the ingress uses it to enforce the 64 KiB ceiling the
 /// plan §7 U6 #11 mandates.
-#[cfg(test)]
+///
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;无 bin 侧
+/// 生产调用方,item 级 `#[allow(dead_code)]`(同 `Stage` 的 promote
+/// 注释)。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessResult {
     pub payload: serde_json::Value,
@@ -294,7 +310,7 @@ pub struct ProcessResult {
     pub elapsed_ms: u64,
 }
 
-#[cfg(test)]
+#[allow(dead_code)] // 同 `Stage` 的 Step 1+2 promote 注释。
 impl ProcessResult {
     pub fn new(
         payload: serde_json::Value,
@@ -317,11 +333,10 @@ impl ProcessResult {
 /// §7 U6 #11: "result payload > 64 KiB must be refused at the
 /// ingress gate with a typed error."
 ///
-/// `#[cfg(test)]` because the only consumer is the ingress
-/// module (also `#[cfg(test)]` for U6) and the `tests` mod that
-/// pins the cap. U7 promotes it once the real subprocess
-/// backend reads payload byte counts.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;当前消费
+/// 方(ingress / 真实 subprocess backend)尚未在 bin 侧接线,item 级
+/// `#[allow(dead_code)]`(同 `Stage` 的 promote 注释)。
+#[allow(dead_code)]
 pub const MAX_INGRESS_PAYLOAD_BYTES: usize = 64 * 1024;
 
 /// All typed failure modes the runtime job kernel can surface.
@@ -333,7 +348,11 @@ pub const MAX_INGRESS_PAYLOAD_BYTES: usize = 64 * 1024;
 /// mentions a path is `PreFenceFailed(String)` where `String` is
 /// the port's own error message (test fakes keep it short and
 /// sanitised).
-#[cfg(test)]
+///
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;无 bin 侧
+/// 生产调用方,item 级 `#[allow(dead_code)]`(同 `Stage` 的 promote
+/// 注释)。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeJobError {
     IllegalStageTransition {
@@ -379,7 +398,6 @@ pub enum RuntimeJobError {
     },
 }
 
-#[cfg(test)]
 impl std::fmt::Display for RuntimeJobError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -441,5 +459,4 @@ impl std::fmt::Display for RuntimeJobError {
     }
 }
 
-#[cfg(test)]
 impl std::error::Error for RuntimeJobError {}

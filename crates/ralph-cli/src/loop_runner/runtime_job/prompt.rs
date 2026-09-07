@@ -19,12 +19,9 @@
 //! kernel's filter result was discarded (`let _ =`), which is the
 //! gap PMI-004② closed.
 
-#[cfg(test)]
 use std::collections::HashMap;
-#[cfg(test)]
 use std::path::PathBuf;
 
-#[cfg(test)]
 use super::JobDescriptor;
 
 /// Plain-data prompt context. Stable, `Clone`, `PartialEq`,
@@ -34,7 +31,13 @@ use super::JobDescriptor;
 /// from the prompt context: it is part of the integration
 /// authorisation surface (U7's concern), not the worker
 /// prompt.
-#[cfg(test)]
+///
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;无 bin 侧
+/// 生产调用方(EventLoop 接线属后续 Step),item 级
+/// `#[allow(dead_code)]`——promote 义务见
+/// `presets/en/parallel-forge-preset-author-notes.md`「promote 前置
+/// 义务清单」#1/#2,接线落地后移除。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptContext {
     pub unit_key: String,
@@ -51,7 +54,7 @@ pub struct PromptContext {
     pub child_env: HashMap<String, String>,
 }
 
-#[cfg(test)]
+#[allow(dead_code)] // 同 `PromptContext` 的 Step 1+2 promote 注释。
 impl PromptContext {
     /// Read-only accessors used by tests + the kernel.
     pub fn unit_key(&self) -> &str {
@@ -80,10 +83,10 @@ impl PromptContext {
 /// output is the child's ONLY env source. The kernel no longer
 /// computes it just to throw it away.
 ///
-/// `#[cfg(test)]` because the only consumers are the per-module
-/// `tests` mod and the integration tests in `runtime_job::tests`.
-/// U7 will promote it once a real subprocess backend is wired.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;真实
+/// subprocess backend 接线前无 bin 侧消费方,item 级
+/// `#[allow(dead_code)]`(同 `PromptContext` 的 promote 注释)。
+#[allow(dead_code)]
 pub fn build_prompt_context(
     descriptor: &JobDescriptor,
     env_policy: &super::environment::DagEnvPolicy,

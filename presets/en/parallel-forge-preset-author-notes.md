@@ -2,18 +2,18 @@
 
 ## Scheduler Mode 过渡态记录（2026-09-05，PMI-002 收口；rubric Q3/HQ3 `scheduler_mode_transitional_state_undocumented`）
 
-- **现状（如实）**：YAML 声明 `event_loop.supervisor.scheduler_mode: dag`（2026-09-03-0959 plan U10 §13 最小 cutover，commit `35adac73`），但 **DAG 执行面未接线**——调度行为与 `wave` 完全等价：forge-dispatcher wave fan-out + supervisor wave 账本 + `forge.wave.*` 事件链原样运行；`max_concurrent_workers: 8` 是唯一生效容量权威（`DagPools`/`AdmissionCaps` 全 `#[cfg(test)]`）。
+- **现状（如实）**：YAML 声明 `event_loop.supervisor.scheduler_mode: dag`（2026-09-03-0959 plan U10 §13 最小 cutover，commit `35adac73`），但 **DAG 执行面未接线**——调度行为与 `wave` 完全等价：forge-dispatcher wave fan-out + supervisor wave 账本 + `forge.wave.*` 事件链原样运行；`max_concurrent_workers: 8` 是唯一生效容量权威（`DagPools` 与 `max_concurrent_workers` 的单一权威收敛属 promote 义务 #2 后半，未落地）。**Step 1+2(2026-09-07) 已落地**：`runtime_job` kernel 与 `dag_scheduler::{driver,jobs}` 类型层 promote 为生产可见（去 `#[cfg(test)]`,无生产调用方的 item 以最小粒度 `#[allow(dead_code)]` 标注）;driver topic 切换为方案 (b) 新增的 `forge.unit.*` per-unit typed topic 族（`forge.unit.executed` / `forge.unit.execution_failed` / `forge.unit.reviewed` / `forge.unit.verified` / `forge.unit.verification_failed` / `forge.unit.integrated`,schema 已声明,executor/reviewer/verifier hat publishes 已追加;`forge.unit.integrated` 为 runtime 发射,D25）,verdict 值域统一为 `ACCEPTED`/`REJECTED`。**未落地**:driver 未接入 EventLoop acceptance 路径,hat instructions 未改（wave 模式下 hat 仍只发 `exec.unit.*`/`forge.wave.*`),integration 推进未消费 `forge.unit.verified`(Stage 枚举无 Integration 阶段)。
 - **发射权威（如实）**：`forge.exec.development.done` 由 **forge-dispatcher hat** 发射（schema field_docs `source: forge-dispatcher` 为准）；preset yml `scheduler_mode: dag` 上方注释已按 PMI-002 改写为同一事实。runtime 发射（「all Units integrated and projection-acknowledged, exactly once」）是 **promote 后目标态，当前不存在对应 runtime 代码**。
 - **inspect 语义**：`scheduler_mode ≠ wave` 时 `ralph inspect loop --format json` 输出只读 `scheduler` 块（空计数 = 零观测的如实反映，非伪造）。
 - **promote 前置义务清单（follow-up 载体，本 notes 即 git-tracked 认领）**——任何「把 DAG 调度器接进 EventLoop」的 PR 必须同批交付，缺一即半接线（TG-S05 变红 = P0）：
-  1. `DagSchedulerDriver::observe_accepted` 接入真实 EventLoop acceptance 路径；接线前必须先做 topic 映射决策（`forge.exec.unit.completed ↔ exec.unit.done`、`forge.review.verdict ↔ forge.wave.reviewed`，字段名与 verdict 值域 `approve/request_changes ↔ ACCEPTED/REJECTED` 双重差异，见 TG-S06 pin）。
-  2. `JobPipeline`/`DagPools`/`RuntimeJob` kernel promote 到非 `#[cfg(test)]`，容量模型与 `max_concurrent_workers` 收敛为单一权威（plan D16：`dag_pools` 默认各等于 `max_concurrent_workers`）。
+  1. `DagSchedulerDriver::observe_accepted` 接入真实 EventLoop acceptance 路径。**topic 映射决策已做(Step 1+2,方案 (b))**:driver 消费新增的 `forge.unit.*` per-unit 族,verdict 值域已统一为 `ACCEPTED`/`REJECTED`,不再是旧的 `forge.exec.unit.completed`/`forge.review.verdict` 平行宇宙;剩余义务是接线本身(driver 仍未被 EventLoop 调用)。
+  2. `JobPipeline`/`DagPools`/`RuntimeJob` kernel promote 到非 `#[cfg(test)]`(**Step 1 已落地**,item 级 `#[allow(dead_code)]` 过渡标注),容量模型与 `max_concurrent_workers` 收敛为单一权威(plan D16:`dag_pools` 默认各等于 `max_concurrent_workers`)——**收敛未落地**。
   3. U5 shadow parity（dag_shadow 在共同边界 exact parity）+ U10 §7 第 7 条 authoritative DAG canary（真实 runtime jobs + 临时 git worktrees + 完整 crash matrix）。
   4. BDD ×9（plan U10 第 9 条：immediate refill / receipt crash / attempt forgery / env-path guard / sibling candidate / integrated task close / correction / resume / final once）+ mock E2E。
   5. 退休 wave 正常路径 hats（forge-dispatcher / worktree hat / LLM integrator 的正常路径），孤儿 topic 清理，schema 同步。
   6. 文档同步：`CLAUDE.md`/`AGENTS.md` 过渡态段翻转 + `crates/ralph-core/data/*.md`（若 agent-facing 命令语义实际改变）。
   7. 既有 promote 前置（PMI-004 残余 / TG-S13 第 3 项孤儿子进程 process-group 语义）。
-- **回归 pin（不可删）**：TG-S05（`tg_s05_scheduler_mode_dag_wave_equivalence`，dag≡wave 事件序列逐条相等——变红即半接线，升 P0）+ TG-S06（driver topic 与真实拓扑不相交 + PMI-003 静态平行定义检查——变红即有人直接接线，先做映射决策）。promote 落地后这两组 pin 按 pin 消息内建指引翻转/升级，不静默删除。
+- **回归 pin（不可删）**：TG-S05（`tg_s05_scheduler_mode_dag_wave_equivalence`，dag≡wave 事件序列逐条相等——变红即半接线，升 P0）+ TG-S06（**Step 2 已按 pin 内建指引翻转**:「真实 topic 喂 driver 必须 Ignored」随映射决策删除;静态 pin 翻转为正包含——driver topic 集合必须 ⊆ schema 的 `forge.unit.*` 族且族成员精确等于钉住的 6 个 topic;PMI-003 的 `compute_resource_aware_digest` 零生产消费 + `PHASE_*` 无 `as u8` 绑定两段保持原样——变红即族/接线失配,先同步再推进）。
 
 ## Preset Intent Confirmation（2026-08-31 关键阶段证据门禁）
 

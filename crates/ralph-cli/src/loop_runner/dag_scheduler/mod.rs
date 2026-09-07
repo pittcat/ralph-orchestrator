@@ -35,10 +35,10 @@ pub mod recovery;
 pub mod shadow;
 pub mod worktree;
 
-// U6 ships these modules but does NOT re-export their public types
-// at the `dag_scheduler::*` path: every type's bin-side consumer is
-// U7's integration concern. Keeping them un-exported here means the
-// bin "ralph" target sees zero dead-code for the U6 surface. Tests
-// reach them via `super::*` and `crate::loop_runner::dag_scheduler::*`
-// (full module path), so this is consistent with the test mod's
-// `use super::*;` convention.
+// Step 1+2(2026-09-03-0959 DAG 接线):driver/jobs 与 runtime_job
+// 全量 promote 为生产可见;EventLoop 接线前尚无 bin 侧生产调用方,
+// 各 item 以最小粒度 `#[allow(dead_code)]` 标注并指向
+// `presets/en/parallel-forge-preset-author-notes.md`「promote 前置
+// 义务清单」。本模块仍不做 `dag_scheduler::*` 平铺 re-export——
+// 测试经 `super::*` / 完整模块路径访问,接线 Step 引入生产调用方时
+// 再按需 re-export。

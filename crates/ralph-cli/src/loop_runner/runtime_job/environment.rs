@@ -17,7 +17,6 @@
 //! wave worker path without adopting it; the wave worker is
 //! U6-out-of-scope and keeps its inherited env.
 
-#[cfg(test)]
 use std::collections::HashMap;
 
 /// Declared set of env var names the DAG is allowed to forward
@@ -25,13 +24,19 @@ use std::collections::HashMap;
 /// (POSIX `getenv` semantics). Order is irrelevant; the type
 /// stores a `Vec<String>` for stable serialisation in
 /// `JobDescriptor`.
-#[cfg(test)]
+///
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;无 bin 侧
+/// 生产调用方(EventLoop 接线属后续 Step),item 级
+/// `#[allow(dead_code)]`——promote 义务见
+/// `presets/en/parallel-forge-preset-author-notes.md`「promote 前置
+/// 义务清单」#1/#2,接线落地后移除。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DagEnvAllowlist {
     names: Vec<String>,
 }
 
-#[cfg(test)]
+#[allow(dead_code)] // 同 `DagEnvAllowlist` 的 Step 1+2 promote 注释。
 impl DagEnvAllowlist {
     /// Build an allowlist from a declared list of var names. The
     /// list is de-duplicated in declaration order so two equal
@@ -69,13 +74,17 @@ impl DagEnvAllowlist {
 /// present in the input. The returned map never contains a name
 /// not in `allowlist`. Values are passed through verbatim — the
 /// policy is name-only.
-#[cfg(test)]
+///
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;无 bin 侧
+/// 生产调用方,item 级 `#[allow(dead_code)]`(同 `DagEnvAllowlist`
+/// 的 promote 注释)。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DagEnvPolicy {
     allowlist: DagEnvAllowlist,
 }
 
-#[cfg(test)]
+#[allow(dead_code)] // 同 `DagEnvAllowlist` 的 Step 1+2 promote 注释。
 impl DagEnvPolicy {
     pub fn new(allowlist: DagEnvAllowlist) -> Self {
         Self { allowlist }
@@ -112,16 +121,16 @@ impl DagEnvPolicy {
 /// `LegacyEnvPolicy` to find every place the inherited-env
 /// behaviour is still mentioned.
 ///
-/// `#[cfg(test)]` because the type's only consumer is the env
-/// tests module that pins the marker against future renames.
-/// U7 promotes it once the migration is planned.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;迁移落地
+/// 前无 bin 侧消费方,item 级 `#[allow(dead_code)]`(同
+/// `DagEnvAllowlist` 的 promote 注释)。
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LegacyEnvPolicy {
     _private: (),
 }
 
-#[cfg(test)]
+#[allow(dead_code)] // 同 `DagEnvAllowlist` 的 Step 1+2 promote 注释。
 impl LegacyEnvPolicy {
     /// Construct the marker. No state — the type is purely a
     /// documentation hand-off.

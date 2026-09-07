@@ -16,10 +16,8 @@
 //! pipeline stages; the only barrier is the per-Unit dependency
 //! graph (U1 / U4).
 
-#[cfg(test)]
 use std::collections::HashMap;
 
-#[cfg(test)]
 use super::super::runtime_job::{JobToken, RuntimeJobError, Stage};
 
 // ---------------------------------------------------------------------------
@@ -34,11 +32,12 @@ use super::super::runtime_job::{JobToken, RuntimeJobError, Stage};
 /// per-stage slot counts. A pipeline tick that would exceed any
 /// cap returns `AdvanceOutcome::Blocked`.
 ///
-/// `#[cfg(test)]` for U6: the only consumer is the pipeline /
-/// driver test mods (which drive `JobPipeline` end-to-end).
-/// U7 promotes these types to pub once the integration half
-/// hands the pipeline to the live runtime.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见。容量模型
+/// 与 `max_concurrent_workers` 的单一权威收敛(promote 义务 #2,见
+/// `presets/en/parallel-forge-preset-author-notes.md`「promote 前置
+/// 义务清单」)属后续 Step;收敛前无 bin 侧生产调用方,故 item 级
+/// `#[allow(dead_code)]`,接线落地后移除。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DagPools {
     pub global: u32,
@@ -47,7 +46,7 @@ pub struct DagPools {
     pub verifier: u32,
 }
 
-#[cfg(test)]
+#[allow(dead_code)] // 同 `DagPools` 的 Step 1+2 promote 注释。
 impl DagPools {
     pub fn new(global: u32, executor: u32, reviewer: u32, verifier: u32) -> Self {
         Self {
@@ -86,12 +85,12 @@ impl DagPools {
 
 /// Per-Unit pipeline state. The runtime owns one of these per
 /// `unit_key`. `attempt` is the current review-rejection counter
-/// (bumped on every `verdict != approve`).
+/// (bumped on every `verdict == REJECTED`).
 ///
-/// `#[cfg(test)]` for U6 — only the pipeline / driver test
-/// mods drive this type. U7 promotes it once the runtime owns
-/// live pipeline state.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;runtime
+/// 接管 live pipeline state 前无 bin 侧消费方,item 级
+/// `#[allow(dead_code)]`(同 `DagPools` 的 promote 注释)。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitPipelineState {
     pub unit_key: String,
@@ -112,7 +111,7 @@ pub struct UnitPipelineState {
     pub in_flight_stage: Option<Stage>,
 }
 
-#[cfg(test)]
+#[allow(dead_code)] // 同 `DagPools` 的 Step 1+2 promote 注释。
 impl UnitPipelineState {
     pub fn new(
         unit_key: impl Into<String>,
@@ -154,9 +153,10 @@ impl UnitPipelineState {
 
 /// Outcome of a single `JobPipeline::advance` call.
 ///
-/// `#[cfg(test)]` for U6 — see `DagPools` rationale. U7 promotes
-/// it.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;无 bin 侧
+/// 生产调用方,item 级 `#[allow(dead_code)]`(同 `DagPools` 的
+/// promote 注释)。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdvanceOutcome {
     /// The Unit was admitted into the requested stage and
@@ -174,9 +174,10 @@ pub enum AdvanceOutcome {
 
 /// Aggregate pipeline state the runtime owns.
 ///
-/// `#[cfg(test)]` for U6 — see `DagPools` rationale. U7 promotes
-/// it.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;无 bin 侧
+/// 生产调用方,item 级 `#[allow(dead_code)]`(同 `DagPools` 的
+/// promote 注释)。
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct PipelineState {
     pub units: HashMap<String, UnitPipelineState>,
@@ -186,9 +187,10 @@ pub struct PipelineState {
     pub in_flight: StageCounts,
 }
 
-/// `#[cfg(test)]` for U6 — see `DagPools` rationale. U7 promotes
-/// it.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;无 bin 侧
+/// 生产调用方,item 级 `#[allow(dead_code)]`(同 `DagPools` 的
+/// promote 注释)。
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StageCounts {
     pub execute: u32,
@@ -197,7 +199,7 @@ pub struct StageCounts {
     pub total: u32,
 }
 
-#[cfg(test)]
+#[allow(dead_code)] // 同 `DagPools` 的 Step 1+2 promote 注释。
 impl StageCounts {
     pub fn bump(&mut self, stage: Stage) {
         match stage {
@@ -226,10 +228,10 @@ impl StageCounts {
 /// the pipeline emits a typed `Blocked` so the runtime can
 /// publish `forge.plan.blocked` (see U4 / U5 wiring).
 ///
-/// `#[cfg(test)]` for U6 — only the pipeline test mod reads
-/// this constant. U7 promotes it once the runtime owns the
-/// live fix-attempt budget.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;runtime
+/// 接管 fix-attempt 预算前无 bin 侧消费方,item 级
+/// `#[allow(dead_code)]`(同 `DagPools` 的 promote 注释)。
+#[allow(dead_code)]
 pub const MAX_FIX_ATTEMPTS: u64 = 3;
 
 /// The per-Unit pipeline. Holds the `DagPools` (shared, runtime
@@ -265,15 +267,16 @@ pub const MAX_FIX_ATTEMPTS: u64 = 3;
 ///   4. On review rejection, calling `bump_attempt_and_advance`
 ///      which mints a fresh token at the new attempt count.
 ///
-/// `#[cfg(test)]` for U6 — see `DagPools` rationale. U7 promotes
-/// it once the runtime owns live pipeline state.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;runtime
+/// 接管 live pipeline state 前无 bin 侧消费方,item 级
+/// `#[allow(dead_code)]`(同 `DagPools` 的 promote 注释)。
+#[allow(dead_code)]
 pub struct JobPipeline {
     pools: DagPools,
     state: PipelineState,
 }
 
-#[cfg(test)]
+#[allow(dead_code)] // 同 `DagPools` 的 Step 1+2 promote 注释。
 impl JobPipeline {
     pub fn new(pools: DagPools) -> Self {
         Self {
@@ -407,7 +410,7 @@ impl JobPipeline {
 
     /// Bump `attempt` and re-enter the pipeline at the same
     /// stage (typically Review). Used when a review verdict is
-    /// `request_changes`. The fix-attempt budget is checked
+    /// `REJECTED`. The fix-attempt budget is checked
     /// BEFORE the bump, so `attempt` can never exceed
     /// `MAX_FIX_ATTEMPTS`.
     pub fn bump_attempt_and_advance(&mut self, unit_key: &str, stage: Stage) -> AdvanceOutcome {

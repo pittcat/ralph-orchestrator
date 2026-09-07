@@ -29,21 +29,20 @@
 //! fields. The schema gate's `Reject(missing)` echoes the field
 //! names back; tests assert that no value field is ever echoed.
 
-#[cfg(test)]
 use ralph_core::event_loop::emit_schema_gate::{EmitDecision, check};
 
-#[cfg(test)]
 use super::{JobDescriptor, MAX_INGRESS_PAYLOAD_BYTES, ProcessResult, RuntimeJobError, Stage};
 
 /// Receipt returned when the ingress successfully built a typed
 /// payload and the real `emit_schema_gate::check` accepted it.
 /// The pipeline uses the receipt to advance the Unit state.
 ///
-/// `#[cfg(test)]` for U6: the only consumer is the
-/// `runtime_job::tests` mod (which exercises the real gate end
-/// to end). U7 promotes it once the integration half wires the
-/// ingress into the live subprocess pipeline.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;真实
+/// subprocess pipeline 接线前无 bin 侧消费方,item 级
+/// `#[allow(dead_code)]`——promote 义务见
+/// `presets/en/parallel-forge-preset-author-notes.md`「promote 前置
+/// 义务清单」#1/#2,接线落地后移除。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngressReceipt {
     pub unit_key: String,
@@ -52,7 +51,7 @@ pub struct IngressReceipt {
     pub payload: serde_json::Value,
 }
 
-#[cfg(test)]
+#[allow(dead_code)] // 同 `IngressReceipt` 的 Step 1+2 promote 注释。
 impl IngressReceipt {
     pub fn stage(&self) -> Stage {
         self.stage
@@ -66,7 +65,7 @@ impl IngressReceipt {
 /// here so a stage-dispatch typo cannot leak across the kernel /
 /// ingress boundary — the only mutator of this list is the type
 /// system.
-#[cfg(test)]
+#[allow(dead_code)] // 同 `IngressReceipt` 的 Step 1+2 promote 注释。
 fn required_fields(stage: Stage) -> &'static [&'static str] {
     match stage {
         Stage::Execute => &["unit_key", "job_id", "stage", "exit_code"],
@@ -79,7 +78,7 @@ fn required_fields(stage: Stage) -> &'static [&'static str] {
 /// `ProcessResult`. The shape matches the required-field list
 /// above; the field names are pinned by typed Rust code so a
 /// runtime cannot inject an env-var name into the schema.
-#[cfg(test)]
+#[allow(dead_code)] // 同 `IngressReceipt` 的 Step 1+2 promote 注释。
 fn build_payload(descriptor: &JobDescriptor, result: &ProcessResult) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     obj.insert(
@@ -103,11 +102,11 @@ fn build_payload(descriptor: &JobDescriptor, result: &ProcessResult) -> serde_js
             // Review verdicts live in the worker payload. Unwrap
             // the `verdict` string field so the accepted event
             // carries the FLAT shape (`payload.verdict ==
-            // "approve"`) that `dag_scheduler::driver::
-            // ReviewVerdict::from_payload` reads. A worker payload
-            // without a string `verdict` field is forwarded
-            // verbatim so the gate still sees the field presence
-            // it requires.
+            // "ACCEPTED" | "REJECTED"`) that
+            // `dag_scheduler::driver::ReviewVerdict::from_payload`
+            // reads. A worker payload without a string `verdict`
+            // field is forwarded verbatim so the gate still sees
+            // the field presence it requires.
             let verdict = result
                 .payload
                 .get("verdict")
@@ -135,12 +134,10 @@ fn build_payload(descriptor: &JobDescriptor, result: &ProcessResult) -> serde_js
 ///     guard, not a runtime-reachable failure — kept for unit
 ///     tests that hand in deliberately mismatched shapes).
 ///
-/// `#[cfg(test)]` for U6: the only consumer is the ingress
-/// `tests` mod and the `runtime_job::tests` integration mod that
-/// drive the real gate end-to-end. U7 promotes it once the
-/// integration half wires the ingress into the live subprocess
-/// pipeline.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;真实
+/// subprocess pipeline 接线前无 bin 侧消费方,item 级
+/// `#[allow(dead_code)]`(同 `IngressReceipt` 的 promote 注释)。
+#[allow(dead_code)]
 pub fn submit_accepted_result(
     descriptor: &JobDescriptor,
     result: &ProcessResult,
@@ -201,10 +198,10 @@ pub fn submit_accepted_result(
 /// (descriptor, result) pair cannot bypass the CAS guard by
 /// accident.
 ///
-/// `#[cfg(test)]` for U6: mirrors `submit_accepted_result`'s
-/// gating — only the ingress test mod + the integration test
-/// mod drive this path. U7 promotes it.
-#[cfg(test)]
+/// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见;无 bin 侧
+/// 生产调用方,item 级 `#[allow(dead_code)]`(同 `IngressReceipt`
+/// 的 promote 注释)。
+#[allow(dead_code)]
 pub fn submit_accepted_result_with_token(
     descriptor: &JobDescriptor,
     result: &ProcessResult,
@@ -255,16 +252,17 @@ mod tests {
     /// Review-stage payload: gate requires `verdict` field, which
     /// is unwrapped from the worker payload's `verdict` string so
     /// the accepted event carries the FLAT shape the DAG driver
-    /// (`ReviewVerdict::from_payload`) reads.
+    /// (`ReviewVerdict::from_payload`) reads — verdict 值域为
+    /// `ACCEPTED` / `REJECTED`。
     #[test]
     fn review_accepts_with_verdict_field() {
         let d = descriptor(Stage::Review);
-        let r = result_with(json!({"verdict": "approve", "notes": "lgtm"}));
+        let r = result_with(json!({"verdict": "ACCEPTED", "notes": "lgtm"}));
         let receipt = submit_accepted_result(&d, &r).expect("accepted");
         assert_eq!(receipt.stage(), Stage::Review);
         assert_eq!(
             receipt.payload().get("verdict").and_then(|v| v.as_str()),
-            Some("approve"),
+            Some("ACCEPTED"),
             "ingress must unwrap the worker payload's verdict string"
         );
     }
