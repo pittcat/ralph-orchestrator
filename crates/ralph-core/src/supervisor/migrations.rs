@@ -52,8 +52,47 @@ mod imp {
     /// scheduler's plan registrations and integration records
     /// survive process restarts (durable DAG store in
     /// `dag_store_rusqlite.rs`).
+    /// v14 (PMI-013 / 2026-09-03-0959 plan Step 0, U3 residual) adds
+    /// the `dag_plan_receipts` durable registration receipt table
+    /// (R17/D18: the receipt survives the crash window between the
+    /// `forge.plan.ready` accepted boundary and task projection /
+    /// ack) plus the DAG unit / resource-lease / job-attempt
+    /// persistence tables (`dag_units` / `dag_resource_leases` /
+    /// `dag_jobs`) the runtime-owned scheduler wires up in later
+    /// steps.
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 13;
+    pub const CURRENT_VERSION: i64 = 14;
+
+    /// PMI-013 / TGP-02: typed error returned when a database's
+    /// `user_version` is ABOVE this binary's migration ledger tail
+    /// — i.e. a newer binary migrated the DB and the current
+    /// (older) binary is now opening it. The schema-negotiation
+    /// contract is fail-closed in BOTH directions: older DB +
+    /// newer binary migrates forward; newer DB + older binary is
+    /// refused instead of silently running unknown-schema code.
+    /// The rejection is side-effect free: `user_version` is left
+    /// at the database's own value.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct DatabaseAheadOfBinary {
+        /// The database's current `user_version`.
+        pub db_version: i64,
+        /// The highest migration version this binary knows about.
+        pub ledger_tail: i64,
+    }
+
+    impl std::fmt::Display for DatabaseAheadOfBinary {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "supervisor database schema version {} is newer than this binary's \
+                 migration ledger tail {}; refusing to run against an unknown schema — \
+                 upgrade the binary or reset the workspace database",
+                self.db_version, self.ledger_tail,
+            )
+        }
+    }
+
+    impl std::error::Error for DatabaseAheadOfBinary {}
 
     /// Apply migrations sequentially. Each migration is a
     /// closure that performs the SQL DDL and bumps the
@@ -61,6 +100,13 @@ mod imp {
     /// idempotent: re-running on an already-current database
     /// is a no-op (SQLite `IF NOT EXISTS` clauses guarantee
     /// this for table/index creation).
+    ///
+    /// PMI-013 / TGP-02: when the database's `user_version` is
+    /// strictly greater than the ledger tail, `run` fails closed
+    /// with [`DatabaseAheadOfBinary`] before applying any DDL — a
+    /// newer DB must never be silently accepted by an older
+    /// binary (the pre-fix loop skipped every migration and
+    /// returned `Ok(())`, letting unknown-schema code run).
     pub fn run(connection: &Connection) -> rusqlite::Result<()> {
         // Pragmas: busy_timeout FIRST so the WAL header switch
         // below tolerates a concurrent process racing the same
@@ -77,6 +123,15 @@ mod imp {
         )?;
 
         let current = user_version(connection)?;
+        let ledger_tail = migrations().last().map_or(0, |m| m.version);
+        if current > ledger_tail {
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                DatabaseAheadOfBinary {
+                    db_version: current,
+                    ledger_tail,
+                },
+            )));
+        }
         for migration in migrations() {
             if current < migration.version {
                 if let Some(per_column) = migration.column_probe {
@@ -411,6 +466,25 @@ mod imp {
                 ddl: include_str!("migrations/v13.sql"),
                 column_probe: None,
             },
+            // PMI-013 / 2026-09-03-0959 plan Step 0 (U3 residual /
+            // R10 / R17 / S12 / S20): adds the `dag_plan_receipts`
+            // durable registration receipt table (backing
+            // `dag_plan_receipt.rs` + the receipt half of
+            // `dag_store_rusqlite.rs`) and the DAG unit /
+            // resource-lease / job-attempt tables
+            // (`dag_units` / `dag_resource_leases` / `dag_jobs`)
+            // the runtime-owned scheduler persists into in later
+            // steps. Forward-only `CREATE TABLE`; no ALTERs against
+            // existing tables, so the column-probe path is
+            // unnecessary. `plan_key` PRIMARY KEY and
+            // `UNIQUE (unit_key, stage, attempt)` keep receipt
+            // idempotency and job attempt uniqueness at the schema
+            // level; digest drift fails closed in the store layer.
+            Migration {
+                version: 14,
+                ddl: include_str!("migrations/v14.sql"),
+                column_probe: None,
+            },
         ]
     }
 }
@@ -489,6 +563,13 @@ mod tests {
             // DAG state family.
             "dag_plans",
             "dag_integrations",
+            // PMI-013 / Step 0 (2026-09-03-0959 plan U3 residual):
+            // durable registration receipt + DAG unit/lease/job
+            // persistence family.
+            "dag_plan_receipts",
+            "dag_units",
+            "dag_resource_leases",
+            "dag_jobs",
         ];
         for table in tables {
             let count: i64 = conn
@@ -801,6 +882,115 @@ mod tests {
             )
             .unwrap();
         assert_eq!(slot_status, "pending", "slot row preserved across v13");
+    }
+
+    /// PMI-013 / Step 0 (2026-09-03-0959 plan U3 residual §14): a
+    /// v13 fixture upgraded to v14 keeps every wave-family AND
+    /// v13 DAG row intact and gains the (empty) receipt / unit /
+    /// lease / job tables. Mirrors the v12→v13 differential
+    /// technique: run migrations on a fresh DB, drop the v14
+    /// tables + indexes, rewind `user_version` to 13, seed a
+    /// representative v13 dataset, reopen, upgrade.
+    #[test]
+    fn migration_v13_to_v14_preserves_existing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor.db");
+
+        // Phase 1: fresh DB at CURRENT_VERSION, then rewind to a
+        // "real" v13 instance (drop the v14 tables + indexes and
+        // rewind the version so the v14 migration re-fires).
+        {
+            let conn = Connection::open(&path).unwrap();
+            run(&conn).unwrap();
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS dag_jobs;
+                 DROP TABLE IF EXISTS dag_resource_leases;
+                 DROP TABLE IF EXISTS dag_units;
+                 DROP TABLE IF EXISTS dag_plan_receipts;
+                 DROP INDEX IF EXISTS dag_plan_receipts_status_idx;
+                 DROP INDEX IF EXISTS dag_units_plan_idx;
+                 DROP INDEX IF EXISTS dag_units_state_idx;
+                 DROP INDEX IF EXISTS dag_resource_leases_resource_idx;
+                 DROP INDEX IF EXISTS dag_resource_leases_plan_idx;
+                 DROP INDEX IF EXISTS dag_jobs_plan_idx;
+                 DROP INDEX IF EXISTS dag_jobs_unit_idx;",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 13_i64).unwrap();
+        }
+
+        // Phase 2: seed a representative v13 dataset — one wave row
+        // (wave family must not be disturbed) plus one dag_plans row
+        // (the v13 DAG family must survive the v14 upgrade).
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "INSERT INTO waves (wave_id, idempotency_key, kind, phase, expected_total, slot_retry_budget)
+                   VALUES ('w-v13-legacy', 'idem-v13-legacy', 'exec', 'dispatch', 2, 1);
+                 INSERT INTO dag_plans (plan_key, artifact_digest, target_branch, unit_ids, status, created_at_ms)
+                   VALUES ('p-v13-legacy', 'digest-v13', 'feat/legacy', '[\"U1\"]', 'active', 1700000000000);",
+            )
+            .unwrap();
+        }
+
+        // Phase 3: reopen → v14 migration applies; every v13 row is
+        // unchanged; the v14 tables exist and start empty.
+        let conn = Connection::open(&path).unwrap();
+        run(&conn).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), CURRENT_VERSION);
+
+        for table in [
+            "dag_plan_receipts",
+            "dag_units",
+            "dag_resource_leases",
+            "dag_jobs",
+        ] {
+            let table_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(table_count, 1, "{table} must exist after upgrade");
+            let row_count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(row_count, 0, "{table} starts empty for legacy DB");
+        }
+
+        // Legacy wave row preserved.
+        let wave_kind: String = conn
+            .query_row(
+                "SELECT kind FROM waves WHERE wave_id = 'w-v13-legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(wave_kind, "exec", "wave row preserved across v14");
+
+        // v13 DAG plan row preserved.
+        let plan_status: String = conn
+            .query_row(
+                "SELECT status FROM dag_plans WHERE plan_key = 'p-v13-legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(plan_status, "active", "dag_plans row preserved across v14");
+        let unit_ids: String = conn
+            .query_row(
+                "SELECT unit_ids FROM dag_plans WHERE plan_key = 'p-v13-legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            unit_ids, "[\"U1\"]",
+            "dag_plans unit_ids preserved across v14"
+        );
     }
 
     /// TGP-02 (PMI-013, P1, post-merge-converge 09-test-gap-plan

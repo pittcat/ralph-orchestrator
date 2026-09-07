@@ -2047,7 +2047,9 @@ pub use coordinator::{CoordinatorAction, SupervisorCoordinator};
 pub use dag_inspect::SchedulerInspectSummary;
 pub use dag_mode::{SchedulerMode, SchedulerModeError, validate_scheduler_mode};
 #[cfg(feature = "supervisor-db")]
-pub use dag_store_rusqlite::{RusqliteDagSchedulerStore, RusqliteIntegrationStore};
+pub use dag_store_rusqlite::{
+    RusqliteDagPlanReceiptStore, RusqliteDagSchedulerStore, RusqliteIntegrationStore,
+};
 pub use memory::InMemorySupervisorStore;
 pub use merge_sink::{EventMergeSink, FileEventMergeSink, InMemoryMergeSink, MergeSinkError};
 pub use phase::{FailedReason, PhaseDecision, PhaseInputs, evaluate_phase};
@@ -2113,10 +2115,13 @@ pub mod dag_integration;
 pub mod dag_mode;
 /// 2026-09-03-0959 plan U3 (R2 / R17 / D4 / D17 / D18 / E5 / E7 / E9 / E16):
 /// durable DAG store trait + bounded registration receipt surface.
-/// The in-memory implementation lands here; the rusqlite
-/// implementation lands in a future Unit. Receipt round-trip is
-/// required so `forge.plan.ready` accepted boundaries can write
-/// a bounded receipt BEFORE `ensure_task_projection` / `ack`.
+/// Receipts are durable since PMI-013 / Step 0: the `dag_plan_receipts`
+/// table (migration v14) is the authority, `dag_store_rusqlite` owns
+/// the SQLite half, and the in-memory variant here keeps the same
+/// contract for shadow / non-`supervisor-db` builds. Receipt
+/// round-trip is required so `forge.plan.ready` accepted boundaries
+/// can write a bounded receipt BEFORE `ensure_task_projection` /
+/// `ack` and recover it after a crash.
 pub mod dag_plan_receipt;
 /// 2026-09-03-0959 plan U4 (R3, R4, R6; S3-S6; D5, D6, D10;
 /// E1, E5, E8, E9): pure work-conserving admission engine for
@@ -2138,7 +2143,7 @@ pub mod dag_store;
 pub mod dag_store_memory;
 /// PMI-006 / 2026-09-03-0959 plan U3 (R2 / R17 / E9): durable
 /// rusqlite variants of the DAG state family. Runs migrations
-/// (v1..=13) on open; the DAG tables are additive to the wave
+/// (v1..=14) on open; the DAG tables are additive to the wave
 /// tables so a wave-authority database and a DAG store may share
 /// one file. The memory variants (`dag_store_memory` /
 /// `dag_integration`) keep the same contract suites for

@@ -1,13 +1,17 @@
 //! PMI-006 / 2026-09-03-0959 plan U3 (R2 / R17 / D4 / E5 / E9):
 //! rusqlite implementation of the durable DAG store contract.
 //!
-//! The module owns TWO trait implementations over a single SQLite
-//! connection (the v13 schema in `migrations/v13.sql`):
+//! The module owns THREE trait implementations over a single SQLite
+//! connection (the v13 schema in `migrations/v13.sql` plus the v14
+//! receipt / unit / lease / job tables in `migrations/v14.sql`):
 //! - [`RusqliteDagSchedulerStore`] implements
 //!   [`super::dag_store::DagSchedulerStore`] (plan registrations),
 //! - [`RusqliteIntegrationStore`] implements
 //!   [`super::dag_integration::IntegrationStore`] (integration
-//!   records).
+//!   records),
+//! - [`RusqliteDagPlanReceiptStore`] implements
+//!   [`super::dag_plan_receipt::DagPlanReceiptStore`] (durable
+//!   registration receipts — PMI-013 / Step 0).
 //!
 //! Contract parity with the in-memory variants
 //! (`dag_store_memory.rs` / `dag_integration.rs`) is enforced by
@@ -26,7 +30,7 @@
 //! spurious IO error.
 //!
 //! Migration versioning: the store runs the supervisor migration
-//! ledger (v1..=13) on `open`, so a `supervisor.db` and a DAG
+//! ledger (v1..=14) on `open`, so a `supervisor.db` and a DAG
 //! store opened against the same file agree on the schema. The
 //! DAG tables are additive to the wave tables — the wave store
 //! keeps its single authority; this module only adds the DAG
@@ -40,6 +44,7 @@ use super::dag_integration::{
     IntegrationInput, IntegrationRecord, IntegrationStore, IntegrationStoreError,
     IntegrationStoreResult, compute_integration_fingerprint,
 };
+use super::dag_plan_receipt::{DagPlanReceipt, DagPlanReceiptStore, parse_receipt_status};
 use super::dag_store::{
     CanonicalPlanRecord, DagSchedulerStore, DagStoreError, DagStoreResult, PlanRegistration,
     PlanStatus,
@@ -246,6 +251,15 @@ impl RusqliteDagSchedulerStore {
             inner: Arc::clone(&self.inner),
         }
     }
+
+    /// Share the same connection as the receipt store so the
+    /// registration receipts live in the same database file as
+    /// the plan registrations they precede (R17 / D18).
+    pub fn shared_with_receipts(&self) -> RusqliteDagPlanReceiptStore {
+        RusqliteDagPlanReceiptStore {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
 impl std::fmt::Debug for RusqliteDagSchedulerStore {
@@ -445,6 +459,341 @@ impl DagSchedulerStore for RusqliteDagSchedulerStore {
                 plans.push(row.map_err(plan_io_err)?);
             }
             Ok(plans)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Durable registration receipt store.
+// ---------------------------------------------------------------------------
+
+/// Read one `dag_plan_receipts` row into a [`DagPlanReceipt`]. A
+/// corrupt `status` column surfaces as a storage error via the
+/// FromSqlConversionFailure path — fail closed rather than
+/// guessing a status.
+#[cfg(feature = "supervisor-db")]
+fn row_to_receipt(row: &rusqlite::Row<'_>) -> Result<DagPlanReceipt, rusqlite::Error> {
+    let status_raw: String = row.get("status")?;
+    let status = parse_receipt_status(&status_raw).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+    Ok(DagPlanReceipt {
+        plan_key: row.get("plan_key")?,
+        artifact_path: row.get("artifact_path")?,
+        artifact_digest: row.get("artifact_digest")?,
+        target_branch: row.get("target_branch")?,
+        status,
+        created_at_ms: row.get::<_, i64>("created_at_ms")? as u64,
+        activated_at_ms: row
+            .get::<_, Option<i64>>("activated_at_ms")?
+            .map(|v| v as u64),
+        consumed_at_ms: row
+            .get::<_, Option<i64>>("consumed_at_ms")?
+            .map(|v| v as u64),
+    })
+}
+
+/// SQLite-backed [`DagPlanReceiptStore`]. One row per registration
+/// receipt in `dag_plan_receipts` (migration v14), keyed by
+/// `plan_key`. Idempotent on `(plan_key, artifact_digest)`; digest
+/// drift fails closed (R17 / D18). PMI-013 / Step 0: this is the
+/// durable authority behind
+/// [`super::dag_plan_receipt::DagPlanReceiptRegistry`].
+#[derive(Clone)]
+pub struct RusqliteDagPlanReceiptStore {
+    inner: Arc<DagConnection>,
+}
+
+#[cfg(feature = "supervisor-db")]
+impl RusqliteDagPlanReceiptStore {
+    /// Open (creating if needed) the durable receipt store at
+    /// `path`. Migrations run on every open; already-current
+    /// databases are a no-op.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, DagStoreError> {
+        Ok(Self {
+            inner: Arc::new(DagConnection::open(path)?),
+        })
+    }
+
+    /// Share the same connection as the plan store.
+    pub fn shared_with_plans(&self) -> RusqliteDagSchedulerStore {
+        RusqliteDagSchedulerStore {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    /// Share the same connection as the integration store.
+    pub fn shared_with_integration(&self) -> RusqliteIntegrationStore {
+        RusqliteIntegrationStore {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl std::fmt::Debug for RusqliteDagPlanReceiptStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RusqliteDagPlanReceiptStore").finish()
+    }
+}
+
+impl DagPlanReceiptStore for RusqliteDagPlanReceiptStore {
+    fn record_receipt(&self, receipt: &DagPlanReceipt) -> DagStoreResult<bool> {
+        #[cfg(not(feature = "supervisor-db"))]
+        {
+            let _ = receipt;
+            Err(DagStoreError::IoError(
+                "supervisor-db cargo feature is off in this build".to_string(),
+            ))
+        }
+        #[cfg(feature = "supervisor-db")]
+        {
+            let mut conn =
+                self.inner.conn.lock().map_err(|_| {
+                    DagStoreError::IoError("dag receipt store mutex poisoned".into())
+                })?;
+            // Same single-transaction + ON CONFLICT shape as
+            // `register_plan`: the insert is atomic against the
+            // PRIMARY KEY, and the follow-up SELECT (same snapshot)
+            // distinguishes idempotent replay from digest drift
+            // (fail closed).
+            let tx = conn.transaction().map_err(plan_io_err)?;
+            let inserted = tx
+                .execute(
+                    "INSERT INTO dag_plan_receipts \
+                     (plan_key, artifact_path, artifact_digest, target_branch, status, \
+                      created_at_ms, activated_at_ms, consumed_at_ms) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                     ON CONFLICT(plan_key) DO NOTHING",
+                    rusqlite::params![
+                        receipt.plan_key,
+                        receipt.artifact_path,
+                        receipt.artifact_digest,
+                        receipt.target_branch,
+                        receipt.status.as_str(),
+                        receipt.created_at_ms as i64,
+                        receipt.activated_at_ms.map(|v| v as i64),
+                        receipt.consumed_at_ms.map(|v| v as i64),
+                    ],
+                )
+                .map_err(plan_io_err)?;
+            let row: DagPlanReceipt = tx
+                .query_row(
+                    "SELECT plan_key, artifact_path, artifact_digest, target_branch, status, \
+                     created_at_ms, activated_at_ms, consumed_at_ms \
+                     FROM dag_plan_receipts WHERE plan_key = ?1",
+                    [&receipt.plan_key],
+                    row_to_receipt,
+                )
+                .map_err(plan_io_err)?;
+            if row.artifact_digest != receipt.artifact_digest {
+                // Digest drift: roll back (tx drop) and fail
+                // closed, leaving the winner's row untouched.
+                return Err(DagStoreError::DigestConflict {
+                    plan_key: receipt.plan_key.clone(),
+                    expected: row.artifact_digest,
+                    actual: receipt.artifact_digest.clone(),
+                });
+            }
+            tx.commit().map_err(plan_io_err)?;
+            Ok(inserted > 0)
+        }
+    }
+
+    fn get_receipt(&self, plan_key: &str) -> DagStoreResult<Option<DagPlanReceipt>> {
+        #[cfg(not(feature = "supervisor-db"))]
+        {
+            let _ = plan_key;
+            Err(DagStoreError::IoError(
+                "supervisor-db cargo feature is off in this build".to_string(),
+            ))
+        }
+        #[cfg(feature = "supervisor-db")]
+        {
+            let conn =
+                self.inner.conn.lock().map_err(|_| {
+                    DagStoreError::IoError("dag receipt store mutex poisoned".into())
+                })?;
+            conn.query_row(
+                "SELECT plan_key, artifact_path, artifact_digest, target_branch, status, \
+                 created_at_ms, activated_at_ms, consumed_at_ms \
+                 FROM dag_plan_receipts WHERE plan_key = ?1",
+                [plan_key],
+                row_to_receipt,
+            )
+            .optional()
+            .map_err(plan_io_err)
+        }
+    }
+
+    fn list_receipts(&self) -> DagStoreResult<Vec<DagPlanReceipt>> {
+        #[cfg(not(feature = "supervisor-db"))]
+        {
+            Err(DagStoreError::IoError(
+                "supervisor-db cargo feature is off in this build".to_string(),
+            ))
+        }
+        #[cfg(feature = "supervisor-db")]
+        {
+            let conn =
+                self.inner.conn.lock().map_err(|_| {
+                    DagStoreError::IoError("dag receipt store mutex poisoned".into())
+                })?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT plan_key, artifact_path, artifact_digest, target_branch, status, \
+                     created_at_ms, activated_at_ms, consumed_at_ms \
+                     FROM dag_plan_receipts ORDER BY created_at_ms, plan_key",
+                )
+                .map_err(plan_io_err)?;
+            let rows = stmt.query_map([], row_to_receipt).map_err(plan_io_err)?;
+            let mut receipts = Vec::new();
+            for row in rows {
+                receipts.push(row.map_err(plan_io_err)?);
+            }
+            Ok(receipts)
+        }
+    }
+
+    fn activate_receipt(
+        &self,
+        plan_key: &str,
+        activated_at_ms: u64,
+    ) -> DagStoreResult<DagPlanReceipt> {
+        #[cfg(not(feature = "supervisor-db"))]
+        {
+            let _ = (plan_key, activated_at_ms);
+            Err(DagStoreError::IoError(
+                "supervisor-db cargo feature is off in this build".to_string(),
+            ))
+        }
+        #[cfg(feature = "supervisor-db")]
+        {
+            let mut conn =
+                self.inner.conn.lock().map_err(|_| {
+                    DagStoreError::IoError("dag receipt store mutex poisoned".into())
+                })?;
+            // Status-guarded conditional UPDATE first (same shape as
+            // `activate_plan`): `affected == 1` means we won the
+            // Pending → Active transition atomically; `affected == 0`
+            // needs one disambiguating read in the same snapshot to
+            // tell apart unknown key / already-active (idempotent
+            // no-op) / consumed (InvalidTransition, fail closed).
+            let tx = conn.transaction().map_err(plan_io_err)?;
+            let affected = tx
+                .execute(
+                    "UPDATE dag_plan_receipts SET status = 'active', activated_at_ms = ?2 \
+                     WHERE plan_key = ?1 AND status = 'pending'",
+                    rusqlite::params![plan_key, activated_at_ms as i64],
+                )
+                .map_err(plan_io_err)?;
+            if affected == 0 {
+                let row: Option<DagPlanReceipt> = tx
+                    .query_row(
+                        "SELECT plan_key, artifact_path, artifact_digest, target_branch, status, \
+                         created_at_ms, activated_at_ms, consumed_at_ms \
+                         FROM dag_plan_receipts WHERE plan_key = ?1",
+                        [plan_key],
+                        row_to_receipt,
+                    )
+                    .optional()
+                    .map_err(plan_io_err)?;
+                let Some(row) = row else {
+                    return Err(DagStoreError::UnknownPlan(plan_key.to_string()));
+                };
+                match row.status {
+                    super::dag_plan_receipt::ReceiptStatus::Consumed => {
+                        return Err(DagStoreError::InvalidTransition {
+                            plan_key: plan_key.to_string(),
+                            expected: "pending_or_active".to_string(),
+                            actual: "receipt is consumed".to_string(),
+                        });
+                    }
+                    super::dag_plan_receipt::ReceiptStatus::Active => {
+                        // Already Active: idempotent no-op; the
+                        // original activation stamp is untouched.
+                        tx.commit().map_err(plan_io_err)?;
+                        return Ok(row);
+                    }
+                    super::dag_plan_receipt::ReceiptStatus::Pending => {
+                        // The guarded UPDATE would have matched a
+                        // Pending row; reaching this arm is a store
+                        // bug.
+                        debug_assert!(false, "pending receipt must have been updated");
+                    }
+                }
+            }
+            // Re-read so the caller observes the post-transition row
+            // exactly as a fresh reopen would.
+            let row: DagPlanReceipt = tx
+                .query_row(
+                    "SELECT plan_key, artifact_path, artifact_digest, target_branch, status, \
+                     created_at_ms, activated_at_ms, consumed_at_ms \
+                     FROM dag_plan_receipts WHERE plan_key = ?1",
+                    [plan_key],
+                    row_to_receipt,
+                )
+                .map_err(plan_io_err)?;
+            tx.commit().map_err(plan_io_err)?;
+            Ok(row)
+        }
+    }
+
+    fn consume_receipt(
+        &self,
+        plan_key: &str,
+        consumed_at_ms: u64,
+    ) -> DagStoreResult<DagPlanReceipt> {
+        #[cfg(not(feature = "supervisor-db"))]
+        {
+            let _ = (plan_key, consumed_at_ms);
+            Err(DagStoreError::IoError(
+                "supervisor-db cargo feature is off in this build".to_string(),
+            ))
+        }
+        #[cfg(feature = "supervisor-db")]
+        {
+            let mut conn =
+                self.inner.conn.lock().map_err(|_| {
+                    DagStoreError::IoError("dag receipt store mutex poisoned".into())
+                })?;
+            let tx = conn.transaction().map_err(plan_io_err)?;
+            let affected = tx
+                .execute(
+                    "UPDATE dag_plan_receipts SET status = 'consumed', consumed_at_ms = ?2 \
+                     WHERE plan_key = ?1 AND status IN ('pending', 'active')",
+                    rusqlite::params![plan_key, consumed_at_ms as i64],
+                )
+                .map_err(plan_io_err)?;
+            if affected == 0 {
+                let row: Option<DagPlanReceipt> = tx
+                    .query_row(
+                        "SELECT plan_key, artifact_path, artifact_digest, target_branch, status, \
+                         created_at_ms, activated_at_ms, consumed_at_ms \
+                         FROM dag_plan_receipts WHERE plan_key = ?1",
+                        [plan_key],
+                        row_to_receipt,
+                    )
+                    .optional()
+                    .map_err(plan_io_err)?;
+                let Some(row) = row else {
+                    return Err(DagStoreError::UnknownPlan(plan_key.to_string()));
+                };
+                // Already Consumed: idempotent no-op; the original
+                // consume stamp is untouched.
+                tx.commit().map_err(plan_io_err)?;
+                return Ok(row);
+            }
+            let row: DagPlanReceipt = tx
+                .query_row(
+                    "SELECT plan_key, artifact_path, artifact_digest, target_branch, status, \
+                     created_at_ms, activated_at_ms, consumed_at_ms \
+                     FROM dag_plan_receipts WHERE plan_key = ?1",
+                    [plan_key],
+                    row_to_receipt,
+                )
+                .map_err(plan_io_err)?;
+            tx.commit().map_err(plan_io_err)?;
+            Ok(row)
         }
     }
 }
@@ -883,6 +1232,295 @@ mod tests {
             .activate_plan("p1", "feat/test")
             .expect_err("closed must reject activation");
         assert!(matches!(err, DagStoreError::InvalidTransition { .. }));
+    }
+
+    // -----------------------------------------------------------------
+    // Receipt store contract (mirrors the memory suite in
+    // dag_plan_receipt.rs) + reopen semantics (PMI-013 / S12 / S20 —
+    // the memory variant cannot express reopen).
+    // -----------------------------------------------------------------
+
+    use crate::supervisor::dag_plan_receipt::{DagPlanReceiptRegistry, ReceiptStatus};
+
+    fn receipt(key: &str, digest: &str) -> DagPlanReceipt {
+        DagPlanReceipt::new(
+            key,
+            format!("/tmp/{key}.yaml"),
+            digest,
+            "feat/test",
+            1_700_000_000_000,
+        )
+    }
+
+    fn fresh_receipt_store() -> (TempDir, RusqliteDagPlanReceiptStore) {
+        let dir = TempDir::new().expect("tempdir");
+        let store = RusqliteDagPlanReceiptStore::open(dir.path().join("dag.db"))
+            .expect("open fresh receipt store");
+        (dir, store)
+    }
+
+    #[test]
+    fn record_receipt_creates_pending_row() {
+        let (_dir, store) = fresh_receipt_store();
+        let recorded = store.record_receipt(&receipt("p1", "d1")).expect("record");
+        assert!(recorded);
+        let fetched = store.get_receipt("p1").expect("get").expect("exists");
+        assert_eq!(fetched.status, ReceiptStatus::Pending);
+        assert_eq!(fetched.artifact_path, "/tmp/p1.yaml");
+        assert_eq!(fetched.target_branch, "feat/test");
+        assert_eq!(fetched.activated_at_ms, None);
+        assert_eq!(fetched.consumed_at_ms, None);
+    }
+
+    #[test]
+    fn record_receipt_is_idempotent_on_same_digest() {
+        let (_dir, store) = fresh_receipt_store();
+        assert!(store.record_receipt(&receipt("p1", "d1")).expect("first"));
+        assert!(
+            !store
+                .record_receipt(&receipt("p1", "d1"))
+                .expect("idempotent")
+        );
+        // A replay with a different created_at_ms must not overwrite
+        // the durable row.
+        let mut replayed = receipt("p1", "d1");
+        replayed.created_at_ms = 42;
+        assert!(!store.record_receipt(&replayed).expect("idempotent"));
+        let fetched = store.get_receipt("p1").expect("get").expect("exists");
+        assert_eq!(fetched.created_at_ms, 1_700_000_000_000);
+        assert_eq!(store.list_receipts().expect("list").len(), 1);
+    }
+
+    #[test]
+    fn record_receipt_fails_closed_on_digest_conflict() {
+        let (_dir, store) = fresh_receipt_store();
+        store.record_receipt(&receipt("p1", "d1")).expect("first");
+        let err = store
+            .record_receipt(&receipt("p1", "d2"))
+            .expect_err("conflict");
+        assert!(matches!(
+            err,
+            DagStoreError::DigestConflict {
+                plan_key,
+                expected,
+                actual,
+            } if plan_key == "p1" && expected == "d1" && actual == "d2"
+        ));
+        // The pre-existing row is untouched by the rejected write.
+        let fetched = store.get_receipt("p1").expect("get").expect("exists");
+        assert_eq!(fetched.artifact_digest, "d1");
+        assert_eq!(fetched.status, ReceiptStatus::Pending);
+    }
+
+    #[test]
+    fn get_receipt_returns_none_for_missing_key() {
+        let (_dir, store) = fresh_receipt_store();
+        assert!(store.get_receipt("missing").expect("get").is_none());
+    }
+
+    #[test]
+    fn list_receipts_returns_every_recorded_receipt() {
+        let (_dir, store) = fresh_receipt_store();
+        store.record_receipt(&receipt("p1", "d1")).expect("p1");
+        store.record_receipt(&receipt("p2", "d2")).expect("p2");
+        let all = store.list_receipts().expect("list");
+        assert_eq!(all.len(), 2);
+        let mut keys: Vec<&str> = all.iter().map(|r| r.plan_key.as_str()).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["p1", "p2"]);
+    }
+
+    #[test]
+    fn activate_receipt_transitions_pending_to_active() {
+        let (_dir, store) = fresh_receipt_store();
+        store.record_receipt(&receipt("p1", "d1")).expect("record");
+        let activated = store
+            .activate_receipt("p1", 1_700_000_001_000)
+            .expect("activate");
+        assert_eq!(activated.status, ReceiptStatus::Active);
+        assert_eq!(activated.activated_at_ms, Some(1_700_000_001_000));
+    }
+
+    #[test]
+    fn activate_receipt_is_idempotent_on_active() {
+        let (_dir, store) = fresh_receipt_store();
+        store.record_receipt(&receipt("p1", "d1")).expect("record");
+        let first = store
+            .activate_receipt("p1", 1_700_000_001_000)
+            .expect("activate");
+        let second = store
+            .activate_receipt("p1", 1_700_000_002_000)
+            .expect("no-op second activate");
+        assert_eq!(second, first, "re-activation must not move the stamp");
+    }
+
+    #[test]
+    fn activate_receipt_unknown_key_returns_error() {
+        let (_dir, store) = fresh_receipt_store();
+        let err = store
+            .activate_receipt("missing", 1_700_000_001_000)
+            .expect_err("err");
+        assert!(matches!(err, DagStoreError::UnknownPlan(_)));
+    }
+
+    #[test]
+    fn activate_receipt_consumed_returns_invalid_transition() {
+        let (_dir, store) = fresh_receipt_store();
+        store.record_receipt(&receipt("p1", "d1")).expect("record");
+        store
+            .consume_receipt("p1", 1_700_000_001_000)
+            .expect("consume");
+        let err = store
+            .activate_receipt("p1", 1_700_000_002_000)
+            .expect_err("consumed must reject activation");
+        assert!(matches!(err, DagStoreError::InvalidTransition { .. }));
+        let fetched = store.get_receipt("p1").expect("get").expect("exists");
+        assert_eq!(fetched.status, ReceiptStatus::Consumed);
+    }
+
+    #[test]
+    fn consume_receipt_transitions_and_keeps_activation_stamp() {
+        let (_dir, store) = fresh_receipt_store();
+        store.record_receipt(&receipt("p1", "d1")).expect("record");
+        store
+            .activate_receipt("p1", 1_700_000_001_000)
+            .expect("activate");
+        let consumed = store
+            .consume_receipt("p1", 1_700_000_002_000)
+            .expect("consume");
+        assert_eq!(consumed.status, ReceiptStatus::Consumed);
+        assert_eq!(consumed.activated_at_ms, Some(1_700_000_001_000));
+        assert_eq!(consumed.consumed_at_ms, Some(1_700_000_002_000));
+    }
+
+    #[test]
+    fn consume_receipt_is_idempotent_on_consumed() {
+        let (_dir, store) = fresh_receipt_store();
+        store.record_receipt(&receipt("p1", "d1")).expect("record");
+        let first = store
+            .consume_receipt("p1", 1_700_000_001_000)
+            .expect("consume");
+        let second = store
+            .consume_receipt("p1", 1_700_000_002_000)
+            .expect("no-op second consume");
+        assert_eq!(second, first, "re-consume must not move the stamp");
+    }
+
+    #[test]
+    fn consume_receipt_unknown_key_returns_error() {
+        let (_dir, store) = fresh_receipt_store();
+        let err = store
+            .consume_receipt("missing", 1_700_000_001_000)
+            .expect_err("err");
+        assert!(matches!(err, DagStoreError::UnknownPlan(_)));
+    }
+
+    /// PMI-013 / S12 / S20: receipts survive a close/reopen cycle —
+    /// after a crash the store can list the recorded receipt,
+    /// activate it, and consume it, each in a separate process
+    /// lifetime.
+    #[test]
+    fn receipt_survives_reopen_list_activate_consume() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("dag.db");
+
+        // Lifetime 1: record at the accepted boundary, then crash.
+        {
+            let store = RusqliteDagPlanReceiptStore::open(&path).expect("open 1");
+            store.record_receipt(&receipt("p1", "d1")).expect("record");
+        }
+
+        // Lifetime 2: recovery lists the receipt and activates it.
+        {
+            let store = RusqliteDagPlanReceiptStore::open(&path).expect("open 2");
+            let all = store.list_receipts().expect("list");
+            assert_eq!(all.len(), 1);
+            assert_eq!(all[0].plan_key, "p1");
+            assert_eq!(all[0].status, ReceiptStatus::Pending);
+            let activated = store
+                .activate_receipt("p1", 1_700_000_001_000)
+                .expect("activate");
+            assert_eq!(activated.status, ReceiptStatus::Active);
+        }
+
+        // Lifetime 3: consume the activated receipt.
+        {
+            let store = RusqliteDagPlanReceiptStore::open(&path).expect("open 3");
+            let consumed = store
+                .consume_receipt("p1", 1_700_000_002_000)
+                .expect("consume");
+            assert_eq!(consumed.status, ReceiptStatus::Consumed);
+        }
+
+        // Lifetime 4: the terminal row round-trips with both stamps.
+        {
+            let store = RusqliteDagPlanReceiptStore::open(&path).expect("open 4");
+            let fetched = store.get_receipt("p1").expect("get").expect("exists");
+            assert_eq!(fetched.status, ReceiptStatus::Consumed);
+            assert_eq!(fetched.activated_at_ms, Some(1_700_000_001_000));
+            assert_eq!(fetched.consumed_at_ms, Some(1_700_000_002_000));
+            assert_eq!(fetched.artifact_digest, "d1");
+        }
+    }
+
+    /// The runtime-facing registry is durable: `open` on the same
+    /// path recovers the receipt, and activate/consume work after
+    /// the reopen (the in-process cache is rebuilt from the DB
+    /// authority, not trusted across processes).
+    #[test]
+    fn registry_open_recovers_receipt_across_reopen() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("dag.db");
+
+        {
+            let reg = DagPlanReceiptRegistry::open(&path).expect("open 1");
+            assert!(reg.record(receipt("p1", "d1")).expect("record"));
+            assert_eq!(
+                reg.cached("p1").expect("cached").status,
+                ReceiptStatus::Pending
+            );
+        }
+
+        {
+            let reg = DagPlanReceiptRegistry::open(&path).expect("open 2");
+            // Fresh process: the cache starts empty but the store
+            // (authority) still has the receipt.
+            assert!(reg.cached("p1").is_none());
+            let fetched = reg.get("p1").expect("get").expect("exists");
+            assert_eq!(fetched.status, ReceiptStatus::Pending);
+            // Reads refresh the cache.
+            assert!(reg.cached("p1").is_some());
+            let activated = reg.activate("p1", 1_700_000_001_000).expect("activate");
+            assert_eq!(activated.status, ReceiptStatus::Active);
+            let consumed = reg.consume("p1", 1_700_000_002_000).expect("consume");
+            assert_eq!(consumed.status, ReceiptStatus::Consumed);
+        }
+
+        {
+            let reg = DagPlanReceiptRegistry::open(&path).expect("open 3");
+            let fetched = reg.get("p1").expect("get").expect("exists");
+            assert_eq!(fetched.status, ReceiptStatus::Consumed);
+            // Idempotent re-record after reopen: same digest → no-op.
+            assert!(!reg.record(receipt("p1", "d1")).expect("idempotent"));
+            // Digest drift after reopen still fails closed.
+            let err = reg.record(receipt("p1", "d2")).expect_err("conflict");
+            assert!(matches!(err, DagStoreError::DigestConflict { .. }));
+        }
+    }
+
+    /// The plan store can hand off a receipt store sharing the same
+    /// connection / file, so receipts and plan registrations live in
+    /// one database.
+    #[test]
+    fn plan_store_shares_connection_with_receipt_store() {
+        let (_dir, plans) = fresh_plan_store();
+        let receipts = plans.shared_with_receipts();
+        receipts
+            .record_receipt(&receipt("p1", "d1"))
+            .expect("record");
+        plans.register_plan(&plan("p1", "d1")).expect("register");
+        let fetched = receipts.get_receipt("p1").expect("get").expect("exists");
+        assert_eq!(fetched.status, ReceiptStatus::Pending);
     }
 
     // -----------------------------------------------------------------
