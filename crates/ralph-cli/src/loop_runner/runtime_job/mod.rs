@@ -22,6 +22,10 @@
 //!     hands to the port.
 //!   - `worker` — `run_job(descriptor, port, env_policy)` runs one
 //!     kernel invocation with pre-fence, heartbeat, deadline.
+//!   - `pty_kernel` — generic async PTY job kernel (spawn +
+//!     dual-clock lease + line collection + cancel) extracted from
+//!     `wave::worker` (Step 5a / D7); the wave worker is its first
+//!     caller, the DAG real port reuses it in Step 5b.
 //!   - `result_ingress` — `submit_accepted_result(event_loop,
 //!     descriptor, process_result)` constructs the typed accepted
 //!     event and runs it through the real public gate
@@ -36,6 +40,7 @@
 pub mod environment;
 pub mod process;
 pub mod prompt;
+pub mod pty_kernel;
 pub mod result_ingress;
 pub mod worker;
 

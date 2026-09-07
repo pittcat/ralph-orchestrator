@@ -15,7 +15,11 @@ pub use channel_registry::{
 };
 
 mod dispatcher;
-mod heartbeat;
+// 2026-09-03-0959 plan Step 5a (D7): `pub(crate)` so the extracted
+// generic PTY job kernel (`runtime_job::pty_kernel`) can share the
+// pure lease types (`LeaseConfig` / `LeaseState` / `HeartbeatKind`)
+// instead of duplicating them.
+pub(crate) mod heartbeat;
 mod io;
 // 2026-09-01-001 plan U2 (R2 / D3): startup-time compensation
 // delivery for crash windows where a slot's accepted events
