@@ -802,4 +802,97 @@ mod tests {
             .unwrap();
         assert_eq!(slot_status, "pending", "slot row preserved across v13");
     }
+
+    /// TGP-02 (PMI-013, P1, post-merge-converge 09-test-gap-plan
+    /// §3): 「新 db + 旧二进制」的 downgrade 窗口必须双向
+    /// fail-closed——db `user_version` 高于本二进制 ledger 尾部
+    /// 时,`run` 必须显式拒绝,而不是静默返回 Ok 让旧代码在
+    /// 未知 schema 上跑。
+    ///
+    /// 场景构造(按 test-gap 计划 TGP-02 steps): 一个已被新
+    /// 二进制迁移到 v13 的 db(模拟: 跑完整 ledger 后把
+    /// user_version 再推高一格到 CURRENT_VERSION+1,代表「未来
+    /// v14 二进制写过、现被回退的当前二进制」),由当前二进制
+    /// 重新打开。ledger 尾部 = CURRENT_VERSION(13),db 版本
+    /// 14 > 13,循环条件 `current < migration.version` 对所有
+    /// 条目为假——当前实现静默跳过全部迁移返回 Ok(())
+    /// (PMI-013 缺陷形态)。
+    ///
+    /// **当前 RED**: 断言「高版本 db 必须被 typed 错误拒绝」,
+    /// 现状实现返回 Ok(())。修复落地(run 循环加
+    /// `current > CURRENT_VERSION` → fail-closed 错误)后本测试
+    /// 转绿;错误消息按 PMI-013 expected 含版本语义(db N newer
+    /// than binary max M)。
+    ///
+    /// invariant: schema 版本协商双向 fail-closed
+    /// (旧 db+新二进制=迁移;新 db+旧二进制=拒绝)。
+    #[test]
+    fn tgp02_migration_run_rejects_db_newer_than_binary_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor.db");
+
+        // Phase 1: 跑完整 ledger 到 CURRENT_VERSION(真实 v13 db
+        // 的产生路径,非手写 DDL),再把 user_version 推到
+        // CURRENT_VERSION+1——模拟「未来二进制已迁移、当前
+        // 二进制被回退」打开的 db。
+        {
+            let conn = Connection::open(&path).unwrap();
+            run(&conn).unwrap();
+            assert_eq!(user_version(&conn).unwrap(), CURRENT_VERSION);
+            conn.pragma_update(None, "user_version", CURRENT_VERSION + 1)
+                .unwrap();
+        }
+
+        // Phase 2: 旧二进制(ledger 只到 CURRENT_VERSION)重开
+        // 该 db。PMI-013 expected: fail-closed 拒绝。
+        let conn = Connection::open(&path).unwrap();
+        let outcome = run(&conn);
+        let err = outcome.expect_err(
+            "TGP-02: db user_version above the binary's ledger tail must be \
+             rejected fail-closed, but `migrations::run` silently returned Ok",
+        );
+
+        // Typed 错误必须携带版本协商语义(两个版本号都可见),
+        // 让操作者知道下一步是升级二进制或换 workspace。
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&(CURRENT_VERSION + 1).to_string())
+                && msg.contains(&CURRENT_VERSION.to_string()),
+            "TGP-02: rejection must carry both the db version ({}) and the \
+             binary max ({}) for actionable diagnostics, got: {msg}",
+            CURRENT_VERSION + 1,
+            CURRENT_VERSION,
+        );
+
+        // 拒绝必须无副作用: user_version 保持 db 原值,不被
+        // 任何迁移改写(旧二进制不得在被拒后留下指纹)。
+        assert_eq!(
+            user_version(&conn).unwrap(),
+            CURRENT_VERSION + 1,
+            "TGP-02: a rejected (newer-db) open must leave user_version \
+             untouched at the db's own value"
+        );
+    }
+
+    /// TGP-02 对照路径(半边): db 版本恰在 ledger 内且不小于
+    /// 尾部(v == CURRENT_VERSION)时,run 幂等通过且版本不变
+    /// ——确认修复加 above-version guard 时不会把「恰好当前
+    /// 版本」的正常重开也误拒(边界是严格大于,不是 >=)。
+    #[test]
+    fn tgp02_migration_run_accepts_db_exactly_at_ledger_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            run(&conn).unwrap();
+            assert_eq!(user_version(&conn).unwrap(), CURRENT_VERSION);
+        }
+        let conn = Connection::open(&path).unwrap();
+        run(&conn).expect("reopen at exactly CURRENT_VERSION must pass");
+        assert_eq!(
+            user_version(&conn).unwrap(),
+            CURRENT_VERSION,
+            "idempotent reopen must keep the version at the ledger tail"
+        );
+    }
 }
