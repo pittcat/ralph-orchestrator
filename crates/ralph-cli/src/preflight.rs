@@ -769,6 +769,19 @@ pub(crate) fn validate_scheduler_mode_for_config(config: &RalphConfig) -> Result
              (field path: event_loop.supervisor.scheduler_mode)"
         );
     }
+    // 2026-09-03-0959 plan Step 3 (D16): the same preflight gate
+    // also rejects `dag_pools` blocks that are unrunnable — a
+    // `wave`-mode declaration (second capacity authority the legacy
+    // path ignores) or a zero pool cap (permanently starved pool).
+    if let Err(err) = ralph_core::config::validate_dag_pools(
+        mode,
+        config.event_loop.supervisor.dag_pools.as_ref(),
+    ) {
+        anyhow::bail!(
+            "dag_pools validation failed: {err} \
+             (field path: event_loop.supervisor.dag_pools)"
+        );
+    }
     Ok(())
 }
 
@@ -2235,6 +2248,137 @@ hats:
         );
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // 2026-09-03-0959 plan Step 3 (D16): `dag_pools` rides the
+    // existing `supervisor` entry in PRESET_OPT_IN_WHEN_OPERATOR_OMITS
+    // (whole-subtree granularity, same as `scheduler_mode`). These
+    // tests pin the three merge shapes: preset declares + operator
+    // omits, operator override wins, preset omits → key stays absent.
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_hats_overlay_preserves_dag_pools_when_operator_omits_it() {
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  supervisor:
+    enabled: true
+    scheduler_mode: dag
+    dag_pools:
+      executor: 8
+      reviewer: 2
+hats:
+  executor:
+    name: Executor
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        let pools = config
+            .event_loop
+            .supervisor
+            .dag_pools
+            .as_ref()
+            .expect("preset dag_pools block must survive merge when operator omits it");
+        assert_eq!(pools.executor, Some(8));
+        assert_eq!(pools.reviewer, Some(2));
+        assert_eq!(pools.verifier, None);
+        assert_eq!(pools.fixer, None);
+    }
+
+    #[test]
+    fn merge_hats_overlay_operator_supervisor_block_wins_over_preset_dag_pools() {
+        // `supervisor` merges at whole-subtree granularity: an
+        // operator who declares `event_loop.supervisor` owns the
+        // entire block, including dag_pools (mirrors the
+        // scheduler_mode contract).
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  supervisor:
+    enabled: true
+    scheduler_mode: dag
+    dag_pools:
+      executor: 3
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  supervisor:
+    enabled: true
+    scheduler_mode: dag
+    dag_pools:
+      executor: 8
+      fixer: 2
+hats:
+  executor:
+    name: Executor
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        let pools = config
+            .event_loop
+            .supervisor
+            .dag_pools
+            .as_ref()
+            .expect("operator dag_pools block must win over the preset's");
+        assert_eq!(pools.executor, Some(3));
+        assert!(
+            pools.fixer.is_none(),
+            "preset dag_pools.fixer must not leak into the operator's supervisor block"
+        );
+    }
+
+    #[test]
+    fn merge_hats_overlay_dag_pools_stays_absent_when_preset_omits_it() {
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  supervisor:
+    enabled: true
+    scheduler_mode: dag
+hats:
+  executor:
+    name: Executor
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert!(
+            config.event_loop.supervisor.dag_pools.is_none(),
+            "dag_pools must stay absent when the preset omits it (resolve falls back to global)"
+        );
+    }
+
     #[test]
     fn merge_hats_overlay_preserves_required_events_from_hats() {
         let core: Value = serde_yaml::from_str(
@@ -3096,5 +3240,61 @@ hats:
             "event_loop:\n  execution_mode: isolated\n  supervisor:\n    enabled: true\n    scheduler_mode: dag_shadow\n",
         );
         assert!(validate_scheduler_mode_for_config(&cfg_ok).is_ok());
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 2026-09-03-0959 plan Step 3 (D16): the same preflight gate
+    // rejects unrunnable dag_pools declarations (wave-mode double
+    // authority, zero pool caps) before the loop starts.
+    // Filter: `cargo nextest run -p ralph-cli --bin ralph -- dag_pools`
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn dag_pools_under_wave_mode_fails_preflight() {
+        // Default scheduler_mode is `wave`; declaring dag_pools there
+        // would create a second capacity authority the legacy path
+        // ignores, so preflight must fail closed (D16).
+        let cfg = parse_ralph_config(
+            "event_loop:\n  execution_mode: isolated\n  supervisor:\n    enabled: true\n    dag_pools:\n      executor: 4\n",
+        );
+        let err = validate_scheduler_mode_for_config(&cfg).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("event_loop.supervisor.dag_pools"),
+            "error must point at the field path; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("wave"),
+            "error must name the offending mode; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn dag_pools_zero_cap_fails_preflight() {
+        let cfg = parse_ralph_config(
+            "event_loop:\n  execution_mode: isolated\n  supervisor:\n    enabled: true\n    scheduler_mode: dag\n    dag_pools:\n      reviewer: 0\n",
+        );
+        let err = validate_scheduler_mode_for_config(&cfg).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("event_loop.supervisor.dag_pools.reviewer"),
+            "error must name the zero-cap leaf field; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn dag_pools_under_dag_mode_passes_preflight() {
+        let cfg = parse_ralph_config(
+            "event_loop:\n  execution_mode: isolated\n  supervisor:\n    enabled: true\n    scheduler_mode: dag\n    dag_pools:\n      executor: 8\n      reviewer: 2\n      verifier: 1\n      fixer: 3\n",
+        );
+        assert!(validate_scheduler_mode_for_config(&cfg).is_ok());
+        let pools = cfg
+            .event_loop
+            .supervisor
+            .dag_pools
+            .as_ref()
+            .expect("dag_pools block must deserialise");
+        assert_eq!(pools.executor, Some(8));
+        assert_eq!(pools.fixer, Some(3));
     }
 }

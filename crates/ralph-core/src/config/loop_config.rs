@@ -1428,6 +1428,18 @@ pub struct SupervisorConfig {
     /// separate Units and must not be wired here.
     #[serde(default = "default_supervisor_scheduler_mode")]
     pub scheduler_mode: SchedulerMode,
+
+    /// 2026-09-03-0959 plan Step 3 (R16 / D16): optional per-pool
+    /// capacity caps for the DAG scheduler. `None` (default) means
+    /// every pool falls back to `max_concurrent_workers`; see
+    /// [`SupervisorConfig::resolve_dag_pools`]. Only meaningful when
+    /// `scheduler_mode` is `dag_shadow` / `dag` — declaring this
+    /// block under `wave` is rejected by
+    /// [`crate::config::scheduler_mode::validate_dag_pools`]
+    /// (invoked by the CLI preflight, not by serde) so the legacy
+    /// `WaveTracker` path never grows a second capacity authority.
+    #[serde(default)]
+    pub dag_pools: Option<DagPoolsConfig>,
 }
 
 fn default_supervisor_enabled() -> bool {
@@ -1463,6 +1475,76 @@ impl Default for SupervisorConfig {
             aggregate_timeout_secs: default_supervisor_aggregate_timeout_secs(),
             slot_retry_budget: default_supervisor_slot_retry_budget(),
             scheduler_mode: default_supervisor_scheduler_mode(),
+            dag_pools: None,
+        }
+    }
+}
+
+/// 2026-09-03-0959 plan Step 3 (R16 / D16): optional per-pool
+/// capacity declaration for the DAG scheduler. Each field caps the
+/// number of concurrently active jobs of that pool; a field left
+/// unset falls back to `SupervisorConfig::max_concurrent_workers`
+/// (the global cap, which always remains the total upper bound on
+/// agent jobs). Values of `0` are rejected by
+/// [`crate::config::scheduler_mode::validate_dag_pools`].
+///
+/// `deny_unknown_fields` matches the parent `SupervisorConfig`
+/// strictness so a typo'd pool name fails at parse time instead of
+/// silently falling back to the global cap.
+///
+/// Note: the CLI-side consumer (`DagPools` in
+/// `crates/ralph-cli/src/loop_runner/dag_scheduler/jobs.rs`) is a
+/// `#[cfg(test)]`-only three-pool scaffold (executor / reviewer /
+/// verifier + global). The `fixer` cap is declared here per D16 so
+/// the config contract is complete; wiring a distinct fixer pool
+/// into the consumer belongs to the Unit that promotes the
+/// scheduler out of test scope — until then the fixer cap is part
+/// of the resolved configuration surface only.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DagPoolsConfig {
+    /// Cap for executor (work) jobs.
+    #[serde(default)]
+    pub executor: Option<u32>,
+    /// Cap for reviewer jobs.
+    #[serde(default)]
+    pub reviewer: Option<u32>,
+    /// Cap for verifier jobs.
+    #[serde(default)]
+    pub verifier: Option<u32>,
+    /// Cap for fixer jobs.
+    #[serde(default)]
+    pub fixer: Option<u32>,
+}
+
+/// Fully-resolved per-pool capacities. Produced by
+/// [`SupervisorConfig::resolve_dag_pools`]; `global` always carries
+/// `max_concurrent_workers` and every pool cap is >= 1 whenever the
+/// config passed
+/// [`crate::config::scheduler_mode::validate_dag_pools`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedDagPools {
+    pub global: u32,
+    pub executor: u32,
+    pub reviewer: u32,
+    pub verifier: u32,
+    pub fixer: u32,
+}
+
+impl SupervisorConfig {
+    /// Resolve the effective per-pool caps: each pool falls back to
+    /// `max_concurrent_workers` when its `dag_pools` field is unset,
+    /// so a configuration without any `dag_pools` block yields four
+    /// pools each equal to the global cap (D16).
+    pub fn resolve_dag_pools(&self) -> ResolvedDagPools {
+        let global = self.max_concurrent_workers;
+        let pools = self.dag_pools.as_ref();
+        ResolvedDagPools {
+            global,
+            executor: pools.and_then(|p| p.executor).unwrap_or(global),
+            reviewer: pools.and_then(|p| p.reviewer).unwrap_or(global),
+            verifier: pools.and_then(|p| p.verifier).unwrap_or(global),
+            fixer: pools.and_then(|p| p.fixer).unwrap_or(global),
         }
     }
 }
@@ -2073,6 +2155,110 @@ steps:
             cfg.flow_type, "declared",
             "missing `type:` must fall back to default_flow_type() to preserve \
              presets that omit the field"
+        );
+    }
+}
+
+// 2026-09-03-0959 plan Step 3 (R16 / D16): dag_pools config model
+// tests. Scope: YAML → typed config in / out, fallback resolution,
+// and the deny_unknown_fields contract. Mode-combination and
+// zero-cap rejection live in `scheduler_mode::scheduler_mode_tests`
+// (same validation family as `validate_scheduler_mode`).
+#[cfg(test)]
+mod dag_pools_config_tests {
+    use super::*;
+
+    /// Default / backward compatibility: a supervisor block that
+    /// predates `dag_pools` deserialises with the field `None`, so
+    /// existing presets keep parsing unchanged.
+    #[test]
+    fn dag_pools_defaults_to_none_when_omitted() {
+        let cfg: SupervisorConfig = serde_yaml::from_str("enabled: true\n").unwrap();
+        assert!(cfg.dag_pools.is_none());
+        assert_eq!(cfg.max_concurrent_workers, 4);
+    }
+
+    /// Serde roundtrip: a fully-declared block preserves all four
+    /// pool caps through parse and re-render.
+    #[test]
+    fn dag_pools_roundtrips_through_yaml() {
+        let yaml = r"
+executor: 8
+reviewer: 2
+verifier: 1
+fixer: 3
+";
+        let pools: DagPoolsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(pools.executor, Some(8));
+        assert_eq!(pools.reviewer, Some(2));
+        assert_eq!(pools.verifier, Some(1));
+        assert_eq!(pools.fixer, Some(3));
+        let rendered = serde_yaml::to_string(&pools).unwrap();
+        let reparsed: DagPoolsConfig = serde_yaml::from_str(&rendered).unwrap();
+        assert_eq!(reparsed, pools);
+    }
+
+    /// Partial declaration: unset fields stay `None` so the resolve
+    /// step can tell "absent" apart from an explicit value.
+    #[test]
+    fn dag_pools_partial_declaration_keeps_unset_fields_none() {
+        let pools: DagPoolsConfig = serde_yaml::from_str("executor: 6\n").unwrap();
+        assert_eq!(pools.executor, Some(6));
+        assert_eq!(pools.reviewer, None);
+        assert_eq!(pools.verifier, None);
+        assert_eq!(pools.fixer, None);
+    }
+
+    /// `deny_unknown_fields`: a typo'd pool name fails at parse
+    /// time instead of silently falling back to the global cap.
+    #[test]
+    fn dag_pools_rejects_unknown_fields() {
+        let result: Result<DagPoolsConfig, _> = serde_yaml::from_str("executors: 2\n");
+        assert!(
+            result.is_err(),
+            "unknown pool key must fail at the serde boundary"
+        );
+    }
+
+    /// Resolve matrix: with no `dag_pools` block every pool equals
+    /// the global cap; declared pools keep their value and
+    /// undeclared pools fall back to `max_concurrent_workers`.
+    #[test]
+    fn resolve_dag_pools_falls_back_to_global_cap() {
+        let cfg: SupervisorConfig = serde_yaml::from_str("max_concurrent_workers: 4\n").unwrap();
+        let resolved = cfg.resolve_dag_pools();
+        assert_eq!(
+            resolved,
+            ResolvedDagPools {
+                global: 4,
+                executor: 4,
+                reviewer: 4,
+                verifier: 4,
+                fixer: 4,
+            },
+            "no dag_pools block: all pools must equal the global cap"
+        );
+
+        let cfg: SupervisorConfig = serde_yaml::from_str(
+            r"
+max_concurrent_workers: 4
+dag_pools:
+  executor: 8
+  fixer: 1
+",
+        )
+        .unwrap();
+        let resolved = cfg.resolve_dag_pools();
+        assert_eq!(
+            resolved,
+            ResolvedDagPools {
+                global: 4,
+                executor: 8,
+                reviewer: 4,
+                verifier: 4,
+                fixer: 1,
+            },
+            "declared pools keep their cap; undeclared pools fall back to global"
         );
     }
 }

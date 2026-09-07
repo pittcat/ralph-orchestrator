@@ -20,6 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::loop_config::DagPoolsConfig;
 use super::workflow_guards::HatExecutionMode;
 
 /// Tri-state selector for the wave-scheduler authority.
@@ -87,6 +88,21 @@ pub enum SchedulerModeError {
         mode: SchedulerMode,
         execution_mode: HatExecutionMode,
     },
+
+    /// 2026-09-03-0959 plan Step 3 (D16): `dag_pools` was declared
+    /// while `scheduler_mode = wave`. The legacy `WaveTracker`
+    /// authority does not consume per-pool caps, so accepting the
+    /// block would create a second, silently-ignored capacity
+    /// authority. Fail-closed: the operator must either drop
+    /// `event_loop.supervisor.dag_pools` or switch the scheduler
+    /// mode to `dag_shadow` / `dag`.
+    DagPoolsWithWaveMode,
+
+    /// 2026-09-03-0959 plan Step 3 (D16): a `dag_pools` pool cap of
+    /// `0` would wedge the pool permanently (no job could ever be
+    /// admitted), so zero caps are rejected at validation time
+    /// rather than deadlocking the scheduler at runtime.
+    DagPoolsZeroCap { field: &'static str },
 }
 
 impl core::fmt::Display for SchedulerModeError {
@@ -107,6 +123,17 @@ impl core::fmt::Display for SchedulerModeError {
                  event_loop.execution_mode = isolated (currently {})",
                 mode.as_str(),
                 execution_mode.as_str()
+            ),
+            SchedulerModeError::DagPoolsWithWaveMode => write!(
+                f,
+                "event_loop.supervisor.dag_pools is set but \
+                 event_loop.supervisor.scheduler_mode = wave; dag_pools only \
+                 applies to scheduler_mode = dag_shadow | dag (remove the \
+                 dag_pools block or switch scheduler_mode)"
+            ),
+            SchedulerModeError::DagPoolsZeroCap { field } => write!(
+                f,
+                "event_loop.supervisor.dag_pools.{field} must be >= 1 (got 0)"
             ),
         }
     }
@@ -152,6 +179,43 @@ pub fn validate_scheduler_mode(
             mode,
             execution_mode,
         });
+    }
+    Ok(())
+}
+
+/// 2026-09-03-0959 plan Step 3 (D16): validates the optional
+/// `event_loop.supervisor.dag_pools` block against the chosen
+/// [`SchedulerMode`]. Rules:
+///
+/// - `None` (block absent) is always legal — every pool then falls
+///   back to `max_concurrent_workers`.
+/// - Any pool cap of `0` is rejected (`DagPoolsZeroCap`); a zero
+///   cap would permanently starve that pool.
+/// - Under `wave` the block is rejected (`DagPoolsWithWaveMode`)
+///   because the legacy authority never consumes per-pool caps;
+///   `dag_shadow` and `dag` are legal.
+///
+/// Zero-cap shape errors are reported before the mode-combination
+/// error so the operator fixes the malformed value first.
+pub fn validate_dag_pools(
+    mode: SchedulerMode,
+    dag_pools: Option<&DagPoolsConfig>,
+) -> Result<(), SchedulerModeError> {
+    let Some(pools) = dag_pools else {
+        return Ok(());
+    };
+    for (field, value) in [
+        ("executor", pools.executor),
+        ("reviewer", pools.reviewer),
+        ("verifier", pools.verifier),
+        ("fixer", pools.fixer),
+    ] {
+        if matches!(value, Some(0)) {
+            return Err(SchedulerModeError::DagPoolsZeroCap { field });
+        }
+    }
+    if mode.uses_legacy_authority() {
+        return Err(SchedulerModeError::DagPoolsWithWaveMode);
     }
     Ok(())
 }
@@ -352,6 +416,104 @@ mod scheduler_mode_tests {
         assert!(
             rendered.contains("coordinator"),
             "error must report the current value; got: {rendered}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 2026-09-03-0959 plan Step 3 (D16): dag_pools validation tests.
+    // ─────────────────────────────────────────────────────────────
+
+    fn pools(executor: Option<u32>) -> DagPoolsConfig {
+        DagPoolsConfig {
+            executor,
+            ..DagPoolsConfig::default()
+        }
+    }
+
+    #[test]
+    fn dag_pools_absent_is_always_legal() {
+        for mode in [
+            SchedulerMode::Wave,
+            SchedulerMode::DagShadow,
+            SchedulerMode::Dag,
+        ] {
+            assert!(
+                validate_dag_pools(mode, None).is_ok(),
+                "absent dag_pools must validate under any mode ({mode:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn dag_pools_rejected_under_wave_mode() {
+        let err = validate_dag_pools(SchedulerMode::Wave, Some(&pools(Some(2)))).unwrap_err();
+        assert_eq!(err, SchedulerModeError::DagPoolsWithWaveMode);
+    }
+
+    #[test]
+    fn dag_pools_accepted_under_dag_modes() {
+        let pools = DagPoolsConfig {
+            executor: Some(4),
+            reviewer: Some(2),
+            verifier: Some(1),
+            fixer: Some(3),
+        };
+        for mode in [SchedulerMode::DagShadow, SchedulerMode::Dag] {
+            assert!(
+                validate_dag_pools(mode, Some(&pools)).is_ok(),
+                "dag_pools must be legal under {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dag_pools_zero_cap_rejected() {
+        for (field, pools) in [
+            ("executor", pools(Some(0))),
+            (
+                "fixer",
+                DagPoolsConfig {
+                    fixer: Some(0),
+                    ..DagPoolsConfig::default()
+                },
+            ),
+        ] {
+            let err = validate_dag_pools(SchedulerMode::Dag, Some(&pools)).unwrap_err();
+            assert_eq!(
+                err,
+                SchedulerModeError::DagPoolsZeroCap { field },
+                "zero {field} cap must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn dag_pools_zero_cap_rejected_before_mode_combination() {
+        // A zero cap is a shape error and must surface even under
+        // `wave` so the operator fixes the malformed value first.
+        let err = validate_dag_pools(SchedulerMode::Wave, Some(&pools(Some(0)))).unwrap_err();
+        assert_eq!(
+            err,
+            SchedulerModeError::DagPoolsZeroCap { field: "executor" }
+        );
+    }
+
+    #[test]
+    fn dag_pools_error_message_includes_field_path() {
+        let rendered = SchedulerModeError::DagPoolsWithWaveMode.to_string();
+        assert!(
+            rendered.contains("event_loop.supervisor.dag_pools"),
+            "error must reference the field path; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("wave"),
+            "error must report the offending mode; got: {rendered}"
+        );
+
+        let rendered = SchedulerModeError::DagPoolsZeroCap { field: "reviewer" }.to_string();
+        assert!(
+            rendered.contains("event_loop.supervisor.dag_pools.reviewer"),
+            "error must reference the offending leaf field; got: {rendered}"
         );
     }
 }

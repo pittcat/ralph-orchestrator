@@ -60,11 +60,12 @@ pub use hooks::{
     HooksConfig,
 };
 pub use loop_config::{
-    CompletionArtifactFieldMode, CompletionPayloadMatchConfig, ElementConstraint, EventFieldDoc,
-    EventLoopConfig, EventSchema, FlowDeclarationConfig, FlowStepConfig, HandoffEnvelopeConfig,
-    HatAllowedValues, HintCondition, HintOp, MechanismConfig, PathRequiredEventGate, PayloadType,
-    Phase, PhaseConfig, ProgressStewardConfig, RoutingHintConfig, SupervisorConfig,
-    TriggerContextConfig, VerdictGateConfig, WarmupConfig,
+    CompletionArtifactFieldMode, CompletionPayloadMatchConfig, DagPoolsConfig, ElementConstraint,
+    EventFieldDoc, EventLoopConfig, EventSchema, FlowDeclarationConfig, FlowStepConfig,
+    HandoffEnvelopeConfig, HatAllowedValues, HintCondition, HintOp, MechanismConfig,
+    PathRequiredEventGate, PayloadType, Phase, PhaseConfig, ProgressStewardConfig,
+    ResolvedDagPools, RoutingHintConfig, SupervisorConfig, TriggerContextConfig, VerdictGateConfig,
+    WarmupConfig,
 };
 pub use memories::{InjectMode, MemoriesConfig, MemoriesFilter};
 pub use multi_hat_policy::{
@@ -86,7 +87,9 @@ pub use profiles::{ProfileScope, ProfileSpec, ProfilesConfig};
 // so the supervisor runtime and the CLI preflight can both pattern-match
 // on `SchedulerMode` without reaching into the `config::scheduler_mode`
 // private path.
-pub use scheduler_mode::{SchedulerMode, SchedulerModeError, validate_scheduler_mode};
+pub use scheduler_mode::{
+    SchedulerMode, SchedulerModeError, validate_dag_pools, validate_scheduler_mode,
+};
 pub use skills::{SkillOverride, SkillsConfig};
 pub use state_files::{StateFileEntry, StateFileFormat, StateFilesConfig};
 pub use state_machine::{BusinessAfterTerminalAction, DuplicateTerminalAction, StateMachineConfig};

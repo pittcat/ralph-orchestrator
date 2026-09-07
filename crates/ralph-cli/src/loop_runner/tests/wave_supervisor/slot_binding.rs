@@ -154,6 +154,7 @@ fn build_supervisor_bridge_relative_db_path_resolves_under_ralph_dir() {
         // the characterisation tight against accidental default
         // drift on later fields).
         scheduler_mode: ralph_core::config::SchedulerMode::Wave,
+        dag_pools: None,
     };
     let bridge = crate::loop_runner::build_supervisor_bridge(
         &cfg,
@@ -188,6 +189,7 @@ fn build_supervisor_bridge_absolute_db_path_honoured_as_is() {
         slot_retry_budget: 1,
         // 2026-09-03-0959 plan U1: legacy `WaveTracker` path.
         scheduler_mode: ralph_core::config::SchedulerMode::Wave,
+        dag_pools: None,
     };
     let bridge = crate::loop_runner::build_supervisor_bridge(
         &cfg,

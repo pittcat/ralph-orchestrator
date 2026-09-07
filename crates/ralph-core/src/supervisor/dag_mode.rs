@@ -18,5 +18,5 @@
 //! belong here — not in `crate::config`.
 
 pub use crate::config::scheduler_mode::{
-    SchedulerMode, SchedulerModeError, validate_scheduler_mode,
+    SchedulerMode, SchedulerModeError, validate_dag_pools, validate_scheduler_mode,
 };

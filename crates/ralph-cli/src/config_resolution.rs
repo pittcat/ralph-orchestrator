@@ -728,7 +728,8 @@ event_loop:
         )
         .expect("preset snippet must parse");
         let merged_no_sched =
-            merge_yaml_values(default_value, preset_no_scheduler_mode).expect("merge must succeed");
+            merge_yaml_values(default_value.clone(), preset_no_scheduler_mode.clone())
+                .expect("merge must succeed");
         let scheduler_mode_absent = merged_no_sched
             .get("event_loop")
             .and_then(|v| v.get("supervisor"))
@@ -737,6 +738,51 @@ event_loop:
             scheduler_mode_absent.is_none(),
             "scheduler_mode must stay absent when preset omits it (so serde default = Wave); got {:?}",
             scheduler_mode_absent
+        );
+
+        // 2026-09-03-0959 plan Step 3 (D16): `dag_pools` is a leaf
+        // under `supervisor` and rides the same parent opt-in strip
+        // as `scheduler_mode`. A preset declaring
+        // `supervisor.dag_pools` must reach the merged value; when
+        // the preset omits the block the key must stay absent so
+        // `resolve_dag_pools()` falls back to the global cap.
+        let preset_pools_value: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  supervisor:
+    enabled: true
+    scheduler_mode: dag
+    dag_pools:
+      executor: 8
+      fixer: 2
+",
+        )
+        .expect("preset snippet must parse");
+        let merged_pools = merge_yaml_values(default_value.clone(), preset_pools_value)
+            .expect("merge must succeed");
+        let executor_cap = merged_pools
+            .get("event_loop")
+            .and_then(|v| v.get("supervisor"))
+            .and_then(|v| v.get("dag_pools"))
+            .and_then(|v| v.get("executor"))
+            .and_then(|v| v.as_u64());
+        assert_eq!(
+            executor_cap,
+            Some(8),
+            "preset supervisor.dag_pools.executor must reach merged value; got {:?}",
+            executor_cap
+        );
+
+        let merged_no_pools =
+            merge_yaml_values(default_value, preset_no_scheduler_mode).expect("merge must succeed");
+        let dag_pools_absent = merged_no_pools
+            .get("event_loop")
+            .and_then(|v| v.get("supervisor"))
+            .and_then(|v| v.get("dag_pools"));
+        assert!(
+            dag_pools_absent.is_none(),
+            "dag_pools must stay absent when preset omits it (so resolve falls back to global); got {:?}",
+            dag_pools_absent
         );
     }
 }

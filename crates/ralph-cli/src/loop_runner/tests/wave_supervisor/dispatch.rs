@@ -1893,6 +1893,7 @@ fn u4_runner_rejects_out_of_range_slot_retry_budget() {
         slot_retry_budget: 3,
         // 2026-09-03-0959 plan U1: legacy `WaveTracker` path.
         scheduler_mode: ralph_core::config::SchedulerMode::Wave,
+        dag_pools: None,
     };
     let events_path = ctx.workspace().join(".ralph").join("events.jsonl");
     let err = crate::loop_runner::build_supervisor_bridge(&cfg, &ctx, events_path)
