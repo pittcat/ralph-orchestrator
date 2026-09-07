@@ -445,12 +445,14 @@ impl EventLoop {
         // U3 (2026-06-13-001 plan): hard-gate / wave-recovery hat pinning.
         //
         // When a `pending_recovery_hat` is recorded (set by the
-        // runner's `inject_missing_event_hard_gate_guidance` or
-        // `inject_wave_policy_rejection_guidance` helpers), the next
+        // runner's `inject_missing_event_hard_gate_guidance`,
+        // `inject_wave_policy_rejection_guidance`, or
+        // `inject_completion_correction` helpers), the next
         // iteration MUST activate that hat, not whatever the
         // round-robin / coordinator topology would pick.  The default
         // round-robin would otherwise drift to `executor` after a
-        // `review-coordinator` hard gate, breaking the loop.
+        // `review-coordinator` hard gate, or to the `ralph` sentinel
+        // after a rejected LOOP_COMPLETE with an empty pending queue.
         //
         // We use `take` semantics: the field is cleared on the
         // iteration that consumes it, so the loop never gets stuck on

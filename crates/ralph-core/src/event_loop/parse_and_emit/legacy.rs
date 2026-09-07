@@ -3173,11 +3173,10 @@ impl EventLoop {
                          required events not yet observed; \
                          event will not transition loop to terminal"
                     );
-                    let _ = Self::inject_completion_correction(
-                        &self.diagnostics,
-                        &mut self.state,
+                    let _ = self.inject_completion_correction(
                         "missing_required_events",
                         &free_form,
+                        false,
                     );
                     // Drop the event from this batch's
                     // accepted stream; the runtime continues

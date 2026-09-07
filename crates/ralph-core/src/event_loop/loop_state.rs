@@ -545,6 +545,8 @@ pub struct LoopState {
     ///   - `inject_missing_event_hard_gate_guidance` (hard gate)
     ///   - `inject_wave_policy_rejection_guidance` (schema-level
     ///     wave recovery)
+    ///   - `inject_completion_correction` (recoverable completion
+    ///     *artifact-path* rejection — pin the completion-promise publisher)
     pub pending_recovery_hat: Option<HatId>,
 
     /// 2026-06-28-003: runtime-recovery directives produced by

@@ -122,7 +122,9 @@ pub mod prompt;
 pub mod termination_impl;
 // U5b: termination text formatting free function SSOT 转发。
 // impl EventLoop 方法留到后续 U 阶段处理。
-pub use termination_impl::{format_duration, termination_status_text};
+pub use termination_impl::{
+    format_duration, termination_status_text, termination_status_text_with_completion_payload,
+};
 pub mod types;
 pub mod verdict;
 pub mod wave;

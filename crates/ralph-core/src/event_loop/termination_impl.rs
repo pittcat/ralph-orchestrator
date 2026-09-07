@@ -30,6 +30,21 @@ pub fn format_duration(d: Duration) -> String {
 
 /// Returns a human-readable status based on termination reason.
 pub fn termination_status_text(reason: &TerminationReason) -> &'static str {
+    termination_status_text_with_completion_payload(reason, None)
+}
+
+/// Same as [`termination_status_text`], but treats an honored
+/// `CompletionPromise` with `success: false` / FAIL-class `verdict`
+/// as operator-facing failure rather than success.
+pub fn termination_status_text_with_completion_payload(
+    reason: &TerminationReason,
+    completion_payload: Option<&str>,
+) -> &'static str {
+    if matches!(reason, TerminationReason::CompletionPromise)
+        && completion_payload_is_operator_failure(completion_payload)
+    {
+        return "Completed with operator-facing failure.";
+    }
     match reason {
         TerminationReason::CompletionPromise => "All tasks completed successfully.",
         TerminationReason::MaxIterations => "Stopped at iteration limit.",
@@ -87,4 +102,27 @@ pub fn termination_status_text(reason: &TerminationReason) -> &'static str {
             "Wave fan-in failed - supervisor could not reach terminal state."
         }
     }
+}
+
+/// True when an honored completion payload still reports operator-facing
+/// failure (`success: false` or a FAIL-class `verdict`).
+pub(crate) fn completion_payload_is_operator_failure(payload: Option<&str>) -> bool {
+    let Some(raw) = payload else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return false;
+    };
+    if value.get("success").and_then(serde_json::Value::as_bool) == Some(false) {
+        return true;
+    }
+    value
+        .get("verdict")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|verdict| {
+            matches!(
+                verdict.to_ascii_uppercase().as_str(),
+                "FAIL" | "FAILED" | "REJECTED"
+            )
+        })
 }

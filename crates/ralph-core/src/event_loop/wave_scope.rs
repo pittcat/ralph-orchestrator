@@ -663,12 +663,9 @@ impl EventLoop {
                      Use loop.cancel to abort the workflow instead.",
                     missing
                 );
-                if let Some(stuck) = Self::inject_completion_correction(
-                    &self.diagnostics,
-                    &mut self.state,
-                    "missing_required_events",
-                    &free_form,
-                ) {
+                if let Some(stuck) =
+                    self.inject_completion_correction("missing_required_events", &free_form, false)
+                {
                     return Some(stuck);
                 }
                 return None;
@@ -777,11 +774,10 @@ impl EventLoop {
                     topic = predecessor_topic,
                     reason = reason,
                 );
-                if let Some(stuck) = Self::inject_completion_correction(
-                    &self.diagnostics,
-                    &mut self.state,
+                if let Some(stuck) = self.inject_completion_correction(
                     "completion_payload_mismatch",
                     &free_form,
+                    false,
                 ) {
                     return Some(stuck);
                 }
@@ -816,12 +812,9 @@ impl EventLoop {
             // U11-T8 / P0-2 (2026-06-23-003 plan): deterministic
             // correction.  Replaces the legacy `task.resume`
             // injection.
-            if let Some(stuck) = Self::inject_completion_correction(
-                &self.diagnostics,
-                &mut self.state,
-                "workflow_guard_incomplete",
-                &free_form,
-            ) {
+            if let Some(stuck) =
+                self.inject_completion_correction("workflow_guard_incomplete", &free_form, false)
+            {
                 return Some(stuck);
             }
             return None;
@@ -859,12 +852,9 @@ impl EventLoop {
                  workspace-relative path to a readable regular file. Re-emit with a valid \
                  path or use loop.cancel to abort."
             );
-            if let Some(stuck) = Self::inject_completion_correction(
-                &self.diagnostics,
-                &mut self.state,
-                "completion_artifact_invalid",
-                &free_form,
-            ) {
+            if let Some(stuck) =
+                self.inject_completion_correction("completion_artifact_invalid", &free_form, true)
+            {
                 return Some(stuck);
             }
             return None;
@@ -1129,6 +1119,24 @@ impl EventLoop {
         None
     }
 
+    /// Hat that publishes `event_loop.completion_promise`.
+    /// Unique publisher wins; if several hats declare the topic, only
+    /// pin `reporter` — never guess among other names.
+    pub(super) fn hat_publishing_completion_promise(config: &RalphConfig) -> Option<HatId> {
+        let topic = config.event_loop.completion_promise.as_str();
+        let ids: Vec<HatId> = config
+            .hats
+            .iter()
+            .filter(|(_, hat)| hat.publishes.iter().any(|published| published == topic))
+            .map(|(id, _)| HatId::new(id.as_str()))
+            .collect();
+        match ids.as_slice() {
+            [] => None,
+            [one] => Some(one.clone()),
+            many => many.iter().find(|id| id.as_str() == "reporter").cloned(),
+        }
+    }
+
     /// P0-2 (2026-06-23-003 plan): completion rejection no longer
     /// publishes a `task.resume` event.  Instead, we route the
     /// rejection through the deterministic-correction path so the
@@ -1153,12 +1161,24 @@ impl EventLoop {
     /// call this helper — it goes straight to
     /// `CompletionStuck(StructuralRejection)` so a structural
     /// failure never silently burns the recoverable budget.
+    ///
+    /// After a recoverable **artifact-path** rejection, optionally pin
+    /// `pending_recovery_hat` to the completion-promise publisher and
+    /// reset the stall counter so isolated loops do not fall through
+    /// to the `ralph` sentinel. Other correction reasons stay
+    /// prompt-only so missing-event / workflow-guard recovery is not
+    /// stolen by the reporter.
     pub(super) fn inject_completion_correction(
-        diagnostics: &crate::diagnostics::DiagnosticsCollector,
-        state: &mut LoopState,
+        &mut self,
         reason_hint: &str,
         free_form: &str,
+        pin_completion_publisher: bool,
     ) -> Option<TerminationReason> {
+        let publisher = pin_completion_publisher
+            .then(|| Self::hat_publishing_completion_promise(&self.config))
+            .flatten();
+        let diagnostics = &self.diagnostics;
+        let state = &mut self.state;
         let topic = ralph_proto::LOOP_COMPLETE.to_string();
         let mut rejection = crate::event_loop::rejection::Rejection {
             stage: crate::event_loop::rejection::RejectionStage::Policy,
@@ -1248,8 +1268,16 @@ impl EventLoop {
             retry_key = %retry_key,
             reason_hint = %reason_hint,
             topic = %topic,
+            publisher = publisher.as_ref().map(HatId::as_str).unwrap_or("-"),
+            pin_completion_publisher,
             "P0-2: injected completion rejection into state.prompt_context (replaces task.resume)"
         );
+        if pin_completion_publisher {
+            if let Some(hat) = publisher {
+                state.consecutive_no_progress_turns = 0;
+                state.pending_recovery_hat = Some(hat);
+            }
+        }
         // 2026-06-26 plan U6: correction queued; budget not
         // exhausted yet — caller should keep the loop alive.
         None

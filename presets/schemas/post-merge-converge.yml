@@ -38,7 +38,7 @@ schemas:
         source: Git status checks plus one full existing verification run.
         fill_rule: true only when branch/HEAD/worktree/verification all match the completion criteria; otherwise false with reasons in the artifact.
       artifact_path:
-        meaning: Artifact landing point, expressed as a path relative to `.ralph/`, for the baseline file written by this activation.
+        meaning: Artifact landing point, expressed as a workspace-root-relative path (joined with the workspace root; do not treat `.ralph/` as cwd), for the baseline file written by this activation.
         source: The file actually created by baseline under `.ralph/post-merge/`.
         fill_rule: Use the observed readable path; if the file is absent, stop and write it before emitting; never invent a path.
         examples: [".ralph/post-merge/01-baseline.md"]
@@ -88,7 +88,7 @@ schemas:
         source: Upstream baseline_valid plus ability to build a change map AND scope decision is resolved.
         fill_rule: false when baseline_valid was false OR the map cannot be built OR scope_status is not resolved; true only when all four required tables exist in the artifact AND scope_status=resolved AND overall_confidence >= 90 AND critical_unknown_count == 0.
       artifact_path:
-        meaning: Artifact landing point, expressed as a path relative to `.ralph/`, for the change-map file written by this activation.
+        meaning: Artifact landing point, expressed as a workspace-root-relative path (joined with the workspace root; do not treat `.ralph/` as cwd), for the change-map file written by this activation.
         source: The file actually created by change-mapper under `.ralph/post-merge/`.
         fill_rule: Use the observed readable path; if the file is absent, stop and write it before emitting; never invent a path.
         examples: [".ralph/post-merge/02-change-map.md"]
@@ -132,17 +132,17 @@ schemas:
         fill_rule: One of `explicit | direct-target | branch-merge | inferred`; must not be `merge-batch-required` (merge-boundary is optional cross-check only).
       # U4 new fields (D6): classification diff paths
       interleaved_diff_path:
-        meaning: Artifact landing point, expressed as a path relative to `.ralph/`, for the interleaved classification diff.
+        meaning: Artifact landing point, expressed as a workspace-root-relative path (joined with the workspace root; do not treat `.ralph/` as cwd), for the interleaved classification diff.
         source: Change-mapper always writes `.ralph/post-merge/diffs/interleaved.patch`, including an empty patch when there are no matching hunks.
         fill_rule: Use the real readable path; always create the file so this required field is never absent.
         examples: [".ralph/post-merge/diffs/interleaved.patch"]
       override_diff_path:
-        meaning: Artifact landing point, expressed as a path relative to `.ralph/`, for the overridden/reverted classification diff.
+        meaning: Artifact landing point, expressed as a workspace-root-relative path (joined with the workspace root; do not treat `.ralph/` as cwd), for the overridden/reverted classification diff.
         source: Change-mapper always writes `.ralph/post-merge/diffs/override.patch`, including an empty patch when there are no matching hunks.
         fill_rule: Use the real readable path; always create the file so this required field is never absent.
         examples: [".ralph/post-merge/diffs/override.patch"]
       unknown_diff_path:
-        meaning: Artifact landing point, expressed as a path relative to `.ralph/`, for the unknown classification diff.
+        meaning: Artifact landing point, expressed as a workspace-root-relative path (joined with the workspace root; do not treat `.ralph/` as cwd), for the unknown classification diff.
         source: Change-mapper always writes `.ralph/post-merge/diffs/unknown.patch`, including an empty patch when there are no matching hunks.
         fill_rule: Use the real readable path; always create the file so this required field is never absent.
         examples: [".ralph/post-merge/diffs/unknown.patch"]
@@ -197,7 +197,7 @@ schemas:
         source: Upstream proceed and completeness of the test-gap plan.
         fill_rule: false when upstream blocked; true when every P0/P1 risk has a scenario or an explicit deferral reason in the artifact.
       artifact_path:
-        meaning: Artifact landing point, expressed as a path relative to `.ralph/`, for the test-gap plan written by this activation.
+        meaning: Artifact landing point, expressed as a workspace-root-relative path (joined with the workspace root; do not treat `.ralph/` as cwd), for the test-gap plan written by this activation.
         source: The file actually created by test-gap under `.ralph/post-merge/`.
         fill_rule: Use the observed readable path; if the file is absent, stop and write it before emitting; never invent a path.
         examples: [".ralph/post-merge/09-test-gap-plan.md"]
@@ -345,14 +345,14 @@ schemas:
         source: Reviewer judgment after reading artifacts + finding board.
         fill_rule: high only when P0/P1 board is clean of LOW_CONFIDENCE and audits are complete; otherwise medium/low.
       final_review_path:
-        meaning: Artifact landing point, expressed as a path relative to `.ralph/`, for the independent final-review file.
+        meaning: Artifact landing point, expressed as a workspace-root-relative path (joined with the workspace root; do not treat `.ralph/` as cwd), for the independent final-review file.
         source: The readable file actually created by closer under `.ralph/post-merge/`.
-        fill_rule: Use the observed path after `test -f`; stop if absent or unreadable; never hand-write a substitute path.
+        fill_rule: Use the workspace-root-relative path after `test -f` from the repository root (example `.ralph/post-merge/15-final-review.md`). Never emit `post-merge/15-...` as if cwd were `.ralph/`. Stop if absent or unreadable.
         examples: [".ralph/post-merge/15-final-review.md"]
       clean_validation_path:
-        meaning: Artifact landing point, expressed as a path relative to `.ralph/`, for the clean-environment validation file.
+        meaning: Artifact landing point, expressed as a workspace-root-relative path (joined with the workspace root; do not treat `.ralph/` as cwd), for the clean-environment validation file.
         source: The readable file actually created by closer under `.ralph/post-merge/`.
-        fill_rule: Use the observed path after `test -f`; stop if absent or unreadable; never hand-write a substitute path.
+        fill_rule: Use the workspace-root-relative path after `test -f` from the repository root (example `.ralph/post-merge/14-clean-validation.md`). Never emit `post-merge/14-...` as if cwd were `.ralph/`. Stop if absent or unreadable.
         examples: [".ralph/post-merge/14-clean-validation.md"]
 
   postmerge.complete:
@@ -376,7 +376,7 @@ schemas:
         source: Trigger postmerge.reviewed.verdict / 15-final-review.md.
         fill_rule: Must match the closer verdict; do not invent a greener verdict in the report.
       report_path:
-        meaning: Artifact landing point, expressed as a path relative to `.ralph/`, for the operator-facing convergence report.
+        meaning: Artifact landing point, expressed as a workspace-root-relative path (joined with the workspace root; do not treat `.ralph/` as cwd), for the operator-facing convergence report.
         source: The report file actually written by reporter under `.ralph/post-merge/`.
-        fill_rule: Use the observed path only after `test -f` and a readable-content check; stop before emit if absent; Confirm must print the same path as `DELIVERABLE_PATH`.
+        fill_rule: Use the workspace-root-relative path observed after `test -f` from the repository root (example `.ralph/post-merge/REPORT.md`). Never emit `post-merge/REPORT.md` as if cwd were `.ralph/`. Stop before emit if absent; Confirm must print the same path as `DELIVERABLE_PATH`.
         examples: [".ralph/post-merge/REPORT.md"]

@@ -725,6 +725,7 @@ hats:
 
       ### Emit
       Write 14 + 15 artifacts → policy-check → emit `postmerge.reviewed` with `verdict`, `verdict_confidence`, `final_review_path`, `clean_validation_path`.
+      Those two path fields are workspace-root relative — the same string `test -f` uses from the repo root (`.ralph/post-merge/14-clean-validation.md` / `.ralph/post-merge/15-final-review.md`), never `post-merge/14-...`.
 
       ### DON'T
       - Quietly repair earlier hats' missing work
@@ -751,9 +752,9 @@ hats:
       OPAC: follow `ralph-tools-opac` and explicitly load `ralph-tools-emit` before constructing or sending any payload. Always `--policy-check` before real emit;
       Confirm emit with `--output json` (`ok`/`recorded`), not by reading event files.
       If policy-check rejects the payload, use the feedback fields to locate the topic/field/path, repair the report or payload from visible artifacts, rerun `test -f`, then rerun policy-check. Stop without a real emit until it returns `ok`.
-      Artifact-first: write the operator report, `test -f` it, put that path in
-      `report_path`, then print `DELIVERABLE_PATH` in the visible reply.
-      Schema only checks the field is non-empty — you must verify the file yourself.
+      Artifact-first: write the operator report, `test -f` it from the repo root, put that **workspace-root-relative** path in
+      `report_path` (`.ralph/post-merge/REPORT.md`, never `post-merge/REPORT.md`), then print `DELIVERABLE_PATH` in the visible reply.
+      Schema only checks the field is non-empty — admission joins the path with the workspace root, so stripping `.ralph/` fails.
 
       ### Observe
       Read trigger `postmerge.reviewed` (`verdict`, `verdict_confidence`, `final_review_path`, `clean_validation_path`) with `test -f` followed by `cat`/`Read` on those two paths. Confirm each contains its declared conclusion, evidence, and validation result; if either is missing or incomplete, stop and do not emit. Then gather remaining paths under `.ralph/post-merge/` (01–15, findings, regression). Do not rebuild facts from runtime-private orchestration ledgers.

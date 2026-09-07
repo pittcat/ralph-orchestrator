@@ -381,7 +381,7 @@ ralph emit <TOPIC> -j '...' --output json                  # 落盘：看 ok=tru
    ```
 3. **查字段名**：对**即将 emit、且 schema 要求路径字段**的那个 topic 跑  
    `ralph emit --schema <TOPIC>`，只用返回的 `required_fields` 里的路径字段名（常见 `report_path` / `artifact_path`）。**不要两个都猜，不要自造字段名，不要把路径字段塞进 schema 未要求它的 topic。**
-4. **Precheck → Apply**：先 `--policy-check`，通过后再真实 emit；路径字段值必须等于第 1 步真实文件路径（仓库相对路径，通常以 `.ralph/` 开头）。
+4. **Precheck → Apply**：先 `--policy-check`，通过后再真实 emit；路径字段值必须等于第 1 步真实文件路径（**相对仓库根 / workspace root**，通常以 `.ralph/` 开头）。runtime 会把该字符串 join 到 workspace root 再验收；`test -f` 也必须从仓库根执行。**不要**把 `.ralph/` 当成 cwd 而填剥掉前缀的路径（例如文件在 `.ralph/foo/REPORT.md` 却填 `foo/REPORT.md`）。
 5. **Confirm（两件事都要做，缺一不可）**：
    - 普通 emit Confirm：看 `--output json` 的 `ok` / `recorded`（见上一节）；
    - **额外**在本轮最终可见回复里单独打印一行（方便操作者在 TUI 搜索）：

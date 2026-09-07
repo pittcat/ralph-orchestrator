@@ -26,7 +26,10 @@ impl EventLoop {
         let payload = format!(
             "## Reason\n{}\n\n## Status\n{}\n\n## Summary\n- Iterations: {}\n- Duration: {}\n- Exit code: {}",
             reason.as_str(),
-            termination_status_text(reason),
+            termination_status_text_with_completion_payload(
+                reason,
+                self.state.last_completion_payload.as_deref(),
+            ),
             self.state.iteration,
             duration_str,
             reason.exit_code()

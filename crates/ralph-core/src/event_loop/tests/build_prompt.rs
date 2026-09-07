@@ -77,6 +77,7 @@ hats:
     assert!(prompt.contains("## TERMINAL DELIVERABLE CONTRACT"));
     assert!(prompt.contains(".ralph/reports/REPORT.md written by this activation"));
     assert!(prompt.contains("`report_path`"));
+    assert!(prompt.contains("relative to the workspace root"));
     assert!(prompt.contains("DELIVERABLE_PATH: <report_path>"));
 }
 

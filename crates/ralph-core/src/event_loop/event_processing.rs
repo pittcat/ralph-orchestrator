@@ -1125,8 +1125,9 @@ impl EventLoop {
              This is the final activation for completion topic `{promise}`.\n\
              - Before emitting, resolve `{path_field}` from: {path_source}.\n\
              - Contract: {fill_rule}.\n\
+             - Path coordinate: `{path_field}` is relative to the workspace root (joined with the workspace root at admission). Do not treat `.ralph/` as cwd; run `test -f` from the repo root. Do not strip a `.ralph/` prefix from a path that lives under `.ralph/`.\n\
              - Verify the file is readable with `test -f` before policy-check and the real emit.\n\
-             - The `{promise}` payload MUST include `{path_field}` with that exact repo-relative path.\n\
+             - The `{promise}` payload MUST include `{path_field}` with that exact workspace-root-relative path.\n\
              - After the emit succeeds, your final visible reply MUST contain exactly one standalone line:\n\
              `DELIVERABLE_PATH: <{path_field}>`\n\
              Replace the placeholder with the same path carried in `{path_field}`. Do not finish with only a prose summary.\n"

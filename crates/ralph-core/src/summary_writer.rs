@@ -4,7 +4,9 @@
 //! with status, iterations, duration, task list, events summary, and commit info.
 
 use crate::event_logger::EventHistory;
-use crate::event_loop::{LoopState, TerminationReason};
+use crate::event_loop::{
+    LoopState, TerminationReason, termination_impl::completion_payload_is_operator_failure,
+};
 use crate::landing::LandingResult;
 use crate::loop_context::LoopContext;
 use std::collections::HashMap;
@@ -261,7 +263,7 @@ impl SummaryWriter {
         content.push_str("# Loop Summary\n\n");
 
         // Status
-        let status = self.status_text(reason);
+        let status = self.status_text(reason, state);
         content.push_str(&format!("**Status:** {status}\n"));
         content.push_str(&format!("**Iterations:** {}\n", state.iteration));
         content.push_str(&format!(
@@ -363,49 +365,68 @@ impl SummaryWriter {
     }
 
     /// Returns a human-readable status based on termination reason.
-    fn status_text(&self, reason: &TerminationReason) -> &'static str {
+    fn status_text(&self, reason: &TerminationReason, state: &LoopState) -> String {
         match reason {
-            TerminationReason::CompletionPromise => "Completed successfully",
-            TerminationReason::MaxIterations => "Stopped: max iterations reached",
-            TerminationReason::MaxRuntime => "Stopped: max runtime exceeded",
-            TerminationReason::MaxCost => "Stopped: max cost exceeded",
-            TerminationReason::ConsecutiveFailures => "Failed: too many consecutive failures",
-            TerminationReason::LoopThrashing => "Failed: loop thrashing detected",
-            TerminationReason::LoopStale => "Failed: stale loop detected",
-            TerminationReason::ValidationFailure => "Failed: too many malformed JSONL events",
-            TerminationReason::Stopped => "Stopped manually",
-            TerminationReason::Interrupted => "Interrupted by signal",
-            TerminationReason::RestartRequested => "Restarting by human request",
-            TerminationReason::WorkspaceGone => "Failed: workspace directory removed",
-            TerminationReason::Cancelled => "Cancelled gracefully (human rejection or timeout)",
-            TerminationReason::PayloadContractViolation => "Failed: payload contract violation",
+            TerminationReason::CompletionPromise => {
+                if completion_payload_is_operator_failure(state.last_completion_payload.as_deref())
+                {
+                    "Completed with operator-facing failure".to_string()
+                } else {
+                    "Completed successfully".to_string()
+                }
+            }
+            TerminationReason::MaxIterations => "Stopped: max iterations reached".to_string(),
+            TerminationReason::MaxRuntime => "Stopped: max runtime exceeded".to_string(),
+            TerminationReason::MaxCost => "Stopped: max cost exceeded".to_string(),
+            TerminationReason::ConsecutiveFailures => {
+                "Failed: too many consecutive failures".to_string()
+            }
+            TerminationReason::LoopThrashing => "Failed: loop thrashing detected".to_string(),
+            TerminationReason::LoopStale => "Failed: stale loop detected".to_string(),
+            TerminationReason::ValidationFailure => {
+                "Failed: too many malformed JSONL events".to_string()
+            }
+            TerminationReason::Stopped => "Stopped manually".to_string(),
+            TerminationReason::Interrupted => "Interrupted by signal".to_string(),
+            TerminationReason::RestartRequested => "Restarting by human request".to_string(),
+            TerminationReason::WorkspaceGone => "Failed: workspace directory removed".to_string(),
+            TerminationReason::Cancelled => {
+                "Cancelled gracefully (human rejection or timeout)".to_string()
+            }
+            TerminationReason::PayloadContractViolation => {
+                "Failed: payload contract violation".to_string()
+            }
             TerminationReason::RecoveryExhausted { .. } => {
-                "Failed: recovery retry window exhausted"
+                "Failed: recovery retry window exhausted".to_string()
             }
             TerminationReason::ReviewFailed { .. } => {
-                "Failed: review verdict failed and propagated to final mirror"
+                "Failed: review verdict failed and propagated to final mirror".to_string()
             }
             TerminationReason::ScopeViolationCircuitBreakerTripped { .. } => {
-                "Failed: isolated scope violation circuit breaker tripped"
+                "Failed: isolated scope violation circuit breaker tripped".to_string()
             }
             TerminationReason::RecoverablePayloadExhausted { .. } => {
-                "Failed: recoverable-payload budget exhausted"
+                "Failed: recoverable-payload budget exhausted".to_string()
             }
             // 2026-06-26 plan U1: completion-rejection budget exhausted
             // (recoverable) OR structural rejection routed to a hard
             // stop. The summary uses the `source` field for
             // disambiguation when the operator drills in.
-            TerminationReason::CompletionStuck(_) => "Failed: completion stuck (see last_reason)",
+            TerminationReason::CompletionStuck(_) => {
+                "Failed: completion stuck (see last_reason)".to_string()
+            }
             // U5 (plan 2026-07-04-004): dimension-reviewer
             // scope_violation hard-reject. The summary surfaces
             // the explicit class so the operator / dashboard sees
             // the silent-success guard fire as a typed failure
             // rather than a generic "loop paused" message.
             TerminationReason::ScopeViolationHardRejected { .. } => {
-                "Failed: dimension-reviewer scope_violation (hard-rejected)"
+                "Failed: dimension-reviewer scope_violation (hard-rejected)".to_string()
             }
             // U1 (plan 2026-07-27-001): production fan-in failure.
-            TerminationReason::FanInFailed => "Failed: wave fan-in could not reach terminal state",
+            TerminationReason::FanInFailed => {
+                "Failed: wave fan-in could not reach terminal state".to_string()
+            }
         }
     }
 
@@ -676,20 +697,29 @@ mod tests {
         let writer = SummaryWriter::default();
 
         assert_eq!(
-            writer.status_text(&TerminationReason::CompletionPromise),
+            writer.status_text(&TerminationReason::CompletionPromise, &test_state()),
             "Completed successfully"
         );
         assert_eq!(
-            writer.status_text(&TerminationReason::MaxIterations),
+            writer.status_text(&TerminationReason::MaxIterations, &test_state()),
             "Stopped: max iterations reached"
         );
         assert_eq!(
-            writer.status_text(&TerminationReason::ConsecutiveFailures),
+            writer.status_text(&TerminationReason::ConsecutiveFailures, &test_state()),
             "Failed: too many consecutive failures"
         );
         assert_eq!(
-            writer.status_text(&TerminationReason::Interrupted),
+            writer.status_text(&TerminationReason::Interrupted, &test_state()),
             "Interrupted by signal"
+        );
+        let mut failed = test_state();
+        failed.last_completion_payload = Some(
+            r#"{"success":false,"verdict":"FAIL","report_path":".ralph/post-merge/REPORT.md"}"#
+                .to_string(),
+        );
+        assert_eq!(
+            writer.status_text(&TerminationReason::CompletionPromise, &failed),
+            "Completed with operator-facing failure"
         );
     }
 
@@ -748,6 +778,27 @@ More text here.
         assert!(content.contains("## Events"));
         assert!(content.contains("## Final Commit"));
         assert!(content.contains("abc1234: feat(auth): add tokens"));
+    }
+
+    #[test]
+    fn test_generate_content_operator_facing_failure() {
+        let writer = SummaryWriter::default();
+        let mut state = test_state();
+        state.last_completion_payload = Some(
+            r#"{"success":false,"verdict":"FAIL","report_path":".ralph/post-merge/REPORT.md"}"#
+                .to_string(),
+        );
+
+        let content = writer.generate_content_with_landing(
+            &TerminationReason::CompletionPromise,
+            &state,
+            None,
+            None,
+            None,
+        );
+
+        assert!(content.contains("**Status:** Completed with operator-facing failure"));
+        assert!(!content.contains("**Status:** Completed successfully"));
     }
 
     #[test]

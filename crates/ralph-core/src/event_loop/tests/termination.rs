@@ -319,6 +319,14 @@ fn test_termination_status_texts() {
     for (reason, expected) in cases {
         assert_eq!(termination_status_text(&reason), expected);
     }
+
+    assert_eq!(
+        termination_status_text_with_completion_payload(
+            &TerminationReason::CompletionPromise,
+            Some(r#"{"success":false,"verdict":"FAIL"}"#),
+        ),
+        "Completed with operator-facing failure."
+    );
 }
 
 #[test]
@@ -1435,6 +1443,63 @@ fn completion_artifact_rejects_missing_file() {
     assert!(
         !event_loop.state().completion_honored,
         "completion_honored must remain false when artifact is missing"
+    );
+}
+
+/// Recoverable artifact rejection pins the completion publisher for the
+/// next activation and clears the stall counter so isolated mode does
+/// not fall through to the `ralph` sentinel.
+#[test]
+fn completion_artifact_rejection_pins_publisher_hat() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let mut config = artifact_completion_config(&temp_dir, false);
+    config.hats.insert(
+        "reporter".to_string(),
+        crate::config::HatConfig {
+            publishes: vec![config.event_loop.completion_promise.clone()],
+            ..Default::default()
+        },
+    );
+
+    let events_path = temp_dir.path().join("events.jsonl");
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    event_loop.state.consecutive_no_progress_turns = 2;
+
+    write_event_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"reason":"done","report_path":"docs/missing.md"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+
+    let reason = event_loop.check_completion_event();
+    assert!(
+        reason.is_none(),
+        "missing artifact file must reject completion (no termination), got {reason:?}"
+    );
+    assert_eq!(
+        event_loop
+            .state()
+            .pending_recovery_hat
+            .as_ref()
+            .map(ralph_proto::HatId::as_str),
+        Some("reporter"),
+        "rejected LOOP_COMPLETE must pin the completion publisher"
+    );
+    assert_eq!(
+        event_loop.state().consecutive_no_progress_turns,
+        0,
+        "correction must count as progress against the stall detector"
+    );
+    let next = event_loop.next_hat().map(|hat| hat.as_str().to_string());
+    assert_eq!(
+        next.as_deref(),
+        Some("reporter"),
+        "next activation after artifact rejection must be the pinned publisher"
     );
 }
 
