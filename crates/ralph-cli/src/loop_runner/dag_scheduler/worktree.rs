@@ -92,11 +92,69 @@ pub enum UnitWorktreeError {
     #[error("failed to inspect existing worktree '{path}': {reason}")]
     #[allow(dead_code)] // defensive variant reserved for future worktree-state probes
     InspectFailed { path: String, reason: String },
+    /// Fail-closed rejection of an externally supplied identifier
+    /// or commit-ish that does not pass the shape whitelist
+    /// (P0-3: path/argv injection guard).
+    #[error("invalid {field} '{value}': {reason}")]
+    InvalidInput {
+        field: &'static str,
+        value: String,
+        reason: &'static str,
+    },
     #[error("git command failed: {0}")]
     GitFailed(String),
 }
 
 pub type UnitWorktreeResult<T> = Result<T, UnitWorktreeError>;
+
+/// P0-3 shape whitelist for identifiers that get interpolated
+/// into a branch name (`ralph/<loop>/<unit>`) and a worktree
+/// path (`.ralph/worktrees/<loop>-<unit>`). Accepts
+/// `[A-Za-z0-9._-]+` and rejects empty values, a leading `-`
+/// (git argv option injection), and any `..` substring (path
+/// escape out of `.ralph/worktrees/`). `/` is excluded by the
+/// character whitelist.
+fn validate_component_id(field: &'static str, value: &str) -> UnitWorktreeResult<()> {
+    let reason = if value.is_empty() {
+        Some("must not be empty")
+    } else if value.starts_with('-') {
+        Some("must not start with '-'")
+    } else if value.contains("..") {
+        Some("must not contain '..'")
+    } else if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        Some("must match [A-Za-z0-9._-]+")
+    } else {
+        None
+    };
+    match reason {
+        Some(reason) => Err(UnitWorktreeError::InvalidInput {
+            field,
+            value: value.to_string(),
+            reason,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// P0-3 shape whitelist for externally supplied commit-ish values
+/// that become git argv positionals: 40-hex (SHA-1) or 64-hex
+/// (SHA-256) object ids only. Anything else (branch names, `HEAD`,
+/// `-`-prefixed option probes) is rejected before git sees it.
+fn validate_commit_oid(field: &'static str, value: &str) -> UnitWorktreeResult<()> {
+    let ok = matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit());
+    if ok {
+        Ok(())
+    } else {
+        Err(UnitWorktreeError::InvalidInput {
+            field,
+            value: value.to_string(),
+            reason: "must be a 40- or 64-hex object id",
+        })
+    }
+}
 
 impl UnitWorktree {
     /// Acquire a trusted worktree for `unit_id`.
@@ -116,6 +174,17 @@ impl UnitWorktree {
         unit_id: &str,
         verified_base_commit: &str,
     ) -> UnitWorktreeResult<Self> {
+        // P0-3: validate every externally supplied component BEFORE
+        // touching disk or spawning git. `loop_id` / `unit_id` are
+        // interpolated into the branch name and the worktree path
+        // below; `verified_base_commit` becomes a git argv positional.
+        // Whitelist shape validation (no `..`, no `/`, no leading `-`)
+        // is what keeps `.ralph/worktrees/` escape and option
+        // injection unreachable.
+        validate_component_id("loop_id", loop_id)?;
+        validate_component_id("unit_id", unit_id)?;
+        validate_commit_oid("verified_base_commit", verified_base_commit)?;
+
         // First, register the worktree directory as a
         // local-only ignore (per-repo `.git/info/exclude`).
         // Without this, the host repo's `git status
@@ -165,10 +234,12 @@ impl UnitWorktree {
         }
 
         // Fresh create: ensure parent dir, then `git worktree add
-        // -B <branch> <path> <verified_base>`. The `-B` flag
+        // -B <branch> -- <path> <verified_base>`. The `-B` flag
         // creates the branch if it doesn't exist; pointing the
         // new branch at the verified base means the worktree's
-        // initial tip IS the verified base.
+        // initial tip IS the verified base. The `--` separator
+        // ends option parsing (defence-in-depth on top of the
+        // shape whitelist above).
         std::fs::create_dir_all(&worktree_root)
             .map_err(|e| UnitWorktreeError::GitFailed(format!("create_dir_all: {e}")))?;
         let status = Command::new("git")
@@ -178,6 +249,7 @@ impl UnitWorktree {
             .arg("add")
             .arg("-B")
             .arg(&branch)
+            .arg("--")
             .arg(&path)
             .arg(verified_base_commit)
             .status()
@@ -217,7 +289,22 @@ fn ensure_host_clean(repo_root: &Path) -> UnitWorktreeResult<()> {
     let mut has_modified = false;
     let mut has_untracked = false;
     for line in text.lines() {
-        if line.len() < 2 {
+        if line.len() < 3 {
+            continue;
+        }
+        // P0-4: `.ralph/` is the runtime ledger (dag.db,
+        // events.jsonl, worktrees/, ...), not operator business
+        // state — the DAG scheduler writes `<repo>/.ralph/dag.db`
+        // while this check is the gate for `acquire`, so treating
+        // `.ralph/` as dirt would deadlock every real run on hosts
+        // that don't gitignore it. The exemption lives HERE (porcelain
+        // parse) rather than in `.git/info/exclude` on purpose:
+        // exclude rules only suppress UNTRACKED entries, while a
+        // tracked-modified path under `.ralph/` would still show up —
+        // filtering the porcelain output covers both shapes with one
+        // mechanism. Operator dirt OUTSIDE `.ralph/` is still refused.
+        let path = line[3..].trim_matches('"');
+        if path == ".ralph" || path.starts_with(".ralph/") {
             continue;
         }
         let xy = &line[..2];
@@ -265,7 +352,22 @@ fn ensure_worktree_dir_excluded(repo_root: &Path) -> UnitWorktreeResult<()> {
         std::fs::create_dir_all(parent)
             .map_err(|e| UnitWorktreeError::GitFailed(format!("create exclude dir: {e}")))?;
     }
-    let existing = std::fs::read_to_string(&exclude_path).unwrap_or_default();
+    let existing = match std::fs::read_to_string(&exclude_path) {
+        Ok(content) => content,
+        // PMI-017: a read failure that is NOT "file missing" must
+        // fail closed. Degrading a read error (permission flap,
+        // disk, ACL) to an empty baseline would let the write below
+        // clobber the operator's existing exclude rules with only
+        // the ralph line. NotFound stays the legitimate empty
+        // baseline — that is the first-creation path.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(UnitWorktreeError::GitFailed(format!(
+                "read exclude {}: {e}",
+                exclude_path.display()
+            )));
+        }
+    };
     // Match a precise line ".ralph/worktrees/" rather than a
     // substring (avoids matching a hypothetical user entry
     // like ".ralph/worktrees-old/").
@@ -291,6 +393,9 @@ mod tests {
 
     use std::process::Command;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn run_git(cwd: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
@@ -425,6 +530,119 @@ mod tests {
     // 可查,使 promote 接线 PR 无法静默依赖非原子的 exclude 写。
     // 修复落地(排他写/原子 append/repo 级锁)后按 pin 消息指引翻转。
     // ─────────────────────────────────────────────────────────────────────
+
+    /// TGP-01(PMI-017,2026-09-07,reproducer)— 读失败注入形态:
+    /// `read_to_string` 失败时以空内容为基线整文件重写,单调用
+    /// 即毁灭性覆盖操作者既有 exclude 行。
+    ///
+    /// 与 TG-S10②(并发丢行)不同:本条是**单调用**即可触发的
+    /// 「丢光」路径——读 IO 错误(权限抖动/磁盘/ACL)被
+    /// `unwrap_or_default()` 静默降级为「读到空文件」,紧随的
+    /// `std::fs::write` 一旦成功,操作者的全部既有 exclude
+    /// 规则被替换为仅含 `.ralph/worktrees/` 一行(被 ignore 的
+    /// 本地敏感文件开始出现在 `git status`)。
+    ///
+    /// 注入手法:exclude 文件 chmod 0200(write-only)。owner 对
+    /// mode-200 文件:读→EACCES,写→成功(Linux 权限位语义;
+    /// uid≠0 时 write 位不受 read 位影响)。这精确重演 PMI-017
+    /// 的触发条件「读失败而写成功」,无需 trait 化 fs。
+    ///
+    /// **当前 RED**: 断言「读失败必须 fail-closed 拒绝写盘,
+    /// exclude 字节不变」。现状实现返回 Ok(()) 且文件被空基线
+    /// 重写(3 行用户规则全丢,实测 3 连跑同形)。修复落地
+    /// (读 Err(kind≠NotFound) → 返回错误)后本测试转绿;
+    /// NotFound 仍允许空基线(首次创建路径),对照断言见
+    /// `tgp01_notfound_keeps_empty_baseline_creation_path`。
+    ///
+    /// invariant: 读-改-写序列中读失败不得降级为「读到空」;
+    /// FAIL-CLOSED 是本仓库 fail 语义底线(PMI-017)。
+    #[test]
+    fn tgp01_read_failure_must_fail_closed_not_clobber_exclude() {
+        let (_tmp, repo, _base) = init_repo_with_initial_commit();
+        let exclude_path = repo.join(".git").join("info").join("exclude");
+
+        // 预置 3 行操作者规则(含防泄漏 secret 路径规则)。
+        let original = "# user comment\nbuild/\nsecrets/local.env\n";
+        std::fs::write(&exclude_path, original).unwrap();
+        assert!(exclude_path.exists());
+
+        // 注入「读失败、写成功」: write-only 权限位。
+        std::fs::set_permissions(&exclude_path, std::fs::Permissions::from_mode(0o200)).unwrap();
+        // 前提自检:读必须失败、写必须可用,否则注入不成立
+        // (比如以 root 跑测试时 mode 位不拦 owner)。
+        let read_fails = std::fs::read_to_string(&exclude_path).is_err();
+        if !read_fails {
+            // 环境不满足注入前提:跳过而非假绿(root/特殊 fs)。
+            eprintln!("TGP-01: read-permission injection unavailable on this host; skipping");
+            std::fs::set_permissions(&exclude_path, std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+            return;
+        }
+
+        // 被测函数:当前实现读失败 → 空基线 → 整文件重写。
+        let outcome = ensure_worktree_dir_excluded(&repo);
+
+        // 恢复可读权限,使后续断言与 fixture 清理不受注入影响。
+        std::fs::set_permissions(&exclude_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        // RED 断言(修复后目标态): fail-closed 错误。
+        match outcome {
+            Err(e) => {
+                // 修复后:读 IO 错误必须返回 typed 错误。
+                assert!(
+                    !e.to_string().is_empty(),
+                    "TGP-01: read failure must surface a typed error"
+                );
+            }
+            Ok(()) => panic!(
+                "TGP-01 (PMI-017): read_to_string failed (EACCES) but \
+                 ensure_worktree_dir_excluded returned Ok — the file was \
+                 rewritten from an EMPTY baseline, destroying the operator's \
+                 existing exclude rules. Read failure must fail-closed \
+                 (return an error), never degrade to 'read empty'."
+            ),
+        }
+
+        // 字节不变断言:拒绝路径不得碰盘(修复后语义)。
+        // 当前 RED 会先在上面 panic;修复落地后此断言保证
+        // fail-closed 不留半写状态。
+        let after = std::fs::read_to_string(&exclude_path).unwrap();
+        assert_eq!(
+            after, original,
+            "TGP-01: a rejected (read-failure) path must leave the exclude \
+             file byte-identical to the operator's original content"
+        );
+    }
+
+    /// TGP-01 对照路径: exclude 不存在(真 NotFound)时,
+    /// 空基线创建 `.ralph/worktrees/` 行是合法首建路径,
+    /// 修复(fail-closed on read error)不得误拒。
+    #[test]
+    fn tgp01_notfound_keeps_empty_baseline_creation_path() {
+        let (_tmp, repo, _base) = init_repo_with_initial_commit();
+        let exclude_path = repo.join(".git").join("info").join("exclude");
+        // init_repo_with_initial_commit 不创建 info/exclude?
+        // git init 一定带模板创建它;删除以构造 NotFound。
+        if exclude_path.exists() {
+            std::fs::remove_file(&exclude_path).unwrap();
+        }
+        let out = ensure_worktree_dir_excluded(&repo);
+        match out {
+            Ok(()) => {
+                let content = std::fs::read_to_string(&exclude_path).unwrap();
+                assert_eq!(
+                    content, ".ralph/worktrees/\n",
+                    "TGP-01 control: fresh creation from NotFound must produce \
+                     exactly the ralph line"
+                );
+            }
+            Err(e) => panic!(
+                "TGP-01 control: a genuinely missing exclude file (NotFound) \
+                 is the legitimate empty-baseline creation path; the \
+                 fail-closed fix must not reject it. Got: {e}"
+            ),
+        }
+    }
 
     /// TG-S10② 现状 pin: 并发调用 `ensure_worktree_dir_excluded`
     /// 会丢失用户的既有 exclude 条目(读-改-写非原子)。
@@ -565,5 +783,134 @@ mod tests {
              this pin to assert the refusal/serialization shape and \
              delete this transitional expectation."
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // P0-3 (2026-09-07): path/argv injection guard — unit_id / loop_id /
+    // verified_base_commit are validated against shape whitelists BEFORE
+    // any disk write or git spawn.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// `..` in unit_id would escape `.ralph/worktrees/`; `/` would
+    /// smuggle a path separator into the branch/worktree name. Both
+    /// must be typed-rejected with zero disk side effects.
+    #[test]
+    fn unit_worktree_acquire_rejects_path_escape_unit_id() {
+        let (_tmp, repo, base) = init_repo_with_initial_commit();
+        for bad in ["../escape", "a/b", "..", "-rf"] {
+            let err = UnitWorktree::acquire(&repo, "loop-1", bad, &base)
+                .expect_err("malicious unit_id must be rejected");
+            assert!(
+                matches!(
+                    err,
+                    UnitWorktreeError::InvalidInput {
+                        field: "unit_id",
+                        ..
+                    }
+                ),
+                "unit_id {bad:?} must fail as InvalidInput, got {err:?}"
+            );
+        }
+        // Fail-closed means no disk side effects: no worktree dir, no
+        // branch, and the exclude file untouched (still the git-init
+        // template content — the ralph line was never appended).
+        assert!(
+            !repo.join(".ralph").join("worktrees").exists(),
+            "rejected acquire must not create the worktree root"
+        );
+        let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        assert!(
+            !exclude.contains(".ralph/worktrees/"),
+            "rejected acquire must not touch .git/info/exclude"
+        );
+    }
+
+    /// loop_id gets the same whitelist treatment (it is also
+    /// interpolated into the branch name and path).
+    #[test]
+    fn unit_worktree_acquire_rejects_path_escape_loop_id() {
+        let (_tmp, repo, base) = init_repo_with_initial_commit();
+        for bad in ["../escape", "a/b"] {
+            let err = UnitWorktree::acquire(&repo, bad, "U1", &base)
+                .expect_err("malicious loop_id must be rejected");
+            assert!(
+                matches!(
+                    err,
+                    UnitWorktreeError::InvalidInput {
+                        field: "loop_id",
+                        ..
+                    }
+                ),
+                "loop_id {bad:?} must fail as InvalidInput, got {err:?}"
+            );
+        }
+        assert!(!repo.join(".ralph").join("worktrees").exists());
+    }
+
+    /// A `-`-leading or otherwise non-hex `verified_base_commit` would
+    /// land as a git argv positional and be parsed as an option. Only
+    /// 40/64-hex object ids are accepted.
+    #[test]
+    fn unit_worktree_acquire_rejects_non_hex_base_commit() {
+        let (_tmp, repo, base) = init_repo_with_initial_commit();
+        for bad in ["-malicious", "HEAD~1", "refs/heads/main", "zzzz"] {
+            let err = UnitWorktree::acquire(&repo, "loop-1", "U1", bad)
+                .expect_err("non-hex base must be rejected");
+            assert!(
+                matches!(
+                    err,
+                    UnitWorktreeError::InvalidInput {
+                        field: "verified_base_commit",
+                        ..
+                    }
+                ),
+                "base {bad:?} must fail as InvalidInput, got {err:?}"
+            );
+        }
+        assert!(!repo.join(".ralph").join("worktrees").exists());
+        // Sanity: the real 40-hex base passes the same gate.
+        UnitWorktree::acquire(&repo, "loop-1", "U1", &base).expect("hex base acquires");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // P0-4 (2026-09-07): `.ralph/` is the runtime ledger — the host-clean
+    // check exempts the whole directory (untracked AND modified) while
+    // operator dirt outside `.ralph/` is still refused.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Host repo with NO gitignore for `.ralph/`, with runtime ledger
+    /// files present (`dag.db`, `events.jsonl`) → acquire succeeds.
+    #[test]
+    fn unit_worktree_acquire_exempts_ralph_ledger_dir() {
+        let (_tmp, repo, base) = init_repo_with_initial_commit();
+        let ralph_dir = repo.join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).unwrap();
+        std::fs::write(ralph_dir.join("dag.db"), b"\x00fake-sqlite").unwrap();
+        std::fs::write(ralph_dir.join("events.jsonl"), "{}\n").unwrap();
+        let wt = UnitWorktree::acquire(&repo, "loop-1", "U1", &base)
+            .expect(".ralph/ ledger files must not block acquire");
+        assert!(!wt.reused);
+    }
+
+    /// The exemption is scoped to `.ralph/`: untracked and modified
+    /// files OUTSIDE it are still refused.
+    #[test]
+    fn unit_worktree_acquire_still_rejects_dirt_outside_ralph_dir() {
+        let (_tmp, repo, base) = init_repo_with_initial_commit();
+        std::fs::create_dir_all(repo.join(".ralph")).unwrap();
+        std::fs::write(repo.join(".ralph/dag.db"), b"\x00").unwrap();
+
+        // Untracked operator file outside .ralph/ → HostUntracked.
+        std::fs::write(repo.join("new_file.txt"), "x").unwrap();
+        let err = UnitWorktree::acquire(&repo, "loop-1", "U1", &base)
+            .expect_err("untracked file outside .ralph/ must be refused");
+        assert!(matches!(err, UnitWorktreeError::HostUntracked(_)));
+        std::fs::remove_file(repo.join("new_file.txt")).unwrap();
+
+        // Modified tracked file outside .ralph/ → HostDirty.
+        std::fs::write(repo.join("README.md"), "modified\n").unwrap();
+        let err = UnitWorktree::acquire(&repo, "loop-1", "U1", &base)
+            .expect_err("modified file outside .ralph/ must be refused");
+        assert!(matches!(err, UnitWorktreeError::HostDirty(_)));
     }
 }

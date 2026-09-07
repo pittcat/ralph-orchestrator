@@ -110,6 +110,16 @@ pub enum LaneError {
     UnknownBase(String),
     #[error("unit '{0}' has no eligible lane entry (not in admission set)")]
     IneligibleUnit(String),
+    /// P0-3: an externally supplied commit-ish / branch name failed
+    /// the shape whitelist before git ever saw it.
+    #[error("invalid {field} shape: '{value}'")]
+    InvalidInput { field: &'static str, value: String },
+    /// D19/S19: the unit's diff (verified base → unit commit) did
+    /// not apply cleanly onto the lane-time head (a sibling changed
+    /// overlapping lines). The candidate is rejected; the target is
+    /// untouched.
+    #[error("unit diff does not apply onto the lane-time head for unit '{unit_id}': {reason}")]
+    ApplyConflict { unit_id: String, reason: String },
     #[error("lane state error: {0}")]
     StateError(String),
 }
@@ -123,14 +133,18 @@ pub trait GitIntegrationPort: Send + Sync {
     /// Current HEAD of `target_branch` as reported by git.
     fn current_target_oid(&self, target_branch: &str) -> LaneResult<String>;
 
-    /// Build a single squash commit on top of `base_commit`
-    /// that captures the candidate's `unit_commit` tree.
-    /// Returns the new commit OID and the tree OID it
-    /// resolved to. Does NOT advance any branch.
+    /// Build a single squash commit on top of `parent_commit`
+    /// (the lane-time target head, D19/S19) whose tree is
+    /// `parent_commit`'s tree PLUS the candidate's unit diff
+    /// (`candidate.base_commit` → `candidate.unit_commit`) applied
+    /// onto it. Returns the new commit OID and the tree OID it
+    /// resolved to. Does NOT advance any branch. A diff that does
+    /// not apply cleanly onto `parent_commit` fails with
+    /// [`LaneError::ApplyConflict`] — the target stays untouched.
     fn prepare_squash_candidate(
         &self,
         candidate: &IntegrationCandidate,
-        base_commit: &str,
+        parent_commit: &str,
     ) -> LaneResult<SquashCandidate>;
 
     /// Run the targeted gate on `squash.tree_oid`. The
@@ -396,6 +410,9 @@ impl RealGitIntegrationPort {
 
 impl GitIntegrationPort for RealGitIntegrationPort {
     fn current_target_oid(&self, target_branch: &str) -> LaneResult<String> {
+        // P0-3: the branch name is interpolated into the ref below;
+        // reject option-like / ref-escape shapes before git sees it.
+        require_branch_name(target_branch)?;
         // Resolve via `git rev-parse --verify refs/heads/<branch>` so the
         // branch resolves whether it lives in a loose ref
         // (`.git/refs/heads/<branch>`) or in `.git/packed-refs` after a
@@ -409,24 +426,76 @@ impl GitIntegrationPort for RealGitIntegrationPort {
     fn prepare_squash_candidate(
         &self,
         candidate: &IntegrationCandidate,
-        base_commit: &str,
+        parent_commit: &str,
     ) -> LaneResult<SquashCandidate> {
-        // Tree of unit_commit: `git rev-parse <unit_commit>^{tree}`.
-        let tree_oid = run_git_capture(
+        // P0-3: every externally supplied commit-ish becomes a git argv
+        // positional below; only 40/64-hex object ids are accepted.
+        require_hex_oid("candidate.base_commit", &candidate.base_commit)?;
+        require_hex_oid("candidate.unit_commit", &candidate.unit_commit)?;
+        require_hex_oid("parent_commit", parent_commit)?;
+
+        // D19/S19: the squash is built on top of the LANE-TIME head
+        // (`parent_commit`), not the admission-time verified base. The
+        // unit's diff (verified base → unit commit) is applied onto a
+        // throwaway index seeded from `parent_commit`, so siblings of
+        // the same target integrate sequentially: after the first FF
+        // moves the head, the next candidate still produces a
+        // DESCENDANT of it, which is what the CAS ancestor check
+        // demands. A wholesale `unit_commit^{tree}` commit would
+        // silently revert every sibling that landed after admission.
+        let patch = run_git_capture_bytes(
             &self.repo_root,
-            &["rev-parse", &format!("{}^{{tree}}", candidate.unit_commit)],
+            &[
+                "diff",
+                "--binary",
+                &candidate.base_commit,
+                &candidate.unit_commit,
+            ],
         )?;
+        // Throwaway index via GIT_INDEX_FILE — the host repo's real
+        // index and worktree are never touched.
+        let scratch = tempfile::tempdir()
+            .map_err(|e| LaneError::StateError(format!("squash scratch tempdir: {e}")))?;
+        let index_file = scratch.path().join("index");
+        run_git_with_index(&self.repo_root, &index_file, &["read-tree", parent_commit])?;
+        if !patch.iter().all(u8::is_ascii_whitespace) {
+            let patch_path = scratch.path().join("unit.patch");
+            std::fs::write(&patch_path, &patch)
+                .map_err(|e| LaneError::StateError(format!("write squash patch: {e}")))?;
+            let patch_arg = patch_path.to_string_lossy().to_string();
+            if let Err(err) = run_git_with_index(
+                &self.repo_root,
+                &index_file,
+                &["apply", "--cached", &patch_arg],
+            ) {
+                // The diff does not apply onto the lane-time head —
+                // a sibling changed overlapping lines. Typed conflict,
+                // target untouched.
+                return Err(LaneError::ApplyConflict {
+                    unit_id: candidate.unit_id.clone(),
+                    reason: err.to_string(),
+                });
+            }
+        }
+        let tree_oid = run_git_with_index(&self.repo_root, &index_file, &["write-tree"])?;
         let message = format!("squash({}): U7 lane integrate", candidate.unit_id);
-        // Commit the tree on top of base_commit:
-        //   git commit-tree <tree_oid> -p <base_commit> -m <msg>
+        // Commit the tree on top of the lane-time head:
+        //   git commit-tree <tree_oid> -p <parent_commit> -m <msg>
         let commit_oid = run_git_capture(
             &self.repo_root,
-            &["commit-tree", &tree_oid, "-p", base_commit, "-m", &message],
+            &[
+                "commit-tree",
+                &tree_oid,
+                "-p",
+                parent_commit,
+                "-m",
+                &message,
+            ],
         )?;
         Ok(SquashCandidate {
             unit_id: candidate.unit_id.clone(),
             target_branch: candidate.target_branch.clone(),
-            base_commit: base_commit.to_string(),
+            base_commit: parent_commit.to_string(),
             squash_commit: commit_oid,
             tree_oid,
             message,
@@ -490,14 +559,40 @@ impl GitIntegrationPort for RealGitIntegrationPort {
         // Explicit removal: unregister the worktree + delete the
         // directory. `worktree remove` also handles the tempdir
         // leftover; the TempDir Drop then only removes an empty
-        // or missing dir.
-        let _ = std::process::Command::new("git")
+        // or missing dir. Removal failure is a diagnostic, not a
+        // silent swallow — a leaked worktree registration confuses
+        // later `worktree list` audits.
+        match std::process::Command::new("git")
             .arg("-C")
             .arg(&self.repo_root)
             .args(["worktree", "remove", "--force", &worktree_path])
-            .output();
-        if !worktree_dir.path().exists() {
-            let _ = std::fs::remove_dir_all(worktree_dir.path());
+            .output()
+        {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                tracing::warn!(
+                    path = %worktree_path,
+                    status = ?out.status.code(),
+                    stderr = %String::from_utf8_lossy(&out.stderr),
+                    "integration gate worktree remove failed; falling back to fs cleanup"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %worktree_path,
+                    error = %e,
+                    "integration gate worktree remove spawn failed; falling back to fs cleanup"
+                );
+            }
+        }
+        if worktree_dir.path().exists()
+            && let Err(e) = std::fs::remove_dir_all(worktree_dir.path())
+        {
+            tracing::warn!(
+                path = %worktree_path,
+                error = %e,
+                "integration gate worktree fs cleanup failed"
+            );
         }
         outcome
     }
@@ -508,6 +603,11 @@ impl GitIntegrationPort for RealGitIntegrationPort {
         expected_head_before: &str,
         squash: &SquashCandidate,
     ) -> LaneResult<CasOutcome> {
+        // P0-3: branch name + both commit-ish values become git argv
+        // below; shape-validate before git sees them.
+        require_branch_name(target_branch)?;
+        require_hex_oid("expected_head_before", expected_head_before)?;
+        require_hex_oid("squash.squash_commit", &squash.squash_commit)?;
         // Re-read HEAD; if it's moved, refuse.
         let current = self.current_target_oid(target_branch)?;
         if current != expected_head_before {
@@ -572,6 +672,88 @@ fn run_git_capture(repo_root: &PathBuf, args: &[&str]) -> LaneResult<String> {
         )));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Raw-stdout variant of [`run_git_capture`]: no trimming. Patch
+/// payloads are whitespace-sensitive, so `git diff` output must not
+/// pass through the trimming capture.
+fn run_git_capture_bytes(repo_root: &PathBuf, args: &[&str]) -> LaneResult<Vec<u8>> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(args)
+        .output()
+        .map_err(|e| LaneError::StateError(format!("git {args:?}: {e}")))?;
+    if !out.status.success() {
+        return Err(LaneError::StateError(format!(
+            "git {args:?} exited {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+    Ok(out.stdout)
+}
+
+/// Run git with `GIT_INDEX_FILE=<index>` so index-mutating plumbing
+/// (`read-tree` / `apply --cached` / `write-tree`) operates on a
+/// throwaway index, never the host repo's real one.
+fn run_git_with_index(
+    repo_root: &PathBuf,
+    index: &std::path::Path,
+    args: &[&str],
+) -> LaneResult<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .env("GIT_INDEX_FILE", index)
+        .args(args)
+        .output()
+        .map_err(|e| LaneError::StateError(format!("git {args:?}: {e}")))?;
+    if !out.status.success() {
+        return Err(LaneError::StateError(format!(
+            "git {args:?} exited {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// P0-3 shape whitelist for externally supplied commit-ish values
+/// that become git argv positionals: 40-hex (SHA-1) or 64-hex
+/// (SHA-256) object ids only. Anything else (branch names, `HEAD`,
+/// `-`-prefixed option probes) is rejected before git sees it.
+fn require_hex_oid(field: &'static str, value: &str) -> LaneResult<()> {
+    let ok = matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit());
+    if ok {
+        Ok(())
+    } else {
+        Err(LaneError::InvalidInput {
+            field,
+            value: value.to_string(),
+        })
+    }
+}
+
+/// P0-3 shape whitelist for target branch names. `/` is legal
+/// (`feat/x`); the guard rejects empty names, a leading `-` (argv
+/// option injection), `..` (ref escape), whitespace and the ref
+/// metacharacters git's own `check-ref-format` forbids.
+fn require_branch_name(target_branch: &str) -> LaneResult<()> {
+    let ok = !target_branch.is_empty()
+        && !target_branch.starts_with('-')
+        && !target_branch.contains("..")
+        && target_branch
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'));
+    if ok {
+        Ok(())
+    } else {
+        Err(LaneError::InvalidInput {
+            field: "target_branch",
+            value: target_branch.to_string(),
+        })
+    }
 }
 
 // ===========================================================================
@@ -660,7 +842,7 @@ impl GitIntegrationPort for FakeGitIntegrationPort {
     fn prepare_squash_candidate(
         &self,
         candidate: &IntegrationCandidate,
-        base_commit: &str,
+        parent_commit: &str,
     ) -> LaneResult<SquashCandidate> {
         let mut g = self.inner.lock().expect("fake port mutex");
         let tree_oid = g
@@ -669,14 +851,14 @@ impl GitIntegrationPort for FakeGitIntegrationPort {
             .cloned()
             .unwrap_or_else(|| format!("tree-{}", candidate.unit_commit));
         g.parents
-            .insert(candidate.unit_commit.clone(), base_commit.to_string());
+            .insert(candidate.unit_commit.clone(), parent_commit.to_string());
         g.next_idx += 1;
         let idx = g.next_idx;
         let squash_commit = format!("squash-{}-{}", candidate.unit_id, idx);
         Ok(SquashCandidate {
             unit_id: candidate.unit_id.clone(),
             target_branch: candidate.target_branch.clone(),
-            base_commit: base_commit.to_string(),
+            base_commit: parent_commit.to_string(),
             squash_commit,
             tree_oid,
             message: format!("squash({}): U7 fake", candidate.unit_id),
@@ -1345,5 +1527,179 @@ mod tests_real_port {
             main_oid,
             "gate failure must leave the target branch unmoved"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // P0-1 (D19/S19, 2026-09-07): the squash is built on the lane-time
+    // head with the unit's diff APPLIED, not a wholesale unit tree
+    // committed on the admission-time base.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// After a sibling FF moved the target past the unit's admission
+    /// base, `prepare_squash_candidate` with `parent_commit` = the
+    /// MOVED head must produce a commit that (a) is a descendant of
+    /// that moved head, (b) carries BOTH the sibling's file and the
+    /// unit's file, and (c) is accepted by `compare_and_swap_ff`.
+    #[test]
+    fn prepare_squash_applies_unit_diff_onto_moved_head() {
+        let (dir, main_oid, unit_commit) = fixture_repo();
+        let root = dir.path();
+        let port = RealGitIntegrationPort::new(root.to_path_buf());
+
+        // Sibling lands on main AFTER the unit's admission base.
+        std::fs::write(root.join("sibling.txt"), "sibling\n").unwrap();
+        git(root, &["add", "sibling.txt"]);
+        git(root, &["commit", "-q", "-m", "sibling"]);
+        let moved_head = git(root, &["rev-parse", "HEAD"]);
+        assert_ne!(moved_head, main_oid, "precondition: sibling advanced main");
+
+        // candidate.base_commit stays the admission-time base; the
+        // parent is the lane-time (moved) head.
+        let squash = port
+            .prepare_squash_candidate(&candidate(&unit_commit, &main_oid), &moved_head)
+            .expect("squash on moved head");
+        let parent = git(root, &["rev-parse", &format!("{}^", squash.squash_commit)]);
+        assert_eq!(parent, moved_head, "squash parent is the lane-time head");
+        let files = git(
+            root,
+            &["ls-tree", "-r", "--name-only", &squash.squash_commit],
+        );
+        assert!(
+            files.lines().any(|f| f == "sibling.txt"),
+            "squash tree must carry the sibling's file, got: {files}"
+        );
+        assert!(
+            files.lines().any(|f| f == "u1.txt"),
+            "squash tree must carry the unit's file, got: {files}"
+        );
+
+        // CAS accepts: the squash is a descendant of the moved head.
+        let outcome = port
+            .compare_and_swap_ff("main", &moved_head, &squash)
+            .expect("cas");
+        assert!(
+            matches!(outcome, CasOutcome::Advanced { .. }),
+            "squash on the lane-time head must CAS cleanly, got {outcome:?}"
+        );
+    }
+
+    /// A unit diff that overlaps a sibling's change must NOT silently
+    /// merge: `git apply` fails and the port reports a typed
+    /// `ApplyConflict` with the target untouched.
+    #[test]
+    fn prepare_squash_conflict_is_typed_and_leaves_target_untouched() {
+        let (dir, main_oid, _unit_commit) = fixture_repo();
+        let root = dir.path();
+        let port = RealGitIntegrationPort::new(root.to_path_buf());
+
+        // Unit branch edits base.txt one way...
+        git(root, &["checkout", "-q", "feat/u1"]);
+        std::fs::write(root.join("base.txt"), "unit-version\n").unwrap();
+        git(root, &["add", "base.txt"]);
+        git(root, &["commit", "-q", "-m", "unit edits base.txt"]);
+        let conflicting_unit = git(root, &["rev-parse", "HEAD"]);
+        // ...sibling edits the SAME file differently on main.
+        git(root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("base.txt"), "sibling-version\n").unwrap();
+        git(root, &["add", "base.txt"]);
+        git(root, &["commit", "-q", "-m", "sibling edits base.txt"]);
+        let moved_head = git(root, &["rev-parse", "HEAD"]);
+
+        let err = port
+            .prepare_squash_candidate(&candidate(&conflicting_unit, &main_oid), &moved_head)
+            .expect_err("overlapping diff must be a typed conflict");
+        assert!(
+            matches!(err, LaneError::ApplyConflict { .. }),
+            "expected ApplyConflict, got {err:?}"
+        );
+        assert_eq!(
+            git(root, &["rev-parse", "refs/heads/main"]),
+            moved_head,
+            "conflict must leave the target branch unmoved"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // P0-3 (2026-09-07): argv shape whitelist — externally supplied
+    // commit-ish / branch names are rejected before git sees them.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// `-`-leading / non-hex commit-ish values must never reach git
+    /// argv as positionals.
+    #[test]
+    fn real_port_rejects_non_hex_commit_ish() {
+        let (dir, main_oid, unit_commit) = fixture_repo();
+        let root = dir.path();
+        let port = RealGitIntegrationPort::new(root.to_path_buf());
+
+        let mut cand = candidate(&unit_commit, &main_oid);
+        cand.unit_commit = "--output=/tmp/pwned".to_string();
+        let err = port
+            .prepare_squash_candidate(&cand, &main_oid)
+            .expect_err("option-like unit_commit must be rejected");
+        assert!(
+            matches!(
+                err,
+                LaneError::InvalidInput {
+                    field: "candidate.unit_commit",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let err = port
+            .prepare_squash_candidate(&candidate(&unit_commit, &main_oid), "-HEAD")
+            .expect_err("option-like parent must be rejected");
+        assert!(
+            matches!(
+                err,
+                LaneError::InvalidInput {
+                    field: "parent_commit",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let squash = port
+            .prepare_squash_candidate(&candidate(&unit_commit, &main_oid), &main_oid)
+            .unwrap();
+        let err = port
+            .compare_and_swap_ff("main", "not-a-sha", &squash)
+            .expect_err("non-hex expected head must be rejected");
+        assert!(
+            matches!(
+                err,
+                LaneError::InvalidInput {
+                    field: "expected_head_before",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// Branch names with option-like or ref-escape shapes are
+    /// rejected before ref interpolation.
+    #[test]
+    fn real_port_rejects_malformed_branch_name() {
+        let (dir, _main_oid, _unit) = fixture_repo();
+        let port = RealGitIntegrationPort::new(dir.path().to_path_buf());
+        for bad in ["-x", "../escape", "feat/../main", ""] {
+            let err = port
+                .current_target_oid(bad)
+                .expect_err("malformed branch must be rejected");
+            assert!(
+                matches!(
+                    err,
+                    LaneError::InvalidInput {
+                        field: "target_branch",
+                        ..
+                    }
+                ),
+                "branch {bad:?}: got {err:?}"
+            );
+        }
     }
 }

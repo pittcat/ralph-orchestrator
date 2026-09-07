@@ -36,7 +36,8 @@
 //!        │
 //!        ▼
 //! 4. port.current_target_oid
-//! 5. port.prepare_squash_candidate
+//! 5. port.prepare_squash_candidate(parent = lane-time head,
+//!                        unit diff = base_commit → unit_commit)
 //! 6. port.run_targeted_gate
 //!        │   if Fail → drop guard → return LaneGateFailed
 //!        ▼
@@ -204,14 +205,19 @@ where
         let expected_head_before = self.lane.port.current_target_oid(&req.target_branch)?;
 
         // Step 5: build the squash candidate on top of the
-        // base (NOT on top of `expected_head_before` — the
-        // squash is purely a tree-on-base commit; the lane
-        // expects it to be a fast-forward descendant of
-        // `expected_head_before`).
+        // LANE-TIME head (`expected_head_before`), not the
+        // admission-time verified base (D19/S19). The port applies
+        // the unit's diff (base_commit → unit_commit) onto the
+        // lane-time head, so the squash is a descendant of it BY
+        // CONSTRUCTION — siblings of the same target integrate
+        // sequentially instead of CAS-refusing forever once the
+        // first Unit moves the head. The verified base stays the
+        // unit-diff anchor and is what `UnitWorktree::acquire`
+        // still pins the worktree to (untrusted-base → Blocked).
         let squash = self
             .lane
             .port
-            .prepare_squash_candidate(&candidate, &req.base_commit)?;
+            .prepare_squash_candidate(&candidate, &expected_head_before)?;
 
         // Step 6: targeted gate against the squash tree.
         let gate = self.lane.port.run_targeted_gate(&squash)?;
@@ -289,7 +295,7 @@ pub fn real_orchestrator(
     repo_root: PathBuf,
     gate_commands: Vec<GateCommandSpec>,
 ) -> Result<Arc<IntegrationOrchestrator<RealRepo, RealGitIntegrationPort>>, DagStoreOpenError> {
-    let core = Arc::new(LaneCore::new());
+    let core = shared_lane_core(&repo_root);
     let port =
         Arc::new(RealGitIntegrationPort::new(repo_root.clone()).with_gate_commands(gate_commands));
     let lane = Arc::new(IntegrationLane::<RealRepo, _>::new(core, port));
@@ -334,6 +340,35 @@ pub fn real_orchestrator(
 pub struct DagStoreOpenError {
     pub path: PathBuf,
     pub source_msg: String,
+}
+
+/// Process-wide lane registry (P1, 2026-09-07): the `LaneCore` is
+/// shared per repo_root across every `real_orchestrator` instance
+/// in this process, so two orchestrators targeting the same branch
+/// of the same repo serialise on the lease instead of racing.
+/// `LaneCore` keys its holders per target branch internally, which
+/// makes the effective exclusion domain (repo_root, target_branch).
+///
+/// Cross-PROCESS mutual exclusion is intentionally out of scope
+/// here: the CAS on `expected_head_before` is the fail-closed
+/// backstop for a second OS process advancing the same target
+/// (tracked as PMI-018). This registry closes only the in-process
+/// hole where each `real_orchestrator()` call used to mint a fresh
+/// `LaneCore`.
+fn shared_lane_core(repo_root: &std::path::Path) -> Arc<LaneCore> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Arc<LaneCore>>>> = OnceLock::new();
+    // Canonicalise so `repo/` and `./repo` resolve to one lane;
+    // fall back to the raw path when the dir does not exist yet.
+    let key = std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    let mut map = REGISTRY
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    map.entry(key)
+        .or_insert_with(|| Arc::new(LaneCore::new()))
+        .clone()
 }
 
 /// Resolve the durable DAG store path for `repo_root`:
@@ -1342,5 +1377,332 @@ mod tests {
         );
         let rows = orch.store.list_for_unit("U1").expect("store readable");
         assert!(rows.is_empty(), "fail-closed refusal must write no rows");
+    }
+
+    // ===================================================================
+    // S19 (P0-1, 2026-09-07) closed loop: two sibling Units admitted at
+    // the SAME base integrate SEQUENTIALLY into the same target. Before
+    // the fix the second Unit's squash was parented on the stale
+    // admission base and the lane's CAS ancestor check refused it
+    // forever. After the fix the squash is parented on the lane-time
+    // head with the unit diff applied onto it.
+    // ===================================================================
+
+    /// Two same-base siblings on one target: U1 lands (head moves),
+    /// U2 still squashes onto the moved head, passes the gate, and
+    /// CAS-advances. The object id the CAS advances MUST be the object
+    /// id the targeted gate ran against.
+    #[test]
+    fn s19_two_same_base_siblings_integrate_sequentially() {
+        use std::process::Command as StdCommand;
+
+        fn git(root: &std::path::Path, args: &[&str]) -> String {
+            let out = StdCommand::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("git {args:?}: spawn {e}"));
+            assert!(
+                out.status.success(),
+                "git {args:?} exited {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        git(root, &["init", "-q", "--initial-branch=main"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test"]);
+        git(root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        git(root, &["add", "base.txt"]);
+        git(root, &["commit", "-q", "-m", "base"]);
+        let base_oid = git(root, &["rev-parse", "HEAD"]);
+
+        // Two sibling unit branches from the SAME base, disjoint files.
+        git(root, &["checkout", "-q", "-b", "feat/u1"]);
+        std::fs::write(root.join("u1.txt"), "unit-1\n").unwrap();
+        git(root, &["add", "u1.txt"]);
+        git(root, &["commit", "-q", "-m", "unit-1"]);
+        let u1_commit = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["checkout", "-q", "main"]);
+        git(root, &["checkout", "-q", "-b", "feat/u2"]);
+        std::fs::write(root.join("u2.txt"), "unit-2\n").unwrap();
+        git(root, &["add", "u2.txt"]);
+        git(root, &["commit", "-q", "-m", "unit-2"]);
+        let u2_commit = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["checkout", "-q", "main"]);
+
+        let orch = real_orchestrator(
+            root.to_path_buf(),
+            vec![GateCommandSpec {
+                program: "sh".to_string(),
+                args: vec!["-c".to_string(), "test -f base.txt".to_string()],
+            }],
+        )
+        .expect("S19 opens the durable DAG store");
+
+        let request =
+            |unit_id: &str, order: u32, unit_commit: &str, file: &str| IntegrationRequest {
+                unit_id: unit_id.to_string(),
+                integration_order: order,
+                target_branch: "main".to_string(),
+                base_commit: base_oid.clone(),
+                unit_commit: unit_commit.to_string(),
+                changed_paths: vec![DiffPathEntry {
+                    path: PathBuf::from(file),
+                    status: DiffStatus::Added,
+                    is_symlink: false,
+                    is_submodule: false,
+                }],
+                allowlist: vec![PathBuf::from(file)],
+                declared_paths: vec![PathBuf::from(file)],
+                created_at_ms: 1_700_000_000_000,
+            };
+
+        // U1 integrates; main advances to the first squash.
+        let head_1 = match orch
+            .integrate(request("U1", 1, &u1_commit, "u1.txt"))
+            .expect("U1 integrate")
+        {
+            IntegrationOutcome::Integrated { new_head, .. } => new_head,
+            other => panic!("S19: U1 expected Integrated, got {other:?}"),
+        };
+        assert_eq!(git(root, &["rev-parse", "refs/heads/main"]), head_1);
+        assert_ne!(head_1, base_oid, "precondition: U1 moved the head");
+
+        // U2 admitted at the SAME (now stale) base must still
+        // integrate: squash parented on the lane-time head.
+        let (record_2, head_2) = match orch
+            .integrate(request("U2", 2, &u2_commit, "u2.txt"))
+            .expect("U2 integrate")
+        {
+            IntegrationOutcome::Integrated {
+                record, new_head, ..
+            } => (record, new_head),
+            other => panic!(
+                "S19 regression: second same-base sibling was rejected ({other:?}) — \
+                 the squash must be built on the lane-time head, not the \
+                 admission-time base (P0-1 / D19 / S19)"
+            ),
+        };
+        assert_eq!(git(root, &["rev-parse", "refs/heads/main"]), head_2);
+        // The object the CAS advanced is exactly the object the
+        // targeted gate ran against (the squash commit recorded by
+        // the orchestrator).
+        assert_eq!(
+            record_2.integrated_commit, head_2,
+            "CAS-advanced object id must equal the gate-tested candidate object id"
+        );
+        // The squash is a descendant of the moved head BY
+        // CONSTRUCTION: its parent is U1's squash.
+        assert_eq!(
+            git(root, &["rev-parse", &format!("{head_2}^")]),
+            head_1,
+            "U2 squash parent must be the lane-time head (U1's squash)"
+        );
+        // The final tree carries base + BOTH siblings' files — the
+        // unit diff was APPLIED onto the head, not wholesale-replaced
+        // (which would have reverted u1.txt).
+        let files = git(root, &["ls-tree", "-r", "--name-only", "HEAD"]);
+        for f in ["base.txt", "u1.txt", "u2.txt"] {
+            assert!(
+                files.lines().any(|line| line == f),
+                "final tree must carry {f}, got: {files}"
+            );
+        }
+        // Both records persisted; U2's record keeps the ORIGINAL
+        // admission base as its base_commit provenance.
+        let rows = orch.store.list_for_unit("U2").expect("store readable");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].base_commit, base_oid);
+        assert_eq!(rows[0].expected_head_before, head_1);
+    }
+
+    /// S19 conflict path: when a sibling changed the SAME lines, the
+    /// unit diff no longer applies onto the lane-time head. The
+    /// orchestrator surfaces the typed `ApplyConflict`, the target is
+    /// untouched, the lane is released, and no record is written.
+    #[test]
+    fn s19_overlapping_sibling_diff_is_typed_conflict_not_clobber() {
+        use std::process::Command as StdCommand;
+
+        fn git(root: &std::path::Path, args: &[&str]) -> String {
+            let out = StdCommand::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("git {args:?}: spawn {e}"));
+            assert!(
+                out.status.success(),
+                "git {args:?} exited {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        git(root, &["init", "-q", "--initial-branch=main"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test"]);
+        git(root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        git(root, &["add", "base.txt"]);
+        git(root, &["commit", "-q", "-m", "base"]);
+        let base_oid = git(root, &["rev-parse", "HEAD"]);
+
+        // Both siblings edit the SAME file differently.
+        git(root, &["checkout", "-q", "-b", "feat/u1"]);
+        std::fs::write(root.join("base.txt"), "unit-1\n").unwrap();
+        git(root, &["add", "base.txt"]);
+        git(root, &["commit", "-q", "-m", "unit-1"]);
+        let u1_commit = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["checkout", "-q", "main"]);
+        git(root, &["checkout", "-q", "-b", "feat/u2"]);
+        std::fs::write(root.join("base.txt"), "unit-2\n").unwrap();
+        git(root, &["add", "base.txt"]);
+        git(root, &["commit", "-q", "-m", "unit-2"]);
+        let u2_commit = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["checkout", "-q", "main"]);
+
+        let orch = real_orchestrator(
+            root.to_path_buf(),
+            vec![GateCommandSpec {
+                program: "sh".to_string(),
+                args: vec!["-c".to_string(), "exit 0".to_string()],
+            }],
+        )
+        .expect("opens the durable DAG store");
+
+        let request = |unit_id: &str, order: u32, unit_commit: &str| IntegrationRequest {
+            unit_id: unit_id.to_string(),
+            integration_order: order,
+            target_branch: "main".to_string(),
+            base_commit: base_oid.clone(),
+            unit_commit: unit_commit.to_string(),
+            changed_paths: vec![DiffPathEntry {
+                path: PathBuf::from("base.txt"),
+                status: DiffStatus::Modified,
+                is_symlink: false,
+                is_submodule: false,
+            }],
+            allowlist: vec![PathBuf::from("base.txt")],
+            declared_paths: vec![PathBuf::from("base.txt")],
+            created_at_ms: 1_700_000_000_000,
+        };
+
+        let head_1 = match orch
+            .integrate(request("U1", 1, &u1_commit))
+            .expect("U1 integrate")
+        {
+            IntegrationOutcome::Integrated { new_head, .. } => new_head,
+            other => panic!("U1 expected Integrated, got {other:?}"),
+        };
+
+        // U2's diff (base → "unit-2") no longer applies: main now
+        // carries "unit-1". Typed conflict, never a silent 3-way.
+        let err = orch
+            .integrate(request("U2", 2, &u2_commit))
+            .expect_err("overlapping sibling diff must be rejected");
+        assert!(
+            matches!(err, IntegrationError::Lane(LaneError::ApplyConflict { .. })),
+            "expected typed ApplyConflict, got {err:?}"
+        );
+        assert_eq!(
+            git(root, &["rev-parse", "refs/heads/main"]),
+            head_1,
+            "conflict must leave the target branch unmoved"
+        );
+        assert!(
+            orch.store
+                .list_for_unit("U2")
+                .expect("store readable")
+                .is_empty(),
+            "conflict must write no integration record"
+        );
+        assert!(
+            orch.lane
+                .core
+                .current_holder("main")
+                .expect("lane readable")
+                .is_none(),
+            "conflict must release the lane lease"
+        );
+    }
+
+    // ===================================================================
+    // P1 (2026-09-07): the lane lease is process-global per repo — two
+    // `real_orchestrator` instances over the same repo_root share one
+    // LaneCore, so the same target serialises across instances while
+    // different targets stay parallel. Cross-PROCESS exclusion remains
+    // the CAS backstop's job (PMI-018).
+    // ===================================================================
+
+    #[test]
+    fn real_orchestrators_share_lane_core_per_repo() {
+        let tmp_a = tempfile::tempdir().expect("tempdir a");
+        let tmp_b = tempfile::tempdir().expect("tempdir b");
+        let orch_a1 = real_orchestrator(tmp_a.path().to_path_buf(), Vec::new()).expect("a1");
+        let orch_a2 = real_orchestrator(tmp_a.path().to_path_buf(), Vec::new()).expect("a2");
+        let orch_b = real_orchestrator(tmp_b.path().to_path_buf(), Vec::new()).expect("b");
+        assert!(
+            Arc::ptr_eq(&orch_a1.lane.core, &orch_a2.lane.core),
+            "same repo_root must share one LaneCore"
+        );
+        assert!(
+            !Arc::ptr_eq(&orch_a1.lane.core, &orch_b.lane.core),
+            "different repo_root must get an independent LaneCore"
+        );
+    }
+
+    #[test]
+    fn real_orchestrator_lease_serialises_same_target_across_instances() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let orch_a = real_orchestrator(tmp.path().to_path_buf(), Vec::new()).expect("a");
+        let orch_b = real_orchestrator(tmp.path().to_path_buf(), Vec::new()).expect("b");
+
+        // Instance A holds the lease for `main`...
+        let _guard = orch_a
+            .lane
+            .core
+            .try_acquire("main", "U-holder")
+            .expect("A takes main");
+
+        // ...instance B integrating the SAME target sees TargetBusy
+        // (Step 2's changed-path guard passes; the lease is what
+        // refuses). Fails before any git call, so synthetic ids are
+        // fine here.
+        let err = orch_b
+            .integrate(IntegrationRequest {
+                unit_id: "U1".to_string(),
+                integration_order: 1,
+                target_branch: "main".to_string(),
+                base_commit: "BASE".to_string(),
+                unit_commit: "UNIT".to_string(),
+                changed_paths: vec![entry("src/a.rs")],
+                allowlist: vec![PathBuf::from("src")],
+                declared_paths: vec![PathBuf::from("src")],
+                created_at_ms: 1_700_000_000_000,
+            })
+            .expect_err("same target across instances must serialise");
+        assert!(
+            matches!(err, IntegrationError::Lane(LaneError::TargetBusy)),
+            "expected TargetBusy, got {err:?}"
+        );
+
+        // A DIFFERENT target stays parallel while `main` is held.
+        let other = orch_b
+            .lane
+            .core
+            .try_acquire("release/other", "U2")
+            .expect("different target stays parallel");
+        other.release();
     }
 }
