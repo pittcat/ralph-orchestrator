@@ -747,7 +747,9 @@ fn worktree_file_name_prefix(
         && let Some(stem) = plan
             .file_stem()
             .and_then(|s| s.to_str())
-            .filter(|s| !s.trim().is_empty())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter(|s| !s.eq_ignore_ascii_case("prompt"))
     {
         return Some(stem.to_string());
     }
@@ -774,13 +776,15 @@ fn resolve_exact_worktree_name(
     plan_file: Option<&Path>,
     derived_plan_name: Option<&str>,
 ) -> Option<String> {
-    worktree_name.map(str::to_owned).or_else(|| {
-        plan_file.and_then(|_| {
-            derived_plan_name
-                .map(str::to_owned)
-                .filter(|name| !name.is_empty())
-        })
-    })
+    if let Some(name) =
+        crate::commands::run_recovery::exact_worktree_name_from(worktree_name, plan_file)
+    {
+        return Some(name);
+    }
+    derived_plan_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case("prompt"))
+        .map(str::to_owned)
 }
 
 /// Resolve a `--plan` argument to an existing plan file path.

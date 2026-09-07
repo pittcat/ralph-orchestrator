@@ -408,7 +408,8 @@ pub(crate) fn render_refusal(refusal: &AssessmentRefusal) -> String {
         AssessmentRefusal::LoopLockedByOther { holder_pid } => format!(
             ".ralph/loop.lock indicates another live loop (pid {holder_pid}); \
              the lock assessment is independent of the gate's own lock because \
-             the prior holder crashed before releasing the flock"
+             the prior holder crashed before releasing the flock. \
+             Delete the worktree's .ralph/loop.lock and retry if that pid is dead."
         ),
         AssessmentRefusal::GateNotClearedByParent { worktree } => format!(
             "parent-cleared gate at {worktree_display} is missing/stale/tampered; \
@@ -641,14 +642,7 @@ mod tests {
         );
 
         // PMI-008① pin — the message must give the operator an executable
-        // next step. Currently it does NOT: it only names the lock file as
-        // the *subject* of the sentence ("`.ralph/loop.lock` indicates
-        // another live loop"), never as the *object* of an action. We
-        // therefore check only for imperative-verb keywords — a bare
-        // `loop.lock` mention (already present, as the subject) does not
-        // count. When the fix lands (message gains guidance or the
-        // assessor auto-degrades dead PIDs like the primary path's Stale
-        // cleanup), this assertion flips to green.
+        // next step (imperative-verb keywords: delete/retry/wait/stop/clean).
         let actionable = ["remove", "delete", "retry", "wait", "stop", "clean"]
             .iter()
             .any(|kw| msg.to_lowercase().contains(kw));
