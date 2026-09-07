@@ -88,8 +88,10 @@ pub struct IntegrationRequest {
     pub base_commit: String,
     pub unit_commit: String,
     /// Diff entries from the integrator's `git diff-tree`
-    /// (path + symlink/submodule flags). Re-checked by the
-    /// orchestrator against the lane allowlist at lock time.
+    /// (path + change status + symlink/submodule flags).
+    /// Re-checked by the orchestrator against the lane
+    /// allowlist at lock time; rename entries authorise BOTH
+    /// source and target paths.
     pub changed_paths: Vec<DiffPathEntry>,
     /// Lane allowlist (e.g. `["crates/ralph-core",
     /// "crates/ralph-cli", ...]`). Re-checked at lock time.
@@ -364,7 +366,9 @@ pub use ralph_core::supervisor::integration_lane::RealRepo;
 mod tests {
     use super::*;
 
-    use ralph_core::supervisor::changed_path_guard::{DiffPathEntry, FORBIDDEN_TOP_LEVEL_PREFIXES};
+    use ralph_core::supervisor::changed_path_guard::{
+        DiffPathEntry, DiffStatus, FORBIDDEN_TOP_LEVEL_PREFIXES,
+    };
     use ralph_core::supervisor::dag_integration::InMemoryIntegrationStore;
     use ralph_core::supervisor::integration_lane::{
         CasOutcome, FakeGitIntegrationPort, FakeRepo, GateOutcome, IntegrationLane,
@@ -373,6 +377,7 @@ mod tests {
     fn entry(path: &str) -> DiffPathEntry {
         DiffPathEntry {
             path: PathBuf::from(path),
+            status: DiffStatus::Modified,
             is_symlink: false,
             is_submodule: false,
         }
@@ -489,6 +494,7 @@ mod tests {
         let mut req = base_request();
         req.changed_paths = vec![DiffPathEntry {
             path: PathBuf::from("src/link"),
+            status: DiffStatus::Modified,
             is_symlink: true,
             is_submodule: false,
         }];
@@ -740,6 +746,7 @@ mod tests {
         // at the expected path.
         assert!(FORBIDDEN_TOP_LEVEL_PREFIXES.contains(&".git"));
         assert!(FORBIDDEN_TOP_LEVEL_PREFIXES.contains(&"target"));
+        assert!(FORBIDDEN_TOP_LEVEL_PREFIXES.contains(&".ralph"));
     }
 
     // ===================================================================
@@ -1103,6 +1110,7 @@ mod tests {
                 unit_commit,
                 changed_paths: vec![DiffPathEntry {
                     path: PathBuf::from("base.txt"),
+                    status: DiffStatus::Modified,
                     is_symlink: false,
                     is_submodule: false,
                 }],
@@ -1217,6 +1225,7 @@ mod tests {
                 unit_commit,
                 changed_paths: vec![DiffPathEntry {
                     path: PathBuf::from("u1.txt"),
+                    status: DiffStatus::Modified,
                     is_symlink: false,
                     is_submodule: false,
                 }],
@@ -1302,6 +1311,7 @@ mod tests {
                 unit_commit,
                 changed_paths: vec![DiffPathEntry {
                     path: PathBuf::from("u1.txt"),
+                    status: DiffStatus::Modified,
                     is_symlink: false,
                     is_submodule: false,
                 }],

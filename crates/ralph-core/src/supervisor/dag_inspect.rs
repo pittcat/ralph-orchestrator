@@ -98,7 +98,7 @@ mod tests {
             plan_key: plan_key.to_string(),
             tick_epoch: tick,
             observed_at_ms,
-            ready_count: admitted + dep + res + cap,
+            candidate_count: admitted + dep + res + cap,
             admitted_count: admitted,
             blocked_dependency_count: dep,
             blocked_resource_count: res,

@@ -1272,11 +1272,9 @@ impl EventLoop {
             pin_completion_publisher,
             "P0-2: injected completion rejection into state.prompt_context (replaces task.resume)"
         );
-        if pin_completion_publisher {
-            if let Some(hat) = publisher {
-                state.consecutive_no_progress_turns = 0;
-                state.pending_recovery_hat = Some(hat);
-            }
+        if pin_completion_publisher && let Some(hat) = publisher {
+            state.consecutive_no_progress_turns = 0;
+            state.pending_recovery_hat = Some(hat);
         }
         // 2026-06-26 plan U6: correction queued; budget not
         // exhausted yet — caller should keep the loop alive.

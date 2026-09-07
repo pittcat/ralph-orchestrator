@@ -2,11 +2,22 @@
 //! registration receipt.
 //!
 //! The runtime writes a `DagPlanReceipt` BEFORE
-//! `ensure_task_projection` / `ack` so a crash in the projection
-//! window can be reconstructed on resume without losing the
-//! plan identity. The receipt is bounded (plan key / path /
-//! digest / target identity only) — it NEVER carries the raw
-//! canonical artifact bytes (E9 / E16 receipt-content rule).
+//! `ensure_task_projection` / `ack` so the projection window has
+//! a recorded plan identity to key off. The receipt is bounded
+//! (plan key / path / digest / target identity only) — it NEVER
+//! carries the raw canonical artifact bytes (E9 / E16
+//! receipt-content rule).
+//!
+//! **Durability caveat (do not over-read this module):** the
+//! current implementation is a process-local
+//! `Mutex<HashMap<...>>` registry — receipts live only for the
+//! lifetime of the process and are LOST on crash; there is no
+//! receipt table in the supervisor migration ledger (v13.sql
+//! covers `dag_plans` / `dag_integrations` only). The
+//! "crash-window reconstruction" story therefore holds only
+//! within a single process run today; making the receipt durable
+//! is a promote-blocking obligation tracked in
+//! `presets/en/parallel-forge-preset-author-notes.md` (义务清单).
 //!
 //! Activation lives on `DagSchedulerStore`; this registry is the
 //! pre-write log. Idempotency:
@@ -19,8 +30,11 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// Bounded registration receipt. Carries the minimum identity a
-/// `forge.plan.ready` accepted boundary must durably record
-/// before projecting tasks / acking the runtime.
+/// `forge.plan.ready` accepted boundary must record before
+/// projecting tasks / acking the runtime. "Record" here means
+/// the process-local registry below — see the module docstring
+/// for the current durability caveat (crash-loss; durable
+/// receipt storage is a pending promote obligation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DagPlanReceipt {
     pub plan_key: String,
@@ -33,8 +47,10 @@ pub struct DagPlanReceipt {
 /// In-memory receipt registry. Records `(plan_key,
 /// artifact_digest) → DagPlanReceipt`. Backs the bounded
 /// pre-write log; the runtime writes a receipt here at the
-/// accepted boundary BEFORE `ensure_task_projection` so a crash in
-/// the projection window can be reconstructed on resume.
+/// accepted boundary BEFORE `ensure_task_projection`.
+/// Process-local only: entries do NOT survive a crash or
+/// restart (see the module docstring for the durability caveat
+/// and the pending durable-receipt obligation).
 #[derive(Debug, Default)]
 pub struct DagPlanReceiptRegistry {
     inner: Mutex<HashMap<(String, String), DagPlanReceipt>>,

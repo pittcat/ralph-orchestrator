@@ -274,6 +274,118 @@ mod tests {
         assert!(matches!(out, DriverOutcome::Ignored { .. }));
     }
 
+    /// P1-4 (verdict payload shape): the REAL ingress output
+    /// feeds `ReviewVerdict::from_payload` end-to-end. The
+    /// ingress unwraps the worker payload's `verdict` string so
+    /// the accepted event is FLAT (`payload.verdict ==
+    /// "approve"`); the driver must route it to Verify instead
+    /// of returning `Ignored` (which would silently drop the
+    /// review event and wedge the pipeline in Review forever).
+    #[test]
+    fn ingress_review_payload_routes_through_driver() {
+        use crate::loop_runner::runtime_job::result_ingress::submit_accepted_result;
+        use crate::loop_runner::runtime_job::{JobDescriptor, ProcessResult};
+
+        let (_pools, mut pipeline) = driver_fixture();
+        pipeline.ensure_unit("U-ing", "j-ing", "executor", Stage::Execute);
+        let _ = pipeline.advance("U-ing", Stage::Execute);
+        pipeline.release("U-ing");
+        let _ = pipeline.advance("U-ing", Stage::Review);
+
+        // Real ingress output: the worker payload nests the
+        // verdict; the receipt must carry it unwrapped.
+        let descriptor = JobDescriptor::new("U-ing", "j-ing", "executor", Stage::Review);
+        let result =
+            ProcessResult::new(json!({"verdict": "approve", "notes": "ok"}), Some(0), 42, 7);
+        let receipt = submit_accepted_result(&descriptor, &result).expect("ingress accepts");
+
+        let mut driver = DagSchedulerDriver::new(&mut pipeline);
+        let out = driver.observe_accepted(topics::REVIEW_VERDICT, "U-ing", receipt.payload());
+        match out {
+            DriverOutcome::Routed { next_stage, .. } => {
+                assert_eq!(next_stage, Stage::Verify);
+            }
+            other => panic!(
+                "expected Routed(Verify) — an ingress/driver shape \
+                 mismatch silently drops the review event, got {other:?}"
+            ),
+        }
+    }
+
+    /// S4 (refill): once an executor reaches a durable terminal
+    /// and its slot is released, a Ready unit queued behind the
+    /// global cap is admitted in the SAME scheduling tick — no
+    /// wave settlement in between.
+    #[test]
+    fn s4_ready_unit_refills_slot_after_terminal_same_tick() {
+        // global=1 / executor=1: exactly one Unit may be in
+        // flight; the second one queues.
+        let pools = DagPools::new(1, 1, 2, 2);
+        let mut pipeline = JobPipeline::new(pools);
+        pipeline.ensure_unit("U-done", "j-done", "executor", Stage::Execute);
+        pipeline.ensure_unit("U-ready", "j-ready", "executor", Stage::Execute);
+
+        let first = pipeline.advance("U-done", Stage::Execute);
+        assert!(matches!(first, AdvanceOutcome::Admitted { .. }));
+        let queued = pipeline.advance("U-ready", Stage::Execute);
+        assert!(
+            matches!(
+                queued,
+                AdvanceOutcome::Blocked(RuntimeJobError::GlobalCapExceeded { .. })
+            ),
+            "U-ready must queue behind the global cap, got {queued:?}"
+        );
+
+        // Same tick: U-done runs to its durable terminal through
+        // the driver (exec-complete → Review, approve → Verify).
+        {
+            let mut driver = DagSchedulerDriver::new(&mut pipeline);
+            let out = driver.observe_accepted(topics::EXEC_UNIT_COMPLETED, "U-done", &json!({}));
+            assert!(
+                matches!(
+                    out,
+                    DriverOutcome::Routed {
+                        next_stage: Stage::Review,
+                        ..
+                    }
+                ),
+                "exec-complete must route U-done to Review, got {out:?}"
+            );
+            let out = driver.observe_accepted(
+                topics::REVIEW_VERDICT,
+                "U-done",
+                &json!({"verdict": "approve"}),
+            );
+            assert!(
+                matches!(
+                    out,
+                    DriverOutcome::Routed {
+                        next_stage: Stage::Verify,
+                        ..
+                    }
+                ),
+                "approve must route U-done to Verify, got {out:?}"
+            );
+            // No premature refill while U-done still holds its
+            // (migrated) slot.
+        }
+        let still_queued = pipeline.advance("U-ready", Stage::Execute);
+        assert!(
+            matches!(still_queued, AdvanceOutcome::Blocked(_)),
+            "U-ready must NOT refill while U-done is still in flight, got {still_queued:?}"
+        );
+
+        // Durable terminal reached: the terminal collect releases
+        // the slot. The queued Ready unit refills it immediately
+        // — same tick, no wave settlement.
+        pipeline.release("U-done");
+        let refill = pipeline.advance("U-ready", Stage::Execute);
+        assert!(
+            matches!(refill, AdvanceOutcome::Admitted { .. }),
+            "U-ready must refill the freed slot in the same tick, got {refill:?}"
+        );
+    }
+
     // =====================================================================
     // TG-S06 (P2 / interface-topic, PMI-002 §4 + PMI-003): driver 平行
     // topic 宇宙与真实拓扑不相交 pin。真实体系的 topic 名是

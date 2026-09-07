@@ -100,11 +100,21 @@ fn build_payload(descriptor: &JobDescriptor, result: &ProcessResult) -> serde_js
             obj.insert("exit_code".to_string(), serde_json::json!(exit));
         }
         Stage::Review => {
-            // Review verdicts live in the worker payload; we
-            // forward the whole payload under `verdict` so the
-            // EventLoop sees the same shape an LLM-emitted
-            // review would carry.
-            obj.insert("verdict".to_string(), result.payload.clone());
+            // Review verdicts live in the worker payload. Unwrap
+            // the `verdict` string field so the accepted event
+            // carries the FLAT shape (`payload.verdict ==
+            // "approve"`) that `dag_scheduler::driver::
+            // ReviewVerdict::from_payload` reads. A worker payload
+            // without a string `verdict` field is forwarded
+            // verbatim so the gate still sees the field presence
+            // it requires.
+            let verdict = result
+                .payload
+                .get("verdict")
+                .and_then(serde_json::Value::as_str)
+                .map(|s| serde_json::Value::String(s.to_string()))
+                .unwrap_or_else(|| result.payload.clone());
+            obj.insert("verdict".to_string(), verdict);
         }
         Stage::Verify => {
             obj.insert("result".to_string(), result.payload.clone());
@@ -243,20 +253,19 @@ mod tests {
     }
 
     /// Review-stage payload: gate requires `verdict` field, which
-    /// is forwarded from the worker payload.
+    /// is unwrapped from the worker payload's `verdict` string so
+    /// the accepted event carries the FLAT shape the DAG driver
+    /// (`ReviewVerdict::from_payload`) reads.
     #[test]
     fn review_accepts_with_verdict_field() {
         let d = descriptor(Stage::Review);
-        let r = result_with(json!({"verdict": "approve"}));
+        let r = result_with(json!({"verdict": "approve", "notes": "lgtm"}));
         let receipt = submit_accepted_result(&d, &r).expect("accepted");
         assert_eq!(receipt.stage(), Stage::Review);
         assert_eq!(
-            receipt
-                .payload()
-                .get("verdict")
-                .and_then(|v| v.get("verdict"))
-                .and_then(|v| v.as_str()),
-            Some("approve")
+            receipt.payload().get("verdict").and_then(|v| v.as_str()),
+            Some("approve"),
+            "ingress must unwrap the worker payload's verdict string"
         );
     }
 
@@ -278,33 +287,14 @@ mod tests {
     }
 
     /// Missing required field surfaces as typed
-    /// `PolicyRejected { missing }`. We trigger this by handing
-    /// the gate a descriptor whose `job_id` is empty — that
-    /// path actually short-circuits at the empty-job-id CAS
-    /// check; to exercise the gate itself, we build a payload
-    /// shape that fails the real gate (a non-object value
-    /// under `verdict` would fail at object-shape check; we
-    /// instead hand in a `ProcessResult` whose payload
-    /// overrides `verdict` with a non-object value).
+    /// `PolicyRejected { missing }`. The trigger: a Review
+    /// `ProcessResult` whose payload is `null` — the ingress
+    /// cannot unwrap a verdict string from it, forwards `null`
+    /// verbatim under `verdict`, and the real gate flags the
+    /// field as missing.
     #[test]
     fn policy_rejected_returns_typed_missing_fields() {
         let d = descriptor(Stage::Review);
-        // Force `verdict` to be null at the top level so the
-        // gate flags it missing. We do this by passing a
-        // payload that the ingress puts under `verdict` —
-        // since the gate checks the OUTER object (built by
-        // `build_payload`), we override the OUTER verdict by
-        // passing a null-as-result then patching the
-        // payload. The simplest reliable trigger: a payload
-        // that becomes non-object, e.g. a string. Strings
-        // cannot be coerced into objects by the build path,
-        // so we patch after build.
-        let mut payload = build_payload(&d, &result_with(json!("not-an-object")));
-        payload
-            .as_object_mut()
-            .unwrap()
-            .insert("verdict".to_string(), serde_json::Value::Null);
-        let _ = payload; // (we exercise the gate via a different route below)
         let r = result_with(json!(null));
         // The ingress builds `verdict: null` for review
         // (because result.payload = null is copied verbatim).

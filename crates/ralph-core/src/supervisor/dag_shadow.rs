@@ -17,7 +17,10 @@ pub struct ShadowObservation {
     pub plan_key: String,
     pub tick_epoch: u64,
     pub observed_at_ms: u64,
-    pub ready_count: u32,
+    /// Total candidate units evaluated this tick (admitted +
+    /// every blocked class). Named `candidate_count`, not
+    /// "ready": BlockedDependencies units are candidates too.
+    pub candidate_count: u32,
     pub admitted_count: u32,
     pub blocked_dependency_count: u32,
     pub blocked_resource_count: u32,
@@ -27,7 +30,15 @@ pub struct ShadowObservation {
     pub decisions: Vec<(String, String)>,
 }
 
+/// Maximum observations retained in the sink. The inspect
+/// surfaces only consume the LATEST observation per plan plus
+/// aggregate counters, so a global latest-N window is
+/// sufficient; once full, the oldest observations are evicted
+/// (FIFO) to keep memory bounded on long-running loops.
+pub const SHADOW_SINK_MAX_OBSERVATIONS: usize = 256;
+
 /// Thread-safe observation store (Arc<Mutex<Vec>>). Cheap clone.
+/// Bounded: see [`SHADOW_SINK_MAX_OBSERVATIONS`].
 #[derive(Debug, Clone, Default)]
 pub struct ShadowSink {
     observations: Arc<Mutex<Vec<ShadowObservation>>>,
@@ -40,6 +51,10 @@ impl ShadowSink {
 
     pub fn record(&self, observation: ShadowObservation) -> ShadowObservation {
         let mut g = self.observations.lock().expect("ShadowSink mutex poisoned");
+        if g.len() >= SHADOW_SINK_MAX_OBSERVATIONS {
+            let overflow = g.len() - SHADOW_SINK_MAX_OBSERVATIONS + 1;
+            g.drain(..overflow);
+        }
         g.push(observation.clone());
         observation
     }
@@ -90,7 +105,7 @@ pub fn compute_shadow_observation(
         plan_key: String::new(),
         tick_epoch: next_tick_epoch(sink),
         observed_at_ms: system_time_ms(),
-        ready_count: decisions.len() as u32,
+        candidate_count: decisions.len() as u32,
         admitted_count,
         blocked_dependency_count,
         blocked_resource_count,
@@ -207,7 +222,7 @@ mod tests {
         let latest = sink.record(compute_shadow_observation(&snap, &cap(10, 10, &[]), &sink));
         assert_eq!(latest.tick_epoch, 1);
         assert_eq!(latest.admitted_count, 2);
-        assert_eq!(latest.ready_count, 2);
+        assert_eq!(latest.candidate_count, 2);
         assert_eq!(latest.decisions.len(), 2);
     }
 
@@ -219,7 +234,7 @@ mod tests {
             plan_key: key.to_string(),
             tick_epoch: 0,
             observed_at_ms: 0,
-            ready_count: 1,
+            candidate_count: 1,
             admitted_count: adm,
             blocked_dependency_count: dep,
             blocked_resource_count: 0,
@@ -286,7 +301,7 @@ mod tests {
             integration_target_head: Some("h"),
         };
         let obs = compute_shadow_observation(&snap, &cap(2, 10, &[("db", 1)]), &sink);
-        assert_eq!(obs.ready_count, 5);
+        assert_eq!(obs.candidate_count, 5);
         assert_eq!(obs.admitted_count, 2);
         assert_eq!(obs.blocked_dependency_count, 1);
         assert_eq!(obs.blocked_resource_count, 1);
@@ -309,5 +324,40 @@ mod tests {
         assert_eq!(dep, obs.blocked_dependency_count);
         assert_eq!(res, obs.blocked_resource_count);
         assert_eq!(cap_n, obs.blocked_cap_count);
+    }
+
+    /// Bounded retention: once the sink reaches
+    /// [`SHADOW_SINK_MAX_OBSERVATIONS`], the oldest observations
+    /// are evicted FIFO so memory stays flat on long-running
+    /// loops. `latest_for_plan` / `list_plans` reflect the
+    /// retained window only.
+    #[test]
+    fn shadow_sink_evicts_oldest_beyond_capacity() {
+        let sink = ShadowSink::new();
+        let mk = |key: &str| ShadowObservation {
+            plan_key: key.to_string(),
+            tick_epoch: 0,
+            observed_at_ms: 0,
+            candidate_count: 1,
+            admitted_count: 1,
+            blocked_dependency_count: 0,
+            blocked_resource_count: 0,
+            blocked_cap_count: 0,
+            decisions: Vec::new(),
+        };
+        sink.record(mk("plan-oldest"));
+        for i in 0..SHADOW_SINK_MAX_OBSERVATIONS {
+            sink.record(mk(&format!("plan-{i}")));
+        }
+        assert_eq!(sink.observation_count(), SHADOW_SINK_MAX_OBSERVATIONS);
+        assert!(
+            sink.latest_for_plan("plan-oldest").is_none(),
+            "oldest observation must be evicted"
+        );
+        assert!(sink.latest_for_plan("plan-0").is_some());
+        assert!(
+            !sink.list_plans().iter().any(|p| p == "plan-oldest"),
+            "evicted plan must disappear from list_plans"
+        );
     }
 }

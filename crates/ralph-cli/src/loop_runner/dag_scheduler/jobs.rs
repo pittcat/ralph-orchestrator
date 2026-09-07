@@ -101,8 +101,15 @@ pub struct UnitPipelineState {
     pub attempt: u64,
     /// Cumulative in-flight count this Unit has contributed
     /// (each call to `advance` increments by one when the
-    /// outcome is `Admitted`).
+    /// outcome is `Admitted`). A Unit holds at most one slot at
+    /// a time, so this is 0 or 1 in practice.
     pub in_flight: u32,
+    /// The stage the currently held slot was reserved under.
+    /// `release` unbumps THIS stage (not the Unit's current
+    /// `stage`, which may already have migrated), so a
+    /// slot can never leak into the wrong pool counter.
+    /// `Some` iff `in_flight > 0`.
+    pub in_flight_stage: Option<Stage>,
 }
 
 #[cfg(test)]
@@ -120,6 +127,7 @@ impl UnitPipelineState {
             stage,
             attempt: 0,
             in_flight: 0,
+            in_flight_stage: None,
         }
     }
 
@@ -227,15 +235,33 @@ pub const MAX_FIX_ATTEMPTS: u64 = 3;
 /// The per-Unit pipeline. Holds the `DagPools` (shared, runtime
 /// global) and the `PipelineState` (per-Unit).
 ///
-/// `advance` is the only mutating entry point. It is idempotent
-/// for a given `(unit_key, stage, attempt)` tuple — calling it
-/// twice with the same tuple returns the same outcome. The
-/// caller advances a Unit by:
-///   1. Calling `advance(unit_key, stage, hat)` to mint the
+/// `advance` is the only mutating entry point. Its slot
+/// semantics:
+///   - **Idempotent replay**: if the Unit already holds a slot
+///     at the requested stage, `advance` returns `Admitted`
+///     with the same deterministic `JobToken` (re-minted from
+///     the unchanged `(unit_key, stage, hat, attempt)` tuple)
+///     and touches NO counter. Calling it twice with the same
+///     tuple is free.
+///   - **Stage migration**: if the Unit holds a slot at a
+///     different stage, the slot migrates atomically — the old
+///     stage counter is unbumped and the new one bumped, so the
+///     global total is unchanged and no cap check applies to
+///     the global pool (the per-stage cap of the target stage
+///     is still enforced).
+///   - **Fresh reservation**: otherwise the global and
+///     per-stage caps are consulted before any counter moves.
+///   - **Budget first**: the three-fix-attempt budget is
+///     checked for EVERY stage, before any bump; once the
+///     budget is exhausted every further `advance` /
+///     `bump_attempt_and_advance` returns the typed `Blocked`.
+///
+/// The caller advances a Unit by:
+///   1. Calling `advance(unit_key, stage)` to mint the
 ///      token and reserve a slot.
 ///   2. Launching the kernel invocation.
-///   3. Calling `release(unit_key)` after `collect` so the slot
-///      returns to the pool.
+///   3. Calling `release(unit_key)` after `collect` so the
+///      slot returns to the pool it was reserved from.
 ///   4. On review rejection, calling `bump_attempt_and_advance`
 ///      which mints a fresh token at the new attempt count.
 ///
@@ -274,7 +300,8 @@ impl JobPipeline {
 
     /// Reserve a slot for `(unit_key, stage)`. Returns
     /// `Admitted` with a freshly minted `JobToken`, or `Blocked`
-    /// with the typed reason.
+    /// with the typed reason. See the struct-level doc for the
+    /// replay / migration / fresh-reservation semantics.
     pub fn advance(&mut self, unit_key: &str, stage: Stage) -> AdvanceOutcome {
         // 1. Stage transition gate.
         let unit = match self.state.units.get(unit_key) {
@@ -293,24 +320,41 @@ impl JobPipeline {
             });
         }
 
-        // 2. Three-fix-attempt budget.
-        if unit.stage == Stage::Review && unit.attempt >= MAX_FIX_ATTEMPTS {
+        // 2. Three-fix-attempt budget — checked for EVERY stage,
+        //    before any counter or attempt is touched.
+        if unit.attempt >= MAX_FIX_ATTEMPTS {
             return AdvanceOutcome::Blocked(RuntimeJobError::Blocked {
                 reason: format!("exceeded {MAX_FIX_ATTEMPTS} fix attempts"),
                 unit_key: unit_key.to_string(),
             });
         }
 
-        // 3. Global cap.
-        let requested = self.state.in_flight.total + 1;
-        if requested > self.pools.global {
-            return AdvanceOutcome::Blocked(RuntimeJobError::GlobalCapExceeded {
-                requested,
-                cap: self.pools.global,
-            });
+        // 3. Idempotent replay: the Unit already holds a slot at
+        //    this exact stage. Re-mint the deterministic token
+        //    (same `(unit_key, stage, hat, attempt)` tuple) and
+        //    return without touching any counter.
+        if unit.in_flight > 0 && unit.in_flight_stage == Some(stage) {
+            let token = unit.mint_token();
+            return AdvanceOutcome::Admitted { token };
         }
 
-        // 4. Per-stage cap.
+        // A Unit holding a slot at a DIFFERENT stage migrates that
+        // slot; the global total is unchanged by a migration.
+        let migrating = unit.in_flight > 0;
+
+        // 4. Global cap — skipped on migration (the total does
+        //    not grow).
+        if !migrating {
+            let requested = self.state.in_flight.total + 1;
+            if requested > self.pools.global {
+                return AdvanceOutcome::Blocked(RuntimeJobError::GlobalCapExceeded {
+                    requested,
+                    cap: self.pools.global,
+                });
+            }
+        }
+
+        // 5. Per-stage cap (always consulted for the target stage).
         let stage_in_flight = match stage {
             Stage::Execute => self.state.in_flight.execute,
             Stage::Review => self.state.in_flight.review,
@@ -325,33 +369,56 @@ impl JobPipeline {
             });
         }
 
-        // 5. Reserve the slot.
+        // 6. Reserve the slot — or migrate it from the stage it
+        //    was originally reserved under.
         let unit = self.state.units.get_mut(unit_key).expect("present");
-        unit.in_flight += 1;
+        if migrating {
+            if let Some(old) = unit.in_flight_stage {
+                self.state.in_flight.unbump(old);
+            }
+        } else {
+            unit.in_flight += 1;
+        }
+        self.state.in_flight.bump(stage);
+        unit.in_flight_stage = Some(stage);
         if unit.stage != stage {
             unit.stage = stage;
         }
-        self.state.in_flight.bump(stage);
 
         let token = unit.mint_token();
         AdvanceOutcome::Admitted { token }
     }
 
-    /// Release a slot after `collect`. Decrements per-stage and
-    /// global in-flight counters.
+    /// Release a slot after `collect`. Decrements the per-stage
+    /// counter the slot was RESERVED under (recorded at
+    /// `advance` time in `in_flight_stage`) plus the global
+    /// counter — never the Unit's current stage, which may
+    /// already have migrated.
     pub fn release(&mut self, unit_key: &str) {
         if let Some(u) = self.state.units.get_mut(unit_key)
             && u.in_flight > 0
         {
             u.in_flight -= 1;
-            self.state.in_flight.unbump(u.stage);
+            if let Some(reserved_stage) = u.in_flight_stage.take() {
+                self.state.in_flight.unbump(reserved_stage);
+            }
         }
     }
 
     /// Bump `attempt` and re-enter the pipeline at the same
     /// stage (typically Review). Used when a review verdict is
-    /// `request_changes`.
+    /// `request_changes`. The fix-attempt budget is checked
+    /// BEFORE the bump, so `attempt` can never exceed
+    /// `MAX_FIX_ATTEMPTS`.
     pub fn bump_attempt_and_advance(&mut self, unit_key: &str, stage: Stage) -> AdvanceOutcome {
+        if let Some(u) = self.state.units.get(unit_key)
+            && u.attempt >= MAX_FIX_ATTEMPTS
+        {
+            return AdvanceOutcome::Blocked(RuntimeJobError::Blocked {
+                reason: format!("exceeded {MAX_FIX_ATTEMPTS} fix attempts"),
+                unit_key: unit_key.to_string(),
+            });
+        }
         if let Some(u) = self.state.units.get_mut(unit_key) {
             u.bump_attempt();
         }
@@ -538,6 +605,141 @@ mod tests {
                 assert_eq!(stage, Stage::Execute);
             }
             other => panic!("expected StillExecuting, got {other:?}"),
+        }
+    }
+
+    /// P1-2 (true idempotence): calling `advance` twice with the
+    /// same `(unit_key, stage, attempt)` tuple returns the same
+    /// token and bumps NO counter a second time.
+    #[test]
+    fn advance_same_tuple_is_idempotent() {
+        let pools = DagPools::small_test_default();
+        let mut pipeline = JobPipeline::new(pools);
+        pipeline.ensure_unit("U-idem", "j-idem", "executor", Stage::Execute);
+
+        let first = pipeline.advance("U-idem", Stage::Execute);
+        let second = pipeline.advance("U-idem", Stage::Execute);
+        let (AdvanceOutcome::Admitted { token: t1 }, AdvanceOutcome::Admitted { token: t2 }) =
+            (first, second)
+        else {
+            panic!("both calls must be Admitted");
+        };
+        assert_eq!(t1, t2, "same tuple must re-mint the same token");
+        assert_eq!(
+            pipeline.state.in_flight,
+            StageCounts {
+                execute: 1,
+                review: 0,
+                verify: 0,
+                total: 1,
+            },
+            "a replayed advance must not double-count the slot"
+        );
+
+        // Release once; every counter returns to zero.
+        pipeline.release("U-idem");
+        assert_eq!(pipeline.state.in_flight, StageCounts::default());
+    }
+
+    /// P1-1 (slot leak): a stage migration (`advance(Execute)` →
+    /// `advance(Review)` with no release in between) moves the
+    /// slot atomically — the Execute counter is unbumped, Review
+    /// is bumped, the global total is unchanged, and `release`
+    /// afterwards unbumps the stage the slot was reserved under.
+    #[test]
+    fn stage_migration_moves_slot_without_leak() {
+        let pools = DagPools::small_test_default();
+        let mut pipeline = JobPipeline::new(pools);
+        pipeline.ensure_unit("U-mig", "j-mig", "executor", Stage::Execute);
+
+        let exec = pipeline.advance("U-mig", Stage::Execute);
+        assert!(matches!(exec, AdvanceOutcome::Admitted { .. }));
+        assert_eq!(
+            pipeline.state.in_flight,
+            StageCounts {
+                execute: 1,
+                review: 0,
+                verify: 0,
+                total: 1,
+            }
+        );
+
+        // Migrate Execute → Review WITHOUT a release in between.
+        let review = pipeline.advance("U-mig", Stage::Review);
+        assert!(matches!(review, AdvanceOutcome::Admitted { .. }));
+        assert_eq!(
+            pipeline.state.in_flight,
+            StageCounts {
+                execute: 0,
+                review: 1,
+                verify: 0,
+                total: 1,
+            },
+            "migration must unbump Execute and bump Review; total stays 1"
+        );
+
+        // Release frees the Review slot (the one actually held),
+        // not the Unit's historical Execute stage.
+        pipeline.release("U-mig");
+        assert_eq!(
+            pipeline.state.in_flight,
+            StageCounts::default(),
+            "no counter may leak after migrate + release"
+        );
+        // The freed global slot is immediately reusable.
+        pipeline.ensure_unit("U-next", "j-next", "executor", Stage::Execute);
+        let next = pipeline.advance("U-next", Stage::Execute);
+        assert!(matches!(next, AdvanceOutcome::Admitted { .. }));
+    }
+
+    /// P1-3 (budget before bump, all stages): `attempt` can never
+    /// exceed `MAX_FIX_ATTEMPTS`, and once the budget is exhausted
+    /// EVERY stage advance is `Blocked`.
+    #[test]
+    fn fix_attempt_budget_checked_before_bump_for_all_stages() {
+        let pools = DagPools::small_test_default();
+        let mut pipeline = JobPipeline::new(pools);
+        pipeline.ensure_unit("U-budget", "j-budget", "executor", Stage::Execute);
+
+        // Drive the unit to Review, then reject three times.
+        let _ = pipeline.advance("U-budget", Stage::Execute);
+        pipeline.release("U-budget");
+        let _ = pipeline.advance("U-budget", Stage::Review);
+        pipeline.release("U-budget");
+        for expected_attempt in 1..=MAX_FIX_ATTEMPTS {
+            let out = pipeline.bump_attempt_and_advance("U-budget", Stage::Review);
+            pipeline.release("U-budget");
+            assert_eq!(
+                pipeline.state.units.get("U-budget").unwrap().attempt,
+                expected_attempt
+            );
+            if expected_attempt < MAX_FIX_ATTEMPTS {
+                assert!(matches!(out, AdvanceOutcome::Admitted { .. }));
+            } else {
+                // The bump to MAX_FIX_ATTEMPTS succeeds, but the
+                // advance itself is Blocked by the budget gate.
+                assert!(matches!(out, AdvanceOutcome::Blocked(_)));
+            }
+        }
+
+        // Attempt is pinned at MAX — further bumps are refused
+        // BEFORE the counter moves.
+        let out = pipeline.bump_attempt_and_advance("U-budget", Stage::Review);
+        assert!(matches!(out, AdvanceOutcome::Blocked(_)));
+        assert_eq!(
+            pipeline.state.units.get("U-budget").unwrap().attempt,
+            MAX_FIX_ATTEMPTS,
+            "attempt must never exceed MAX_FIX_ATTEMPTS"
+        );
+
+        // The budget gate applies to every stage, not just Review.
+        // (Review → Verify is the only legal forward move left.)
+        let out = pipeline.advance("U-budget", Stage::Verify);
+        match out {
+            AdvanceOutcome::Blocked(RuntimeJobError::Blocked { reason, .. }) => {
+                assert!(reason.contains("fix attempts"));
+            }
+            other => panic!("expected budget Blocked on Verify, got {other:?}"),
         }
     }
 }

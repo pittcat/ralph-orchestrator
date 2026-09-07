@@ -16,9 +16,14 @@
 //! against both adapters.
 //!
 //! Concurrency: a single `Mutex<Connection>` serialises every
-//! statement, mirroring `RusqliteSupervisorStore`. All
-//! idempotency / fail-closed checks happen INSIDE the lock so two
-//! racing writers cannot interleave a read-decide-write cycle.
+//! statement within the process, mirroring
+//! `RusqliteSupervisorStore`. Cross-process safety does NOT rely
+//! on that mutex: every read-decide-write cycle runs inside one
+//! SQLite transaction, with `INSERT ... ON CONFLICT DO NOTHING`
+//! and status-guarded conditional UPDATEs, so two processes
+//! racing on the same `plan_key` cannot interleave a
+//! read-decide-write cycle or turn a UNIQUE collision into a
+//! spurious IO error.
 //!
 //! Migration versioning: the store runs the supervisor migration
 //! ledger (v1..=13) on `open`, so a `supervisor.db` and a DAG
@@ -260,37 +265,29 @@ impl DagSchedulerStore for RusqliteDagSchedulerStore {
         }
         #[cfg(feature = "supervisor-db")]
         {
-            let conn = self
+            let mut conn = self
                 .inner
                 .conn
                 .lock()
                 .map_err(|_| DagStoreError::IoError("dag plan store mutex poisoned".into()))?;
-            // Read-decide-write INSIDE the lock: a same-key
-            // existing row decides idempotent-return vs
-            // DigestConflict before any INSERT runs.
-            let existing: Option<PlanRegistration> = conn
-                .query_row(
-                    "SELECT id, plan_key, artifact_digest, target_branch, unit_ids, status, \
-                     created_at_ms FROM dag_plans WHERE plan_key = ?1",
-                    [&plan.plan_key],
-                    row_to_plan_registration,
-                )
-                .optional()
-                .map_err(plan_io_err)?;
-            if let Some(existing) = existing {
-                if existing.artifact_digest == plan.artifact_digest {
-                    return Ok(existing);
-                }
-                return Err(DagStoreError::DigestConflict {
-                    plan_key: plan.plan_key.clone(),
-                    expected: existing.artifact_digest,
-                    actual: plan.artifact_digest.clone(),
-                });
-            }
-            conn.execute(
+            // Single transaction spanning the write and the
+            // deciding read: the in-process mutex alone cannot
+            // stop a SECOND PROCESS from interleaving its own
+            // INSERT between our SELECT and INSERT (cross-process
+            // TOCTOU). `INSERT ... ON CONFLICT(plan_key) DO
+            // NOTHING` makes the insert atomic against the UNIQUE
+            // constraint — a losing racer does nothing instead of
+            // surfacing a raw constraint violation — and the
+            // follow-up SELECT (same transaction snapshot)
+            // distinguishes the two existing-row cases:
+            //   same digest  → idempotent Ok(existing)
+            //   other digest → DigestConflict (fail closed)
+            let tx = conn.transaction().map_err(plan_io_err)?;
+            tx.execute(
                 "INSERT INTO dag_plans \
                  (plan_key, artifact_digest, target_branch, unit_ids, status, created_at_ms) \
-                 VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
+                 VALUES (?1, ?2, ?3, ?4, 'pending', ?5) \
+                 ON CONFLICT(plan_key) DO NOTHING",
                 rusqlite::params![
                     plan.plan_key,
                     plan.artifact_digest,
@@ -300,7 +297,7 @@ impl DagSchedulerStore for RusqliteDagSchedulerStore {
                 ],
             )
             .map_err(plan_io_err)?;
-            let registered: PlanRegistration = conn
+            let row: PlanRegistration = tx
                 .query_row(
                     "SELECT id, plan_key, artifact_digest, target_branch, unit_ids, status, \
                      created_at_ms FROM dag_plans WHERE plan_key = ?1",
@@ -308,11 +305,18 @@ impl DagSchedulerStore for RusqliteDagSchedulerStore {
                     row_to_plan_registration,
                 )
                 .map_err(plan_io_err)?;
-            // The INSERT wrote 'pending' + the caller's identity
-            // columns; re-read everything so the returned row is
-            // exactly what a later get_plan would observe.
-            debug_assert_eq!(registered.status, PlanStatus::Pending);
-            Ok(registered)
+            if row.artifact_digest != plan.artifact_digest {
+                // Digest drift: roll back (tx drop) and fail
+                // closed. When we lost the insert race this also
+                // leaves the winner's row untouched.
+                return Err(DagStoreError::DigestConflict {
+                    plan_key: plan.plan_key.clone(),
+                    expected: row.artifact_digest,
+                    actual: plan.artifact_digest.clone(),
+                });
+            }
+            tx.commit().map_err(plan_io_err)?;
+            Ok(row)
         }
     }
 
@@ -326,46 +330,63 @@ impl DagSchedulerStore for RusqliteDagSchedulerStore {
         }
         #[cfg(feature = "supervisor-db")]
         {
-            let conn = self
+            let mut conn = self
                 .inner
                 .conn
                 .lock()
                 .map_err(|_| DagStoreError::IoError("dag plan store mutex poisoned".into()))?;
-            let row: Option<(String, String)> = conn
-                .query_row(
-                    "SELECT target_branch, status FROM dag_plans WHERE plan_key = ?1",
-                    [plan_key],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            // Conditional UPDATE first, inside one transaction:
+            // the status guard in the WHERE clause makes the
+            // Pending → Active transition atomic across processes
+            // (a second-process racer cannot slip between a
+            // check-SELECT and a write). `affected == 1` means we
+            // won the transition; `affected == 0` needs one
+            // disambiguating read in the same snapshot to tell
+            // apart unknown key / already-active (idempotent Ok)
+            // / closed (InvalidTransition) / target mismatch
+            // (fail closed, R10/R17).
+            let tx = conn.transaction().map_err(plan_io_err)?;
+            let affected = tx
+                .execute(
+                    "UPDATE dag_plans SET status = 'active' \
+                     WHERE plan_key = ?1 AND status = 'pending' AND target_branch = ?2",
+                    rusqlite::params![plan_key, target_branch],
                 )
-                .optional()
                 .map_err(plan_io_err)?;
-            let Some((registered_branch, status)) = row else {
-                return Err(DagStoreError::UnknownPlan(plan_key.to_string()));
-            };
-            let status = parse_plan_status(&status)
-                .map_err(|err| DagStoreError::IoError(err.to_string()))?;
-            if status == PlanStatus::Closed {
-                return Err(DagStoreError::InvalidTransition {
-                    plan_key: plan_key.to_string(),
-                    expected: "active_or_pending".to_string(),
-                    actual: "plan is closed".to_string(),
-                });
+            if affected == 0 {
+                let row: Option<(String, String)> = tx
+                    .query_row(
+                        "SELECT target_branch, status FROM dag_plans WHERE plan_key = ?1",
+                        [plan_key],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .optional()
+                    .map_err(plan_io_err)?;
+                let Some((registered_branch, status)) = row else {
+                    return Err(DagStoreError::UnknownPlan(plan_key.to_string()));
+                };
+                let status = parse_plan_status(&status)
+                    .map_err(|err| DagStoreError::IoError(err.to_string()))?;
+                if status == PlanStatus::Closed {
+                    return Err(DagStoreError::InvalidTransition {
+                        plan_key: plan_key.to_string(),
+                        expected: "active_or_pending".to_string(),
+                        actual: "plan is closed".to_string(),
+                    });
+                }
+                if registered_branch != target_branch {
+                    return Err(DagStoreError::TargetMismatch {
+                        plan_key: plan_key.to_string(),
+                        expected: registered_branch,
+                        actual: target_branch.to_string(),
+                    });
+                }
+                debug_assert_eq!(status, PlanStatus::Active);
+                // Already Active with the same target: idempotent
+                // no-op. Nothing was written; commit is a no-op
+                // read-transaction close.
             }
-            if registered_branch != target_branch {
-                return Err(DagStoreError::TargetMismatch {
-                    plan_key: plan_key.to_string(),
-                    expected: registered_branch,
-                    actual: target_branch.to_string(),
-                });
-            }
-            if status == PlanStatus::Active {
-                return Ok(());
-            }
-            conn.execute(
-                "UPDATE dag_plans SET status = 'active' WHERE plan_key = ?1",
-                [plan_key],
-            )
-            .map_err(plan_io_err)?;
+            tx.commit().map_err(plan_io_err)?;
             Ok(())
         }
     }
@@ -1075,5 +1096,164 @@ mod tests {
         let err_i =
             RusqliteIntegrationStore::open(&not_a_db).expect_err("opening a directory must fail");
         assert!(matches!(err_i, IntegrationStoreError::StorageIo(_)));
+    }
+
+    // -----------------------------------------------------------------
+    // Cross-process concurrency (P1 fix pins). Each thread opens
+    // its OWN connection to the same file — the same race shape
+    // as two OS processes sharing one database, which the
+    // in-process mutex cannot serialise. A barrier maximises the
+    // overlap of the two writers.
+    // -----------------------------------------------------------------
+
+    use std::sync::Barrier;
+
+    /// Run `f` concurrently from two threads, each with its own
+    /// store connection on `db`, released simultaneously by a
+    /// barrier. Returns both results in spawn order.
+    fn race_two_handles<T: Send + 'static>(
+        db: &std::path::Path,
+        f: impl Fn(RusqliteDagSchedulerStore) -> DagStoreResult<T> + Send + Sync + 'static,
+    ) -> [DagStoreResult<T>; 2] {
+        let barrier = Arc::new(Barrier::new(2));
+        let f = Arc::new(f);
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let db = db.to_path_buf();
+            let barrier = Arc::clone(&barrier);
+            let f = Arc::clone(&f);
+            handles.push(std::thread::spawn(move || {
+                let store = RusqliteDagSchedulerStore::open(&db).expect("open racing handle");
+                barrier.wait();
+                f(store)
+            }));
+        }
+        let mut results = handles
+            .into_iter()
+            .map(|h| h.join().expect("racing thread panicked"));
+        [
+            results.next().expect("two results"),
+            results.next().expect("two results"),
+        ]
+    }
+
+    #[test]
+    fn concurrent_register_same_key_same_digest_both_ok_idempotent() {
+        // Two racing handles register the same (plan_key, digest):
+        // BOTH must observe Ok with the SAME row id (contract
+        // idempotency), never a raw UNIQUE-constraint IO error.
+        let dir = TempDir::new().expect("tempdir");
+        let db = dir.path().join("dag.db");
+        let [a, b] = race_two_handles(&db, |store| store.register_plan(&plan("p1", "d1")));
+        let a = a.expect("first racer must be Ok");
+        let b = b.expect("second racer must be Ok");
+        assert_eq!(a.id, b.id, "both racers must observe the one row");
+        let store = RusqliteDagSchedulerStore::open(&db).expect("reopen");
+        let fetched = store.get_plan("p1").expect("get").expect("exists");
+        assert_eq!(fetched.id, a.id);
+        assert_eq!(fetched.status, PlanStatus::Pending);
+    }
+
+    #[test]
+    fn concurrent_register_same_key_different_digest_exactly_one_conflict() {
+        // Digest drift under race: EXACTLY ONE side wins the
+        // insert; the loser MUST get DigestConflict (fail closed),
+        // never a spurious IO error from the UNIQUE constraint.
+        let dir = TempDir::new().expect("tempdir");
+        let db = dir.path().join("dag.db");
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for digest in ["d1", "d2"] {
+            let db = db.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let store = RusqliteDagSchedulerStore::open(&db).expect("open racing handle");
+                barrier.wait();
+                store.register_plan(&plan("p1", digest))
+            }));
+        }
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("racing thread panicked"))
+            .collect();
+        let oks = results.iter().filter(|r| r.is_ok()).count();
+        let conflicts = results
+            .iter()
+            .filter(|r| matches!(r, Err(DagStoreError::DigestConflict { .. })))
+            .count();
+        assert_eq!(oks, 1, "exactly one racer wins: {results:?}");
+        assert_eq!(conflicts, 1, "exactly one racer conflicts: {results:?}");
+        // Whichever digest won is the single persisted row.
+        let store = RusqliteDagSchedulerStore::open(&db).expect("reopen");
+        let fetched = store.get_plan("p1").expect("get").expect("exists");
+        let winner = results
+            .iter()
+            .find_map(|r| r.as_ref().ok())
+            .expect("one Ok");
+        assert_eq!(fetched.id, winner.id);
+        assert_eq!(fetched.artifact_digest, winner.artifact_digest);
+    }
+
+    #[test]
+    fn concurrent_activate_exactly_one_pending_to_active_transition() {
+        // Two racing handles activate the same Pending plan: both
+        // observe Ok (activation is idempotent on Active), the
+        // conditional UPDATE guarantees at most one performs the
+        // Pending → Active write, and the final state is Active.
+        let dir = TempDir::new().expect("tempdir");
+        let db = dir.path().join("dag.db");
+        {
+            let store = RusqliteDagSchedulerStore::open(&db).expect("open");
+            store.register_plan(&plan("p1", "d1")).expect("register");
+        }
+        let [a, b] = race_two_handles(&db, |store| store.activate_plan("p1", "feat/test"));
+        a.expect("first activation must be Ok");
+        b.expect("second activation must be Ok (idempotent on active)");
+        let store = RusqliteDagSchedulerStore::open(&db).expect("reopen");
+        let fetched = store.get_plan("p1").expect("get").expect("exists");
+        assert_eq!(fetched.status, PlanStatus::Active);
+    }
+
+    #[test]
+    fn concurrent_activate_vs_mismatch_fails_closed_without_transition() {
+        // One racer activates with the registered branch; the
+        // other with a WRONG branch. The mismatch racer MUST get
+        // TargetMismatch and MUST NOT flip the status itself —
+        // the row ends Active only via the legitimate racer.
+        let dir = TempDir::new().expect("tempdir");
+        let db = dir.path().join("dag.db");
+        {
+            let store = RusqliteDagSchedulerStore::open(&db).expect("open");
+            store.register_plan(&plan("p1", "d1")).expect("register");
+        }
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for branch in ["feat/test", "feat/OTHER"] {
+            let db = db.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let store = RusqliteDagSchedulerStore::open(&db).expect("open racing handle");
+                barrier.wait();
+                store.activate_plan("p1", branch)
+            }));
+        }
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("racing thread panicked"))
+            .collect();
+        let oks = results.iter().filter(|r| r.is_ok()).count();
+        let mismatches = results
+            .iter()
+            .filter(|r| matches!(r, Err(DagStoreError::TargetMismatch { .. })))
+            .count();
+        assert_eq!(oks, 1, "legit racer activates: {results:?}");
+        assert_eq!(
+            mismatches, 1,
+            "wrong-branch racer fails closed: {results:?}"
+        );
+        let store = RusqliteDagSchedulerStore::open(&db).expect("reopen");
+        let fetched = store.get_plan("p1").expect("get").expect("exists");
+        assert_eq!(fetched.status, PlanStatus::Active);
+        assert_eq!(fetched.target_branch, "feat/test");
     }
 }

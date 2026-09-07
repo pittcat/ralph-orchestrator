@@ -148,33 +148,78 @@ impl fmt::Display for Signal {
 /// Stable string tokens for the keyword set the classifier uses.
 /// Tests assert the set is closed (no surprise keywords); new
 /// keywords MUST be added here AND covered by a new test.
+///
+/// Every entry is a **multi-token phrase** (contains a space,
+/// colon, or dot), so plain substring matching is safe: the
+/// punctuation inside the phrase already anchors it against
+/// look-alike garbage. Single-word tokens MUST NOT be added
+/// here — they belong in `STRONG_WORDS`, which matches on word
+/// boundaries instead.
 pub const STRONG_KEYWORDS: &[&str] = &[
     "test result:",
     "forge.unit.integrated",
     "forge.unit.verified",
     "cargo test ok",
     "exit code: 0",
-    "compiled",
-    "ok ",
-    "passed",
 ];
+
+/// Single-word strong tokens. Unlike `STRONG_KEYWORDS` these are
+/// matched as **whole words**: a hit requires the character on
+/// each side to be a string edge or a non-ASCII-alphanumeric
+/// byte. Substring matching here previously let spinner/garbage
+/// lines like `"bypassed"` (contains `"passed"`) or `"book "`
+/// (contains `"ok "`) classify as `Strong`, renewing the idle
+/// lease forever — see the P0 fix tests below.
+///
+/// A bare `"ok"` token is intentionally absent: word-boundary
+/// matching still cannot distinguish `"test result: ok"` (real)
+/// from `"looking... ok,"` (filler). The standard strong forms
+/// carrying "ok" are already covered by the `test result:` and
+/// `cargo test ok` phrases above.
+pub const STRONG_WORDS: &[&str] = &["compiled", "passed"];
+
+/// True iff `haystack` (already ASCII-lowercased) contains
+/// `word` as a whole word: the byte before and after the match
+/// must be a string edge or non-ASCII-alphanumeric. `word` must
+/// be non-empty ASCII lowercase.
+fn contains_word(haystack: &str, word: &str) -> bool {
+    let hay = haystack.as_bytes();
+    let needle = word.as_bytes();
+    if needle.is_empty() || needle.len() > hay.len() {
+        return false;
+    }
+    for (i, window) in hay.windows(needle.len()).enumerate() {
+        if window != needle {
+            continue;
+        }
+        let left_ok = i == 0 || !hay[i - 1].is_ascii_alphanumeric();
+        let right = i + needle.len();
+        let right_ok = right == hay.len() || !hay[right].is_ascii_alphanumeric();
+        if left_ok && right_ok {
+            return true;
+        }
+    }
+    false
+}
 
 pub const WEAK_KEYWORDS: &[&str] = &[
     "...", "thinking", "spinner", "loading", "idle", "waiting", "retry",
 ];
 
 /// Classify a raw heartbeat payload into one of the three
-/// signal bins. The lookup is keyword-substring: the payload
-/// is searched for any `STRONG_KEYWORDS` substring (case
-/// insensitive — worker output is human-readable) and any
-/// `WEAK_KEYWORDS` substring in that order. Strong wins over
-/// weak; empty / whitespace-only payloads are `Silent`.
+/// signal bins. The payload is searched for any
+/// `STRONG_KEYWORDS` phrase substring, then for any
+/// `STRONG_WORDS` whole word (case insensitive — worker output
+/// is human-readable), then for any `WEAK_KEYWORDS` substring.
+/// Strong wins over weak; empty / whitespace-only payloads are
+/// `Silent`.
 ///
-/// New strong keywords MUST be appended to `STRONG_KEYWORDS`
-/// (and a test added). The classifier is **fail-closed** for
-/// unknown keywords: anything not matching a known bucket
-/// falls into `Weak` (the more pessimistic of the two
-/// recognised classes). Truly empty payloads are `Silent`.
+/// New strong phrases MUST be appended to `STRONG_KEYWORDS`,
+/// new single-word tokens to `STRONG_WORDS` (and a test added
+/// for either). The classifier is **fail-closed** for unknown
+/// keywords: anything not matching a known bucket falls into
+/// `Weak` (the more pessimistic of the two recognised classes).
+/// Truly empty payloads are `Silent`.
 pub fn classify_signal(payload: &str) -> Signal {
     let trimmed = payload.trim();
     if trimmed.is_empty() {
@@ -183,6 +228,11 @@ pub fn classify_signal(payload: &str) -> Signal {
     let haystack = trimmed.to_ascii_lowercase();
     for kw in STRONG_KEYWORDS {
         if haystack.contains(kw) {
+            return Signal::Strong;
+        }
+    }
+    for word in STRONG_WORDS {
+        if contains_word(&haystack, word) {
             return Signal::Strong;
         }
     }
@@ -545,6 +595,120 @@ mod tests {
                 "keyword {kw:?} should classify as Strong"
             );
         }
+        for word in STRONG_WORDS {
+            let payload = format!("some prefix {word} some suffix");
+            assert_eq!(
+                classify_signal(&payload),
+                Signal::Strong,
+                "word {word:?} should classify as Strong"
+            );
+        }
+    }
+
+    // ----- P0 regression: substring false positives -----------------------
+    //
+    // Pre-fix, strong matching was raw substring: `"bypassed"`
+    // contains `"passed"`, `"book "` contains `"ok "`, so spinner /
+    // garbage lines classified as Strong and renewed the idle
+    // lease forever. These tests pin the boundary-anchored fix.
+
+    #[test]
+    fn classify_substring_lookalikes_are_not_strong() {
+        // Words that merely *contain* a strong token must not
+        // classify as Strong (fail-closed to Weak).
+        for payload in [
+            "bypassed",
+            "checks bypassed by user",
+            "book ",
+            "booking the next slot",
+            "uncompiled sources remain",
+            "looking... ok,",
+            "looking... ok, let me see",
+        ] {
+            assert_eq!(
+                classify_signal(payload),
+                Signal::Weak,
+                "payload {payload:?} must NOT classify as Strong"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_real_strong_output_shapes_are_strong() {
+        // Standard strong-signal output shapes must still hit.
+        for payload in [
+            "test result: ok. 12 passed; 0 failed; 0 ignored; finished in 0.42s",
+            "running 5 tests\ntest result: ok. 5 passed; 0 failed",
+            "12 passed; 0 failed",
+            "successfully compiled ralph-core v0.1.0",
+            "Compiled in 3.2s",
+            "process finished with exit code: 0",
+            "forge.unit.integrated U3",
+            "CARGO TEST OK summary",
+        ] {
+            assert_eq!(
+                classify_signal(payload),
+                Signal::Strong,
+                "payload {payload:?} should classify as Strong"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_contains_word_helper_boundaries() {
+        assert!(contains_word("passed", "passed"));
+        assert!(contains_word("12 passed; 0 failed", "passed"));
+        assert!(contains_word("(passed)", "passed"));
+        assert!(!contains_word("bypassed", "passed"));
+        assert!(!contains_word("passedly", "passed"));
+        assert!(!contains_word("uncompiled", "compiled"));
+        assert!(!contains_word("", "passed"));
+        assert!(!contains_word("pass", "passed"));
+    }
+
+    #[test]
+    fn substring_spam_never_renews_idle_lease_and_times_out() {
+        // A job that emits an endless stream of benign look-alike
+        // spam ("bypassed ... book ok,") must behave as weak:
+        // the idle lease is never renewed, the weak budget drains,
+        // and the job trips IdleLeaseExpired well before the hard
+        // cap. Pre-fix every one of these payloads was Strong.
+        let c = clock();
+        let policy = default_policy(); // grace 1s, cap 10s, idle 5s, weak 2s
+        let mut s = DeadlineState::fresh(c.now_ms());
+        c.advance(1_001); // out of grace
+        // 5 spam ticks, 400 ms apart: weak budget = 2_000 ms,
+        // saturating exactly at the cap. Every payload must
+        // classify Weak — never Strong.
+        for i in 0..5 {
+            let signal = classify_signal("bypassed book looking... ok, retrying");
+            assert_eq!(
+                signal,
+                Signal::Weak,
+                "spam tick {i} must classify Weak, not Strong"
+            );
+            let v = evaluate_deadline(&mut s, signal, c.now_ms(), &policy);
+            assert!(
+                matches!(v, DeadlineVerdict::Alive { .. }),
+                "tick {i} should still be Alive (elapsed 3001 < idle 5000)"
+            );
+            c.advance(400);
+        }
+        assert_eq!(s.weak_consumed_ms, policy.weak_allowance_total_ms);
+        assert_eq!(
+            s.last_strong_ms, s.start_ms,
+            "spam must never renew the idle lease"
+        );
+        // Push the idle gap past the lease; weak budget is
+        // exhausted, so the next spam tick trips IdleLeaseExpired
+        // (elapsed 5_501 < hard cap 10_000).
+        c.advance(2_500);
+        let signal = classify_signal("bypassed book looking... ok, retrying");
+        let v = evaluate_deadline(&mut s, signal, c.now_ms(), &policy);
+        assert!(
+            matches!(v, DeadlineVerdict::IdleLeaseExpired { .. }),
+            "weak spam past allowance + idle lease MUST time out, got {v:?}"
+        );
     }
 
     #[test]
