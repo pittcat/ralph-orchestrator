@@ -61,6 +61,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ralph_core::config::{ResolvedDagPools, SchedulerMode};
+use ralph_core::parallel_forge_handoff::{ResourceCapacity, ResourceClaim};
 use ralph_core::supervisor::dag_plan_receipt::{
     DagPlanReceipt, DagPlanReceiptRegistry, InMemoryDagPlanReceiptStore,
 };
@@ -114,6 +115,7 @@ struct PlanTopology {
     /// workspace git state is unresolvable — spawn then fails closed).
     verified_base_commit: Option<String>,
     units: Vec<UnitTopology>,
+    resource_capacities: Vec<ResourceCapacity>,
     /// Units whose `forge.unit.integrated` event was accepted (the
     /// close-task projection ran) and whose durable integration
     /// record is acked. Fed into the admission snapshot so
@@ -131,6 +133,7 @@ struct UnitTopology {
     /// field (E1 verifier prompt / E2 integration gate). Empty when
     /// the unit declares none.
     tests: Vec<String>,
+    resource_claims: Vec<ResourceClaim>,
 }
 
 /// Step 4 (2026-09-03-0959 DAG 接线): observation-only DAG
@@ -990,13 +993,6 @@ impl DagSchedulerRuntime {
         if self.plans.is_empty() {
             return;
         }
-        let caps = AdmissionCaps {
-            global_cap: self.pipeline.pools().global,
-            executor_pool_cap: self.pipeline.pools().executor,
-            // Resource capacities are declared in the artifact; wiring
-            // them into the observation is a later step's scope.
-            resource_capacities: Vec::new(),
-        };
         // The integration target head is the loop workspace's current
         // tip: parallel-forge integrates onto the branch the loop
         // checked out. Unresolvable git state degrades to `None`,
@@ -1007,6 +1003,13 @@ impl DagSchedulerRuntime {
             if self.blocked_plans.contains(plan_key) {
                 continue;
             }
+            let caps = AdmissionCaps {
+                global_cap: self.pipeline.pools().global,
+                executor_pool_cap: self.pipeline.pools().executor,
+                // Resource capacities come from the verified artifact
+                // handoff, never from the event payload.
+                resource_capacities: plan.resource_capacities.clone(),
+            };
             let inputs: Vec<UnitAdmissionInput> = plan
                 .units
                 .iter()
@@ -1018,7 +1021,7 @@ impl DagSchedulerRuntime {
                     // (projection acknowledged) unlock their
                     // dependents.
                     integrated_units: plan.integrated.clone(),
-                    resource_claims: Vec::new(),
+                    resource_claims: u.resource_claims.clone(),
                 })
                 .collect();
             let snapshot = AdmissionSnapshot {
@@ -1119,6 +1122,7 @@ fn topology_from_handoff(
         target_branch,
         verified_base_commit: None,
         integrated: std::collections::HashSet::new(),
+        resource_capacities: handoff.resource_capacities.clone(),
         units: handoff
             .tasks
             .iter()
@@ -1132,6 +1136,11 @@ fn topology_from_handoff(
                     .collect(),
                 tests: handoff
                     .unit_tests
+                    .get(&task.unit_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                resource_claims: handoff
+                    .unit_resource_claims
                     .get(&task.unit_id)
                     .cloned()
                     .unwrap_or_default(),
@@ -1188,6 +1197,32 @@ units:
 
     const ARTIFACT_REL: &str = ".ralph/forge/pf-test/execution-plan.yml";
 
+    const RESOURCE_ARTIFACT: &str = r#"version: 2
+plan_key: pf-test
+resource_capacities:
+  - key: gpu
+    capacity: 1
+units:
+  - id: U1
+    title: GPU unit one
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1
+    resource_claims:
+      - key: gpu
+        permits: 1
+  - id: U2
+    title: GPU unit two
+    depends_on: []
+    execution_wave: 1
+    integration_order: 2
+    target_branch: feat/u2
+    resource_claims:
+      - key: gpu
+        permits: 1
+"#;
+
     fn resolved_pools() -> ResolvedDagPools {
         ResolvedDagPools {
             global: 4,
@@ -1218,6 +1253,23 @@ units:
             "plan_digest": digest,
         });
         ralph_proto::Event::new(seam_topics::PLAN_READY, payload.to_string())
+    }
+
+    fn init_git_head(workspace: &std::path::Path) {
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "dag-test@example.invalid"][..],
+            &["config", "user.name", "DAG Test"][..],
+            &["add", "."][..],
+            &["commit", "-qm", "fixture"][..],
+        ] {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(workspace)
+                .status()
+                .expect("run git fixture command");
+            assert!(status.success(), "git command failed: git {args:?}");
+        }
     }
 
     fn approved_event() -> ralph_proto::Event {
@@ -1503,6 +1555,32 @@ units:
         assert_eq!(reason_of("U1"), "BlockedNoTargetHead");
         assert_eq!(reason_of("U2"), "BlockedNoTargetHead");
         assert_eq!(reason_of("U3"), "BlockedDependencies");
+    }
+
+    #[test]
+    fn tick_enforces_verified_resource_capacity_and_claims() {
+        let (tmp, mut runtime) = fixture(SchedulerMode::DagShadow);
+        std::fs::write(tmp.path().join(ARTIFACT_REL), RESOURCE_ARTIFACT)
+            .expect("write resource artifact");
+        init_git_head(tmp.path());
+        runtime.observe_accepted_events(&[plan_ready_event(tmp.path())]);
+        assert_eq!(runtime.plans["pf-test"].resource_capacities.len(), 1);
+        assert_eq!(runtime.plans["pf-test"].units[0].resource_claims.len(), 1);
+
+        runtime.sink.with_observations(|observations| {
+            let observation = observations.last().expect("resource observation");
+            assert_eq!(observation.candidate_count, 2);
+            let reason_of = |unit: &str| {
+                observation
+                    .decisions
+                    .iter()
+                    .find(|(id, _)| id == unit)
+                    .map(|(_, reason)| reason.as_str())
+                    .unwrap_or("missing")
+            };
+            assert_eq!(reason_of("U1"), "Admitted");
+            assert_eq!(reason_of("U2"), "BlockedResources");
+        });
     }
 
     /// Sanity: the fixture artifact passes the real handoff loader

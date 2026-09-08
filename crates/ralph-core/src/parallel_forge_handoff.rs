@@ -597,6 +597,13 @@ pub struct CanonicalPlanHandoff {
     /// struct is never serialized, while the task spec feeds the
     /// wave-mode task projection byte stream.
     pub unit_tests: HashMap<String, Vec<String>>,
+    /// Verified plan-scope resource capacities. These values are copied from
+    /// the canonical artifact so the runtime admission layer can enforce the
+    /// same bounded-resource contract that was validated at handoff time.
+    pub resource_capacities: Vec<ResourceCapacity>,
+    /// Verified per-unit resource claims, keyed by unit id. Units without
+    /// claims are absent, matching the optional `unit_tests` representation.
+    pub unit_resource_claims: HashMap<String, Vec<ResourceClaim>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -714,12 +721,16 @@ fn derive_plan_handoff(
     // out. `integration_order` remains the separate deterministic merge order.
     let execution_waves = derive_execution_waves(&plan.units)?;
     let mut unit_tests: HashMap<String, Vec<String>> = HashMap::new();
+    let mut unit_resource_claims: HashMap<String, Vec<ResourceClaim>> = HashMap::new();
     let mut tasks = Vec::with_capacity(plan.units.len());
     let mut wave_sizes: HashMap<u32, usize> = HashMap::new();
     for unit in plan.units {
         let execution_wave = execution_waves[&unit.id];
         if !unit.tests.is_empty() {
             unit_tests.insert(unit.id.clone(), unit.tests.clone());
+        }
+        if !unit.resource_claims.is_empty() {
+            unit_resource_claims.insert(unit.id.clone(), unit.resource_claims.clone());
         }
         let depends_on_task_keys = unit
             .depends_on
@@ -762,6 +773,8 @@ fn derive_plan_handoff(
         tasks,
         wave_total,
         unit_tests,
+        resource_capacities: plan.resource_capacities,
+        unit_resource_claims,
     })
 }
 
@@ -1041,6 +1054,55 @@ units:
         });
         let handoff = load_plan_handoff(&payload, temp.path()).expect("valid handoff");
         assert!(handoff.unit_tests.is_empty());
+    }
+
+    #[test]
+    fn resource_contract_lands_on_handoff_for_runtime_admission() {
+        let artifact: &[u8] = br#"version: 2
+plan_key: pf-test
+resource_capacities:
+  - key: gpu
+    capacity: 1
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1-foundation
+    resource_claims:
+      - key: gpu
+        permits: 1
+  - id: U2
+    title: Feature
+    depends_on: []
+    execution_wave: 1
+    integration_order: 2
+    target_branch: feat/u2-feature
+"#;
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("execution-plan.yml"), artifact).expect("write plan");
+        let payload = json!({
+            "execution_plan_path": "execution-plan.yml",
+            "plan_key": "pf-test",
+        });
+
+        let handoff = load_plan_handoff(&payload, temp.path()).expect("valid handoff");
+        assert_eq!(
+            handoff.resource_capacities,
+            vec![ResourceCapacity {
+                key: "gpu".to_string(),
+                capacity: 1,
+            }]
+        );
+        assert_eq!(
+            handoff.unit_resource_claims["U1"],
+            vec![ResourceClaim {
+                key: "gpu".to_string(),
+                permits: 1,
+            }]
+        );
+        assert!(!handoff.unit_resource_claims.contains_key("U2"));
     }
 
     #[test]
