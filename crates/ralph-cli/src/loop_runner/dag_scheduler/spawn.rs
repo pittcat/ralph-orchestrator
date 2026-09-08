@@ -1322,6 +1322,54 @@ units:
         )
     }
 
+    fn real_job_exec_context(workspace: &Path) -> DagExecutionContext {
+        let mut config = RalphConfig::default();
+        config.hats.insert(
+            HAT_EXECUTOR.to_string(),
+            HatConfig {
+                name: HAT_EXECUTOR.to_string(),
+                instructions: "execute one fixture unit".to_string(),
+                timeout: Some(10),
+                ..HatConfig::default()
+            },
+        );
+        let mut cli = CliConfig::default();
+        cli.backend = "custom".to_string();
+        cli.command = Some("sh".to_string());
+        cli.prompt_mode = "stdin".to_string();
+        cli.args = vec![
+            "-c".to_string(),
+            "printf '%s\\n' '{\"topic\":\"forge.unit.executed\",\"payload\":\"{}\"}' >> \"$RALPH_EVENTS_FILE\""
+                .to_string(),
+        ];
+        let backend = CliBackend::from_config(&cli).expect("custom fixture backend builds");
+        DagExecutionContext::new(
+            &config,
+            &backend,
+            "loop-test",
+            workspace.join("events.jsonl"),
+            None,
+        )
+    }
+
+    fn init_git_fixture(workspace: &Path) -> String {
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "dag-test@example.invalid"][..],
+            &["config", "user.name", "DAG Test"][..],
+            &["add", "."][..],
+            &["commit", "-qm", "fixture"][..],
+        ] {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(workspace)
+                .status()
+                .expect("run git fixture command");
+            assert!(status.success(), "git command failed: git {args:?}");
+        }
+        ralph_core::get_head_sha(workspace).expect("fixture has a git head")
+    }
+
     /// Dag-mode runtime with the plan activated through the real
     /// accepted-event path (receipt → store registration → pipeline
     /// seed). The tempdir is NOT a git repository, so
@@ -1407,6 +1455,40 @@ units:
             "replayed admission is deduped before the journal reserve"
         );
         assert!(runtime.active_jobs.is_empty());
+    }
+
+    /// Authoritative canary: a real DAG executor job uses the verified Git
+    /// base, creates a real isolated worktree, runs a real PTY child, and
+    /// returns its success event to the runtime merge queue.
+    #[tokio::test]
+    async fn real_dag_executor_canary_runs_in_git_worktree() {
+        let (tmp, mut runtime) = dag_fixture();
+        let base = init_git_fixture(tmp.path());
+        runtime
+            .plans
+            .get_mut("pf-test")
+            .expect("fixture plan registered")
+            .verified_base_commit = Some(base);
+        runtime.attach_execution_context(real_job_exec_context(tmp.path()));
+
+        runtime.maybe_spawn_executor("pf-test", "U1");
+        for _ in 0..100 {
+            runtime.drain_completions();
+            if !runtime.merge_queue.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert!(runtime.active_jobs.is_empty(), "canary child must be reaped");
+        let merge = runtime.merge_queue.front().expect("success event queued");
+        assert_eq!(merge.event.topic.as_str(), "forge.unit.executed");
+        assert!(
+            tmp.path()
+                .join(".ralph/worktrees/loop-test-U1")
+                .is_dir(),
+            "executor must run in its isolated unit worktree"
+        );
     }
 
     /// A unit id outside the journal charset (`[A-Za-z0-9-_]`) is

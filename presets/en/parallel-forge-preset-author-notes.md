@@ -4,12 +4,12 @@
 
 - **现状（如实）**：YAML 声明 `event_loop.supervisor.scheduler_mode: dag`。DAG runtime 已接入 EventLoop acceptance 路径：审批后从 execution-plan dependency graph 做 admission，按 durable launch journal 启动 executor/reviewer/verifier，恢复未决 job，按 `integration_order` 串行 FF integration，并在 accepted `forge.unit.integrated`（含 close-task projection）后解锁后继 Unit。`forge.exec.development.done` 由 runtime 的 terminal fence 恰好一次发射。
 - **已完成**：旧 wave 正常路径 hats（forge-dispatcher / worktree / LLM integrator / wave-fixer）及其 wave-only schema/topic 已从 builtin DAG 拓扑退役；静态 WAC/runtime-contract 已按 runtime control-plane 接缝同步，scripted preset verification 与 parallel-forge mock E2E 场景已通过。
-- **仍属后续收口**：BDD×9、真实 authoritative DAG canary/crash matrix 仍待处理。author/review skill references、mock E2E、DAG 资源准入接线与 PMI-004/TG-S13 的 process-group 清理已完成。
+- **仍属后续收口**：BDD×9、authoritative DAG 的完整 crash matrix 仍待处理；真实 executor canary 已补齐。author/review skill references、mock E2E、DAG 资源准入接线与 PMI-004/TG-S13 的 process-group 清理已完成。
 - **inspect 语义**：`scheduler_mode ≠ wave` 时 `ralph inspect loop --format json` 输出只读 `scheduler` 块（空计数 = 零观测的如实反映，非伪造）。
 - **promote 前置义务清单（follow-up 载体，本 notes 即 git-tracked 认领）**——任何「把 DAG 调度器接进 EventLoop」的 PR 必须同批交付，缺一即半接线（TG-S05 变红 = P0）：
   1. `DagSchedulerDriver::observe_accepted` 接入真实 EventLoop acceptance 路径。**已完成**：driver 消费 `forge.unit.*` per-unit 族，runtime 在 accepted 边界调用并继续推进 pipeline。
   2. `JobPipeline`/`DagPools`/`RuntimeJob` kernel promote 到非 `#[cfg(test)]`(**Step 1 已落地**,item 级 `#[allow(dead_code)]` 过渡标注),容量模型与 `max_concurrent_workers` 收敛为单一权威(plan D16:`dag_pools` 默认各等于 `max_concurrent_workers`)——**已落地**。
-  3. U5 shadow parity（dag_shadow 在共同边界 exact parity）+ U10 §7 第 7 条 authoritative DAG canary（真实 runtime jobs + 临时 git worktrees + 完整 crash matrix）。**运行时主链已接通；canary 与 crash matrix 回归仍待补齐。**
+  3. U5 shadow parity（dag_shadow 在共同边界 exact parity）+ U10 §7 第 7 条 authoritative DAG canary（真实 runtime jobs + 临时 git worktrees + 完整 crash matrix）。**运行时主链与单 executor canary 已接通；完整 crash matrix 回归仍待补齐。**
   4. BDD ×9（plan U10 第 9 条：immediate refill / receipt crash / attempt forgery / env-path guard / sibling candidate / integrated task close / correction / resume / final once）。mock E2E 已完成；九个真实 EventLoop 场景仍待补齐。
   5. **已完成**：退休 wave 正常路径 hats（forge-dispatcher / worktree hat / LLM integrator / wave-fixer），清理孤儿 topic 并同步 schema。
   6. 文档同步：`CLAUDE.md`/`AGENTS.md` 过渡态段翻转 + `crates/ralph-core/data/*.md`（若 agent-facing 命令语义实际改变）。
