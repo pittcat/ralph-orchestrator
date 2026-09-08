@@ -1454,6 +1454,39 @@ units:
         )
     }
 
+    #[cfg(feature = "supervisor-db")]
+    fn counting_job_exec_context(workspace: &Path, counter: &Path) -> DagExecutionContext {
+        let mut config = RalphConfig::default();
+        config.hats.insert(
+            HAT_EXECUTOR.to_string(),
+            HatConfig {
+                name: HAT_EXECUTOR.to_string(),
+                instructions: "execute one recovery fixture unit".to_string(),
+                timeout: Some(10),
+                ..HatConfig::default()
+            },
+        );
+        let mut cli = CliConfig::default();
+        cli.backend = "custom".to_string();
+        cli.command = Some("sh".to_string());
+        cli.prompt_mode = "stdin".to_string();
+        let counter = counter.to_string_lossy().replace('\'', "'\\''");
+        cli.args = vec![
+            "-c".to_string(),
+            format!(
+                "printf '%s\\n' spawn >> '{counter}'; sleep 2; printf '%s\\n' '{{\"topic\":\"forge.unit.executed\",\"payload\":\"{{}}\"}}' >> \"$RALPH_EVENTS_FILE\""
+            ),
+        ];
+        let backend = CliBackend::from_config(&cli).expect("counting backend builds");
+        DagExecutionContext::new(
+            &config,
+            &backend,
+            "loop-test",
+            workspace.join("events.jsonl"),
+            None,
+        )
+    }
+
     fn init_git_fixture(workspace: &Path) -> String {
         for args in [
             &["init", "-q"][..],
@@ -1596,6 +1629,82 @@ units:
                 .join(".ralph/worktrees/loop-test-U1")
                 .is_dir(),
             "executor must run in its isolated unit worktree"
+        );
+    }
+
+    /// A real worker already reserved before a runtime restart must be
+    /// adopted from the durable journal, never launched a second time.
+    #[cfg(feature = "supervisor-db")]
+    #[tokio::test]
+    async fn recovery_adopts_real_worker_without_duplicate_spawn() {
+        let (tmp, mut first) = dag_fixture();
+        let base = init_git_fixture(tmp.path());
+        first
+            .plans
+            .get_mut("pf-test")
+            .expect("fixture plan registered")
+            .verified_base_commit = Some(base.clone());
+        first
+            .journal()
+            .expect("durable journal")
+            .record_verified_base("pf-test", &base, 1)
+            .expect("pin verified base");
+        let counter = tmp.path().join("spawn-count.txt");
+        first.attach_execution_context(counting_job_exec_context(tmp.path(), &counter));
+        first.maybe_spawn_executor("pf-test", "U1");
+
+        for _ in 0..100 {
+            let pid_recorded = first
+                .journal()
+                .expect("durable journal")
+                .list_jobs("pf-test")
+                .expect("list jobs")
+                .iter()
+                .any(|job| job.identity.unit_id == "U1" && job.pid.is_some());
+            if pid_recorded && counter.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            std::fs::read_to_string(&counter)
+                .expect("worker startup counter")
+                .lines()
+                .count(),
+            1,
+            "the first runtime launches exactly one child"
+        );
+        drop(first);
+
+        let mut recovered = DagSchedulerRuntime::new(
+            SchedulerMode::Dag,
+            ResolvedDagPools {
+                global: 4,
+                executor: 2,
+                reviewer: 2,
+                verifier: 2,
+                fixer: 2,
+            },
+            tmp.path().to_path_buf(),
+        );
+        recovered.attach_execution_context(counting_job_exec_context(tmp.path(), &counter));
+        recovered.recover_after_restart();
+        for _ in 0..200 {
+            recovered.drain_completions();
+            if !recovered.merge_queue.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert!(!recovered.merge_queue.is_empty(), "recovery adopts the worker result");
+        assert_eq!(
+            std::fs::read_to_string(&counter)
+                .expect("worker startup counter")
+                .lines()
+                .count(),
+            1,
+            "restart recovery must not spawn a duplicate child"
         );
     }
 
