@@ -392,17 +392,12 @@ impl DagSchedulerRuntime {
             );
             return;
         }
-        // `tests` entries are plain argv words; shell metacharacters
-        // (quotes, pipes, redirects) are not interpreted by design.
+        // `tests` entries are argv strings; quotes only group an argument and
+        // shell metacharacters are never interpreted by the runtime.
         let gate_commands: Vec<GateCommandSpec> = tests
             .iter()
             .filter_map(|cmd| {
-                let mut words = cmd.split_whitespace();
-                let program = words.next()?.to_string();
-                Some(GateCommandSpec {
-                    program,
-                    args: words.map(str::to_string).collect(),
-                })
+                parse_gate_command(cmd).map(|(program, args)| GateCommandSpec { program, args })
             })
             .collect();
         if gate_commands.is_empty() {
@@ -576,6 +571,83 @@ impl DagSchedulerRuntime {
             None,
         );
     }
+}
+
+/// Parse one execution-plan test entry into argv without invoking a shell.
+/// Whitespace separates words outside quotes; single/double quotes group
+/// characters and backslash escapes the following character. Shell operators
+/// remain ordinary argument characters, so the gate cannot gain shell
+/// expansion as a side effect of supporting quoted paths or labels.
+fn parse_gate_command(command: &str) -> Option<(String, Vec<String>)> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+    }
+
+    let mut quote = Quote::None;
+    let mut escaped = false;
+    let mut token = String::new();
+    let mut words = Vec::new();
+    let mut token_started = false;
+
+    for ch in command.chars() {
+        if escaped {
+            token.push(ch);
+            token_started = true;
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Quote::Single => {
+                if ch == '\'' {
+                    quote = Quote::None;
+                } else {
+                    token.push(ch);
+                }
+                token_started = true;
+            }
+            Quote::Double => match ch {
+                '"' => quote = Quote::None,
+                '\\' => escaped = true,
+                _ => token.push(ch),
+            },
+            Quote::None => match ch {
+                '\'' => {
+                    quote = Quote::Single;
+                    token_started = true;
+                }
+                '"' => {
+                    quote = Quote::Double;
+                    token_started = true;
+                }
+                '\\' => {
+                    escaped = true;
+                    token_started = true;
+                }
+                c if c.is_whitespace() => {
+                    if token_started {
+                        words.push(std::mem::take(&mut token));
+                        token_started = false;
+                    }
+                }
+                _ => {
+                    token.push(ch);
+                    token_started = true;
+                }
+            },
+        }
+    }
+
+    if escaped || quote != Quote::None {
+        return None;
+    }
+    if token_started {
+        words.push(token);
+    }
+    let program = words.first()?.clone();
+    Some((program, words.into_iter().skip(1).collect()))
 }
 
 /// Read the unit branch tip: the executor's commit is the ONLY
@@ -913,5 +985,39 @@ units:
             1,
             "terminal event emitted exactly once"
         );
+    }
+
+    #[test]
+    fn gate_command_parser_preserves_quoted_arguments() {
+        assert_eq!(
+            parse_gate_command("cargo nextest run --package 'ralph core' -- 'test name'")
+                .expect("quoted command parses"),
+            (
+                "cargo".to_string(),
+                vec![
+                    "nextest".to_string(),
+                    "run".to_string(),
+                    "--package".to_string(),
+                    "ralph core".to_string(),
+                    "--".to_string(),
+                    "test name".to_string(),
+                ]
+            )
+        );
+        assert_eq!(
+            parse_gate_command(r#"tool "path with spaces" escaped\ value"#)
+                .expect("double quotes and escapes parse"),
+            (
+                "tool".to_string(),
+                vec!["path with spaces".to_string(), "escaped value".to_string()]
+            )
+        );
+    }
+
+    #[test]
+    fn gate_command_parser_rejects_unterminated_quotes_or_escapes() {
+        assert!(parse_gate_command("cargo test '").is_none());
+        assert!(parse_gate_command("cargo test \\").is_none());
+        assert!(parse_gate_command("   ").is_none());
     }
 }
