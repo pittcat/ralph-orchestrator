@@ -89,6 +89,7 @@ mechanism:
         runs: forge.development_loop
         "on": forge.concurrency.approved
         allowed_emits:
+          - forge.worktrees.ready
           - forge.wave.worktrees.ready
           - forge.wave.prepare
           - exec.unit.ready

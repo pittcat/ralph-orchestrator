@@ -33,11 +33,16 @@ impl EventLoop {
     ///   the gate the `mode == Dag` guard keeps the legacy path
     ///   byte-identical.
     pub(super) fn is_runtime_driven_suppressed(&self, hat_id: &HatId) -> bool {
-        self.config.event_loop.supervisor.scheduler_mode == SchedulerMode::Dag
+        self.dag_runtime_attached
+            && self.config.event_loop.supervisor.scheduler_mode == SchedulerMode::Dag
             && self
                 .registry
                 .get_config(hat_id)
                 .is_some_and(|config| config.runtime_driven)
+    }
+
+    pub fn attach_dag_runtime(&mut self) {
+        self.dag_runtime_attached = true;
     }
 
     pub(super) fn determine_active_hat_ids(&self, events: &[Event]) -> Vec<HatId> {

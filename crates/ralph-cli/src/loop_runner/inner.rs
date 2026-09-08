@@ -1204,6 +1204,7 @@ pub(super) async fn run_loop_impl_inner(
     // ledger path) to the DAG seam. No-op in wave / dag_shadow mode;
     // spawning still only starts once forge seam events arrive.
     if let Some(dag) = dag_scheduler.as_mut() {
+        event_loop.attach_dag_runtime();
         dag.attach_execution_context(
             crate::loop_runner::dag_scheduler::DagExecutionContext::new(
                 &config,

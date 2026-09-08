@@ -434,6 +434,10 @@ pub struct EventLoop {
     /// in sync.
     pub(crate) execution_contract:
         Option<std::sync::Arc<crate::execution_contract::EffectiveExecutionContract>>,
+    /// True only after the production loop attaches its DAG execution
+    /// driver. Standalone preset verification uses the same config in a
+    /// scripted EventLoop but has no runtime driver to own those hats.
+    pub(crate) dag_runtime_attached: bool,
     /// Snapshot captured immediately before each hat activation. Read-only
     /// audits compare against this activation baseline so pre-existing
     /// foreign dirt is not misattributed to the reviewer.
