@@ -2352,6 +2352,14 @@ fn test_parallel_forge_resume_correction_runtime() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// DAG resume must continue from the accepted executed boundary without
+/// activating the executor again or replaying its terminal event.
+#[test]
+fn test_parallel_forge_dag_resume_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_dag_resume_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// U3 (plan 2026-08-03-004) / S7: a repeated manifest bootstrap is a
 /// no-op — one recovery obligation, one activation per resumed hat.
 #[test]

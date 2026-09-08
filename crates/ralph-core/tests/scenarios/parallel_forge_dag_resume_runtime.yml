@@ -1,0 +1,69 @@
+# Runtime BDD for resuming a DAG unit after its executed boundary was
+# accepted. The resume starts at review, so the executor event is not
+# replayed and the unit can continue to verification and completion.
+
+name: pf_dag_resume_runtime
+description: DAG resume rebinds an accepted executed boundary directly to review
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 8
+  event_loop:
+    execution_mode: isolated
+    starting_event: forge.start
+    completion_promise: LOOP_COMPLETE
+  hats:
+    pf-executor:
+      subscribes_to: [forge.start]
+      publishes: [forge.unit.executed]
+    pf-reviewer:
+      subscribes_to: [forge.unit.executed]
+      publishes: [forge.unit.reviewed]
+    pf-verifier:
+      subscribes_to: [forge.unit.reviewed]
+      publishes: [forge.unit.verified]
+    pf-reporter:
+      subscribes_to: [forge.unit.verified]
+      publishes: [LOOP_COMPLETE]
+
+resume_bootstrap:
+  accepted:
+    - topic: forge.unit.executed
+      hat: pf-executor
+  pending_hat: pf-reviewer
+  original_trigger:
+    topic: forge.unit.executed
+    hat: pf-executor
+    payload: '{"plan_key":"pf-dag-resume","unit_id":"U1","attempt":0,"execution_status":"accepted"}'
+
+mock_responses:
+  - hat: pf-reviewer
+    text: |
+      <event topic="forge.unit.reviewed">
+      {"plan_key":"pf-dag-resume","unit_id":"U1","attempt":0,"verdict":"ACCEPTED"}
+      </event>
+  - hat: pf-verifier
+    text: |
+      <event topic="forge.unit.verified">
+      {"plan_key":"pf-dag-resume","unit_id":"U1","attempt":0,"verification_status":"passed"}
+      </event>
+  - hat: pf-reporter
+    text: |
+      <event topic="LOOP_COMPLETE">
+      {"reason":"DAG resume completed"}
+      </event>
+
+expected:
+  iterations: 3
+  activation_hats:
+    - pf-reviewer
+    - pf-verifier
+    - pf-reporter
+  events:
+    - topic: forge.unit.reviewed
+    - topic: forge.unit.verified
+    - topic: LOOP_COMPLETE
+  absent_events:
+    - topic: forge.unit.executed
+    - topic: work.failed
+  completion: true
