@@ -1455,6 +1455,27 @@ units:
         assert_eq!(runtime.pipeline_stage("U-nope"), None);
     }
 
+    #[test]
+    fn correction_request_reenters_unit_at_fixer_attempt() {
+        let (tmp, mut runtime) = fixture(SchedulerMode::Dag);
+        runtime.observe_accepted_events(&[plan_ready_event(tmp.path())]);
+        runtime.observe_accepted_events(&[approved_event()]);
+
+        let correction = ralph_proto::Event::new(
+            seam_topics::CORRECTION_REQUESTED,
+            serde_json::json!({
+                "plan_key": "pf-test",
+                "affected_unit_ids": ["U1"],
+                "correction_request_path": ".ralph/forge/pf-test/failures/U1.md",
+            })
+            .to_string(),
+        );
+        runtime.observe_accepted_events(&[correction]);
+
+        assert_eq!(runtime.pipeline_stage("U1"), Some(Stage::Review));
+        assert_eq!(runtime.pipeline.attempt_of("U1"), Some(1));
+    }
+
     /// The observation tick reflects dependency gating: with no
     /// integration head (fixture is not a git repo) every unit is
     /// reported `BlockedNoTargetHead`.

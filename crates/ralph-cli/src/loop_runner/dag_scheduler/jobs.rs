@@ -498,6 +498,11 @@ impl JobPipeline {
         self.state.units.get(unit_key).map(|u| u.stage)
     }
 
+    #[cfg(test)]
+    pub fn attempt_of(&self, unit_key: &str) -> Option<u64> {
+        self.state.units.get(unit_key).map(|u| u.attempt)
+    }
+
     /// Mark a Unit as `StillExecuting` — used by the driver
     /// when the kernel's `collect_with_deadline` returns
     /// `CollectFailed` (i.e. the subprocess has not yet exited).
@@ -553,13 +558,7 @@ mod tests {
     #[test]
     fn restore_unit_rehydrates_state_without_reserving_a_slot() {
         let mut pipeline = JobPipeline::new(DagPools::small_test_default());
-        let state = pipeline.restore_unit(
-            "forge:plan:U1",
-            "job-1",
-            "reviewer",
-            Stage::Review,
-            2,
-        );
+        let state = pipeline.restore_unit("forge:plan:U1", "job-1", "reviewer", Stage::Review, 2);
         assert_eq!(state.job_id, "job-1");
         assert_eq!(state.attempt, 2);
         assert_eq!(state.in_flight, 0);
