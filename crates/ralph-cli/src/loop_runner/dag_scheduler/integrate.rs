@@ -1103,14 +1103,14 @@ units:
     #[cfg(feature = "supervisor-db")]
     #[test]
     fn recovery_blocks_acked_integration_without_ledger_event() {
-        let (tmp, mut runtime) = git_fixture(PLAN_ARTIFACT, false);
-        let target_branch = runtime
+        let (tmp, mut first) = git_fixture(PLAN_ARTIFACT, false);
+        let target_branch = first
             .plans
             .get("pf-test")
             .expect("plan")
             .target_branch
             .clone();
-        let store = runtime
+        let store = first
             .journal()
             .expect("durable journal")
             .shared_with_integration();
@@ -1125,11 +1125,24 @@ units:
             })
             .expect("record integration");
         store.ack("U1", &target_branch).expect("ack integration");
+        drop(first);
 
-        runtime.reconcile_after_restart();
-        runtime.maybe_emit_development_done();
+        let mut recovered = DagSchedulerRuntime::new(
+            SchedulerMode::Dag,
+            ResolvedDagPools {
+                global: 4,
+                executor: 2,
+                reviewer: 2,
+                verifier: 2,
+                fixer: 2,
+            },
+            tmp.path().to_path_buf(),
+        );
+        recovered.attach_execution_context(exec_context(tmp.path()));
+        recovered.recover_after_restart();
+        recovered.maybe_emit_development_done();
 
-        assert!(runtime.blocked_plans.contains("pf-test"));
+        assert!(recovered.blocked_plans.contains("pf-test"));
         assert_eq!(ledger_contains(tmp.path(), UNIT_INTEGRATED), 0);
         assert_eq!(ledger_contains(tmp.path(), DEVELOPMENT_DONE), 0);
     }
