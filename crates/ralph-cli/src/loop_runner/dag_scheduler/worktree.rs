@@ -414,6 +414,16 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// Canonicalize two paths before comparing. On macOS the same
+    /// physical directory may appear as `/var/folders/...` from one
+    /// caller and `/private/var/folders/...` from another (`/var` is a
+    /// symlink to `/private/var`), so raw `PathBuf::eq` reports drift
+    /// for what is actually the same worktree on disk.
+    fn same_worktree(a: &Path, b: &Path) -> bool {
+        let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        canon(a) == canon(b)
+    }
+
     fn init_repo_with_initial_commit() -> (TempDir, PathBuf, String) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo = tmp.path().to_path_buf();
@@ -450,7 +460,12 @@ mod tests {
         let first = UnitWorktree::acquire(&repo, "loop-1", "U1", &base).expect("first");
         let second = UnitWorktree::acquire(&repo, "loop-1", "U1", &base).expect("second");
         assert!(second.reused);
-        assert_eq!(first.path, second.path);
+        assert!(
+            same_worktree(&first.path, &second.path),
+            "second acquire must bind the same on-disk worktree (first={:?}, second={:?})",
+            first.path,
+            second.path
+        );
         assert_eq!(first.branch, second.branch);
     }
 
@@ -463,7 +478,12 @@ mod tests {
         run_git(&wt.path, &["commit", "-qm", "unit implementation"]);
         let head = run_git(&wt.path, &["rev-parse", "HEAD"]);
         let resumed = UnitWorktree::resume(&repo, "loop-1", "U1", &base, &head).unwrap();
-        assert_eq!(resumed.path, wt.path);
+        assert!(
+            same_worktree(&resumed.path, &wt.path),
+            "resume must rebind the same on-disk worktree (wt={:?}, resumed={:?})",
+            wt.path,
+            resumed.path
+        );
         assert_eq!(resumed.base_commit, base);
         assert_eq!(run_git(&resumed.path, &["rev-parse", "HEAD"]), head);
         assert_eq!(run_git(&repo, &["rev-parse", "HEAD"]), base);
@@ -831,37 +851,48 @@ mod tests {
         );
     }
 
-    /// TG-S10③ 现状 pin: 并发 acquire 同一 (loop, unit) 在 tip 匹配
-    /// 时双双走 reuse 分支——两个 UnitWorktree 绑定同一 path,无任何
-    /// 进程级互斥(double-attach 窗口)。
+    /// TG-S10③ Double-attach shape (post-flip): two callers racing past
+    /// `read_branch_tip` both see branch == verified_base, so both walk
+    /// the reuse branch and bind the same physical worktree directory.
+    /// The second `acquire` returns `reused = true` and points at the
+    /// same on-disk path as the first — there is no lease, mutex, or
+    /// owner registry yet, but downstream callers must not assume the
+    /// returned `UnitWorktree` is exclusive.
     ///
-    /// 沙箱实测(2026-09-05): `git worktree add -B` 对「分支已被另一
-    /// worktree 持有」的重指自身 fail-closed(exit 128),所以
-    /// PMI-008③ 字面描述的「-B 重指正在被使用的分支」被 git 挡住;
-    /// 真实暴露面是本测试钉住的 double-attach。**预期 GREEN**(现状
-    /// 如实);变绿失败 = acquire 加了 repo 级锁/互斥,按消息指引
-    /// 翻转为「第二 acquire 走 reuse 拒绝或串行化」断言。
+    /// We canonicalize before comparing because macOS reports
+    /// `tempfile` paths as `/var/folders/...` from one caller and
+    /// `/private/var/folders/...` from another (`/var` is a symlink to
+    /// `/private/var`); raw `PathBuf::eq` would falsely report drift
+    /// for the same physical directory.
     #[test]
-    fn tg_s10_concurrent_acquire_same_unit_double_attach_transitional_pin() {
+    fn tg_s10_concurrent_acquire_same_unit_double_attach_shape() {
         let (_tmp, repo, base) = init_repo_with_initial_commit();
         // First acquire establishes the worktree.
         let first = UnitWorktree::acquire(&repo, "loop-1", "U1", &base).expect("first");
         assert!(!first.reused);
 
-        // A second acquire of the SAME (loop, unit, base) — what two
-        // concurrent callers racing past `read_branch_tip` both see —
-        // currently succeeds and hands back a SECOND live binding to the
-        // same path (no mutex, no lease, no owner registration).
+        // Second acquire of the SAME (loop, unit, base): both callers
+        // race past `read_branch_tip`, both take the reuse branch, and
+        // both bind the same on-disk directory. Asserting the
+        // double-attach shape (NOT a refusal/serialization) pins the
+        // current acquire contract; if acquire ever gains mutual
+        // exclusion or a lease, this test must be revisited and either
+        // updated to assert the new shape or removed.
         let second = UnitWorktree::acquire(&repo, "loop-1", "U1", &base)
-            .expect("second acquire currently succeeds (transitional)");
+            .expect("second acquire reuses the existing worktree");
 
         assert!(
-            second.reused && second.path == first.path,
-            "TG-S10③ transitional pin drifted: second acquire no longer \
-             double-attaches (it refused or moved the worktree). Good — \
-             acquire gained a mutual-exclusion or lease mechanism. Flip \
-             this pin to assert the refusal/serialization shape and \
-             delete this transitional expectation."
+            second.reused,
+            "second acquire must take the reuse branch when the branch \
+             already exists at the verified base (got fresh create; the \
+             reuse-branch shape was lost)"
+        );
+        assert!(
+            same_worktree(&second.path, &first.path),
+            "second acquire must bind the same physical worktree as the \
+             first (first={:?}, second={:?})",
+            first.path,
+            second.path
         );
     }
 
