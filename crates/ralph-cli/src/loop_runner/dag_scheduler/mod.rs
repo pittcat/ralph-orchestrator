@@ -420,6 +420,7 @@ impl DagSchedulerRuntime {
                 }
             }
         }
+        self.reconcile_after_restart();
     }
 
     #[cfg(not(feature = "supervisor-db"))]

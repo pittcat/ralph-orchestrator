@@ -64,6 +64,109 @@ pub(crate) struct PendingIntegration {
 }
 
 impl DagSchedulerRuntime {
+    /// Reconcile durable integration records with the trusted ledger after a
+    /// restart. An unacked record is safe to re-emit only when its prior
+    /// coordination event is absent; if the event is present, the missing
+    /// acknowledgement means the task projection is uncertain and the plan
+    /// is blocked instead of being acknowledged speculatively.
+    #[cfg(feature = "supervisor-db")]
+    pub(super) fn reconcile_after_restart(&mut self) {
+        let Some(main_events_file) = self.exec.as_ref().map(|exec| exec.main_events_file.clone()) else {
+            return;
+        };
+        let ledger = crate::loop_runner::wave::io::read_worker_events(&main_events_file);
+        let Some(journal) = self.journal() else {
+            return;
+        };
+        let integration_store = journal.shared_with_integration();
+        let plans: Vec<(String, String, Vec<String>)> = self
+            .plans
+            .iter()
+            .map(|(key, plan)| {
+                (
+                    key.clone(),
+                    plan.target_branch.clone(),
+                    plan.units.iter().map(|unit| unit.unit_id.clone()).collect(),
+                )
+            })
+            .collect();
+        for (plan_key, target_branch, unit_ids) in plans {
+            for unit_id in unit_ids {
+                let Ok(records) = integration_store.list_for_unit(&unit_id) else {
+                    self.block_plan(&plan_key, "integration reconciliation read failed");
+                    continue;
+                };
+                let Some(record) = records
+                    .into_iter()
+                    .find(|record| record.target_branch == target_branch && !record.acked)
+                else {
+                    continue;
+                };
+                let event_present = ledger.iter().any(|event| {
+                    if event.topic != UNIT_INTEGRATED {
+                        return false;
+                    }
+                    event
+                        .payload
+                        .as_deref()
+                        .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
+                        .is_some_and(|payload| {
+                            payload.get("plan_key").and_then(Value::as_str) == Some(&plan_key)
+                                && payload.get("unit_id").and_then(Value::as_str) == Some(&unit_id)
+                        })
+                });
+                if event_present {
+                    self.block_plan(
+                        &plan_key,
+                        "integrated event exists but durable acknowledgement is missing",
+                    );
+                    continue;
+                }
+                let task_key = format!("forge:{plan_key}:{unit_id}");
+                let payload = serde_json::json!({
+                    "unit_id": unit_id,
+                    "plan_key": plan_key,
+                    "task_id": self.resolve_task_id(&task_key),
+                    "task_key": task_key,
+                    "integrated_commit": record.integrated_commit,
+                });
+                if let Err(err) = append_supervisor_coord_event(
+                    &main_events_file,
+                    UNIT_INTEGRATED,
+                    &payload,
+                ) {
+                    self.block_plan(&plan_key, "integration event re-emission failed");
+                    warn!(plan_key, error = %err, "DAG recovery: integrated event re-emit failed");
+                }
+            }
+            if journal
+                .has_terminal_emit(&plan_key, DEVELOPMENT_DONE)
+                .unwrap_or(false)
+                && !ledger.iter().any(|event| {
+                    event.topic == DEVELOPMENT_DONE
+                        && event
+                            .payload
+                            .as_deref()
+                            .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
+                            .and_then(|payload| {
+                                (payload.get("plan_key").and_then(Value::as_str)
+                                    == Some(&plan_key))
+                                    .then_some(())
+                            })
+                            .is_some()
+                })
+            {
+                self.block_plan(
+                    &plan_key,
+                    "development.done fence exists but trusted ledger event is missing",
+                );
+            }
+        }
+    }
+
+    #[cfg(not(feature = "supervisor-db"))]
+    pub(super) fn reconcile_after_restart(&mut self) {}
+
     /// Queue a verified unit for integration. Deduped against the
     /// pending queue and the already-integrated set.
     pub(crate) fn queue_integration(&mut self, plan_key: &str, unit_id: &str) {
