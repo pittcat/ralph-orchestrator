@@ -604,6 +604,11 @@ pub struct CanonicalPlanHandoff {
     /// Verified per-unit resource claims, keyed by unit id. Units without
     /// claims are absent, matching the optional `unit_tests` representation.
     pub unit_resource_claims: HashMap<String, Vec<ResourceClaim>>,
+    /// Verified per-unit path policy from the execution artifact. The
+    /// scheduler/integration lane uses these roots to reject changes outside
+    /// the Unit's declared scope; absent entries preserve legacy artifacts.
+    pub unit_allowed_paths: HashMap<String, Vec<String>>,
+    pub unit_forbidden_paths: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -636,6 +641,12 @@ struct ExecutionPlanUnit {
     /// stay byte-identical).
     #[serde(default)]
     tests: Vec<String>,
+    /// Optional path policy authored by the Unit. `/**` suffixes are
+    /// normalized to directory roots before the policy reaches the lane.
+    #[serde(default)]
+    allowed_paths: Vec<String>,
+    #[serde(default)]
+    forbidden_paths: Vec<String>,
 }
 
 /// Read, verify, and derive the canonical Parallel Forge task schedule.
@@ -722,6 +733,8 @@ fn derive_plan_handoff(
     let execution_waves = derive_execution_waves(&plan.units)?;
     let mut unit_tests: HashMap<String, Vec<String>> = HashMap::new();
     let mut unit_resource_claims: HashMap<String, Vec<ResourceClaim>> = HashMap::new();
+    let mut unit_allowed_paths: HashMap<String, Vec<String>> = HashMap::new();
+    let mut unit_forbidden_paths: HashMap<String, Vec<String>> = HashMap::new();
     let mut tasks = Vec::with_capacity(plan.units.len());
     let mut wave_sizes: HashMap<u32, usize> = HashMap::new();
     for unit in plan.units {
@@ -731,6 +744,15 @@ fn derive_plan_handoff(
         }
         if !unit.resource_claims.is_empty() {
             unit_resource_claims.insert(unit.id.clone(), unit.resource_claims.clone());
+        }
+        let allowed_paths = normalize_path_policy(&unit.id, "allowed_paths", &unit.allowed_paths)?;
+        if !allowed_paths.is_empty() {
+            unit_allowed_paths.insert(unit.id.clone(), allowed_paths);
+        }
+        let forbidden_paths =
+            normalize_path_policy(&unit.id, "forbidden_paths", &unit.forbidden_paths)?;
+        if !forbidden_paths.is_empty() {
+            unit_forbidden_paths.insert(unit.id.clone(), forbidden_paths);
         }
         let depends_on_task_keys = unit
             .depends_on
@@ -775,7 +797,43 @@ fn derive_plan_handoff(
         unit_tests,
         resource_capacities: plan.resource_capacities,
         unit_resource_claims,
+        unit_allowed_paths,
+        unit_forbidden_paths,
     })
+}
+
+/// Convert the template's bounded path syntax into the prefix roots used by
+/// the changed-path guard. Only a trailing `/**` glob is supported; accepting
+/// arbitrary glob syntax here would make the integration authorization
+/// semantics ambiguous.
+fn normalize_path_policy(
+    unit_id: &str,
+    field: &str,
+    paths: &[String],
+) -> Result<Vec<String>, HandoffError> {
+    let mut normalized = Vec::with_capacity(paths.len());
+    for raw in paths {
+        let trimmed = raw.trim();
+        let path = trimmed.strip_suffix("/**").unwrap_or(trimmed);
+        let valid = !path.is_empty()
+            && !path.starts_with('/')
+            && !path.contains('*')
+            && !path.contains('?')
+            && !path.split('/').any(|component| {
+                component.is_empty() || component == "." || component == ".."
+            });
+        if !valid {
+            return Err(HandoffError::ParseError {
+                source: format!(
+                    "unit '{unit_id}' has invalid {field} path '{raw}'; expected a relative path or trailing /**"
+                ),
+            });
+        }
+        normalized.push(path.to_string());
+    }
+    normalized.sort_unstable();
+    normalized.dedup();
+    Ok(normalized)
 }
 
 /// Compute the earliest safe execution wave from dependency edges.
@@ -1358,6 +1416,52 @@ units:
         let bytes = std::fs::read(temp.path().join("execution-plan.yml")).expect("read plan");
         let canonical = crate::artifact_canonicalizer::canonicalize(&bytes).expect("canon");
         assert_eq!(first.artifact.digest, canonical.digest);
+    }
+
+    #[test]
+    fn unit_path_policy_survives_verified_handoff() {
+        let raw = br#"version: 1
+plan_key: pf-paths
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1
+    allowed_paths: [src/**, tests/**]
+    forbidden_paths: [secrets/**]
+  - id: U2
+    title: Feature
+    depends_on: []
+    execution_wave: 1
+    integration_order: 2
+    target_branch: feat/u2
+    allowed_paths: [src/**]
+"#;
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("execution-plan.yml"), raw).expect("write plan");
+        let handoff = load_plan_handoff(
+            &json!({
+                "execution_plan_path": "execution-plan.yml",
+                "plan_key": "pf-paths",
+            }),
+            temp.path(),
+        )
+        .expect("path policy must load");
+
+        assert_eq!(
+            handoff.unit_allowed_paths.get("U1"),
+            Some(&vec!["src".to_string(), "tests".to_string()])
+        );
+        assert_eq!(
+            handoff.unit_forbidden_paths.get("U1"),
+            Some(&vec!["secrets".to_string()])
+        );
+        assert_eq!(
+            handoff.unit_allowed_paths.get("U2"),
+            Some(&vec!["src".to_string()])
+        );
     }
 
     #[test]

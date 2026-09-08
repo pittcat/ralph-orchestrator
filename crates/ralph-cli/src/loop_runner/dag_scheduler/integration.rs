@@ -58,7 +58,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ralph_core::supervisor::changed_path_guard::{
-    ChangedPathError, ChangedPathRejection, ChangedPathSet, DiffPathEntry,
+    ChangedPathError, ChangedPathRejection, ChangedPathSet, DiffPathEntry, DiffStatus,
 };
 // `FORBIDDEN_TOP_LEVEL_PREFIXES` is referenced only from the
 // `tests` module below (bin compilation has no other use), so
@@ -76,6 +76,10 @@ use ralph_core::supervisor::integration_lane::{
 
 #[allow(unused_imports)]
 use super::worktree::UnitWorktree;
+
+fn path_is_forbidden(path: &std::path::Path, forbidden: &[PathBuf]) -> bool {
+    forbidden.iter().any(|root| path.starts_with(root))
+}
 
 /// What the orchestrator was given as input. The lane expects
 /// its own [`IntegrationCandidate`]; this struct adds the
@@ -103,6 +107,9 @@ pub struct IntegrationRequest {
     /// Sourced from the job's declared changed-set. Re-checked
     /// at lock time alongside the allowlist.
     pub declared_paths: Vec<PathBuf>,
+    /// Additional Unit-level paths that must never be changed. These are
+    /// checked for both sides of a rename before the lane can mutate target.
+    pub forbidden_paths: Vec<PathBuf>,
     pub created_at_ms: i64,
 }
 
@@ -132,6 +139,8 @@ pub enum IntegrationError {
     ChangedPathRejected(#[from] ChangedPathRejection),
     #[error("lane error: {0}")]
     Lane(#[from] LaneError),
+    #[error("changed path is forbidden by the Unit policy: {0}")]
+    ForbiddenPath(String),
     #[error("integration store error: {0}")]
     Store(#[from] ralph_core::supervisor::dag_integration::IntegrationStoreError),
 }
@@ -184,6 +193,15 @@ where
         // rejects the candidate.
         let set = ChangedPathSet::from_diff_entries(req.changed_paths.clone())?;
         let _authorised = set.is_clean_within(&req.allowlist, &req.declared_paths, &req.unit_id)?;
+        for entry in &req.changed_paths {
+            if path_is_forbidden(&entry.path, &req.forbidden_paths)
+                || matches!(&entry.status, DiffStatus::Renamed { from } if path_is_forbidden(from, &req.forbidden_paths))
+            {
+                return Err(IntegrationError::ForbiddenPath(
+                    entry.path.display().to_string(),
+                ));
+            }
+        }
 
         // Step 3: build the lane's `IntegrationCandidate` and
         // acquire the per-target lease.
@@ -463,6 +481,7 @@ mod tests {
             // (forbidden prefix, symlink) short-circuit at earlier
             // checks before the declared-set gate runs.
             declared_paths: vec![PathBuf::from("src")],
+            forbidden_paths: Vec::new(),
             created_at_ms: 1_700_000_000_000,
         }
     }
@@ -554,6 +573,30 @@ mod tests {
             IntegrationError::ChangedPathRejected(ChangedPathRejection::ForbiddenPath(_))
         ));
         // Lane must still be free (we never acquired).
+        assert!(
+            orch.lane
+                .core
+                .current_holder("feat/integration")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn orchestrator_rejects_unit_forbidden_path_policy() {
+        let port = Arc::new(FakeGitIntegrationPort::new());
+        port.set_head("feat/integration", "BASE_OID");
+        port.set_unit_tree("UNIT_OID", "TREE_OID");
+        let orch = orchestrator_with_fake(&port);
+
+        let mut req = base_request();
+        req.changed_paths = vec![entry("src/private/file.txt")];
+        req.forbidden_paths = vec![PathBuf::from("src/private")];
+        let err = orch.integrate(req).expect_err("unit policy must reject");
+        assert!(matches!(
+            err,
+            IntegrationError::ForbiddenPath(path) if path == "src/private/file.txt"
+        ));
         assert!(
             orch.lane
                 .core
@@ -1198,6 +1241,7 @@ mod tests {
                 }],
                 allowlist: vec![PathBuf::from("base.txt")],
                 declared_paths: vec![PathBuf::from("base.txt")],
+                forbidden_paths: Vec::new(),
                 created_at_ms: 1_700_000_000_000,
             })
             .expect("integrate runs the decision flow");
@@ -1313,6 +1357,7 @@ mod tests {
                 }],
                 allowlist: vec![PathBuf::from("u1.txt")],
                 declared_paths: vec![PathBuf::from("u1.txt")],
+                forbidden_paths: Vec::new(),
                 created_at_ms: 1_700_000_000_000,
             })
             .expect("integrate must succeed for a passing gate");
@@ -1399,6 +1444,7 @@ mod tests {
                 }],
                 allowlist: vec![PathBuf::from("u1.txt")],
                 declared_paths: vec![PathBuf::from("u1.txt")],
+                forbidden_paths: Vec::new(),
                 created_at_ms: 1_700_000_000_000,
             })
             .expect("integrate runs the decision flow");
@@ -1508,6 +1554,7 @@ mod tests {
                 }],
                 allowlist: vec![PathBuf::from(file)],
                 declared_paths: vec![PathBuf::from(file)],
+                forbidden_paths: Vec::new(),
                 created_at_ms: 1_700_000_000_000,
             };
 
@@ -1642,6 +1689,7 @@ mod tests {
             }],
             allowlist: vec![PathBuf::from("base.txt")],
             declared_paths: vec![PathBuf::from("base.txt")],
+            forbidden_paths: Vec::new(),
             created_at_ms: 1_700_000_000_000,
         };
 
@@ -1736,6 +1784,7 @@ mod tests {
                 changed_paths: vec![entry("src/a.rs")],
                 allowlist: vec![PathBuf::from("src")],
                 declared_paths: vec![PathBuf::from("src")],
+                forbidden_paths: Vec::new(),
                 created_at_ms: 1_700_000_000_000,
             })
             .expect_err("same target across instances must serialise");

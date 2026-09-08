@@ -134,6 +134,10 @@ struct UnitTopology {
     /// the unit declares none.
     tests: Vec<String>,
     resource_claims: Vec<ResourceClaim>,
+    /// Artifact-declared path roots used by the integration guard. Empty
+    /// means this is a legacy artifact without path policy.
+    allowed_paths: Vec<std::path::PathBuf>,
+    forbidden_paths: Vec<std::path::PathBuf>,
 }
 
 /// Step 4 (2026-09-03-0959 DAG 接线): observation-only DAG
@@ -1177,6 +1181,16 @@ fn topology_from_handoff(
                     .unit_resource_claims
                     .get(&task.unit_id)
                     .cloned()
+                    .unwrap_or_default(),
+                allowed_paths: handoff
+                    .unit_allowed_paths
+                    .get(&task.unit_id)
+                    .map(|paths| paths.iter().map(std::path::PathBuf::from).collect())
+                    .unwrap_or_default(),
+                forbidden_paths: handoff
+                    .unit_forbidden_paths
+                    .get(&task.unit_id)
+                    .map(|paths| paths.iter().map(std::path::PathBuf::from).collect())
                     .unwrap_or_default(),
             })
             .collect(),

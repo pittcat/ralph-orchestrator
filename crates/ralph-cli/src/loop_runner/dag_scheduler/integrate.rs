@@ -377,9 +377,11 @@ impl DagSchedulerRuntime {
                 plan.target_branch.clone(),
                 plan.verified_base_commit.clone()?,
                 unit.tests.clone(),
+                unit.allowed_paths.clone(),
+                unit.forbidden_paths.clone(),
             ))
         });
-        let Some((target_branch, base_commit, tests)) = lookup
+        let Some((target_branch, base_commit, tests, allowed_paths, forbidden_paths)) = lookup
         else {
             self.fail_integration(
                 &pending,
@@ -449,14 +451,21 @@ impl DagSchedulerRuntime {
                 return;
             }
         };
-        // The artifact declares no path policy, so the guard's
-        // allowlist and the declared set both degenerate to the
-        // actual changed paths: the second authorisation still
-        // rejects forbidden top-level prefixes, symlinks, and
-        // submodules, but cannot enforce a per-unit scope the plan
-        // never declared.
-        let paths: Vec<std::path::PathBuf> =
+        // The verified artifact supplies the Unit path policy when present.
+        // The explicit legacy fallback below keeps older artifacts usable,
+        // while new artifacts cannot define their own authorization boundary
+        // from the observed diff.
+        let actual_paths: Vec<std::path::PathBuf> =
             changed_paths.iter().map(|e| e.path.clone()).collect();
+        // Artifacts that declare no path policy retain the legacy behavior
+        // for older fixtures. New artifacts carry roots from the verified
+        // handoff, so actual diff paths cannot silently define their own
+        // authorization boundary.
+        let policy_paths = if allowed_paths.is_empty() {
+            actual_paths
+        } else {
+            allowed_paths
+        };
 
         let request = IntegrationRequest {
             unit_id: unit_id.clone(),
@@ -465,8 +474,9 @@ impl DagSchedulerRuntime {
             base_commit,
             unit_commit,
             changed_paths,
-            allowlist: paths.clone(),
-            declared_paths: paths,
+            allowlist: policy_paths.clone(),
+            declared_paths: policy_paths,
+            forbidden_paths,
             created_at_ms: now_ms() as i64,
         };
         let orchestrator = match real_orchestrator(self.workspace.clone(), gate_commands) {
@@ -743,6 +753,7 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1-foundation
+    allowed_paths: [u1.txt]
     tests:
       - "true"
   - id: U2
@@ -751,6 +762,7 @@ units:
     execution_wave: 1
     integration_order: 2
     target_branch: feat/u2-feature
+    allowed_paths: [u2.txt]
     tests:
       - "true"
 "#;
