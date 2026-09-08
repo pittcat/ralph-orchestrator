@@ -268,10 +268,10 @@
 
 > **触发条件**：YAML 声明 `event_loop.supervisor.scheduler_mode`（`dag_shadow` / `dag`；`wave` 为缺省不触发）。**capability-triggered**，禁止按 preset 名称门控。
 > **未触发**：author 把本段记为 N/A（按「Hard questions — N/A 规则」段写法），不假装已答。
-> **目的**：钉死调度权威选择器的 fail-closed 组合与过渡态事实，防止 hat instructions 描述未接线的 DAG 行为。
+> **目的**：钉死调度权威选择器的 fail-closed 组合与 side-effect 边界，防止 hat 越权伪造 runtime-owned DAG 行为。
 
 1. **fail-closed 组合**：`dag_shadow` / `dag` 时 `event_loop.supervisor.enabled: true` 且 `event_loop.execution_mode: isolated`（违反组合 `ralph preset check --strict` / preflight 启动即拒，错误含字段路径 `event_loop.supervisor.scheduler_mode`）。✓ / ✗ + 引用字段路径
-2. **instructions 不描述 DAG 行为**：任何 hat `instructions:` 不得描述 / 依赖 DAG 调度器行为（per-Unit admission、`forge.exec.development.done` 由 runtime 发射等）——这些行为当前未接线，调度与 `wave` 完全等价，由 dispatcher wave fan-out 驱动。✓ / ✗ + grep
+2. **instructions 不越权伪造 DAG 行为**：`dag` 模式可以说明 per-Unit admission、job lifecycle、recovery、integration 和 `forge.exec.development.done` 是 runtime-owned；但任何 hat 都不得自行执行/伪造这些控制面副作用。`dag_shadow` 只能描述只读观察，不得声称已产生 DAG 执行副作用。✓ / ✗ + grep
 3. **执行面事实入 notes**：`dag` preset 的注释 / author notes 必须说明 runtime-owned admission、job lifecycle、recovery、integration 与 completion fence；不得让 hat 伪造这些控制面副作用。✓ / ✗ + 引用 notes 段
 4. **inspect 可见性核对**：`ralph inspect loop --format json` 在非 `wave` 模式输出只读 `scheduler` 块（`scheduler_mode` / `plan_keys` / 观测计数）——用它核对配置确实生效，而不是从行为反推。✓ / ✗ + 列 inspect 输出
 

@@ -524,6 +524,6 @@ preset 作者**不需要**手动把 `aggregate_timeout_secs` 乘以尝试次数�
 
 **反模式：**
 
-- ❌ hat `instructions:` 描述 / 依赖 DAG 调度器行为（per-Unit admission、`forge.exec.development.done` 由 runtime 发射等）——当前未接线，agent 不可见
-- ❌ preset 注释声称「DAG authority 已接管调度」，与过渡态事实矛盾
+- ❌ hat `instructions:` 要求 agent 自行执行或伪造 DAG 调度器行为（per-Unit admission、job lifecycle、integration、`forge.exec.development.done` 等 runtime-owned effects）
+- ❌ `dag_shadow` preset 注释声称已经产生 DAG 执行副作用，或 `dag` preset 声称 runtime-owned 控制面仍由 hat 手工驱动
 - ❌ 把 `scheduler_mode: dag` 当成行为开关写进 hat 触发逻辑 / payload 字段
