@@ -410,13 +410,12 @@ mod tests {
     // 无 as u8 绑定)不属于 topic 映射,保持原样。
     // =====================================================================
 
-    /// TG-S06(翻转后): driver topic 集合与 preset schema 声明的
+    /// TG-S06: driver topic 集合与 preset schema 声明的
     /// `forge.unit.*` per-unit topic 族正包含 + 族成员精确钉住。附带
     /// PMI-003 的两个平行定义检查: `compute_resource_aware_digest` 零
-    /// 生产消费、`PHASE_*` 无 `WaveDeliveryState` 枚举绑定断言——一旦
-    /// 有人接线,此静态断言红,提示先做权威关系决策。
+    /// 生产消费、`PHASE_*` 无 `WaveDeliveryState` 枚举绑定断言。
     #[test]
-    fn tg_s06_driver_topics_match_schema_unit_family_and_parallel_defs_unwired() {
+    fn tg_s06_driver_topics_match_schema_unit_family_and_parallel_defs() {
         // ── 1. driver topic 集合 ⊆ schema 的 forge.unit.* 族,且族成员
         //    精确等于钉住的 6 个 topic ──
         // schema 文件里 `schemas:` 块下的顶层 topic 键(两空格缩进、
@@ -450,10 +449,10 @@ mod tests {
             "TG-S06 前置失效: preset schema topic 提取为空——schema 文件\
              结构可能已改,需同步本测试的解析规则"
         );
-        // 证据自检: wave 路径的两个 topic 必须仍在 schema 集合里(wave
-        // 路径不动,退休属后续 Step 8)。
-        assert!(schema_topics.contains(&"exec.unit.done"));
-        assert!(schema_topics.contains(&"forge.wave.reviewed"));
+        // DAG runtime 的控制入口也必须保留在 schema 中：审批允许并发
+        // admission，correction.requested 驱动修复重入。
+        assert!(schema_topics.contains(&"forge.concurrency.approved"));
+        assert!(schema_topics.contains(&"forge.correction.requested"));
 
         // 族成员精确钉住: 6 个 per-unit topic(方案 (b))。族增删 →
         // 本断言红,强制同步 driver / preset publishes / BDD。
@@ -494,8 +493,7 @@ mod tests {
         // load_plan_handoff)用的是 artifact_canonicalizer::canonicalize;
         // 资源感知摘要只在 parallel_forge_handoff.rs 自身的单测内自用。
         // 断言: 整个 ralph-core src 树中,该函数名除定义文件自身外
-        // 零命中(注释引用算命中——接线者会先在注释里声明意图,那时
-        // 本断言变红,提示同时更新权威链)。
+        // 零命中(注释引用算命中——若接线,需同步更新权威链)。
         let core_src_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
