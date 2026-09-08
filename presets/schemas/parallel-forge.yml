@@ -1508,3 +1508,9 @@ state_projection:
     forge.wave.settled:
       kind: close_task_batch
       task_ids: settled_task_ids
+    # DAG 模式(D25):runtime 在 lane CAS FF 后发射 forge.unit.integrated;
+    # 事件过 acceptance 时投影关闭该 unit 的任务,ack 由 runtime 在事件
+    # 回流后写入 DAG store(全部 ack 才允许 forge.exec.development.done)。
+    forge.unit.integrated:
+      kind: close_task
+      task_id: task_id

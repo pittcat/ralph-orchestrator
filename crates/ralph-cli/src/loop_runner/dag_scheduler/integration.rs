@@ -227,6 +227,27 @@ where
             return Ok(IntegrationOutcome::GateFailed { reason });
         }
 
+        // Step 6b (2026-09-03-0959 plan Step E2): persist the TESTED
+        // candidate BEFORE moving the target ref. The intent row lets
+        // recovery distinguish a pending CAS from a completed CAS
+        // whose record write was lost; a replayed prepare for the
+        // same unit/target with a different candidate fails closed in
+        // the store layer.
+        self.store.prepare_intent(
+            &ralph_core::supervisor::dag_integration::IntegrationIntent {
+                input: IntegrationInput {
+                    unit_id: req.unit_id.clone(),
+                    target_branch: req.target_branch.clone(),
+                    base_commit: req.base_commit.clone(),
+                    integrated_commit: squash.squash_commit.clone(),
+                    expected_head_before: expected_head_before.clone(),
+                    created_at_ms: req.created_at_ms,
+                },
+                unit_commit: req.unit_commit.clone(),
+                tree_oid: squash.tree_oid.clone(),
+            },
+        )?;
+
         // Step 7: CAS FF. The lane refuses to advance the
         // target if the head moved between read and CAS.
         let cas = self.lane.port.compare_and_swap_ff(
@@ -482,6 +503,32 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// Step E2: the tested candidate is persisted as an intent
+    /// BEFORE the CAS moves the target ref, and the intent matches
+    /// the integration record the CAS produced.
+    #[test]
+    fn integrate_persists_intent_before_cas() {
+        let port = Arc::new(FakeGitIntegrationPort::new());
+        port.set_head("feat/integration", "BASE_OID");
+        port.set_unit_tree("UNIT_OID", "TREE_OID");
+        let core = Arc::new(LaneCore::new());
+        let lane = Arc::new(IntegrationLane::<FakeRepo, _>::new(core, port.clone()));
+        let store: Arc<dyn IntegrationStore> = Arc::new(InMemoryIntegrationStore::new());
+        let orch = Arc::new(IntegrationOrchestrator::new(lane, store.clone()));
+
+        let outcome = orch.integrate(base_request()).expect("integrate");
+        let IntegrationOutcome::Integrated { record, .. } = outcome else {
+            panic!("expected Integrated, got {outcome:?}");
+        };
+        let intent = store
+            .get_intent("U1", "feat/integration")
+            .expect("get_intent")
+            .expect("intent persisted before CAS");
+        assert_eq!(intent.unit_commit, "UNIT_OID");
+        assert_eq!(intent.input.integrated_commit, record.integrated_commit);
+        assert_eq!(intent.input.expected_head_before, record.expected_head_before);
     }
 
     /// U7 contract: a forbidden top-level prefix is rejected

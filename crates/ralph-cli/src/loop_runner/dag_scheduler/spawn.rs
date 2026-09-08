@@ -108,9 +108,9 @@ pub struct DagExecutionContext {
     hats: HashMap<String, HatConfig>,
     /// Fallback backend when a hat declares none.
     global_backend: CliBackend,
-    loop_id: String,
+    pub(crate) loop_id: String,
     /// Main events ledger the merge sink appends to.
-    main_events_file: PathBuf,
+    pub(crate) main_events_file: PathBuf,
     hats_source_label: Option<String>,
     config_path: Option<PathBuf>,
     /// `event_policy.schemas` — the same-source required-fields /
@@ -155,7 +155,7 @@ pub(crate) struct JobCompletion {
 /// A completed result waiting for its OPAC merge slot.
 #[derive(Debug)]
 pub(crate) struct PendingMerge {
-    event: ralph_proto::Event,
+    pub(crate) event: ralph_proto::Event,
     /// Present when the producing job's journal terminal must be
     /// written once this event is accepted by the real EventLoop.
     post: Option<PostAcceptance>,
@@ -199,7 +199,7 @@ pub(crate) enum SpawnKind {
 }
 
 impl SpawnKind {
-    fn stage_str(self) -> &'static str {
+    pub(crate) fn stage_str(self) -> &'static str {
         match self {
             Self::Execute => "execute",
             Self::Review => "review",
@@ -208,7 +208,7 @@ impl SpawnKind {
         }
     }
 
-    fn hat(self) -> &'static str {
+    pub(crate) fn hat(self) -> &'static str {
         match self {
             Self::Execute | Self::Fix => HAT_EXECUTOR,
             Self::Review => HAT_REVIEWER,
@@ -217,7 +217,7 @@ impl SpawnKind {
     }
 
     /// Success topic the job is expected to emit.
-    fn success_topic(self) -> &'static str {
+    pub(crate) fn success_topic(self) -> &'static str {
         match self {
             Self::Execute | Self::Fix => topics::UNIT_EXECUTED,
             Self::Review => topics::UNIT_REVIEWED,
@@ -226,7 +226,7 @@ impl SpawnKind {
     }
 
     /// Agent-emitted failure topic, when the family defines one.
-    fn failure_topic(self) -> &'static str {
+    pub(crate) fn failure_topic(self) -> &'static str {
         match self {
             Self::Execute | Self::Fix => "forge.unit.execution_failed",
             Self::Review => "forge.unit.execution_failed",
@@ -262,6 +262,7 @@ impl DagSchedulerRuntime {
             || !self.merge_queue.is_empty()
             || !self.pending_advances.is_empty()
             || !self.pending_spawns.is_empty()
+            || !self.pending_integrations.is_empty()
             || !self.awaiting_acceptance.is_empty()
     }
 
@@ -484,7 +485,7 @@ impl DagSchedulerRuntime {
     /// Live task id for a `forge:<plan>:<unit>` task key; "unresolved"
     /// when the store lookup fails so the failure stays visible
     /// instead of wedging silently.
-    fn resolve_task_id(&self, task_key: &str) -> String {
+    pub(crate) fn resolve_task_id(&self, task_key: &str) -> String {
         let Some(exec) = self.exec.as_ref() else {
             return "unresolved".to_string();
         };
@@ -517,7 +518,7 @@ impl DagSchedulerRuntime {
         self.queue_result_event(kind.failure_topic(), identity.hat.clone(), payload, None);
     }
 
-    fn queue_result_event(
+    pub(crate) fn queue_result_event(
         &mut self,
         topic: &str,
         hat: String,
@@ -571,7 +572,7 @@ impl DagSchedulerRuntime {
     }
 
     #[cfg(feature = "supervisor-db")]
-    fn journal(
+    pub(crate) fn journal(
         &mut self,
     ) -> Option<std::sync::Arc<ralph_core::supervisor::dag_store_rusqlite::RusqliteDagSchedulerStore>>
     {
@@ -602,6 +603,16 @@ impl DagSchedulerRuntime {
             }
             self.pipeline.release(unit_key);
             debug!(unit_key, topic, "DAG seam: verify-stage result settled");
+            // E2: a passed Verify stage queues the unit for lane
+            // integration; verification_failed settles without one.
+            if topic == topics_ext::UNIT_VERIFIED {
+                let plan_key = payload
+                    .get("plan_key")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                self.queue_integration(&plan_key, unit_key);
+            }
             return;
         }
 

@@ -263,6 +263,53 @@ impl RusqliteDagSchedulerStore {
             inner: Arc::clone(&self.inner),
         }
     }
+
+    /// S15 exactly-once fence for runtime-emitted terminal
+    /// coordination events (dag mode). `INSERT OR IGNORE` against
+    /// the `(plan_key, topic)` PRIMARY KEY: the first caller wins
+    /// the emit permit (`Ok(true)`); every replay loses
+    /// (`Ok(false)`). A conflicting key payload for an already-
+    /// fenced pair fails closed with `IoError` — a replay must
+    /// carry the identical idempotency key.
+    pub fn try_record_terminal_emit(
+        &self,
+        plan_key: &str,
+        topic: &str,
+        idempotency_key: &str,
+        created_at_ms: i64,
+    ) -> Result<bool, DagStoreError> {
+        let conn = self
+            .inner
+            .conn
+            .lock()
+            .map_err(|_| DagStoreError::IoError("dag store mutex poisoned".into()))?;
+        let inserted = conn
+            .execute(
+                "INSERT OR IGNORE INTO dag_terminal_emits \
+                 (plan_key, topic, idempotency_key, created_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![plan_key, topic, idempotency_key, created_at_ms],
+            )
+            .map_err(|err| DagStoreError::IoError(format!("terminal-emit fence insert: {err}")))?;
+        if inserted == 1 {
+            return Ok(true);
+        }
+        let existing: String = conn
+            .query_row(
+                "SELECT idempotency_key FROM dag_terminal_emits \
+                 WHERE plan_key = ?1 AND topic = ?2",
+                rusqlite::params![plan_key, topic],
+                |row| row.get(0),
+            )
+            .map_err(|err| DagStoreError::IoError(format!("terminal-emit fence read: {err}")))?;
+        if existing != idempotency_key {
+            return Err(DagStoreError::IoError(format!(
+                "terminal-emit fence conflict for ({plan_key}, {topic}): \
+                 persisted key {existing} != candidate {idempotency_key}"
+            )));
+        }
+        Ok(false)
+    }
 }
 
 impl std::fmt::Debug for RusqliteDagSchedulerStore {
@@ -1193,6 +1240,46 @@ mod tests {
         let store = RusqliteDagSchedulerStore::open(dir.path().join("dag.db"))
             .expect("open fresh plan store");
         (dir, store)
+    }
+
+    /// S15 fence: first insert wins the emit permit, same-key replay
+    /// loses quietly, conflicting key fails closed, and the fence
+    /// survives a reopen.
+    #[test]
+    fn terminal_emit_fence_is_exactly_once_and_durable() {
+        let (dir, store) = fresh_plan_store();
+        assert!(
+            store
+                .try_record_terminal_emit("pf", "forge.exec.development.done", "k1", 100)
+                .expect("first insert")
+        );
+        assert!(
+            !store
+                .try_record_terminal_emit("pf", "forge.exec.development.done", "k1", 200)
+                .expect("same-key replay"),
+            "replay must not win the emit permit"
+        );
+        assert!(
+            store
+                .try_record_terminal_emit("pf", "forge.exec.development.done", "k2", 300)
+                .is_err(),
+            "conflicting idempotency key fails closed"
+        );
+        // A different topic for the same plan is an independent fence.
+        assert!(
+            store
+                .try_record_terminal_emit("pf", "forge.plan.complete", "k9", 400)
+                .expect("independent topic")
+        );
+        drop(store);
+        let reopened = RusqliteDagSchedulerStore::open(dir.path().join("dag.db"))
+            .expect("reopen");
+        assert!(
+            !reopened
+                .try_record_terminal_emit("pf", "forge.exec.development.done", "k1", 500)
+                .expect("replay after reopen"),
+            "the fence survives process restart"
+        );
     }
 
     // -----------------------------------------------------------------

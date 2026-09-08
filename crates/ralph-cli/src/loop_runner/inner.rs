@@ -17,6 +17,7 @@ use super::*; // mod.rs re-exports: event_logging, execution, exit_conditions, h
 // so the qualified imports live here at the file head.
 use super::entry::merge_isolated_channel_on_interrupt;
 use super::entry::persist_starting_event_to_events_file;
+use super::inner_prologue;
 use super::rpc_bootstrap::loop_bootstrap;
 use super::run_impl::build_supervisor_bridge;
 use super::runner::RpcSharedState;
@@ -110,56 +111,14 @@ pub(super) async fn run_loop_impl_inner(
     source_is_builtin_embedded: bool,
     hats_source_label: Option<String>,
 ) -> Result<TerminationReason> {
-    // U5: Payload contract hard gate. Runs BEFORE any backend is spawned.
-    // In strict mode (always on for `ralph run`), any payload contract
-    // error is fatal: the agent must not be started. There is no skip flag.
-    enforce_payload_contract_gate(&config)?;
-
-    // U4: Preset static lint hard gate. Runs BEFORE any backend is spawned
-    // and BEFORE process group setup. In strict mode (always on for
-    // `ralph run`), any lint error is fatal with exit code 2.
-    // P1 finding #5: the failure path propagates a typed
-    // `PresetLintGateError` instead of calling `std::process::exit`.
-    // `process::exit` would skip the RAII drop chain (tracing flush,
-    // scoped guards, lock release) and is hostile to any future
-    // `TempDir` / `LockGuard` / `tracing::subscriber::with_default`
-    // added near the top of `run_loop_impl`. The outer
-    // `Result`-driven flow maps the error to exit code2 *after*
-    // drops have run; see `commands::run::run_command` and
-    // `main.rs`.
-    //
-    // WRC-U3: pass `source_is_builtin_embedded` so the WAC
-    // severity upgrade (KTD-7) applies to builtin presets even
-    // outside `--strict` mode.
-    //
-    // 2026-07-09-001 plan (U1 / A7): forward `hats_source_label`
-    // so the U7 emit-feedback lint gate can scope its check to
-    // the preset whitelist. Without this, `preset_name` resolves
-    // to `""` inside the gate and the lint silently bypasses
-    // the new rule on `ralph run -H builtin:ce-executor-pipeline-loop`.
-    if let Err(lint_error) = enforce_preset_lint_gate_with_preset_name(
+    // Startup hard gates (payload contract + preset lint), extracted
+    // to `inner_prologue::run_startup_gates`; both run BEFORE any
+    // backend spawn.
+    inner_prologue::run_startup_gates(
         &config,
         source_is_builtin_embedded,
         hats_source_label.as_deref(),
-    ) {
-        let diagnostics_dir = std::path::Path::new(".").join(".ralph").join("diagnostics");
-        let _artifact_path = write_preset_lint_artifact(&diagnostics_dir, &lint_error);
-        eprintln!(
-            "\nPreset lint gate failed with {} error(s). No backend was started.\n\
-             Fix the preset configuration and retry.",
-            lint_error.error_count
-        );
-        // P1 finding #5: return the typed error instead of calling
-        // `std::process::exit`. Calling `process::exit` here would skip
-        // the RAII drop chain (tracing flush, scoped guards, lock
-        // release) and is hostile to any future `TempDir` /
-        // `LockGuard` / `tracing::subscriber::with_default` added near
-        // the top of `run_loop_impl`. The outer `Result`-driven flow
-        // maps `PresetLintGateError` to exit code2 *after* drops have
-        // run. See `commands::run::run_command` and `main.rs` for the
-        // exit-code mapping.
-        return Err(anyhow::Error::new(lint_error));
-    }
+    )?;
 
     // Set up process group leadership per spec
     // "The orchestrator must run as a process group leader"
@@ -578,30 +537,11 @@ pub(super) async fn run_loop_impl_inner(
     }
 
     // ── U5/U6 production wiring (P1.1–P1.4) ──────────────────────────────
-    // Construct a `DriftEngine` that owns the drift observer,
-    // detector, and per-iteration responder glue. The engine is
-    // enabled iff `telemetry.runtime_diagnosis.enabled` is true.
-    // When disabled (the default), every per-iteration method is
-    // a cheap no-op so the loop runs unchanged.
-    let telemetry_config = Arc::new(config.telemetry.runtime_diagnosis.clone());
-    let mut drift_engine = if telemetry_config.enabled {
-        let required_fields = ralph_core::drift::engine::required_fields_from_config(
-            config.event_loop.event_policy.as_ref(),
-            config.event_loop.execution_contracts.as_ref(),
-        );
-        let hat_configs: Vec<HatConfig> = config.hats.values().cloned().collect();
-        let declared_edges = ralph_core::drift::engine::declared_edges_from_hats(&hat_configs);
-        ralph_core::drift::DriftEngine::enabled(
-            Arc::clone(&telemetry_config),
-            required_fields,
-            declared_edges,
-        )
-    } else {
-        ralph_core::drift::DriftEngine::disabled(Arc::clone(&telemetry_config))
-    };
-    // Install the drift observer on the EventBus as the very
-    // first observer so it observes every event the bus sees
-    // (including the recovery events we publish later).
+    // Construction extracted to `build_drift_engine`. Install the
+    // drift observer on the EventBus as the very first observer so it
+    // observes every event the bus sees (including the recovery
+    // events we publish later).
+    let mut drift_engine = inner_prologue::build_drift_engine(&config);
     drift_engine.install_observer(&mut event_loop);
 
     let hooks_dispatch_enabled = config.hooks.enabled && !config.hooks.events.is_empty();

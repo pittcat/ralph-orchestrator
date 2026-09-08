@@ -60,8 +60,11 @@ mod imp {
     /// persistence tables (`dag_units` / `dag_resource_leases` /
     /// `dag_jobs`) the runtime-owned scheduler wires up in later
     /// steps.
+    /// v16 (2026-09-03-0959 plan Step E2, S15) adds the
+    /// `dag_terminal_emits` exactly-once fence table for
+    /// runtime-emitted terminal coordination events in dag mode.
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 15;
+    pub const CURRENT_VERSION: i64 = 16;
 
     /// PMI-013 / TGP-02: typed error returned when a database's
     /// `user_version` is ABOVE this binary's migration ledger tail
@@ -490,6 +493,18 @@ mod imp {
                 ddl: include_str!("migrations/v15.sql"),
                 column_probe: None,
             },
+            // 2026-09-03-0959 plan Step E2 (S15): adds the
+            // `dag_terminal_emits` exactly-once fence table for
+            // runtime-emitted terminal coordination events in dag
+            // mode. Forward-only `CREATE TABLE`; no ALTERs against
+            // existing tables, so the column-probe path is
+            // unnecessary. `PRIMARY KEY (plan_key, topic)` keeps the
+            // emit fence at the schema level.
+            Migration {
+                version: 16,
+                ddl: include_str!("migrations/v16.sql"),
+                column_probe: None,
+            },
         ]
     }
 }
@@ -575,6 +590,9 @@ mod tests {
             "dag_units",
             "dag_resource_leases",
             "dag_jobs",
+            // Step E2 (2026-09-03-0959 plan, S15): exactly-once
+            // terminal-emit fence.
+            "dag_terminal_emits",
         ];
         for table in tables {
             let count: i64 = conn

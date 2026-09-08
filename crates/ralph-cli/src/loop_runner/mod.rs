@@ -57,6 +57,7 @@ pub(crate) use activation_outcome::{
 // working unchanged.
 mod entry;
 mod inner;
+mod inner_prologue;
 mod rpc_bootstrap;
 mod run_impl;
 mod runner;
@@ -80,6 +81,10 @@ pub(crate) use loop_owner::register_loop_owner;
 #[cfg(test)]
 pub(crate) use loop_owner::register_loop_owner_with_hat;
 pub use merge_queue::process_pending_merges_cli;
+// Test-only consumers (`loop_runner/tests/*` via the glob) plus
+// reserved external surface; the bin target no longer calls
+// `enforce_payload_contract_gate` directly (inner_prologue does).
+#[allow(unused_imports)]
 pub use payload_contract_gate::{
     enforce_payload_contract_gate, write_payload_contract_violation_report,
 };
@@ -90,6 +95,11 @@ pub use payload_contract_gate::{
 // signature without churn.
 #[allow(unused_imports)]
 pub use preset_lint_gate::enforce_preset_lint_gate;
+// `PresetLintGateError` / `EXIT_CODE_*` are consumed by
+// `commands/run.rs`; the two fn re-exports are consumed by tests via
+// the glob and by `inner_prologue` (which imports the source module
+// directly).
+#[allow(unused_imports)]
 pub use preset_lint_gate::{
     EXIT_CODE_AGENT_DOC_SYNC_STRICT, EXIT_CODE_LINT_GATE, PresetLintGateError,
     enforce_preset_lint_gate_with_preset_name, write_preset_lint_artifact,

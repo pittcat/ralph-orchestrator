@@ -14,7 +14,11 @@ pub use channel_registry::{
     RegistryFile, ResolveOutcome, WaveChannelRegistry, WaveChannelRegistryGuard, encode_identity,
 };
 
-mod dispatcher;
+// Step E2 (2026-09-03-0959 plan): `pub(crate)` so the DAG
+// integration seam can reuse `dispatcher::coordination::
+// append_supervisor_coord_event` for runtime-emitted coordination
+// topics (`forge.unit.integrated` / `forge.exec.development.done`).
+pub(crate) mod dispatcher;
 // 2026-09-03-0959 plan Step 5a (D7): `pub(crate)` so the extracted
 // generic PTY job kernel (`runtime_job::pty_kernel`) can share the
 // pure lease types (`LeaseConfig` / `LeaseState` / `HeartbeatKind`)

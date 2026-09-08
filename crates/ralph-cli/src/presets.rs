@@ -2997,10 +2997,14 @@ mod tests {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let expected_new_keys: BTreeSet<String> = ["forge.plan.ready", "forge.wave.settled"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let expected_new_keys: BTreeSet<String> = [
+            "forge.plan.ready",
+            "forge.wave.settled",
+            "forge.unit.integrated",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
         let mut full_legacy: BTreeSet<String> = legacy_keys.clone();
         let mut full_new: BTreeSet<String> = BTreeSet::new();
@@ -3101,12 +3105,14 @@ mod tests {
                     }
                 }
                 // Plan 2026-07-29-001 U3: `forge.wave.settled`
-                // is now the only state-authority path that closes
+                // is the wave-path state authority that closes
                 // tasks for parallel-forge (slot → wave settlement
                 // rather than slot → close_task). The legacy
                 // `exec.unit.done → close_task` mapping was removed
                 // because fan-out completion must not release
-                // downstream Unit dependencies early (R7).
+                // downstream Unit dependencies early (R7). In dag
+                // mode the runtime-emitted `forge.unit.integrated`
+                // closes its single unit task instead (D25).
                 match config
                     .event_loop
                     .state_projection
@@ -3117,6 +3123,20 @@ mod tests {
                         if task_ids == "settled_task_ids" => {}
                     other => bad_presets.push(format!(
                         "{}: forge.wave.settled must be CloseTaskBatch{{task_ids:\"settled_task_ids\"}}, got {:?}",
+                        preset.name, other
+                    )),
+                }
+                // Step E2 (D25): dag-mode per-unit close projection.
+                match config
+                    .event_loop
+                    .state_projection
+                    .actions
+                    .get("forge.unit.integrated")
+                {
+                    Some(StateProjectionAction::CloseTask { task_id, .. })
+                        if task_id == "task_id" => {}
+                    other => bad_presets.push(format!(
+                        "{}: forge.unit.integrated must be CloseTask{{task_id:\"task_id\"}}, got {:?}",
                         preset.name, other
                     )),
                 }

@@ -38,6 +38,7 @@
 //! main ledger at most one business event per tick (OPAC).
 
 pub mod driver;
+mod integrate;
 pub mod integration;
 pub mod jobs;
 pub mod recovery;
@@ -112,6 +113,12 @@ struct PlanTopology {
     /// workspace git state is unresolvable — spawn then fails closed).
     verified_base_commit: Option<String>,
     units: Vec<UnitTopology>,
+    /// Units whose `forge.unit.integrated` event was accepted (the
+    /// close-task projection ran) and whose durable integration
+    /// record is acked. Fed into the admission snapshot so
+    /// dependents unlock (E2); hydrated from the durable store at
+    /// activation.
+    integrated: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +198,9 @@ pub struct DagSchedulerRuntime {
     /// each tick.
     pending_advances: VecDeque<spawn::PendingAdvance>,
     pending_spawns: VecDeque<spawn::PendingSpawn>,
+    /// Verified units awaiting integration (E2); at most one is
+    /// integrated per tick, in declared integration order.
+    pending_integrations: Vec<integrate::PendingIntegration>,
     /// Units whose execute-stage job was already reserved (dedup
     /// against the pure admission snapshot, which re-reports Ready
     /// units every tick).
@@ -234,6 +244,7 @@ impl DagSchedulerRuntime {
             awaiting_acceptance: HashMap::new(),
             pending_advances: VecDeque::new(),
             pending_spawns: VecDeque::new(),
+            pending_integrations: Vec::new(),
             executors_launched: HashSet::new(),
             fixer_in_flight: 0,
             job_seq: 0,
@@ -310,6 +321,21 @@ impl DagSchedulerRuntime {
                     }
                 };
                 self.observe_unit_event(topic, &payload);
+            }
+            // E2: the runtime-emitted integrated event came back
+            // through real acceptance (the close-task projection ran)
+            // — ack the durable record and unlock dependents.
+            integrate::UNIT_INTEGRATED if self.mode == SchedulerMode::Dag => {
+                match serde_json::from_str::<Value>(payload_raw) {
+                    Ok(payload) => self.on_unit_integrated_accepted(&payload),
+                    Err(err) => {
+                        warn!(
+                            topic,
+                            error = %err,
+                            "DAG seam: accepted integrated event payload is not valid JSON; skipping ack"
+                        );
+                    }
+                }
             }
             _ => {}
         }
@@ -543,6 +569,37 @@ impl DagSchedulerRuntime {
             self.pipeline
                 .ensure_unit(unit_id, job_id, "executor", Stage::Execute);
         }
+        // E2: hydrate the integrated set from the durable store so a
+        // restarted loop does not re-admit dependents of units that
+        // already integrated before the restart.
+        #[cfg(feature = "supervisor-db")]
+        {
+            use ralph_core::supervisor::dag_integration::IntegrationStore as _;
+            let acked: Vec<String> = match self.journal() {
+                Some(journal) => {
+                    let store = journal.shared_with_integration();
+                    self.plans
+                        .get(&plan_key)
+                        .map(|plan| {
+                            plan.units
+                                .iter()
+                                .filter(|u| {
+                                    store
+                                        .list_for_unit(&u.unit_id)
+                                        .map(|records| records.iter().any(|r| r.acked))
+                                        .unwrap_or(false)
+                                })
+                                .map(|u| u.unit_id.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                }
+                None => Vec::new(),
+            };
+            if let Some(plan) = self.plans.get_mut(&plan_key) {
+                plan.integrated.extend(acked);
+            }
+        }
     }
 
     /// Look up the plan key for an artifact path: in-memory topology
@@ -699,10 +756,10 @@ impl DagSchedulerRuntime {
                     unit_id: u.unit_id.clone(),
                     integration_order: u.integration_order,
                     depends_on: u.depends_on.clone(),
-                    // Integration tracking (`forge.unit.integrated`)
-                    // lands with the execution cutover; until then no
-                    // unit is observed as integrated.
-                    integrated_units: HashSet::new(),
+                    // E2: units whose integrated event was accepted
+                    // (projection acknowledged) unlock their
+                    // dependents.
+                    integrated_units: plan.integrated.clone(),
                     resource_claims: Vec::new(),
                 })
                 .collect();
@@ -729,9 +786,11 @@ impl DagSchedulerRuntime {
         // journaled `failed` terminal, never a panic.
         if self.mode == SchedulerMode::Dag && self.exec.is_some() {
             self.retry_pending();
+            self.maybe_integrate_one();
             for (plan_key, unit_id) in admitted {
                 self.maybe_spawn_executor(&plan_key, &unit_id);
             }
+            self.maybe_emit_development_done();
         }
     }
 
@@ -768,6 +827,7 @@ fn topology_from_handoff(
         artifact_digest: handoff.artifact.digest.clone(),
         target_branch,
         verified_base_commit: None,
+        integrated: std::collections::HashSet::new(),
         units: handoff
             .tasks
             .iter()
