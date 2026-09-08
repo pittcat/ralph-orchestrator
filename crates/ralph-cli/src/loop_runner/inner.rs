@@ -710,23 +710,21 @@ pub(super) async fn run_loop_impl_inner(
     };
 
     // ── 2026-07-03-001 supervisor real-wiring: construct the ──────────
-    // bridge when `event_loop.supervisor.enabled: true` AND the
-    // preset is `execution_mode: isolated`. The bridge owns the
-    // `RusqliteSupervisorStore` (when `supervisor-db` feature is
-    // on) and the `SupervisorCoordinator`. When the feature is off
-    // or the gate is closed, `supervisor_bridge` stays `None` and
-    // the dispatcher takes the legacy `WaveTracker` path (R3 /
-    // KTD-7). Recovery runs unconditionally when the bridge is
-    // present so in-flight waves from a prior crash are reconciled
-    // (U11 R-C3) before the loop accepts new events.
+    // legacy wave bridge when event_loop.supervisor.enabled is true
+    // and the preset uses execution_mode: isolated. In dag mode
+    // the runtime-owned DAG scheduler is the sole execution
+    // authority, so the legacy bridge is deliberately absent;
+    // dag_shadow retains it for side-by-side observation.
     let supervisor_cfg = &config.event_loop.supervisor;
-    let supervisor_path_enabled = is_supervisor_path_enabled(
-        supervisor_cfg.enabled,
-        matches!(
-            config.event_loop.execution_mode,
-            ralph_core::config::HatExecutionMode::Isolated
-        ),
-    );
+    let supervisor_path_enabled = config.event_loop.supervisor.scheduler_mode
+        != ralph_core::config::SchedulerMode::Dag
+        && is_supervisor_path_enabled(
+            supervisor_cfg.enabled,
+            matches!(
+                config.event_loop.execution_mode,
+                ralph_core::config::HatExecutionMode::Isolated
+            ),
+        );
     // 2026-07-28-002 plan U4 (G1): capture the supervisor store here so
     // it survives the `if supervisor_path_enabled { ... } else { ... }`
     // block scope. The redrive boot scan (below, after `backend` is
@@ -1016,13 +1014,13 @@ pub(super) async fn run_loop_impl_inner(
     // sees one leaves the `.ralph` file listing identical to a wave
     // run (TG-S05). The seam never spawns, never emits, never closes
     // tasks — execution authority stays with the wave path.
-    let mut dag_scheduler = if supervisor_path_enabled
-        && !config
-            .event_loop
-            .supervisor
-            .scheduler_mode
-            .uses_legacy_authority()
-    {
+    let mut dag_scheduler = if config.event_loop.supervisor.scheduler_mode
+        == ralph_core::config::SchedulerMode::Dag
+        && config.event_loop.supervisor.enabled
+        && matches!(
+            config.event_loop.execution_mode,
+            ralph_core::config::HatExecutionMode::Isolated
+        ) {
         Some(crate::loop_runner::dag_scheduler::DagSchedulerRuntime::new(
             config.event_loop.supervisor.scheduler_mode,
             config.event_loop.supervisor.resolve_dag_pools(),

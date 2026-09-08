@@ -1492,14 +1492,10 @@ impl Default for SupervisorConfig {
 /// strictness so a typo'd pool name fails at parse time instead of
 /// silently falling back to the global cap.
 ///
-/// Note: the CLI-side consumer (`DagPools` in
-/// `crates/ralph-cli/src/loop_runner/dag_scheduler/jobs.rs`) is a
-/// `#[cfg(test)]`-only three-pool scaffold (executor / reviewer /
-/// verifier + global). The `fixer` cap is declared here per D16 so
-/// the config contract is complete; wiring a distinct fixer pool
-/// into the consumer belongs to the Unit that promotes the
-/// scheduler out of test scope — until then the fixer cap is part
-/// of the resolved configuration surface only.
+/// The CLI DAG runtime consumes all four stage caps (executor / reviewer /
+/// verifier / fixer) plus the global cap from this resolved value. Keeping
+/// resolution here gives both the admission snapshot and the execution
+/// pipeline one configuration authority.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DagPoolsConfig {
