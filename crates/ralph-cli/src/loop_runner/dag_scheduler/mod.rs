@@ -1798,4 +1798,50 @@ units:
                 .any(|job| job.identity == identity && job.terminal.as_deref() == Some("failed"))
         );
     }
+
+    /// Crash window: a live child is found after restart. Recovery must adopt
+    /// the durable job instead of launching a second executor.
+    #[cfg(feature = "supervisor-db")]
+    #[tokio::test]
+    async fn recovery_adopts_live_pid_without_relaunch() {
+        let (tmp, mut runtime) = fixture(SchedulerMode::Dag);
+        init_git_head(tmp.path());
+        runtime.observe_accepted_events(&[plan_ready_event(tmp.path())]);
+        runtime.observe_accepted_events(&[approved_event()]);
+        runtime.attach_execution_context(execution_context(tmp.path()));
+        let identity = execute_identity();
+        runtime
+            .journal()
+            .expect("durable journal")
+            .reserve_job(&identity, 1)
+            .expect("reserve job");
+        runtime
+            .journal()
+            .expect("durable journal")
+            .record_job_pid(&identity, std::process::id(), 2)
+            .expect("record live child pid");
+        drop(runtime);
+
+        let mut recovered = DagSchedulerRuntime::new(
+            SchedulerMode::Dag,
+            resolved_pools(),
+            tmp.path().to_path_buf(),
+        );
+        recovered.attach_execution_context(execution_context(tmp.path()));
+        recovered.recover_after_restart();
+
+        assert!(recovered.blocked_plans.is_empty());
+        assert!(recovered.pending_spawns.is_empty());
+        assert!(recovered.active_jobs.contains(&identity.job_id));
+        assert!(recovered.has_pending_work());
+        assert!(
+            recovered
+                .journal()
+                .expect("durable journal")
+                .list_jobs("pf-test")
+                .expect("list jobs")
+                .iter()
+                .any(|job| job.identity == identity && job.terminal.is_none())
+        );
+    }
 }

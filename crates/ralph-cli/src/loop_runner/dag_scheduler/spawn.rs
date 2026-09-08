@@ -1639,6 +1639,53 @@ units:
         assert!(runtime.awaiting_acceptance.is_empty());
     }
 
+    /// The post-acceptance seam must persist the terminal against the
+    /// reserved job after the accepted event is read back with its plan key.
+    #[cfg(feature = "supervisor-db")]
+    #[test]
+    fn accepted_result_persists_terminal_after_plan_qualified_lookup() {
+        let (_tmp, mut runtime) = dag_fixture();
+        let identity = JobIdentity {
+            plan_key: "pf-test".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "job-terminal-projection".to_string(),
+            hat: HAT_EXECUTOR.to_string(),
+            stage: "execute".to_string(),
+            attempt: 0,
+            token: "token-terminal-projection".to_string(),
+        };
+        runtime
+            .journal()
+            .expect("durable journal")
+            .reserve_job(&identity, 1)
+            .expect("reserve job");
+        runtime.awaiting_acceptance.insert(
+            identity.unit_key(),
+            PostAcceptance {
+                identity,
+                terminal: "accepted",
+                digest: "b".repeat(64),
+            },
+        );
+
+        runtime.observe_unit_event_dag(
+            "forge.unknown.accepted",
+            "U1",
+            &serde_json::json!({"plan_key": "pf-test", "unit_id": "U1"}),
+        );
+
+        let jobs = runtime
+            .journal()
+            .expect("durable journal")
+            .list_jobs("pf-test")
+            .expect("list jobs");
+        assert!(runtime.awaiting_acceptance.is_empty());
+        assert!(jobs.iter().any(|job| {
+            job.identity.job_id == "job-terminal-projection"
+                && job.terminal.as_deref() == Some("accepted")
+        }));
+    }
+
     /// The inner keepalive gate: a fresh dag runtime owns no work; a
     /// queued failure event flips it so the loop cannot fall into
     /// fallback termination while the result awaits merge.
