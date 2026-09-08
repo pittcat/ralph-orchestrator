@@ -41,8 +41,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use super::dag_integration::{
-    IntegrationInput, IntegrationRecord, IntegrationStore, IntegrationStoreError,
-    IntegrationStoreResult, compute_integration_fingerprint,
+    IntegrationInput, IntegrationIntent, IntegrationRecord, IntegrationStore,
+    IntegrationStoreError, IntegrationStoreResult, compute_integration_fingerprint,
+    validate_intent_replay,
 };
 use super::dag_plan_receipt::{DagPlanReceipt, DagPlanReceiptStore, parse_receipt_status};
 use super::dag_store::{
@@ -54,6 +55,8 @@ use super::dag_store::{
 use super::migrations;
 #[cfg(feature = "supervisor-db")]
 use rusqlite::OptionalExtension;
+
+pub mod jobs;
 
 // ---------------------------------------------------------------------------
 // Shared connection wrapper.
@@ -839,6 +842,86 @@ impl std::fmt::Debug for RusqliteIntegrationStore {
 }
 
 impl IntegrationStore for RusqliteIntegrationStore {
+    fn prepare_intent(
+        &self,
+        intent: &IntegrationIntent,
+    ) -> IntegrationStoreResult<IntegrationIntent> {
+        #[cfg(not(feature = "supervisor-db"))]
+        {
+            let _ = intent;
+            Err(IntegrationStoreError::StorageIo(
+                "supervisor-db cargo feature is off in this build".to_string(),
+            ))
+        }
+        #[cfg(feature = "supervisor-db")]
+        {
+            let conn = self.inner.conn.lock().map_err(|_| {
+                IntegrationStoreError::StorageIo("dag integration store mutex poisoned".into())
+            })?;
+            let existing: Option<IntegrationIntent> = conn
+                .query_row(
+                    "SELECT unit_id, target_branch, base_commit, unit_commit, \
+                     expected_head_before, integrated_commit, tree_oid, created_at_ms \
+                     FROM dag_integration_intents WHERE unit_id = ?1 AND target_branch = ?2",
+                    [&intent.input.unit_id, &intent.input.target_branch],
+                    row_to_integration_intent,
+                )
+                .optional()
+                .map_err(integration_io_err)?;
+            if let Some(existing) = existing {
+                validate_intent_replay(&existing, intent)?;
+                return Ok(existing);
+            }
+            conn.execute(
+                "INSERT INTO dag_integration_intents \
+                 (unit_id, target_branch, base_commit, unit_commit, \
+                  expected_head_before, integrated_commit, tree_oid, created_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    intent.input.unit_id,
+                    intent.input.target_branch,
+                    intent.input.base_commit,
+                    intent.unit_commit,
+                    intent.input.expected_head_before,
+                    intent.input.integrated_commit,
+                    intent.tree_oid,
+                    intent.input.created_at_ms,
+                ],
+            )
+            .map_err(integration_io_err)?;
+            Ok(intent.clone())
+        }
+    }
+
+    fn get_intent(
+        &self,
+        unit_id: &str,
+        target_branch: &str,
+    ) -> IntegrationStoreResult<Option<IntegrationIntent>> {
+        #[cfg(not(feature = "supervisor-db"))]
+        {
+            let _ = (unit_id, target_branch);
+            Err(IntegrationStoreError::StorageIo(
+                "supervisor-db cargo feature is off in this build".to_string(),
+            ))
+        }
+        #[cfg(feature = "supervisor-db")]
+        {
+            let conn = self.inner.conn.lock().map_err(|_| {
+                IntegrationStoreError::StorageIo("dag integration store mutex poisoned".into())
+            })?;
+            conn.query_row(
+                "SELECT unit_id, target_branch, base_commit, unit_commit, \
+                 expected_head_before, integrated_commit, tree_oid, created_at_ms \
+                 FROM dag_integration_intents WHERE unit_id = ?1 AND target_branch = ?2",
+                [unit_id, target_branch],
+                row_to_integration_intent,
+            )
+            .optional()
+            .map_err(integration_io_err)
+        }
+    }
+
     fn record_integrated(
         &self,
         input: &IntegrationInput,
@@ -1044,6 +1127,25 @@ fn row_to_integration_record(
         commit_fingerprint: row.get("commit_fingerprint")?,
         acked: row.get::<_, i64>("acked")? != 0,
         created_at_ms: row.get("created_at_ms")?,
+    })
+}
+
+/// Read one `dag_integration_intents` row into an [`IntegrationIntent`].
+#[cfg(feature = "supervisor-db")]
+fn row_to_integration_intent(
+    row: &rusqlite::Row<'_>,
+) -> Result<IntegrationIntent, rusqlite::Error> {
+    Ok(IntegrationIntent {
+        input: IntegrationInput {
+            unit_id: row.get("unit_id")?,
+            target_branch: row.get("target_branch")?,
+            base_commit: row.get("base_commit")?,
+            integrated_commit: row.get("integrated_commit")?,
+            expected_head_before: row.get("expected_head_before")?,
+            created_at_ms: row.get("created_at_ms")?,
+        },
+        unit_commit: row.get("unit_commit")?,
+        tree_oid: row.get("tree_oid")?,
     })
 }
 

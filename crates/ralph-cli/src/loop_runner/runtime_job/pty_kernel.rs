@@ -57,6 +57,9 @@ pub struct PtySpawnSpec {
     pub stdin_input: Option<String>,
     /// Working directory for the child.
     pub cwd: PathBuf,
+    /// Clear the parent's environment before applying `env`. DAG jobs must
+    /// set this; legacy wave workers explicitly retain inheritance.
+    pub clear_env: bool,
     /// Extra env entries applied on top of the inherited
     /// environment. The kernel always appends `TERM=dumb` and
     /// `NO_COLOR=1` after these, exactly like the legacy wave
@@ -132,6 +135,7 @@ pub fn spawn_pty_job(spec: PtySpawnSpec) -> Result<PtyJobHandle, PtyKernelError>
         args,
         stdin_input,
         cwd,
+        clear_env,
         env,
     } = spec;
 
@@ -163,12 +167,22 @@ pub fn spawn_pty_job(spec: PtySpawnSpec) -> Result<PtyJobHandle, PtyKernelError>
             .chain(args.iter().cloned())
             .collect::<Vec<_>>();
         stdin_prompt_file = Some(prompt_file);
-        ("sh".to_string(), wrapper_args)
+        // An isolated job may deliberately omit PATH. Resolve the runtime
+        // wrapper independently of the child's declared environment.
+        let shell = if cfg!(unix) && clear_env {
+            "/bin/sh"
+        } else {
+            "sh"
+        };
+        (shell.to_string(), wrapper_args)
     } else {
         (cmd, args)
     };
 
     let mut cmd_builder = portable_pty::CommandBuilder::new(&spawn_cmd);
+    if clear_env {
+        cmd_builder.env_clear();
+    }
     cmd_builder.args(&spawn_args);
     cmd_builder.cwd(&cwd);
     for (key, value) in &env {
@@ -689,6 +703,7 @@ mod tests {
             stdin_input: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             env: Vec::new(),
+            clear_env: false,
         }
     }
 
@@ -706,6 +721,43 @@ mod tests {
         }
     }
 
+    /// Exercise the real PTY boundary: clearing must remove an ambient
+    /// variable while retaining explicitly supplied values, in both prompt
+    /// delivery modes. Never mutate the test process's environment.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_environment_reaches_real_pty_without_parent_home() {
+        assert!(
+            std::env::var_os("HOME").is_some(),
+            "fixture needs parent HOME"
+        );
+        for stdin_input in [None, Some("test prompt".to_string())] {
+            let mut spec = sh_spec(
+                "test -z \"${HOME+x}\" && test \"$DAG_TEST_VALUE\" = declared && printf 'isolated-ok\\n'",
+            );
+            spec.cmd = "/bin/sh".to_string();
+            spec.clear_env = true;
+            spec.stdin_input = stdin_input;
+            spec.env = vec![("DAG_TEST_VALUE".to_string(), "declared".to_string())];
+            let mut handle = spawn_pty_job(spec).expect("spawn isolated PTY");
+            let mut lines = Vec::new();
+            let outcome = drive_pty_lease_loop(
+                &mut handle,
+                &PtyLeaseMode::Legacy {
+                    hard_cap: Duration::from_secs(5),
+                },
+                OutputFormat::Text,
+                0,
+                &mut |line: &str| lines.push(line.to_string()),
+                Instant::now(),
+            )
+            .await;
+            assert!(!outcome.timed_out);
+            assert!(finish_pty_job(handle).await.expect("reap child").success());
+            assert!(lines.iter().any(|line| line.trim() == "isolated-ok"));
+        }
+    }
+
     /// Spawn failure surfaces the typed `Spawn` error.
     #[cfg(unix)]
     #[test]
@@ -716,6 +768,7 @@ mod tests {
             stdin_input: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             env: Vec::new(),
+            clear_env: false,
         };
         let err = match spawn_pty_job(spec) {
             Ok(_) => panic!("missing binary must fail to spawn"),

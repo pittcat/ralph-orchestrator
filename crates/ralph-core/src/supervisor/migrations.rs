@@ -61,7 +61,7 @@ mod imp {
     /// `dag_jobs`) the runtime-owned scheduler wires up in later
     /// steps.
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 14;
+    pub const CURRENT_VERSION: i64 = 15;
 
     /// PMI-013 / TGP-02: typed error returned when a database's
     /// `user_version` is ABOVE this binary's migration ledger tail
@@ -483,6 +483,11 @@ mod imp {
             Migration {
                 version: 14,
                 ddl: include_str!("migrations/v14.sql"),
+                column_probe: None,
+            },
+            Migration {
+                version: 15,
+                ddl: include_str!("migrations/v15.sql"),
                 column_probe: None,
             },
         ]

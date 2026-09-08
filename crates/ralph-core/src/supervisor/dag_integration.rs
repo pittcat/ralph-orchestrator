@@ -78,6 +78,14 @@ pub struct IntegrationInput {
     pub created_at_ms: i64,
 }
 
+/// Exact candidate that passed its targeted gate, persisted before Git CAS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationIntent {
+    pub input: IntegrationInput,
+    pub unit_commit: String,
+    pub tree_oid: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IntegrationStoreError {
     #[error(
@@ -115,6 +123,18 @@ pub type IntegrationStoreResult<T> = Result<T, IntegrationStoreError>;
 /// (this file); the future rusqlite variant will satisfy
 /// the same contract.
 pub trait IntegrationStore: Send + Sync {
+    /// Reserve one tested candidate. Matching replay returns the original
+    /// intent; another candidate for the same unit/target is refused.
+    fn prepare_intent(
+        &self,
+        intent: &IntegrationIntent,
+    ) -> IntegrationStoreResult<IntegrationIntent>;
+
+    fn get_intent(
+        &self,
+        unit_id: &str,
+        target_branch: &str,
+    ) -> IntegrationStoreResult<Option<IntegrationIntent>>;
     /// Record an integration event. Idempotent on the
     /// natural key tuple. See module docs for the contract.
     fn record_integrated(
@@ -166,6 +186,7 @@ pub fn compute_integration_fingerprint(input: &IntegrationInput) -> String {
 pub struct InMemoryIntegrationStore {
     rows: Mutex<HashMap<(String, String), IntegrationRecord>>,
     next_id: Mutex<i64>,
+    intents: Mutex<HashMap<(String, String), IntegrationIntent>>,
 }
 
 impl InMemoryIntegrationStore {
@@ -187,6 +208,38 @@ impl InMemoryIntegrationStore {
 }
 
 impl IntegrationStore for InMemoryIntegrationStore {
+    fn prepare_intent(
+        &self,
+        intent: &IntegrationIntent,
+    ) -> IntegrationStoreResult<IntegrationIntent> {
+        let mut rows = self
+            .intents
+            .lock()
+            .map_err(|_| IntegrationStoreError::StorePoisoned)?;
+        let key = (
+            intent.input.unit_id.clone(),
+            intent.input.target_branch.clone(),
+        );
+        if let Some(existing) = rows.get(&key) {
+            validate_intent_replay(existing, intent)?;
+            return Ok(existing.clone());
+        }
+        rows.insert(key, intent.clone());
+        Ok(intent.clone())
+    }
+
+    fn get_intent(
+        &self,
+        unit_id: &str,
+        target_branch: &str,
+    ) -> IntegrationStoreResult<Option<IntegrationIntent>> {
+        Ok(self
+            .intents
+            .lock()
+            .map_err(|_| IntegrationStoreError::StorePoisoned)?
+            .get(&(unit_id.into(), target_branch.into()))
+            .cloned())
+    }
     fn record_integrated(
         &self,
         input: &IntegrationInput,
@@ -281,6 +334,21 @@ impl IntegrationStore for InMemoryIntegrationStore {
             .cloned()
             .collect())
     }
+}
+
+pub(crate) fn validate_intent_replay(
+    existing: &IntegrationIntent,
+    incoming: &IntegrationIntent,
+) -> IntegrationStoreResult<()> {
+    let mut normalized = incoming.clone();
+    normalized.input.created_at_ms = existing.input.created_at_ms;
+    if &normalized != existing {
+        return Err(IntegrationStoreError::DuplicateUnitForTarget {
+            unit_id: incoming.input.unit_id.clone(),
+            target_branch: incoming.input.target_branch.clone(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

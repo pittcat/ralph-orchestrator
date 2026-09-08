@@ -62,6 +62,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod resume;
+
 /// Identity of one Unit's trusted worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitWorktree {
@@ -206,14 +208,13 @@ impl UnitWorktree {
                 if tip == verified_base_commit {
                     // Verify the worktree path is still on disk.
                     if path.exists() {
-                        return Ok(UnitWorktree {
-                            unit_id: unit_id.to_string(),
-                            loop_id: loop_id.to_string(),
-                            path,
-                            branch,
-                            base_commit: verified_base_commit.to_string(),
-                            reused: true,
-                        });
+                        return Self::resume(
+                            repo_root,
+                            loop_id,
+                            unit_id,
+                            verified_base_commit,
+                            verified_base_commit,
+                        );
                     }
                     // Branch exists but worktree path is missing —
                     // fall through to fresh create.
@@ -451,6 +452,85 @@ mod tests {
         assert!(second.reused);
         assert_eq!(first.path, second.path);
         assert_eq!(first.branch, second.branch);
+    }
+
+    #[test]
+    fn unit_worktree_resume_after_executor_commit_preserves_exact_head() {
+        let (_tmp, repo, base) = init_repo_with_initial_commit();
+        let wt = UnitWorktree::acquire(&repo, "loop-1", "U1", &base).unwrap();
+        std::fs::write(wt.path.join("unit.txt"), "implemented\n").unwrap();
+        run_git(&wt.path, &["add", "unit.txt"]);
+        run_git(&wt.path, &["commit", "-qm", "unit implementation"]);
+        let head = run_git(&wt.path, &["rev-parse", "HEAD"]);
+        let resumed = UnitWorktree::resume(&repo, "loop-1", "U1", &base, &head).unwrap();
+        assert_eq!(resumed.path, wt.path);
+        assert_eq!(resumed.base_commit, base);
+        assert_eq!(run_git(&resumed.path, &["rev-parse", "HEAD"]), head);
+        assert_eq!(run_git(&repo, &["rev-parse", "HEAD"]), base);
+        assert!(UnitWorktree::resume(&repo, "loop-1", "U1", &base, &base).is_err());
+    }
+
+    #[test]
+    fn unit_worktree_resume_rejects_dirty_untracked_and_detached_checkout() {
+        let (_tmp, repo, base) = init_repo_with_initial_commit();
+        let wt = UnitWorktree::acquire(&repo, "loop-1", "U1", &base).unwrap();
+        std::fs::write(wt.path.join("README.md"), "dirty\n").unwrap();
+        assert!(UnitWorktree::resume(&repo, "loop-1", "U1", &base, &base).is_err());
+        assert_eq!(
+            std::fs::read_to_string(wt.path.join("README.md")).unwrap(),
+            "dirty\n"
+        );
+        std::fs::write(wt.path.join("README.md"), "init\n").unwrap();
+        std::fs::write(wt.path.join("untracked.txt"), "untracked\n").unwrap();
+        assert!(UnitWorktree::resume(&repo, "loop-1", "U1", &base, &base).is_err());
+        std::fs::remove_file(wt.path.join("untracked.txt")).unwrap();
+        run_git(&wt.path, &["checkout", "--detach"]);
+        assert!(UnitWorktree::resume(&repo, "loop-1", "U1", &base, &base).is_err());
+    }
+
+    #[test]
+    fn unit_worktree_resume_rejects_foreign_repository_at_registered_path() {
+        let (_tmp, repo, base) = init_repo_with_initial_commit();
+        let wt = UnitWorktree::acquire(&repo, "loop-1", "U1", &base).unwrap();
+        std::fs::rename(&wt.path, repo.join(".ralph/original-worktree")).unwrap();
+        run_git(
+            &repo,
+            &["clone", "--no-hardlinks", ".", wt.path.to_str().unwrap()],
+        );
+        run_git(&wt.path, &["checkout", "-b", &wt.branch]);
+        assert_eq!(run_git(&wt.path, &["rev-parse", "HEAD"]), base);
+        assert!(UnitWorktree::resume(&repo, "loop-1", "U1", &base, &base).is_err());
+        assert!(UnitWorktree::acquire(&repo, "loop-1", "U1", &base).is_err());
+    }
+
+    #[test]
+    fn unit_worktree_resume_requires_verified_base_in_unit_history() {
+        let (_tmp, repo, base) = init_repo_with_initial_commit();
+        let wt = UnitWorktree::acquire(&repo, "loop-1", "U1", &base).unwrap();
+        std::fs::write(repo.join("later.txt"), "later\n").unwrap();
+        run_git(&repo, &["add", "later.txt"]);
+        run_git(&repo, &["commit", "-qm", "later base"]);
+        let later = run_git(&repo, &["rev-parse", "HEAD"]);
+        assert!(UnitWorktree::resume(&repo, "loop-1", "U1", &later, &base).is_err());
+        assert_eq!(run_git(&wt.path, &["rev-parse", "HEAD"]), base);
+        assert!(!wt.path.join("later.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unit_worktree_resume_rejects_symlink_replacement() {
+        let (_tmp, repo, base) = init_repo_with_initial_commit();
+        let wt = UnitWorktree::acquire(&repo, "loop-1", "U1", &base).unwrap();
+        let saved = repo.join(".ralph/original-worktree");
+        std::fs::rename(&wt.path, &saved).unwrap();
+        std::os::unix::fs::symlink(&saved, &wt.path).unwrap();
+        assert!(UnitWorktree::resume(&repo, "loop-1", "U1", &base, &base).is_err());
+        assert!(
+            std::fs::symlink_metadata(&wt.path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     /// U7 contract: re-acquire with a DIFFERENT base fails

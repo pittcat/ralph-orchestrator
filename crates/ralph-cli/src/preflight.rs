@@ -792,8 +792,7 @@ pub(crate) fn validate_scheduler_mode_for_config(config: &RalphConfig) -> Result
         .filter(|(_, hat)| hat.runtime_driven)
         .map(|(id, _)| id.clone())
         .collect();
-    if let Err(err) = ralph_core::config::validate_runtime_driven_hats(mode, &runtime_driven_hats)
-    {
+    if let Err(err) = ralph_core::config::validate_runtime_driven_hats(mode, &runtime_driven_hats) {
         anyhow::bail!(
             "runtime_driven validation failed: {err} \
              (field path: hats[].runtime_driven)"

@@ -155,6 +155,7 @@ pub async fn run_wave_worker_pty(
         stdin_input,
         cwd,
         env: worker_backend.env_vars.clone(),
+        clear_env: false,
     };
     let mut handle = match spawn_pty_job(spec) {
         Ok(handle) => handle,
