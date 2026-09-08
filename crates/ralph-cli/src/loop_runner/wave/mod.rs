@@ -20,7 +20,9 @@ mod dispatcher;
 // pure lease types (`LeaseConfig` / `LeaseState` / `HeartbeatKind`)
 // instead of duplicating them.
 pub(crate) mod heartbeat;
-mod io;
+// E1 (2026-09-03-0959 DAG 接线): the DAG spawn seam reuses
+// `read_worker_events` to drain per-job event channels.
+pub(crate) mod io;
 // 2026-09-01-001 plan U2 (R2 / D3): startup-time compensation
 // delivery for crash windows where a slot's accepted events
 // were persisted to `slot_event_payloads` but never reached

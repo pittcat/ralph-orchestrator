@@ -589,6 +589,14 @@ pub struct CanonicalPlanHandoff {
     pub plan_key: String,
     pub tasks: Vec<CanonicalTaskSpec>,
     pub wave_total: u32,
+    /// E1 (2026-09-03-0959 DAG 接线): per-unit targeted gate
+    /// commands (`tests` in the artifact), keyed by unit id. Units
+    /// without a `tests` declaration are absent from the map; the
+    /// verifier job treats a missing entry as "no targeted gate
+    /// declared". Kept off `CanonicalTaskSpec` deliberately: this
+    /// struct is never serialized, while the task spec feeds the
+    /// wave-mode task projection byte stream.
+    pub unit_tests: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -612,6 +620,15 @@ struct ExecutionPlanUnit {
     target_branch: String,
     #[serde(default)]
     resource_claims: Vec<ResourceClaim>,
+    /// E1 (2026-09-03-0959 DAG 接线): optional per-unit targeted
+    /// gate commands the runtime's verifier job runs (and E2's
+    /// integration lane re-runs against the squash tree). Absent in
+    /// pre-E1 artifacts — `serde(default)` keeps those parseable.
+    /// Carried on the handoff (never on `CanonicalTaskSpec`, whose
+    /// serialization feeds the wave-mode task projection and must
+    /// stay byte-identical).
+    #[serde(default)]
+    tests: Vec<String>,
 }
 
 /// Read, verify, and derive the canonical Parallel Forge task schedule.
@@ -696,10 +713,14 @@ fn derive_plan_handoff(
     // so a plan that lists independent Units in serial waves still fans them
     // out. `integration_order` remains the separate deterministic merge order.
     let execution_waves = derive_execution_waves(&plan.units)?;
+    let mut unit_tests: HashMap<String, Vec<String>> = HashMap::new();
     let mut tasks = Vec::with_capacity(plan.units.len());
     let mut wave_sizes: HashMap<u32, usize> = HashMap::new();
     for unit in plan.units {
         let execution_wave = execution_waves[&unit.id];
+        if !unit.tests.is_empty() {
+            unit_tests.insert(unit.id.clone(), unit.tests.clone());
+        }
         let depends_on_task_keys = unit
             .depends_on
             .iter()
@@ -740,6 +761,7 @@ fn derive_plan_handoff(
         plan_key: plan.plan_key,
         tasks,
         wave_total,
+        unit_tests,
     })
 }
 
@@ -959,6 +981,66 @@ units:
         assert_eq!(handoff.wave_total, 1);
         assert_eq!(handoff.tasks[0].task_key, "forge:pf-test:U1");
         assert_eq!(handoff.tasks[1].depends_on_task_keys, Vec::<String>::new());
+    }
+
+    /// E1 (2026-09-03-0959 DAG 接线): the artifact's optional
+    /// per-unit `tests` list lands on `CanonicalPlanHandoff::unit_tests`
+    /// keyed by unit id; units without it are absent (never an empty
+    /// entry), and pre-E1 artifacts without the field keep parsing.
+    #[test]
+    fn unit_tests_field_lands_on_handoff_and_is_optional() {
+        let artifact: &[u8] = br#"version: 1
+plan_key: pf-test
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1-foundation
+    tests:
+      - cargo nextest run -p ralph-core -- dag
+  - id: U2
+    title: Feature
+    depends_on: []
+    execution_wave: 1
+    integration_order: 2
+    target_branch: feat/u2-feature
+"#;
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("execution-plan.yml"), artifact).expect("write plan");
+        let payload = json!({
+            "execution_plan_path": "execution-plan.yml",
+            "plan_key": "pf-test",
+        });
+
+        let handoff = load_plan_handoff(&payload, temp.path()).expect("valid handoff");
+        assert_eq!(
+            handoff.unit_tests.get("U1").map(Vec::as_slice),
+            Some(&["cargo nextest run -p ralph-core -- dag".to_string()][..])
+        );
+        assert!(
+            !handoff.unit_tests.contains_key("U2"),
+            "a unit without `tests` must be absent, not an empty entry"
+        );
+        // The task spec stream is untouched (wave-mode byte
+        // stability): no `tests` leak into `CanonicalTaskSpec`.
+        let serialized = serde_json::to_value(&handoff.tasks).expect("serialize tasks");
+        assert!(!serialized.to_string().contains("\"tests\""));
+    }
+
+    /// Pre-E1 artifacts (no `tests` key anywhere) still parse and
+    /// yield an empty `unit_tests` map.
+    #[test]
+    fn artifact_without_tests_yields_empty_unit_tests() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("execution-plan.yml"), PLAN_ARTIFACT).expect("write plan");
+        let payload = json!({
+            "execution_plan_path": "execution-plan.yml",
+            "plan_key": "pf-test",
+        });
+        let handoff = load_plan_handoff(&payload, temp.path()).expect("valid handoff");
+        assert!(handoff.unit_tests.is_empty());
     }
 
     #[test]

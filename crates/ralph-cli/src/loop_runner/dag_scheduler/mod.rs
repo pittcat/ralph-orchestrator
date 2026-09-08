@@ -29,18 +29,23 @@
 //! descriptor so U7 can authorise against the same value.
 //!
 //! Step 4 (2026-09-03-0959 DAG 接线) adds [`DagSchedulerRuntime`]
-//! below: the **observability-only** seam the loop runner feeds
-//! accepted (post-policy) events into. It never spawns workers,
-//! never creates worktrees, never merges, never emits events, and
-//! never closes tasks — execution stays with the legacy wave
-//! authority until the DAG cutover steps land.
+//! below: the seam the loop runner feeds accepted (post-policy)
+//! events into. In `wave` / `dag_shadow` mode it stays
+//! **observability-only** (no spawn, no worktree, no merge, no
+//! emit). Step E1 adds the `dag`-mode execution face (`spawn`
+//! module): per-unit executor → reviewer → verifier jobs fenced by
+//! the durable launch journal, with results merged back into the
+//! main ledger at most one business event per tick (OPAC).
 
 pub mod driver;
 pub mod integration;
 pub mod jobs;
 pub mod recovery;
 pub mod shadow;
+mod spawn;
 pub mod worktree;
+
+pub use spawn::DagExecutionContext;
 
 // Step 1+2(2026-09-03-0959 DAG 接线):driver/jobs 与 runtime_job
 // 全量 promote 为生产可见;EventLoop 接线前尚无 bin 侧生产调用方,
@@ -50,7 +55,7 @@ pub mod worktree;
 // 测试经 `super::*` / 完整模块路径访问,接线 Step 引入生产调用方时
 // 再按需 re-export。
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -84,6 +89,13 @@ mod seam_topics {
 struct StoreHandles {
     plans: Arc<dyn DagSchedulerStore>,
     receipts: DagPlanReceiptRegistry,
+    /// E1: the durable launch journal (`reserve_job` /
+    /// `record_job_pid` / `accept_job_terminal`) lives on the
+    /// concrete rusqlite store, not on the `DagSchedulerStore`
+    /// trait. Present only in `dag` mode with the `supervisor-db`
+    /// feature; every other combination spawns nothing.
+    #[cfg(feature = "supervisor-db")]
+    journal: Option<Arc<ralph_core::supervisor::dag_store_rusqlite::RusqliteDagSchedulerStore>>,
 }
 
 /// In-memory topology mirror for one registered plan, derived from
@@ -94,6 +106,11 @@ struct PlanTopology {
     artifact_path: String,
     artifact_digest: String,
     target_branch: String,
+    /// Trusted base commit captured at the `forge.concurrency.approved`
+    /// boundary (workspace HEAD at approval time). Unit worktrees are
+    /// acquired against this base. `None` until approval (or when the
+    /// workspace git state is unresolvable — spawn then fails closed).
+    verified_base_commit: Option<String>,
     units: Vec<UnitTopology>,
 }
 
@@ -102,10 +119,15 @@ struct UnitTopology {
     unit_id: String,
     integration_order: u32,
     depends_on: Vec<String>,
+    /// Targeted gate commands declared by the artifact's `tests`
+    /// field (E1 verifier prompt / E2 integration gate). Empty when
+    /// the unit declares none.
+    tests: Vec<String>,
 }
 
 /// Step 4 (2026-09-03-0959 DAG 接线): observation-only DAG
-/// scheduler runtime seam.
+/// scheduler runtime seam; Step E1 adds the `dag`-mode execution
+/// face (see `spawn`).
 ///
 /// Wired into `loop_runner::inner` at the post-acceptance boundary:
 /// every event that already passed origin → policy → schema →
@@ -128,9 +150,13 @@ struct UnitTopology {
 ///   - after each batch: one observation tick — a pure
 ///     `compute_admissions` snapshot per tracked plan recorded into
 ///     the [`ShadowSink`]. In `dag` mode the durable decision record
-///     is the store's plan/receipt rows; a durable per-tick decision
-///     journal needs the `dag_units` store API, which is a later
-///     step's scope.
+///     is the store's plan/receipt rows plus the `dag_jobs` /
+///     `dag_units` launch journal (`reserve_job` → `record_job_pid`
+///     → `accept_job_terminal`); a separate per-tick decision journal
+///     was evaluated and rejected (E1 decision) — the launch journal
+///     already carries every admission that became a launch, and
+///     recovery (`unresolved_jobs`) reads exactly that. The
+///     [`ShadowSink`] observation stays in-memory diagnostics only.
 ///
 /// **Lazy durability (TG-S05):** `.ralph/dag.db` is opened (and thus
 /// created) only when the FIRST relevant accepted event arrives. A
@@ -148,6 +174,32 @@ pub struct DagSchedulerRuntime {
     stores: Option<StoreHandles>,
     sink: ShadowSink,
     plans: BTreeMap<String, PlanTopology>,
+    /// E1 execution face, attached by `inner` once the global
+    /// backend exists. `Some` only in `dag` mode.
+    exec: Option<DagExecutionContext>,
+    completion_tx: tokio::sync::mpsc::UnboundedSender<spawn::JobCompletion>,
+    completion_rx: tokio::sync::mpsc::UnboundedReceiver<spawn::JobCompletion>,
+    /// In-flight job ids (`JobIdentity.job_id`).
+    active_jobs: HashSet<String>,
+    /// Completed results awaiting merge into the main ledger.
+    /// OPAC: at most one entry is merged per tick.
+    merge_queue: VecDeque<spawn::PendingMerge>,
+    /// Merged events whose journal terminal is written once the
+    /// real `EventLoop` accepts them (keyed by pipeline unit key).
+    awaiting_acceptance: HashMap<String, spawn::PostAcceptance>,
+    /// Advances/spawns deferred by transient pool caps; retried
+    /// each tick.
+    pending_advances: VecDeque<spawn::PendingAdvance>,
+    pending_spawns: VecDeque<spawn::PendingSpawn>,
+    /// Units whose execute-stage job was already reserved (dedup
+    /// against the pure admission snapshot, which re-reports Ready
+    /// units every tick).
+    executors_launched: HashSet<String>,
+    /// D16: in-flight fixer jobs; the cap is enforced here because
+    /// the pipeline `Stage` enum has no Fix variant.
+    fixer_in_flight: u32,
+    /// Monotonic worker index for kernel log lines.
+    job_seq: u32,
 }
 
 impl DagSchedulerRuntime {
@@ -158,8 +210,14 @@ impl DagSchedulerRuntime {
             resolved.executor,
             resolved.reviewer,
             resolved.verifier,
-        );
+        )
+        // D16 four-pool semantics: the fixer cap comes from the
+        // supervisor config (`dag_pools.fixer`) and is enforced by
+        // the spawn seam, not by `JobPipeline::advance` (the fix
+        // loop reuses the Review-stage slot).
+        .with_fixer(resolved.fixer);
         let db_path = integration::dag_store_path(&workspace);
+        let (completion_tx, completion_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             mode,
             pipeline: JobPipeline::new(pools),
@@ -168,6 +226,25 @@ impl DagSchedulerRuntime {
             stores: None,
             sink: ShadowSink::new(),
             plans: BTreeMap::new(),
+            exec: None,
+            completion_tx,
+            completion_rx,
+            active_jobs: HashSet::new(),
+            merge_queue: VecDeque::new(),
+            awaiting_acceptance: HashMap::new(),
+            pending_advances: VecDeque::new(),
+            pending_spawns: VecDeque::new(),
+            executors_launched: HashSet::new(),
+            fixer_in_flight: 0,
+            job_seq: 0,
+        }
+    }
+
+    /// Attach the E1 execution context. No-op outside `dag` mode:
+    /// wave / `dag_shadow` keep the seam observability-only.
+    pub fn attach_execution_context(&mut self, ctx: DagExecutionContext) {
+        if self.mode == SchedulerMode::Dag {
+            self.exec = Some(ctx);
         }
     }
 
@@ -215,6 +292,25 @@ impl DagSchedulerRuntime {
                 };
                 self.observe_unit_event(topic, &payload);
             }
+            // E1: verify-stage results only drive the execution face
+            // (journal terminal + slot release); the pipeline driver
+            // intentionally does not consume them.
+            spawn::topics_ext::UNIT_VERIFIED | spawn::topics_ext::UNIT_VERIFICATION_FAILED
+                if self.mode == SchedulerMode::Dag =>
+            {
+                let payload: Value = match serde_json::from_str(payload_raw) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        warn!(
+                            topic,
+                            error = %err,
+                            "DAG seam: accepted verify event payload is not valid JSON; skipping"
+                        );
+                        return;
+                    }
+                };
+                self.observe_unit_event(topic, &payload);
+            }
             _ => {}
         }
     }
@@ -241,14 +337,16 @@ impl DagSchedulerRuntime {
                 DagStoreError::IoError(format!("create {}: {err}", parent.display()))
             })?;
         }
-        let plans = ralph_core::supervisor::dag_store_rusqlite::RusqliteDagSchedulerStore::open(
+        let store = ralph_core::supervisor::dag_store_rusqlite::RusqliteDagSchedulerStore::open(
             &self.db_path,
         )?;
-        let receipts = DagPlanReceiptRegistry::new(Arc::new(plans.shared_with_receipts()));
+        let receipts = DagPlanReceiptRegistry::new(Arc::new(store.shared_with_receipts()));
         debug!(mode = self.mode.as_str(), "DAG seam: durable store opened");
+        let store = Arc::new(store);
         Ok(StoreHandles {
-            plans: Arc::new(plans),
+            plans: store.clone(),
             receipts,
+            journal: Some(store),
         })
     }
 
@@ -267,6 +365,8 @@ impl DagSchedulerRuntime {
         StoreHandles {
             plans: Arc::new(InMemoryDagSchedulerStore::new()),
             receipts: DagPlanReceiptRegistry::new(Arc::new(InMemoryDagPlanReceiptStore::new())),
+            #[cfg(feature = "supervisor-db")]
+            journal: None,
         }
     }
 
@@ -420,6 +520,13 @@ impl DagSchedulerRuntime {
                 return;
             }
         }
+        // E1: pin the trusted base commit for unit worktrees at the
+        // approval boundary. An unresolvable git state stays `None`
+        // and the spawn seam fails closed on it.
+        let verified_base = ralph_core::get_head_sha(&self.workspace).ok();
+        if let Some(plan) = self.plans.get_mut(&plan_key) {
+            plan.verified_base_commit = verified_base;
+        }
         // Seed the in-memory pipeline so per-unit events route. The
         // job id is a deterministic observation label — Step 4 never
         // launches a process under it.
@@ -527,6 +634,14 @@ impl DagSchedulerRuntime {
             debug!(topic, "DAG seam: unit event without unit_id; ignored");
             return;
         };
+        // E1: in `dag` mode the execution face owns the follow-up —
+        // journal terminal for the completing job, slot release, and
+        // the next-stage spawn. Shadow mode keeps the pure
+        // observation path below untouched.
+        if self.mode == SchedulerMode::Dag {
+            self.observe_unit_event_dag(topic, unit_key, payload);
+            return;
+        }
         let outcome = {
             let mut driver = DagSchedulerDriver::new(&mut self.pipeline);
             driver.observe_accepted(topic, unit_key, payload)
@@ -575,6 +690,7 @@ impl DagSchedulerRuntime {
         // checked out. Unresolvable git state degrades to `None`,
         // which the admission engine reports as `BlockedNoTargetHead`.
         let target_head = ralph_core::get_head_sha(&self.workspace).ok();
+        let mut admitted: Vec<(String, String)> = Vec::new();
         for (plan_key, plan) in &self.plans {
             let inputs: Vec<UnitAdmissionInput> = plan
                 .units
@@ -596,7 +712,26 @@ impl DagSchedulerRuntime {
             };
             let mut observation = compute_shadow_observation(&snapshot, &caps, &self.sink);
             observation.plan_key = plan_key.clone();
+            if self.mode == SchedulerMode::Dag {
+                admitted.extend(
+                    observation
+                        .decisions
+                        .iter()
+                        .filter(|(_, reason)| reason == "Admitted")
+                        .map(|(unit_id, _)| (plan_key.clone(), unit_id.clone())),
+                );
+            }
             self.sink.record(observation);
+        }
+        // E1 execution passes (dag mode only): retry deferred
+        // follow-ups, then admit Ready units into Execute. Both are
+        // fail-closed — a spawn error strands the unit with a
+        // journaled `failed` terminal, never a panic.
+        if self.mode == SchedulerMode::Dag && self.exec.is_some() {
+            self.retry_pending();
+            for (plan_key, unit_id) in admitted {
+                self.maybe_spawn_executor(&plan_key, &unit_id);
+            }
         }
     }
 
@@ -632,6 +767,7 @@ fn topology_from_handoff(
         artifact_path,
         artifact_digest: handoff.artifact.digest.clone(),
         target_branch,
+        verified_base_commit: None,
         units: handoff
             .tasks
             .iter()
@@ -643,6 +779,11 @@ fn topology_from_handoff(
                     .iter()
                     .map(|key| key.strip_prefix(&prefix).unwrap_or(key).to_string())
                     .collect(),
+                tests: handoff
+                    .unit_tests
+                    .get(&task.unit_id)
+                    .cloned()
+                    .unwrap_or_default(),
             })
             .collect(),
     }
@@ -678,6 +819,8 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1-foundation
+    tests:
+      - cargo nextest run -p ralph-core -- u1
   - id: U2
     title: Feature
     depends_on: []

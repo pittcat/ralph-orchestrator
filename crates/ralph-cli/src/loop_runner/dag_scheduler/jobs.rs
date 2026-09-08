@@ -25,12 +25,21 @@ use super::super::runtime_job::{JobToken, RuntimeJobError, Stage};
 // ---------------------------------------------------------------------------
 
 /// Pool caps for the three pipeline stages + a global cap that
-/// applies across all stages.
+/// applies across all stages, plus the D16 fourth pool for fixer
+/// jobs.
 ///
 /// `global` is the upper bound on Units that may be in flight at
 /// any moment. `executor` / `reviewer` / `verifier` are the
 /// per-stage slot counts. A pipeline tick that would exceed any
 /// cap returns `AdvanceOutcome::Blocked`.
+///
+/// `fixer` caps the correction jobs spawned after a REJECTED
+/// review. The pipeline `Stage` enum has no `Fix` variant (the
+/// fix loop reuses the `Review` slot), so the fixer cap is
+/// enforced by the spawn seam (`dag_scheduler` runtime) against
+/// its in-flight fixer count, not by `JobPipeline::advance`.
+/// Defaults to `reviewer` when not explicitly set so the legacy
+/// 4-arg `new` call sites keep a sensible four-pool semantic.
 ///
 /// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见。容量模型
 /// 与 `max_concurrent_workers` 的单一权威收敛(promote 义务 #2,见
@@ -44,6 +53,7 @@ pub struct DagPools {
     pub executor: u32,
     pub reviewer: u32,
     pub verifier: u32,
+    pub fixer: u32,
 }
 
 #[allow(dead_code)] // 同 `DagPools` 的 Step 1+2 promote 注释。
@@ -54,7 +64,24 @@ impl DagPools {
             executor,
             reviewer,
             verifier,
+            // D16: an unset fixer pool inherits the reviewer cap so
+            // the four-pool config degrades gracefully for callers
+            // that predate the fixer field.
+            fixer: reviewer,
         }
+    }
+
+    /// Set the D16 fixer-pool cap (builder form so existing `new`
+    /// call sites stay untouched).
+    pub fn with_fixer(mut self, fixer: u32) -> Self {
+        self.fixer = fixer;
+        self
+    }
+
+    /// Cap for fixer (correction) jobs — enforced by the spawn
+    /// seam, see the struct-level doc.
+    pub fn fixer_cap(&self) -> u32 {
+        self.fixer
     }
 
     /// Default test cap: small enough that a 3-Unit test
@@ -66,6 +93,7 @@ impl DagPools {
             executor: 2,
             reviewer: 2,
             verifier: 2,
+            fixer: 2,
         }
     }
 
@@ -757,5 +785,22 @@ mod tests {
             }
             other => panic!("expected budget Blocked on Verify, got {other:?}"),
         }
+    }
+
+    /// D16 four-pool semantics: `new` without an explicit fixer cap
+    /// inherits the reviewer cap; `with_fixer` overrides it. The
+    /// fixer pool is enforced by the spawn seam (the pipeline's
+    /// `Stage` has no Fix variant), so this test pins the carried
+    /// value, not a pipeline transition.
+    #[test]
+    fn fixer_pool_defaults_to_reviewer_and_overrides() {
+        let default = DagPools::new(4, 2, 3, 2);
+        assert_eq!(default.fixer_cap(), 3, "unset fixer inherits reviewer");
+        let explicit = default.clone().with_fixer(1);
+        assert_eq!(explicit.fixer_cap(), 1);
+        // The three pipeline-stage caps are untouched by the fixer
+        // override.
+        assert_eq!(explicit.cap_for(Stage::Review), 3);
+        assert_eq!(default, DagPools::new(4, 2, 3, 2).with_fixer(3));
     }
 }

@@ -1259,6 +1259,22 @@ pub(super) async fn run_loop_impl_inner(
         backend.args.extend(custom_args);
     }
 
+    // ── Step E1 (2026-09-03-0959 DAG 接线): dag-mode execution face ──
+    // Attach the job-template context (hat configs, global backend,
+    // ledger path) to the DAG seam. No-op in wave / dag_shadow mode;
+    // spawning still only starts once forge seam events arrive.
+    if let Some(dag) = dag_scheduler.as_mut() {
+        dag.attach_execution_context(
+            crate::loop_runner::dag_scheduler::DagExecutionContext::new(
+                &config,
+                &backend,
+                &loop_id,
+                crate::loop_runner::paths::resolve_current_events_path(&ctx),
+                hats_source_label.clone(),
+            ),
+        );
+    }
+
     // 2026-07-28-002 plan U4 (G1 / R-F1): redrive boot dispatch. When
     // resuming, scan the supervisor store for pending redrive child
     // waves (created by a previous loop via `create_redrive_wave` but
@@ -2477,6 +2493,24 @@ pub(super) async fn run_loop_impl_inner(
                 id.clone()
             }
             None => {
+                // Step E1 (2026-09-03-0959 DAG 接线): dag-mode
+                // keepalive. Runtime-driven hats are suppressed, so a
+                // loop whose only work is in-flight DAG jobs would
+                // otherwise exhaust the fallback budget and stop. The
+                // pump must run BEFORE `recover_late_events_before_
+                // fallback`: that path discards accepted events, which
+                // would swallow merged job results. The pump only
+                // peeks termination flags — honoring them stays with
+                // the recovery path below. The per-iteration
+                // `check_termination` at the loop top still bounds
+                // max_runtime / max_iterations.
+                if let Some(dag) = dag_scheduler.as_mut()
+                    && dag.pump_idle(&mut event_loop)
+                {
+                    consecutive_fallbacks = 0;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
                 match recover_late_events_before_fallback(&mut event_loop)
                     .inspect_err(
                         |e| warn!(error = %e, "Failed to drain late JSONL events before fallback"),
