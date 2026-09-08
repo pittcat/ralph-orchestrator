@@ -288,7 +288,7 @@
 
 1. **fail-closed 组合**：`dag_shadow` / `dag` 时 `event_loop.supervisor.enabled: true` 且 `event_loop.execution_mode: isolated`（违反组合 `ralph preset check --strict` / preflight 启动即拒，错误含字段路径 `event_loop.supervisor.scheduler_mode`）。✓ / ✗ + 引用字段路径
 2. **instructions 不描述 DAG 行为**：任何 hat `instructions:` 不得描述 / 依赖 DAG 调度器行为（per-Unit admission、`forge.exec.development.done` 由 runtime 发射等）——这些行为当前未接线，调度与 `wave` 完全等价，由 dispatcher wave fan-out 驱动。✓ / ✗ + grep
-3. **过渡态事实入 notes**：preset 注释 / author notes 必须如实记录「`scheduler_mode` 已声明但行为当前等价 `wave`」，不得声称 DAG authority 已接管调度。✓ / ✗ + 引用 notes 段
+3. **执行面事实入 notes**：`dag` preset 的注释 / author notes 必须说明 runtime-owned admission、job lifecycle、recovery、integration 与 completion fence；不得让 hat 伪造这些控制面副作用。✓ / ✗ + 引用 notes 段
 4. **inspect 可见性核对**：`ralph inspect loop --format json` 在非 `wave` 模式输出只读 `scheduler` 块（`scheduler_mode` / `plan_keys` / 观测计数）——用它核对配置确实生效，而不是从行为反推。✓ / ✗ + 列 inspect 输出
 
 任一问 ✗ → 必须改写或显式说明。完整 finding 默认 severity / confidence / aaf_question 见 `finding-rubric.md`「Scheduler mode audit」段。

@@ -266,11 +266,11 @@ review 命中时按上表 `finding_id` + `default_severity` + 默认 confidence 
 
 | 缺口 | Severity | category | aaf_question | finding_id |
 |---|---|---|---|---|
-| hat `instructions` 描述 / 依赖 DAG 调度器行为（per-Unit admission、`forge.exec.development.done` 由 runtime 发射等），而这些行为当前未接线（调度与 `wave` 完全等价，由 dispatcher wave fan-out 驱动） | P0 | payload-content | Q4 | review-only（`scheduler_mode_instructions_describe_unwired_behavior`） |
-| preset 注释 / notes 声称 `scheduler_mode: dag` 已改变调度行为（「DAG authority 已接管」），与过渡态事实矛盾 | P1 | payload-content | Q4 | review-only（`scheduler_mode_overstates_cutover`） |
-| `dag_shadow` / `dag` 模式下 preset 未在 author notes 记录「行为当前等价 wave」的过渡态事实 | P1 | feasibility | Q3 | review-only（`scheduler_mode_transitional_state_undocumented`） |
+| hat `instructions` 伪造 runtime admission、job lifecycle 或 terminal receipt，绕过 runtime-owned DAG 控制面 | P0 | payload-content | Q4 | review-only（`scheduler_mode_instructions_describe_unwired_behavior`） |
+| preset 注释 / notes 声称 `scheduler_mode: dag` 已接管调度，却缺少对应 runtime-driven contract | P1 | payload-content | Q4 | review-only（`scheduler_mode_overstates_cutover`） |
+| `dag_shadow` / `dag` 模式下 preset 未在 author notes 说明 side-effect boundary 与 runtime ownership | P1 | feasibility | Q3 | review-only（`scheduler_mode_transitional_state_undocumented`） |
 
-命中按上表 `finding_id` + default severity + 默认 confidence 起点 60 入主表。**过渡态现状**：builtin `parallel-forge` 已声明 `scheduler_mode: dag`，调度行为与 `wave` 完全等价（DAG 执行面未接线）；`ralph inspect loop --format json` 在非 `wave` 模式输出只读 `scheduler` 块。DAG 执行面接线落地后本表第 1 行降级为 N/A。
+命中按上表 `finding_id` + default severity + 默认 confidence 起点 60 入主表。builtin `parallel-forge` 的 `scheduler_mode: dag` 已使用 runtime-owned DAG execution face；`ralph inspect loop --format json` 在非 `wave` 模式输出只读 `scheduler` 块。
 ### Agent skill audit（review-only，由 review SKILL Workflow 0a 弹窗默认跳过、选审触发）
 
 按 `references/agent-skill-audit.md` 的规程，对注入给 agent 的 skill 文档（`crates/ralph-core/data/*.md` / 外仓二进制内嵌）做内容级审计。**默认不审**，review SKILL 第 0a 步必须弹出交互选择菜单，默认选项是「仅审查 preset YAML（推荐）」。命中按上表 `default_severity` + `default_confidence` 入主表（与 `ralph preset check --strict` 输出的 lint ID 分开——本表 ID 不带 `lint.` 前缀，也**不**出现在 `ralph preset check` JSON）。

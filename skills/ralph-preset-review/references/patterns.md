@@ -488,6 +488,6 @@ preset 作者**不需要**手动把 `aggregate_timeout_secs` 乘以尝试次数�
 **Reviewer 核对点：**
 
 - **fail-closed 组合由 runtime 强制**（`validate_scheduler_mode`，preflight / `ralph preset check` 启动即拒），review 不重复检查该组合，重点在 runtime 不覆盖的三条 review-only 缺口（见 rubric 表）。
-- **instructions 与接线事实对账**：hat `instructions:` 不得描述 / 依赖 DAG 调度器行为（per-Unit admission、`forge.exec.development.done` 由 runtime 发射等）；当前调度与 `wave` 完全等价，由 dispatcher wave fan-out 驱动。发现即按 `scheduler_mode_instructions_describe_unwired_behavior`（P0）入主表。
-- **叙述诚实性**：preset 注释 / notes 声称「DAG authority 已接管调度」而实际未接线 → `scheduler_mode_overstates_cutover`（P1）；`dag_shadow` / `dag` 声明但 notes 无「行为当前等价 wave」过渡态记录 → `scheduler_mode_transitional_state_undocumented`（P1）。
+- **instructions 与接线事实对账**：`dag` runtime preset 可以描述 per-Unit admission 与 runtime-owned `forge.exec.development.done`，但不得让 agent 伪造 scheduler receipts、跨 Unit 调度或绕过 runtime fences；发现控制面越权仍按 `scheduler_mode_instructions_describe_unwired_behavior`（P0）入主表。
+- **叙述诚实性**：preset 注释 / notes 声称 runtime 已接管调度，却没有对应 runtime-driven contract 或 active mode → `scheduler_mode_overstates_cutover`（P1）；`dag_shadow` / `dag` 声明但 notes 没有说明实际 side-effect boundary → `scheduler_mode_transitional_state_undocumented`（P1）。
 - **inspect 证据**：配置生效核对用 `ralph inspect loop --format json` 的只读 `scheduler` 块（非 `wave` 模式才出现），不要求跑真 loop。

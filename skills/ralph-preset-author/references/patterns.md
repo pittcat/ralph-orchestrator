@@ -519,7 +519,7 @@ preset 作者**不需要**手动把 `aggregate_timeout_secs` 乘以尝试次数�
 
 - **三态选择器**：`wave`（默认，legacy WaveTracker 执行面） / `dag_shadow`（legacy 照常执行 + DAG 调度器 dry-run 观察，无副作用） / `dag`（声明运行时自有 work-conserving DAG 调度器）。
 - **fail-closed 组合（runtime 强制）**：`dag_shadow` / `dag` 要求 `event_loop.supervisor.enabled: true` ∧ `event_loop.execution_mode: isolated`；违反组合在 `ralph preset check` / preflight 启动即拒（错误含字段路径 `event_loop.supervisor.scheduler_mode`），无静默降级。
-- **过渡态事实（2026-09-03-0959 plan U10 cutover 后）**：builtin `parallel-forge` 已声明 `scheduler_mode: dag`，但调度行为当前与 `wave` **完全等价**（DAG 执行面未接线；调度仍由 dispatcher wave fan-out 驱动）。preset 注释与 author notes 必须如实记录这一点。
+- **执行面事实（2026-09-08 U10 cutover 后）**：builtin `parallel-forge` 的 `scheduler_mode: dag` 已由 runtime 接管 Unit admission、job 生命周期、recovery、integration 与 completion fence；preset 注释与 author notes 必须说明这些是 runtime-owned effects，不应再把旧 wave dispatcher 当作控制面。
 - **inspect 核对**：`ralph inspect loop --format json` 在非 `wave` 模式输出只读 `scheduler` 块（`scheduler_mode` / `plan_keys` / 观测计数）——配置生效与否用这个核对，不要从行为反推。
 
 **反模式：**
