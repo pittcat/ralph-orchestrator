@@ -445,6 +445,7 @@ impl DagSchedulerRuntime {
             }
         }
         self.reconcile_after_restart();
+        self.write_recovery_report();
     }
 
     #[cfg(not(feature = "supervisor-db"))]
@@ -1004,6 +1005,28 @@ impl DagSchedulerRuntime {
         let plan_key = plan_key.into();
         if self.blocked_plans.insert(plan_key.clone()) {
             error!(plan_key, reason, "DAG recovery blocked plan");
+        }
+    }
+
+    #[cfg(feature = "supervisor-db")]
+    fn write_recovery_report(&self) {
+        let Some(loop_id) = self.exec.as_ref().map(|exec| exec.loop_id.as_str()) else {
+            return;
+        };
+        let diagnostics = self.workspace.join(".ralph").join("diagnostics");
+        if let Err(err) = std::fs::create_dir_all(&diagnostics) {
+            warn!(error = %err, "DAG recovery: diagnostics directory unavailable");
+            return;
+        }
+        let report = serde_json::json!({
+            "loop_id": loop_id,
+            "recovered_at_ms": now_ms(),
+            "blocked_plans": self.blocked_plans.iter().collect::<Vec<_>>(),
+            "recovered_plan_count": self.plans.len(),
+        });
+        let path = diagnostics.join(format!("dag-recovery-{loop_id}.json"));
+        if let Err(err) = std::fs::write(&path, format!("{}\n", report)) {
+            warn!(path = %path.display(), error = %err, "DAG recovery: report write failed");
         }
     }
 
