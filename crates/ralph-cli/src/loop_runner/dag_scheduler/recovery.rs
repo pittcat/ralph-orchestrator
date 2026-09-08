@@ -19,11 +19,10 @@
 //     `Ambiguous { hint }` and the runtime MUST mark the plan as
 //     `blocked`. Never respawn or kill.
 //
-// The recovery *use site* (U10) composes these planners against
-// the live `DagSchedulerStore` / `IntegrationStore` /
-// `UnitWorktree`. Until then, the module is reachable from tests
-// but not from the runtime driver, which is the expected
-// transitional state for the U6/U7/U8/U10 surface.
+// The live runtime driver composes these planners against the
+// `DagSchedulerStore` / `IntegrationStore` / `UnitWorktree` during
+// restart recovery. The planners remain deliberately pure so the
+// driver can fail closed when any durable state is ambiguous.
 #![allow(dead_code)]
 
 use crate::loop_runner::runtime_job::Stage;

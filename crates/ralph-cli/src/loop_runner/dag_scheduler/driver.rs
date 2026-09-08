@@ -10,9 +10,9 @@
 //!     `JobPipeline::bump_attempt_and_advance(unit, Review)`
 //!   - any other topic → ignored (driver is observation-only)
 //!
-//! Step 1+2(DAG 接线)起 driver 消费 `forge.unit.*` per-unit typed
-//! topic 族(映射决策方案 (b):dag 模式新增 per-unit topic,wave
-//! 路径的 `exec.unit.done` / `forge.wave.reviewed` 不动)。`Stage`
+//! The driver consumes the `forge.unit.*` per-unit typed topic
+//! family. The retired wave control path is not part of active DAG
+//! scheduling. `Stage`
 //! 枚举只有 Execute/Review/Verify——verified 之后的 integration
 //! 推进(`forge.unit.integrated` 由 runtime 在 lane CAS FF 后发射)
 //! 属后续 Step,driver 暂不消费。

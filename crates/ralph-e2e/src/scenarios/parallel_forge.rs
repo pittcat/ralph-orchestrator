@@ -8,10 +8,9 @@
 //! ```text
 //! planner ─▶ forge.plan.ready ─▶ runtime canonicalizes artifact (U9)
 //!         ─▶ runtime projects the unit task DAG
-//!         ─▶ dispatcher ─▶ forge.wave.worktrees.ready (NON-EMPTY ready wave)
-//!         ─▶ executor slots run TDD
-//!         ─▶ reviewer ─▶ forge.wave.reviewed
-//!         ─▶ integrator ─▶ forge.wave.integrated
+//!         ─▶ DAG runtime ─▶ forge.unit.executed (immediate Unit admission)
+//!         ─▶ reviewer ─▶ forge.unit.reviewed
+//!         ─▶ integrator ─▶ forge.unit.integrated
 //!         ─▶ verifier ─▶ forge.full.verified
 //!         ─▶ reporter ─▶ LOOP_COMPLETE (terminal)
 //! ```
@@ -26,13 +25,13 @@
 //! `bus.publish` records carry the structured forge payloads. Ralph parses the
 //! replayed terminal output, detects the `LOOP_COMPLETE` completion promise,
 //! and terminates cleanly — proving the chain reaches the reporter terminal
-//! with a non-empty ready wave, all without a live AI backend.
+//! with runtime-owned Unit receipts, all without a live AI backend.
 //!
 //! # Assertions (acceptance contract)
 //!
 //! - the reporter reaches a terminal state (`LOOP_COMPLETE`);
-//! - at least one **non-empty** ready wave was dispatched
-//!   (`forge.wave.worktrees.ready` with a concrete `ready_units` entry);
+//! - both Units are dispatched and integrated by the DAG runtime without a
+//!   retired wave receipt;
 //! - the planner (`forge.plan.ready`) and verifier (`forge.full.verified`)
 //!   bookends of the chain are present in the reporter terminal output.
 
@@ -47,24 +46,6 @@ use std::path::{Path, PathBuf};
 /// lookup. The cassette file name is derived from this constant; do not change
 /// it without renaming the cassette.
 pub const SCENARIO_ID: &str = "parallel-forge-dispatch-contract";
-
-/// Extracts the first `ready_units=<token>` value from reporter terminal
-/// output.
-///
-/// The cassette renders the dispatcher event as
-/// `forge.wave.worktrees.ready ... ready_units=U1`; the token runs until the
-/// next whitespace or the closing `<` of the XML event tag. Returns `None` when
-/// no `ready_units=` marker is present.
-fn first_ready_units_token(stdout: &str) -> Option<String> {
-    const MARKER: &str = "ready_units=";
-    let idx = stdout.find(MARKER)?;
-    let rest = &stdout[idx + MARKER.len()..];
-    let token: String = rest
-        .chars()
-        .take_while(|c| !c.is_whitespace() && *c != '<')
-        .collect();
-    Some(token)
-}
 
 #[derive(Default)]
 pub struct ParallelForgeDispatchContractScenario;
@@ -83,8 +64,8 @@ impl TestScenario for ParallelForgeDispatchContractScenario {
 
     fn description(&self) -> &str {
         "parallel-forge task authority E2E: the mock cassette replays the full \
-         forge chain (forge.plan.ready -> task DAG projection -> non-empty \
-         forge.wave.worktrees.ready -> executor/reviewer/integrator -> \
+         forge chain (forge.plan.ready -> task DAG projection -> runtime \
+         Unit dispatch/integration -> executor/reviewer/integrator -> \
          forge.full.verified) and the reporter reaches the LOOP_COMPLETE \
          terminal."
     }
@@ -134,7 +115,7 @@ event_loop:
 
         let prompt = "You are the parallel-forge reporter for this mock E2E. The \
 recorded cassette replays the full forge chain (planner -> forge.plan.ready -> \
-task DAG projection -> non-empty wave dispatch -> executor -> reviewer -> \
+task DAG projection -> runtime Unit dispatch -> executor -> reviewer -> \
 integrator -> verifier -> reporter). Signal LOOP_COMPLETE once the chain settles.";
 
         Ok(ScenarioConfig {
@@ -175,7 +156,7 @@ integrator -> verifier -> reporter). Signal LOOP_COMPLETE once the chain settles
                 "forge.plan.ready",
                 "planner emits forge.plan.ready",
             ),
-            self.non_empty_ready_wave_dispatched(&execution),
+            self.runtime_dispatches_units_without_wave_barrier(&execution),
             self.chain_step_present(
                 &execution,
                 "forge.full.verified",
@@ -215,25 +196,19 @@ impl ParallelForgeDispatchContractScenario {
             .with_passed(reached)
     }
 
-    /// Asserts at least one **non-empty** ready wave was dispatched.
-    fn non_empty_ready_wave_dispatched(
+    /// Asserts both Units were dispatched and integrated without a wave barrier.
+    fn runtime_dispatches_units_without_wave_barrier(
         &self,
         result: &crate::executor::ExecutionResult,
     ) -> crate::models::Assertion {
-        let token = first_ready_units_token(&result.stdout);
-        let dispatched = result.stdout.contains("forge.wave.worktrees.ready")
-            && token.as_ref().is_some_and(|t| !t.is_empty() && t != "[]");
-        super::AssertionBuilder::new("Non-empty ready wave dispatched")
-            .expected("forge.wave.worktrees.ready with non-empty ready_units")
-            .actual(match &token {
-                Some(t) if !t.is_empty() && t != "[]" => {
-                    format!("ready_units={} (wave dispatched)", t)
-                }
-                _ => format!(
-                    "no non-empty ready_units in output: {}",
-                    truncate(&result.stdout, 120)
-                ),
-            })
+        let executed = result.stdout.matches("forge.unit.executed").count();
+        let integrated = result.stdout.matches("forge.unit.integrated").count();
+        let dispatched = executed >= 2
+            && integrated >= 2
+            && !result.stdout.contains("forge.wave.worktrees.ready");
+        super::AssertionBuilder::new("DAG runtime dispatches Units without wave barrier")
+            .expected("two forge.unit.executed and two forge.unit.integrated markers")
+            .actual(format!("executed={executed}, integrated={integrated}"))
             .build()
             .with_passed(dispatched)
     }
@@ -331,7 +306,10 @@ mod tests {
             exit_code: Some(0),
             stdout: concat!(
                 "<event topic=\"forge.plan.ready\">units=U1,U2</event>\n",
-                "<event topic=\"forge.wave.worktrees.ready\">wave=1 ready_units=U1</event>\n",
+                "<event topic=\"forge.unit.executed\">unit_id=U1</event>\n",
+                "<event topic=\"forge.unit.executed\">unit_id=U2</event>\n",
+                "<event topic=\"forge.unit.integrated\">unit_id=U1</event>\n",
+                "<event topic=\"forge.unit.integrated\">unit_id=U2</event>\n",
                 "<event topic=\"forge.full.verified\">gate=pass</event>\n",
                 "LOOP_COMPLETE\n",
             )
@@ -340,8 +318,8 @@ mod tests {
             duration: Duration::from_secs(1),
             scratchpad: None,
             events: vec![EventRecord {
-                topic: "forge.wave.worktrees.ready".to_string(),
-                payload: "wave=1 ready_units=U1".to_string(),
+                topic: "forge.unit.executed".to_string(),
+                payload: "unit_id=U1".to_string(),
             }],
             iterations: 1,
             termination_reason: Some("LOOP_COMPLETE".to_string()),
@@ -379,19 +357,6 @@ mod tests {
     }
 
     #[test]
-    fn first_ready_units_token_extracts_value() {
-        assert_eq!(
-            first_ready_units_token("x forge.wave.worktrees.ready wave=1 ready_units=U1</event>"),
-            Some("U1".to_string())
-        );
-        assert_eq!(first_ready_units_token("no marker here"), None);
-        assert_eq!(
-            first_ready_units_token("ready_units= end"),
-            Some(String::new())
-        );
-    }
-
-    #[test]
     fn reporter_terminal_assertion_passed() {
         let scenario = ParallelForgeDispatchContractScenario::new();
         let assertion = scenario.reporter_terminal_reached(&mock_execution_result());
@@ -408,21 +373,22 @@ mod tests {
     }
 
     #[test]
-    fn non_empty_ready_wave_assertion_passed() {
+    fn dag_runtime_dispatch_assertion_passed() {
         let scenario = ParallelForgeDispatchContractScenario::new();
-        let assertion = scenario.non_empty_ready_wave_dispatched(&mock_execution_result());
-        assert!(assertion.passed, "ready_units=U1 is a non-empty wave");
+        let assertion = scenario.runtime_dispatches_units_without_wave_barrier(&mock_execution_result());
+        assert!(assertion.passed, "two Units are dispatched and integrated");
     }
 
     #[test]
-    fn non_empty_ready_wave_assertion_failed_when_empty() {
+    fn dag_runtime_dispatch_assertion_rejects_retired_wave_receipt() {
         let scenario = ParallelForgeDispatchContractScenario::new();
         let mut result = mock_execution_result();
-        result.stdout =
-            "<event topic=\"forge.wave.worktrees.ready\">wave=1 ready_units=</event>\n".to_string();
+        result.stdout = "<event topic=\"forge.wave.worktrees.ready\">wave=1</event>\n\
+            <event topic=\"forge.unit.executed\">unit_id=U1</event>\n\
+            <event topic=\"forge.unit.integrated\">unit_id=U1</event>\n".to_string();
         assert!(
-            !scenario.non_empty_ready_wave_dispatched(&result).passed,
-            "an empty ready_units must fail the non-empty wave assertion"
+            !scenario.runtime_dispatches_units_without_wave_barrier(&result).passed,
+            "a retired wave receipt must fail the active DAG assertion"
         );
     }
 
@@ -430,7 +396,8 @@ mod tests {
     fn cassette_replays_full_forge_chain_to_reporter_terminal() {
         // Deterministic, no ralph spawn: parse the committed cassette and
         // assert the reporter-terminal surface carries the whole chain and a
-        // non-empty ready wave, and that the bus ledger has ready-wave events.
+        // two runtime Unit receipts, and that the bus ledger has the same
+        // accepted Unit topics.
         let file = std::fs::File::open(cassette_path()).expect("cassette exists");
         let player = SessionPlayer::from_reader(BufReader::new(file)).expect("cassette parses");
         let text = player
@@ -443,33 +410,37 @@ mod tests {
         );
         for marker in [
             "forge.plan.ready",
-            "forge.wave.worktrees.ready",
+            "forge.unit.executed",
+            "forge.unit.reviewed",
+            "forge.unit.integrated",
             "forge.full.verified",
         ] {
             assert!(text.contains(marker), "chain missing {marker}");
         }
         assert!(
-            first_ready_units_token(&text).is_some_and(|t| !t.is_empty() && t != "[]"),
-            "ready wave must be non-empty"
+            text.matches("forge.unit.executed").count() >= 2
+                && text.matches("forge.unit.integrated").count() >= 2
+                && !text.contains("forge.wave.worktrees.ready"),
+            "DAG runtime must dispatch and integrate Units without a wave receipt"
         );
 
-        let ready_waves = player
+        let executed_units = player
             .bus_events()
             .iter()
             .filter(|r| {
                 r.record.data.get("topic").and_then(|v| v.as_str())
-                    == Some("forge.wave.worktrees.ready")
+                    == Some("forge.unit.executed")
             })
             .count();
-        assert!(ready_waves >= 1, "at least one ready-wave bus event");
+        assert_eq!(executed_units, 2, "both Unit jobs must be recorded");
     }
 
     // ========== acceptance test: full mock E2E through the runner ==========
 
     /// U13 acceptance: run the scenario end-to-end via a real cross-process
     /// `ralph run` whose custom backend is `ralph-e2e mock-cli` replaying the
-    /// committed cassette, then assert the reporter reaches the terminal with a
-    /// non-empty ready wave.
+    /// committed cassette, then assert the reporter reaches the terminal with
+    /// runtime-owned Unit receipts.
     #[tokio::test]
     async fn u13_parallel_forge_e2e_reaches_reporter_terminal() {
         let workspace =
@@ -514,8 +485,8 @@ mod tests {
 
         assert!(
             result.passed,
-            "parallel-forge E2E must reach reporter terminal with a non-empty \
-             ready wave; assertions: {:#?}",
+            "parallel-forge E2E must reach reporter terminal with DAG Unit \
+             receipts; assertions: {:#?}",
             result.assertions
         );
         assert!(
@@ -529,8 +500,8 @@ mod tests {
             result
                 .assertions
                 .iter()
-                .any(|a| a.name.contains("Non-empty ready wave") && a.passed),
-            "non-empty ready wave assertion must pass"
+                .any(|a| a.name.contains("DAG runtime dispatches Units") && a.passed),
+            "DAG runtime Unit dispatch assertion must pass"
         );
     }
 }
