@@ -1106,11 +1106,17 @@ impl DagSchedulerRuntime {
         }
         let _ = std::fs::remove_file(&events_file);
 
-        let tests = self
+        let (tests, allowed_paths, forbidden_paths) = self
             .plans
             .get(&plan_key)
             .and_then(|p| p.units.iter().find(|u| u.unit_id == unit_key))
-            .map(|u| u.tests.clone())
+            .map(|u| {
+                (
+                    u.tests.clone(),
+                    u.allowed_paths.clone(),
+                    u.forbidden_paths.clone(),
+                )
+            })
             .unwrap_or_default();
         let prompt = build_job_prompt(
             &identity,
@@ -1120,6 +1126,8 @@ impl DagSchedulerRuntime {
             &events_file,
             schema.as_ref(),
             &tests,
+            &allowed_paths,
+            &forbidden_paths,
             feedback.as_deref(),
         );
 
@@ -1253,6 +1261,8 @@ fn build_job_prompt(
     events_file: &Path,
     schema: Option<&EventSchema>,
     tests: &[String],
+    allowed_paths: &[PathBuf],
+    forbidden_paths: &[PathBuf],
     feedback: Option<&str>,
 ) -> String {
     let required: Vec<String> = schema
@@ -1266,6 +1276,8 @@ fn build_job_prompt(
          worktree pinned to the approved base commit. Do NOT create, switch, or reuse any other \
          worktree or branch.\n\
          - task_key: `{task_key}` (task_id is looked up by the runtime at merge time).\n\
+         - Allowed paths for this Unit: {allowed_paths}\n\
+         - Forbidden paths for this Unit: {forbidden_paths}\n\
          - The runtime points RALPH_EVENTS_FILE at `{events}`; `ralph emit` writes there. \
          Emit EXACTLY ONE business event.\n\
          - On success emit `{success}` with a JSON payload containing: {required}. The runtime \
@@ -1280,6 +1292,8 @@ fn build_job_prompt(
         cwd = worktree_path.display(),
         task_key = identity.unit_key(),
         events = events_file.display(),
+        allowed_paths = format_path_policy(allowed_paths),
+        forbidden_paths = format_path_policy(forbidden_paths),
         success = kind.success_topic(),
         failure = kind.failure_topic(),
         required = required.join(", "),
@@ -1308,6 +1322,18 @@ fn build_job_prompt(
     prompt.push('\n');
     prompt.push_str(&hat_config.instructions);
     prompt
+}
+
+fn format_path_policy(paths: &[PathBuf]) -> String {
+    if paths.is_empty() {
+        "`<none declared>`".to_string()
+    } else {
+        paths
+            .iter()
+            .map(|path| format!("`{}`", path.display()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 #[cfg(test)]
@@ -2072,5 +2098,38 @@ units:
             runtime.has_pending_work(),
             "a queued merge keeps the loop alive"
         );
+    }
+
+    #[test]
+    fn job_prompt_surfaces_unit_path_policy() {
+        let identity = JobIdentity {
+            plan_key: "pf-test".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "job-prompt-policy".to_string(),
+            hat: HAT_EXECUTOR.to_string(),
+            stage: "execute".to_string(),
+            attempt: 0,
+            token: "token-prompt-policy".to_string(),
+        };
+        let hat = HatConfig {
+            name: HAT_EXECUTOR.to_string(),
+            instructions: "execute the unit".to_string(),
+            ..HatConfig::default()
+        };
+        let prompt = build_job_prompt(
+            &identity,
+            SpawnKind::Execute,
+            &hat,
+            Path::new("/worktree/U1"),
+            Path::new("/worktree/U1/events.jsonl"),
+            None,
+            &[],
+            &[PathBuf::from("src"), PathBuf::from("tests")],
+            &[PathBuf::from("secrets")],
+            None,
+        );
+
+        assert!(prompt.contains("Allowed paths for this Unit: `src`, `tests`"));
+        assert!(prompt.contains("Forbidden paths for this Unit: `secrets`"));
     }
 }
