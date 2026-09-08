@@ -268,12 +268,6 @@ event_loop:
       - {hat_id: executor, topic: exec.wave.failed}
       - {hat_id: reviewer, topic: exec.wave.failed}
       - {hat_id: forge-failure-handler, topic: exec.wave.failed}
-      - {hat_id: executor, topic: exec.unit.ready}
-      - {hat_id: reviewer, topic: exec.unit.ready}
-      - {hat_id: executor, topic: exec.unit.ready}
-      - {hat_id: inspector, topic: exec.unit.ready}
-      # executor owns slot terminals.
-      - {hat_id: reviewer, topic: exec.unit.done}
       # forge-failure-handler owns work.failed from exec path.
       - {hat_id: executor, topic: work.failed}
       # Single-writer rule (plan 2026-08-27-1430 U2): only the
@@ -350,7 +344,7 @@ event_loop:
         - id: parallel-forge-dev-done-nonzero-failed
           topic: forge.exec.development.done
           when: {field: failed_unit_count, gt: 0}
-          message: "failed_unit_count must be 0 on forge.exec.development.done; units that reached exec.unit.failed must not be reported as development complete."
+          message: "failed_unit_count must be 0 on forge.exec.development.done; units that reached forge.unit.execution_failed must not be reported as development complete."
         - id: parallel-forge-full-verified-false
           topic: forge.full.verified
           when: {field: all_required_passed, eq: false}
@@ -668,13 +662,10 @@ hats:
         `forge.worktree_map_path`) and the wave-scoped projection keys
         (`forge.wave.current_wave_id`, `forge.wave.current_wave_index`,
         `forge.wave.verified_base_commit` — pinned by
-        `forge.wave.worktrees.ready` and refreshed by each
-        `forge.wave.settled`). Fail closed: if
-        `forge.wave.current_wave_id` does not match the trigger's
-        `wave_id`, write `blocks/forge-failure-handler-blocked.md` with
-        the mismatch and emit `forge.plan.blocked`; never use another
-        wave's base. Use the restored `forge.wave.verified_base_commit`
-        as the `base_commit` for `forge.correction.requested`.
+        the runtime's current Unit job and candidate commit. Fail closed if
+        the job identity, plan key, or candidate base does not match the
+        failure artifact; write `blocks/forge-failure-handler-blocked.md`
+        and emit `forge.plan.blocked` rather than correcting another job.
       - **Map slots back to Units.** Use `worktree_map_path` to map each
         `blocking_slots.slot_index` to `unit_id` and `candidate_branch`, producing
         `affected_unit_ids`. Get live `affected_task_ids` from
@@ -797,8 +788,8 @@ hats:
 
       ### Step 1 — Observe (read paths only from the trigger)
 
-      Read these required fields from the `exec.unit.ready` trigger:
-      `unit_id`、`task_id`、`task_key`、`wave_id`、`slot_index`、
+      Read these required fields from the runtime job context:
+      `unit_id`、`task_id`、`task_key`、`plan_key`、`slot_index`、
       `plan_key`、`execution_plan_path`、`worktree_map_path`。
 
       1. Use `ralph tools task list` to verify the live `task_id` / `task_key`.
@@ -823,7 +814,7 @@ hats:
       3. Do not use fixed `/tmp` files, database names, container projects, or service
          ports. If a command cannot be isolated and the plan has no explicit serial
          dependency, stop this Unit, record the conflict and reproduction command in
-         the completion/failure artifact, and emit `exec.unit.failed`; do not hide
+         the completion/failure artifact, and emit `forge.unit.execution_failed`; do not hide
          contention with retries.
       4. Run test commands in phases; release ports, databases/schemas,
          containers, temp directories, and cache locks as soon as each phase no
@@ -841,21 +832,21 @@ hats:
       ### Step 8 — Emit
 
       **Precheck:** before emitting, run `test -f .ralph/forge/<plan_key>/units/<unit-id>-completion.md`.
-      If the completion report is absent, emit `exec.unit.failed` with
+      If the completion report is absent, emit `forge.unit.execution_failed` with
       `reason: "completion report missing for unit <unit_id>"`; do not cite the path,
       create a workaround, or fabricate the file. This is the **only** failure path
       under the one-business-event budget.
 
-      **Mandatory precheck:** on success, first run `ralph emit exec.unit.done --policy-check`,
+      **Mandatory precheck:** on success, first run `ralph emit forge.unit.executed --policy-check`,
       then formally write the same payload without `--policy-check` (per `ralph-tools-emit` §5).
       **Never** send the real event without the precheck.
 
-      Success: emit `exec.unit.done`, passing through the trigger's `task_id`, `task_key`,
-      `wave_id`, `slot_index`, `unit_id`, and `plan_key`, plus `unit_report_path` and `content_hash`.
-      Failure: emit `exec.unit.failed` with `reason` and `plan_key`.
+      Success: emit `forge.unit.executed`, passing through the job's `task_id`, `task_key`,
+      `slot_index`, `unit_id`, and `plan_key`, plus `unit_report_path` and `content_hash`.
+      Failure: emit `forge.unit.execution_failed` with `reason` and `plan_key`.
 
       **Do not close tasks in this activation.** Do **not** call
-      `ralph tools task close` or imply that `exec.unit.done` closes a task.
+      `ralph tools task close` or imply that `forge.unit.executed` closes a task.
 
       Emit only one business event in this activation.
 
@@ -878,25 +869,20 @@ hats:
     instructions: |
       ## REVIEWER MODE
 
-      Read-only on code. Review each completed Unit after supervisor development phase.
+      Read-only on code. Review the completed Unit named by the runtime job.
 
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. Read `wave_id`, `wave_index`, and `plan_key` from the trigger; read
-         `execution_plan_path` from the current projection. Do not assume the
-         trigger provides `wave_total` or `unit_verdicts`: read the current wave's
-         completion artifacts and diffs, then calculate each verdict and the wave total.
+      1. Read `unit_id`, `task_id`, `task_key`, and `plan_key` from the job
+         context; read `execution_plan_path` from the current projection. Review
+         only the Unit named by the runtime job.
          The runtime has already isolated this Unit's worktree and selected the
          current attempt; review only the Unit named by the trigger.
       2. List Units from the execution plan and `ralph tools task list`.
       3. For each Unit, read its completion report and inspect its worktree diff via the map.
-      4. Write `.ralph/forge/<plan_key>/waves/<wave_id>/review.md` with one entry
-         per fan-in Unit — this is the `review_report_path` you will emit. Record
-         each Unit's reviewed commit as its worktree HEAD at review time
-         (`git rev-parse` in that Unit's worktree). Review happens **before**
-         integration, so never reference `forge.wave.integrated.*` fields — that
-         event does not exist yet in your activation.
+      4. Write `.ralph/forge/<plan_key>/units/<unit_id>-review.md` and record
+         the reviewed commit as the worktree HEAD at review time (`git rev-parse`).
       5. Emit `forge.unit.reviewed` with the Unit identity, `verdict` (`ACCEPTED` or
          `REJECTED`), review artifact path, and content hash. The runtime routes
          rejected verdicts through the bounded correction path.
@@ -922,7 +908,7 @@ hats:
     instructions: |
       ## VERIFIER MODE
 
-      Run incremental regression per integrated Unit chain.
+      Run incremental regression for the accepted Unit job before integration.
 
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
