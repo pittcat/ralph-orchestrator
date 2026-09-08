@@ -720,11 +720,17 @@ impl DagSchedulerRuntime {
     /// completing job, slot release, then the driver routing that
     /// admits the next stage.
     pub(super) fn observe_unit_event_dag(&mut self, topic: &str, unit_key: &str, payload: &Value) {
+        let acceptance_key = payload
+            .get("plan_key")
+            .and_then(Value::as_str)
+            .filter(|plan_key| !plan_key.trim().is_empty())
+            .map(|plan_key| format!("forge:{plan_key}:{unit_key}"))
+            .unwrap_or_else(|| unit_key.to_string());
         // Verify-stage completions are not driver topics: the
         // pipeline ends at Verify (integration is a later step), so
         // the seam only settles the job and frees the slot.
         if topic == topics_ext::UNIT_VERIFIED || topic == topics_ext::UNIT_VERIFICATION_FAILED {
-            if let Some(post) = self.awaiting_acceptance.remove(unit_key) {
+            if let Some(post) = self.awaiting_acceptance.remove(&acceptance_key) {
                 self.write_terminal(&post.identity, post.terminal, &post.digest);
             }
             self.pipeline.release(unit_key);
@@ -745,7 +751,7 @@ impl DagSchedulerRuntime {
         // The completing job's terminal is written now — the merged
         // event just came back through real EventLoop acceptance,
         // which is exactly the journal's post-acceptance contract.
-        if let Some(post) = self.awaiting_acceptance.remove(unit_key) {
+        if let Some(post) = self.awaiting_acceptance.remove(&acceptance_key) {
             self.write_terminal(&post.identity, post.terminal, &post.digest);
         }
         // Free the completing job's slot BEFORE the driver admits
@@ -1599,6 +1605,38 @@ units:
             "the reason names the budget: {}",
             event.payload
         );
+    }
+
+    /// The accepted-event read-back must find the post-acceptance record by
+    /// the same plan-qualified key used when the result was merged.
+    #[test]
+    fn post_acceptance_cleanup_uses_plan_qualified_unit_key() {
+        let (_tmp, mut runtime) = dag_fixture();
+        let identity = JobIdentity {
+            plan_key: "pf-test".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "job-post-acceptance".to_string(),
+            hat: HAT_EXECUTOR.to_string(),
+            stage: "execute".to_string(),
+            attempt: 0,
+            token: "token-post-acceptance".to_string(),
+        };
+        runtime.awaiting_acceptance.insert(
+            identity.unit_key(),
+            PostAcceptance {
+                identity,
+                terminal: "accepted",
+                digest: "a".repeat(64),
+            },
+        );
+
+        runtime.observe_unit_event_dag(
+            "forge.unknown.accepted",
+            "U1",
+            &serde_json::json!({"plan_key": "pf-test", "unit_id": "U1"}),
+        );
+
+        assert!(runtime.awaiting_acceptance.is_empty());
     }
 
     /// The inner keepalive gate: a fresh dag runtime owns no work; a
