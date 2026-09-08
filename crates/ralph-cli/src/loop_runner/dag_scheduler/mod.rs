@@ -79,6 +79,7 @@ use crate::loop_runner::runtime_job::Stage;
 mod seam_topics {
     pub const PLAN_READY: &str = "forge.plan.ready";
     pub const CONCURRENCY_APPROVED: &str = "forge.concurrency.approved";
+    pub const CORRECTION_REQUESTED: &str = "forge.correction.requested";
 }
 
 /// Durable (or in-memory) store pair the seam writes through.
@@ -274,7 +275,10 @@ impl DagSchedulerRuntime {
         if self.mode != SchedulerMode::Dag || self.exec.is_none() || !self.db_path.exists() {
             return;
         }
-        let active = match self.ensure_stores().and_then(|s| s.plans.list_active_plans()) {
+        let active = match self
+            .ensure_stores()
+            .and_then(|s| s.plans.list_active_plans())
+        {
             Ok(plans) => plans,
             Err(err) => {
                 warn!(error = %err, "DAG recovery: active-plan scan failed");
@@ -357,14 +361,15 @@ impl DagSchedulerRuntime {
                         && job.identity.stage == "verify"
                         && job.terminal.as_deref() == Some("accepted")
                 });
-                let has_record = integration_store
-                    .list_for_unit(unit_id)
-                    .ok()
-                    .is_some_and(|records| {
-                        records.iter().any(|record| {
-                            record.target_branch == registration.target_branch
-                        })
-                    });
+                let has_record =
+                    integration_store
+                        .list_for_unit(unit_id)
+                        .ok()
+                        .is_some_and(|records| {
+                            records
+                                .iter()
+                                .any(|record| record.target_branch == registration.target_branch)
+                        });
                 if verified && !has_record {
                     self.queue_integration(&plan_key, unit_id);
                 }
@@ -412,10 +417,7 @@ impl DagSchedulerRuntime {
                         );
                         continue;
                     };
-                    match nix::sys::signal::kill(
-                        nix::unistd::Pid::from_raw(pid as i32),
-                        None,
-                    ) {
+                    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None) {
                         Ok(()) | Err(nix::errno::Errno::EPERM) => {
                             let timeout = self
                                 .exec
@@ -428,7 +430,10 @@ impl DagSchedulerRuntime {
                                 events_file,
                                 timeout,
                             ) {
-                                self.block_plan(&plan_key, "recovered live job could not be adopted");
+                                self.block_plan(
+                                    &plan_key,
+                                    "recovered live job could not be adopted",
+                                );
                             }
                         }
                         Err(nix::errno::Errno::ESRCH) => {
@@ -495,6 +500,16 @@ impl DagSchedulerRuntime {
                 };
                 self.observe_unit_event(topic, &payload);
             }
+            seam_topics::CORRECTION_REQUESTED if self.mode == SchedulerMode::Dag => {
+                match serde_json::from_str::<Value>(payload_raw) {
+                    Ok(payload) => self.on_correction_requested(&payload),
+                    Err(err) => warn!(
+                        topic,
+                        error = %err,
+                        "DAG seam: correction payload is not valid JSON; skipping"
+                    ),
+                }
+            }
             // E1: verify-stage results only drive the execution face
             // (journal terminal + slot release); the pipeline driver
             // intentionally does not consume them.
@@ -530,6 +545,46 @@ impl DagSchedulerRuntime {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Accepted failure-handler correction: advance every affected Unit to a
+    /// fresh fixer attempt. The runtime owns the attempt budget and stage
+    /// admission; the fixer hat only supplies the repair decision and result.
+    fn on_correction_requested(&mut self, payload: &Value) {
+        let plan_key = payload
+            .get("plan_key")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let feedback = payload
+            .get("failure_observation_path")
+            .or_else(|| payload.get("correction_request_path"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let Some(unit_ids) = payload.get("affected_unit_ids").and_then(Value::as_array) else {
+            warn!(plan_key, "DAG correction request has no affected_unit_ids");
+            return;
+        };
+        for unit_id in unit_ids.iter().filter_map(Value::as_str) {
+            let outcome = self
+                .pipeline
+                .bump_attempt_and_advance(unit_id, Stage::Review);
+            if let self::jobs::AdvanceOutcome::Admitted { token } = outcome {
+                self.queue_spawn(spawn::PendingSpawn {
+                    unit_key: unit_id.to_string(),
+                    kind: spawn::SpawnKind::Fix,
+                    attempt: u32::try_from(token.attempt()).unwrap_or(u32::MAX),
+                    plan_key: plan_key.clone(),
+                    feedback: feedback.clone(),
+                });
+            } else {
+                debug!(
+                    unit_id,
+                    ?outcome,
+                    "DAG correction admission deferred or blocked"
+                );
+            }
         }
     }
 

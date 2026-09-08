@@ -202,11 +202,11 @@ pub(crate) struct PendingAdvance {
 /// A follow-up spawn deferred by the D16 fixer cap.
 #[derive(Debug)]
 pub(crate) struct PendingSpawn {
-    unit_key: String,
-    kind: SpawnKind,
-    attempt: u32,
-    plan_key: String,
-    feedback: Option<String>,
+    pub(super) unit_key: String,
+    pub(super) kind: SpawnKind,
+    pub(super) attempt: u32,
+    pub(super) plan_key: String,
+    pub(super) feedback: Option<String>,
 }
 
 /// Which job to launch. `Fix` reuses the executor hat with the
@@ -291,7 +291,10 @@ impl DagSchedulerRuntime {
         let Some(stage) = super::recovery::stage_from_str(&identity.stage) else {
             return false;
         };
-        if !matches!(self.pipeline.advance(&identity.unit_key(), stage), AdvanceOutcome::Admitted { .. }) {
+        if !matches!(
+            self.pipeline.advance(&identity.unit_key(), stage),
+            AdvanceOutcome::Admitted { .. }
+        ) {
             return false;
         }
         self.active_jobs.insert(identity.job_id.clone());
@@ -302,10 +305,7 @@ impl DagSchedulerRuntime {
         tokio::spawn(async move {
             let started = Instant::now();
             loop {
-                match nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(pid as i32),
-                    None,
-                ) {
+                match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None) {
                     Ok(()) | Err(nix::errno::Errno::EPERM) => {}
                     Err(nix::errno::Errno::ESRCH) => {
                         let _ = tx.send(JobCompletion::recovered(
@@ -439,12 +439,8 @@ impl DagSchedulerRuntime {
             _ => SpawnKind::Fix,
         };
         let events = crate::loop_runner::wave::io::read_worker_events(&completion.events_file);
-        let success = events
-            .iter()
-            .find(|e| e.topic == kind.success_topic());
-        let failure = events
-            .iter()
-            .find(|e| e.topic == kind.failure_topic());
+        let success = events.iter().find(|e| e.topic == kind.success_topic());
+        let failure = events.iter().find(|e| e.topic == kind.failure_topic());
 
         if let Some(agent_event) = failure {
             // The agent reported the stage as failed. The event is
@@ -465,7 +461,11 @@ impl DagSchedulerRuntime {
 
         let Some(agent_event) = success else {
             let reason = if completion.timed_out {
-                format!("dag job {} timed out without emitting {}", completion.identity.job_id, kind.success_topic())
+                format!(
+                    "dag job {} timed out without emitting {}",
+                    completion.identity.job_id,
+                    kind.success_topic()
+                )
             } else {
                 format!(
                     "dag job {} exited {:?} without emitting {}",
@@ -508,7 +508,12 @@ impl DagSchedulerRuntime {
                 kind.success_topic(),
                 missing.join(",")
             );
-            self.fail_job(&completion.identity, kind, &reason, "orphan_or_empty_result");
+            self.fail_job(
+                &completion.identity,
+                kind,
+                &reason,
+                "orphan_or_empty_result",
+            );
             return;
         }
 
@@ -523,7 +528,12 @@ impl DagSchedulerRuntime {
                         completion.identity.job_id,
                         kind.success_topic()
                     );
-                    self.fail_job(&completion.identity, kind, &reason, "orphan_or_empty_result");
+                    self.fail_job(
+                        &completion.identity,
+                        kind,
+                        &reason,
+                        "orphan_or_empty_result",
+                    );
                     return;
                 }
             },
@@ -544,19 +554,17 @@ impl DagSchedulerRuntime {
     }
 
     /// Overlay runtime-owned identity fields onto the agent payload.
-    fn complete_payload(
-        &self,
-        _kind: SpawnKind,
-        identity: &JobIdentity,
-        payload: Value,
-    ) -> Value {
+    fn complete_payload(&self, _kind: SpawnKind, identity: &JobIdentity, payload: Value) -> Value {
         let mut obj = payload.as_object().cloned().unwrap_or_default();
-        obj.insert("unit_id".to_string(), Value::String(identity.unit_id.clone()));
-        obj.insert("plan_key".to_string(), Value::String(identity.plan_key.clone()));
         obj.insert(
-            "task_key".to_string(),
-            Value::String(identity.unit_key()),
+            "unit_id".to_string(),
+            Value::String(identity.unit_id.clone()),
         );
+        obj.insert(
+            "plan_key".to_string(),
+            Value::String(identity.plan_key.clone()),
+        );
+        obj.insert("task_key".to_string(), Value::String(identity.unit_key()));
         obj.insert(
             "task_id".to_string(),
             Value::String(self.resolve_task_id(&identity.unit_key())),
@@ -566,11 +574,7 @@ impl DagSchedulerRuntime {
 
     /// Schema-required fields minus the runtime-owned identity four.
     fn missing_agent_fields(&self, topic: &str, payload: &Value) -> Vec<String> {
-        let Some(schema) = self
-            .exec
-            .as_ref()
-            .and_then(|exec| exec.schemas.get(topic))
-        else {
+        let Some(schema) = self.exec.as_ref().and_then(|exec| exec.schemas.get(topic)) else {
             return Vec::new();
         };
         schema
@@ -596,7 +600,11 @@ impl DagSchedulerRuntime {
         let Some(exec) = self.exec.as_ref() else {
             return "unresolved".to_string();
         };
-        let path = self.workspace.join(".ralph").join("agent").join("tasks.jsonl");
+        let path = self
+            .workspace
+            .join(".ralph")
+            .join("agent")
+            .join("tasks.jsonl");
         ralph_core::TaskStore::load(&path)
             .ok()
             .and_then(|store| {
@@ -679,8 +687,7 @@ impl DagSchedulerRuntime {
         let Some(journal) = self.journal() else {
             return;
         };
-        if let Err(err) = journal.accept_job_terminal(identity, terminal, digest, now_ms() as i64)
-        {
+        if let Err(err) = journal.accept_job_terminal(identity, terminal, digest, now_ms() as i64) {
             warn!(
                 job_id = %identity.job_id,
                 terminal,
@@ -753,7 +760,10 @@ impl DagSchedulerRuntime {
         match outcome {
             DriverOutcome::Routed { token, .. } => {
                 let Some(kind) = follow_up_kind(topic, payload) else {
-                    debug!(unit_key, topic, "DAG seam: routed event has no follow-up job");
+                    debug!(
+                        unit_key,
+                        topic, "DAG seam: routed event has no follow-up job"
+                    );
                     return;
                 };
                 let plan_key = payload
@@ -825,7 +835,7 @@ impl DagSchedulerRuntime {
 
     /// Spawn a follow-up job now, or defer it when the D16 fixer cap
     /// is saturated.
-    fn queue_spawn(&mut self, pending: PendingSpawn) {
+    pub(super) fn queue_spawn(&mut self, pending: PendingSpawn) {
         if pending.kind == SpawnKind::Fix
             && self.fixer_in_flight >= self.pipeline.pools().fixer_cap()
         {
@@ -912,7 +922,10 @@ impl DagSchedulerRuntime {
         };
         match journal.reserve_job(&identity, now_ms() as i64) {
             Ok(false) => {
-                debug!(job_id, "DAG spawn: reservation replay; not launching a second process");
+                debug!(
+                    job_id,
+                    "DAG spawn: reservation replay; not launching a second process"
+                );
                 return;
             }
             Err(err) => {
@@ -1067,7 +1080,10 @@ impl DagSchedulerRuntime {
                 warn!(job_id, error = %err, "DAG journal: pid write rejected");
             }
         } else {
-            warn!(job_id, "DAG spawn: kernel exposed no pid; journal pid stays NULL");
+            warn!(
+                job_id,
+                "DAG spawn: kernel exposed no pid; journal pid stays NULL"
+            );
         }
 
         let timeout = Duration::from_secs(u64::from(hat_config.timeout.unwrap_or(3600)));
@@ -1237,8 +1253,16 @@ mod tests {
         assert_eq!(SpawnKind::Fix.stage_str(), "fix");
         assert_eq!(SpawnKind::Fix.hat(), "executor");
         assert_eq!(SpawnKind::Fix.success_topic(), "forge.unit.executed");
-        assert_eq!(SpawnKind::Verify.failure_topic(), "forge.unit.verification_failed");
-        for kind in [SpawnKind::Execute, SpawnKind::Review, SpawnKind::Verify, SpawnKind::Fix] {
+        assert_eq!(
+            SpawnKind::Verify.failure_topic(),
+            "forge.unit.verification_failed"
+        );
+        for kind in [
+            SpawnKind::Execute,
+            SpawnKind::Review,
+            SpawnKind::Verify,
+            SpawnKind::Fix,
+        ] {
             assert!(
                 ["execute", "review", "verify", "fix"].contains(&kind.stage_str()),
                 "journal only accepts execute/review/verify/fix"
@@ -1366,7 +1390,13 @@ units:
             "the stranded unit gets exactly one synthesised failure event"
         );
         assert_eq!(
-            runtime.merge_queue.front().expect("queued").event.topic.as_str(),
+            runtime
+                .merge_queue
+                .front()
+                .expect("queued")
+                .event
+                .topic
+                .as_str(),
             "forge.unit.execution_failed"
         );
 
@@ -1454,7 +1484,9 @@ units:
         // rejection is the budget-exhaustion path under test.
         for attempt in 1..=2 {
             runtime.pipeline.release("U1");
-            let outcome = runtime.pipeline.bump_attempt_and_advance("U1", Stage::Review);
+            let outcome = runtime
+                .pipeline
+                .bump_attempt_and_advance("U1", Stage::Review);
             assert!(
                 matches!(outcome, AdvanceOutcome::Admitted { .. }),
                 "fix attempt {attempt} stays inside the budget"

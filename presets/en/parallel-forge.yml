@@ -109,6 +109,8 @@ mechanism:
           - exec.unit.ready
           - exec.unit.done
           - exec.unit.failed
+          - forge.unit.execution_failed
+          - forge.unit.verification_failed
           - exec.wave.complete
           - exec.wave.failed
           - forge.wave.reviewed
@@ -1031,6 +1033,8 @@ hats:
       - forge.wave.integration.failed
       - forge.verification.failed
       - forge.full.verification.failed
+      - forge.unit.execution_failed
+      - forge.unit.verification_failed
     publishes:
       - forge.correction.requested
       - forge.final.correction.settled
@@ -1054,6 +1058,8 @@ hats:
         - forge.wave.integration.failed
         - forge.verification.failed
         - forge.full.verification.failed
+        - forge.unit.execution_failed
+        - forge.unit.verification_failed
     instructions: |
       ## FORGE FAILURE HANDLER MODE — evidence-first correction
 
@@ -1288,7 +1294,7 @@ hats:
     # Step E0(2026-09-07 DAG 接线):dag 模式下由 runtime DAG driver 直接
     # spawn,trigger 激活被抑制;triggers/publishes 保留为 job 模板声明。
     runtime_driven: true
-    triggers: [exec.wave.complete, forge.correction.done]
+    triggers: [forge.unit.executed, forge.correction.done]
     # Step 2(2026-09-03-0959 DAG 接线):追加 dag 模式 per-unit topic
     # `forge.unit.reviewed`(verdict 值域 ACCEPTED/REJECTED)。
     publishes: [forge.wave.reviewed, forge.wave.review.failed, forge.units.reviewed, forge.plan.blocked, forge.unit.reviewed]
@@ -1297,7 +1303,7 @@ hats:
     event_filter:
       enabled: true
       events:
-        - exec.wave.complete
+        - forge.unit.executed
         - forge.correction.done
     instructions: |
       ## REVIEWER MODE
@@ -1456,7 +1462,7 @@ hats:
     # Step E0(2026-09-07 DAG 接线):dag 模式下由 runtime DAG driver 直接
     # spawn,trigger 激活被抑制;triggers/publishes 保留为 job 模板声明。
     runtime_driven: true
-    triggers: [forge.wave.integrated, forge.integration.done]
+    triggers: [forge.unit.reviewed, forge.wave.integrated, forge.integration.done]
     # Step 2(2026-09-03-0959 DAG 接线):追加 dag 模式 per-unit topic
     # `forge.unit.verified` / `forge.unit.verification_failed`。
     publishes: [forge.wave.verified, forge.verification.failed, forge.unit.verified, forge.unit.verification_failed]
@@ -1465,6 +1471,7 @@ hats:
     event_filter:
       enabled: true
       events:
+        - forge.unit.reviewed
         - forge.wave.integrated
         - forge.integration.done
     instructions: |
