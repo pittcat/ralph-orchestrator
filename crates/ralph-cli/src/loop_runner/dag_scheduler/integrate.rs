@@ -1172,6 +1172,11 @@ units:
         let (tmp, mut first) = git_fixture(PLAN_ARTIFACT, true);
         first.attach_execution_context(exec_context(tmp.path()));
         let base = ralph_core::get_head_sha(tmp.path()).expect("approval-time Git base");
+        git(tmp.path(), &["checkout", "-b", "ralph/loop-test/U2"]);
+        std::fs::write(tmp.path().join("u2.txt"), "u2\n").expect("write u2 work");
+        git(tmp.path(), &["add", "u2.txt"]);
+        git(tmp.path(), &["commit", "-m", "u2 work"]);
+        git(tmp.path(), &["checkout", "main"]);
         first
             .plans
             .get_mut("pf-test")
@@ -1190,33 +1195,10 @@ units:
             "real integration must append exactly one event"
         );
         first.on_unit_integrated_accepted(&integrated_payload("U1"));
-        let target_branch = first
-            .plans
-            .get("pf-test")
-            .expect("fixture plan")
-            .target_branch
-            .clone();
-        let store = first
-            .journal()
-            .expect("durable journal")
-            .shared_with_integration();
-        store
-            .record_integrated(&ralph_core::supervisor::dag_integration::IntegrationInput {
-                unit_id: "U2".to_string(),
-                target_branch: target_branch.clone(),
-                base_commit: base.clone(),
-                integrated_commit: "0".repeat(40),
-                expected_head_before: base,
-                created_at_ms: 1,
-            })
-            .expect("seed acknowledged sibling record");
-        store.ack("U2", &target_branch).expect("ack sibling record");
-        first
-            .plans
-            .get_mut("pf-test")
-            .expect("fixture plan")
-            .integrated
-            .insert("U2".to_string());
+        first.queue_integration("pf-test", "U2");
+        first.maybe_integrate_one();
+        assert_eq!(ledger_contains(tmp.path(), UNIT_INTEGRATED), 2);
+        first.on_unit_integrated_accepted(&integrated_payload("U2"));
         first.maybe_emit_development_done();
         assert_eq!(ledger_contains(tmp.path(), DEVELOPMENT_DONE), 1);
         drop(first);
@@ -1237,7 +1219,7 @@ units:
         recovered.maybe_emit_development_done();
 
         assert!(recovered.blocked_plans.is_empty());
-        assert_eq!(ledger_contains(tmp.path(), UNIT_INTEGRATED), 1);
+        assert_eq!(ledger_contains(tmp.path(), UNIT_INTEGRATED), 2);
         assert_eq!(ledger_contains(tmp.path(), DEVELOPMENT_DONE), 1);
     }
 
