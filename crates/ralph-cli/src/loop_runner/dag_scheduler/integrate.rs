@@ -1164,6 +1164,83 @@ units:
         );
     }
 
+    /// A second runtime rebuilt from the same durable store must not repeat
+    /// either the real Git integration event or the final completion event.
+    #[cfg(feature = "supervisor-db")]
+    #[test]
+    fn restart_keeps_integration_and_development_done_counts_exactly_once() {
+        let (tmp, mut first) = git_fixture(PLAN_ARTIFACT, true);
+        first.attach_execution_context(exec_context(tmp.path()));
+        let base = ralph_core::get_head_sha(tmp.path()).expect("approval-time Git base");
+        first
+            .plans
+            .get_mut("pf-test")
+            .expect("fixture plan")
+            .verified_base_commit = Some(base.clone());
+        first
+            .journal()
+            .expect("durable journal")
+            .record_verified_base("pf-test", &base, 1)
+            .expect("persist verified base");
+        first.queue_integration("pf-test", "U1");
+        first.maybe_integrate_one();
+        assert_eq!(
+            ledger_contains(tmp.path(), UNIT_INTEGRATED),
+            1,
+            "real integration must append exactly one event"
+        );
+        first.on_unit_integrated_accepted(&integrated_payload("U1"));
+        let target_branch = first
+            .plans
+            .get("pf-test")
+            .expect("fixture plan")
+            .target_branch
+            .clone();
+        let store = first
+            .journal()
+            .expect("durable journal")
+            .shared_with_integration();
+        store
+            .record_integrated(&ralph_core::supervisor::dag_integration::IntegrationInput {
+                unit_id: "U2".to_string(),
+                target_branch: target_branch.clone(),
+                base_commit: base.clone(),
+                integrated_commit: "0".repeat(40),
+                expected_head_before: base,
+                created_at_ms: 1,
+            })
+            .expect("seed acknowledged sibling record");
+        store.ack("U2", &target_branch).expect("ack sibling record");
+        first
+            .plans
+            .get_mut("pf-test")
+            .expect("fixture plan")
+            .integrated
+            .insert("U2".to_string());
+        first.maybe_emit_development_done();
+        assert_eq!(ledger_contains(tmp.path(), DEVELOPMENT_DONE), 1);
+        drop(first);
+
+        let mut recovered = DagSchedulerRuntime::new(
+            SchedulerMode::Dag,
+            ResolvedDagPools {
+                global: 4,
+                executor: 2,
+                reviewer: 2,
+                verifier: 2,
+                fixer: 2,
+            },
+            tmp.path().to_path_buf(),
+        );
+        recovered.attach_execution_context(exec_context(tmp.path()));
+        recovered.recover_after_restart();
+        recovered.maybe_emit_development_done();
+
+        assert!(recovered.blocked_plans.is_empty());
+        assert_eq!(ledger_contains(tmp.path(), UNIT_INTEGRATED), 1);
+        assert_eq!(ledger_contains(tmp.path(), DEVELOPMENT_DONE), 1);
+    }
+
     #[test]
     fn gate_command_parser_preserves_quoted_arguments() {
         assert_eq!(
