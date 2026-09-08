@@ -464,12 +464,13 @@ impl DagSchedulerRuntime {
     /// `loop_runner::inner` after acceptance; never fails.
     pub fn observe_accepted_events(&mut self, events: &[ralph_proto::Event]) {
         for event in events {
-            self.route_event(event.topic.as_str(), &event.payload);
+            let source = event.source.as_ref().map(|source| source.as_str());
+            self.route_event(event.topic.as_str(), &event.payload, source);
         }
         self.tick();
     }
 
-    fn route_event(&mut self, topic: &str, payload_raw: &str) {
+    fn route_event(&mut self, topic: &str, payload_raw: &str, source: Option<&str>) {
         match topic {
             seam_topics::PLAN_READY | seam_topics::CONCURRENCY_APPROVED => {
                 let payload: Value = match serde_json::from_str(payload_raw) {
@@ -501,7 +502,7 @@ impl DagSchedulerRuntime {
                         return;
                     }
                 };
-                self.observe_unit_event(topic, &payload);
+                self.observe_unit_event(topic, &payload, source);
             }
             seam_topics::CORRECTION_REQUESTED if self.mode == SchedulerMode::Dag => {
                 match serde_json::from_str::<Value>(payload_raw) {
@@ -530,7 +531,7 @@ impl DagSchedulerRuntime {
                         return;
                     }
                 };
-                self.observe_unit_event(topic, &payload);
+                self.observe_unit_event(topic, &payload, source);
             }
             // E2: the runtime-emitted integrated event came back
             // through real acceptance (the close-task projection ran)
@@ -952,7 +953,7 @@ impl DagSchedulerRuntime {
     /// `unit_key` comes from the payload's `unit_id` field (the
     /// schema-declared unit identity; `unit_key` accepted as a
     /// fallback alias).
-    fn observe_unit_event(&mut self, topic: &str, payload: &Value) {
+    fn observe_unit_event(&mut self, topic: &str, payload: &Value, source: Option<&str>) {
         let unit_key = payload
             .get("unit_id")
             .or_else(|| payload.get("unit_key"))
@@ -987,7 +988,7 @@ impl DagSchedulerRuntime {
         // the next-stage spawn. Shadow mode keeps the pure
         // observation path below untouched.
         if self.mode == SchedulerMode::Dag {
-            self.observe_unit_event_dag(topic, unit_key, payload);
+            self.observe_unit_event_dag(topic, unit_key, payload, source);
             return;
         }
         let outcome = {

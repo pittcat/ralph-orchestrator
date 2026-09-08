@@ -66,7 +66,16 @@ const HAT_VERIFIER: &str = "verifier";
 /// job identity, so a forged or stale agent value cannot misroute a
 /// unit. Everything else in the schema's `required_fields` is the
 /// agent's responsibility.
-const RUNTIME_OWNED_FIELDS: [&str; 4] = ["unit_id", "plan_key", "task_id", "task_key"];
+const RUNTIME_OWNED_FIELDS: [&str; 8] = [
+    "unit_id",
+    "plan_key",
+    "task_id",
+    "task_key",
+    "job_id",
+    "job_token",
+    "stage",
+    "attempt",
+];
 
 /// Host env names a DAG child may inherit (name-only policy; values
 /// are never inspected). Backend credentials the operator declared
@@ -191,12 +200,40 @@ pub(crate) struct PostAcceptance {
     digest: String,
 }
 
+/// Accepted worker results must still carry the runtime-owned identity that
+/// was bound to the durable reservation. Agent output cannot choose these
+/// values; `complete_payload` overlays them before the event enters the
+/// EventLoop acceptance path.
+fn accepted_identity_matches(
+    post: &PostAcceptance,
+    payload: &Value,
+    source: Option<&str>,
+) -> bool {
+    source == Some(post.identity.hat.as_str())
+        && payload_matches_identity(&post.identity, payload)
+}
+
+fn payload_matches_identity(identity: &JobIdentity, payload: &Value) -> bool {
+    payload.get("job_id").and_then(Value::as_str) == Some(identity.job_id.as_str())
+        && payload.get("job_token").and_then(Value::as_str) == Some(identity.token.as_str())
+        && payload.get("stage").and_then(Value::as_str) == Some(identity.stage.as_str())
+        && payload.get("attempt").and_then(Value::as_u64) == Some(u64::from(identity.attempt))
+}
+
+fn has_worker_identity(payload: &Value, source: Option<&str>) -> bool {
+    source.is_some()
+        || ["job_id", "job_token", "stage", "attempt"]
+            .iter()
+            .any(|field| payload.get(*field).is_some())
+}
+
 /// A driver advance deferred by a transient pool cap.
 #[derive(Debug)]
 pub(crate) struct PendingAdvance {
     topic: String,
     unit_key: String,
     payload: Value,
+    source: Option<String>,
 }
 
 /// A follow-up spawn deferred by the D16 fixer cap.
@@ -407,7 +444,8 @@ impl DagSchedulerRuntime {
         match event_loop.process_events_from_jsonl() {
             Ok(processed) => {
                 for event in &processed.accepted_events {
-                    self.route_event(event.topic.as_str(), &event.payload);
+                    let source = event.source.as_ref().map(|source| source.as_str());
+                    self.route_event(event.topic.as_str(), &event.payload, source);
                 }
             }
             Err(err) => {
@@ -569,6 +607,10 @@ impl DagSchedulerRuntime {
             "task_id".to_string(),
             Value::String(self.resolve_task_id(&identity.unit_key())),
         );
+        obj.insert("job_id".to_string(), Value::String(identity.job_id.clone()));
+        obj.insert("job_token".to_string(), Value::String(identity.token.clone()));
+        obj.insert("stage".to_string(), Value::String(identity.stage.clone()));
+        obj.insert("attempt".to_string(), Value::from(identity.attempt));
         Value::Object(obj)
     }
 
@@ -719,13 +761,40 @@ impl DagSchedulerRuntime {
     /// `dag`-mode unit-event handling: journal terminal for the
     /// completing job, slot release, then the driver routing that
     /// admits the next stage.
-    pub(super) fn observe_unit_event_dag(&mut self, topic: &str, unit_key: &str, payload: &Value) {
+    pub(super) fn observe_unit_event_dag(
+        &mut self,
+        topic: &str,
+        unit_key: &str,
+        payload: &Value,
+        source: Option<&str>,
+    ) {
         let acceptance_key = payload
             .get("plan_key")
             .and_then(Value::as_str)
             .filter(|plan_key| !plan_key.trim().is_empty())
             .map(|plan_key| format!("forge:{plan_key}:{unit_key}"))
             .unwrap_or_else(|| unit_key.to_string());
+        if let Some(post) = self.awaiting_acceptance.get(&acceptance_key)
+            && !accepted_identity_matches(post, payload, source)
+        {
+            warn!(
+                unit_key,
+                topic,
+                "DAG seam: accepted event identity does not match the current job"
+            );
+            return;
+        }
+        if !self.awaiting_acceptance.contains_key(&acceptance_key)
+            && has_worker_identity(payload, source)
+            && !self.current_job_matches_payload(payload, source)
+        {
+            warn!(
+                unit_key,
+                topic,
+                "DAG seam: worker result does not match the durable current job"
+            );
+            return;
+        }
         // Verify-stage completions are not driver topics: the
         // pipeline ends at Verify (integration is a later step), so
         // the seam only settles the job and frees the slot.
@@ -803,6 +872,7 @@ impl DagSchedulerRuntime {
                         topic: topic.to_string(),
                         unit_key,
                         payload: payload.clone(),
+                        source: source.map(str::to_string),
                     });
                 }
                 other => {
@@ -839,6 +909,27 @@ impl DagSchedulerRuntime {
         }
     }
 
+    fn current_job_matches_payload(&mut self, payload: &Value, source: Option<&str>) -> bool {
+        let Some(plan_key) = payload.get("plan_key").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(unit_id) = payload.get("unit_id").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(journal) = self.journal() else {
+            return false;
+        };
+        let Ok(jobs) = journal.list_jobs(plan_key) else {
+            return false;
+        };
+        jobs.iter().rev().any(|job| {
+            job.identity.unit_id == unit_id
+                && job.terminal.is_none()
+                && source == Some(job.identity.hat.as_str())
+                && payload_matches_identity(&job.identity, payload)
+        })
+    }
+
     /// Spawn a follow-up job now, or defer it when the D16 fixer cap
     /// is saturated.
     pub(super) fn queue_spawn(&mut self, pending: PendingSpawn) {
@@ -859,7 +950,12 @@ impl DagSchedulerRuntime {
     pub(super) fn retry_pending(&mut self) {
         let advances = std::mem::take(&mut self.pending_advances);
         for pending in advances {
-            self.observe_unit_event_dag(&pending.topic, &pending.unit_key, &pending.payload);
+            self.observe_unit_event_dag(
+                &pending.topic,
+                &pending.unit_key,
+                &pending.payload,
+                pending.source.as_deref(),
+            );
         }
         let spawns = std::mem::take(&mut self.pending_spawns);
         for pending in spawns {
@@ -1489,6 +1585,12 @@ units:
         assert!(runtime.active_jobs.is_empty(), "canary child must be reaped");
         let merge = runtime.merge_queue.front().expect("success event queued");
         assert_eq!(merge.event.topic.as_str(), "forge.unit.executed");
+        let payload: Value = serde_json::from_str(&merge.event.payload).expect("JSON result");
+        assert_eq!(merge.event.source.as_ref().map(ToString::to_string).as_deref(), Some(HAT_EXECUTOR));
+        assert_eq!(payload["job_id"], "dag-U1-execute-a0");
+        assert_eq!(payload["job_token"], "tok-U1-execute-a0");
+        assert_eq!(payload["stage"], "execute");
+        assert_eq!(payload["attempt"], 0);
         assert!(
             tmp.path()
                 .join(".ralph/worktrees/loop-test-U1")
@@ -1587,7 +1689,7 @@ units:
             "plan_key": "pf-test",
             "verdict": "REJECTED",
         });
-        runtime.observe_unit_event_dag(topics::UNIT_REVIEWED, "U1", &payload);
+        runtime.observe_unit_event_dag(topics::UNIT_REVIEWED, "U1", &payload, None);
 
         assert!(
             runtime.pending_spawns.is_empty(),
@@ -1633,7 +1735,15 @@ units:
         runtime.observe_unit_event_dag(
             "forge.unknown.accepted",
             "U1",
-            &serde_json::json!({"plan_key": "pf-test", "unit_id": "U1"}),
+            &serde_json::json!({
+                "plan_key": "pf-test",
+                "unit_id": "U1",
+                "job_id": "job-post-acceptance",
+                "job_token": "token-post-acceptance",
+                "stage": "execute",
+                "attempt": 0,
+            }),
+            Some(HAT_EXECUTOR),
         );
 
         assert!(runtime.awaiting_acceptance.is_empty());
@@ -1671,7 +1781,15 @@ units:
         runtime.observe_unit_event_dag(
             "forge.unknown.accepted",
             "U1",
-            &serde_json::json!({"plan_key": "pf-test", "unit_id": "U1"}),
+            &serde_json::json!({
+                "plan_key": "pf-test",
+                "unit_id": "U1",
+                "job_id": "job-terminal-projection",
+                "job_token": "token-terminal-projection",
+                "stage": "execute",
+                "attempt": 0,
+            }),
+            Some(HAT_EXECUTOR),
         );
 
         let jobs = runtime
@@ -1684,6 +1802,48 @@ units:
             job.identity.job_id == "job-terminal-projection"
                 && job.terminal.as_deref() == Some("accepted")
         }));
+    }
+
+    /// A stale or forged accepted event must not consume the current
+    /// post-acceptance record when its token or source hat differs.
+    #[test]
+    fn forged_accepted_result_cannot_advance_current_job() {
+        let (_tmp, mut runtime) = dag_fixture();
+        let identity = JobIdentity {
+            plan_key: "pf-test".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "job-forgery-fence".to_string(),
+            hat: HAT_EXECUTOR.to_string(),
+            stage: "execute".to_string(),
+            attempt: 0,
+            token: "token-forgery-fence".to_string(),
+        };
+        let key = identity.unit_key();
+        runtime.awaiting_acceptance.insert(
+            key.clone(),
+            PostAcceptance {
+                identity,
+                terminal: "accepted",
+                digest: "c".repeat(64),
+            },
+        );
+
+        runtime.observe_unit_event_dag(
+            "forge.unit.executed",
+            "U1",
+            &serde_json::json!({
+                "plan_key": "pf-test",
+                "unit_id": "U1",
+                "job_id": "job-forgery-fence",
+                "job_token": "wrong-token",
+                "stage": "execute",
+                "attempt": 0,
+            }),
+            Some(HAT_EXECUTOR),
+        );
+
+        assert!(runtime.awaiting_acceptance.contains_key(&key));
+        assert!(runtime.merge_queue.is_empty());
     }
 
     /// The inner keepalive gate: a fresh dag runtime owns no work; a
