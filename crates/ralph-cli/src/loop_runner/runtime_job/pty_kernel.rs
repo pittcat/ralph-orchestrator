@@ -35,6 +35,30 @@ use std::time::{Duration, Instant};
 use ralph_adapters::OutputFormat;
 use tracing::{info, warn};
 
+/// Kill the complete Unix process group created by `portable-pty`.
+///
+/// `portable-pty` calls `setsid()` in the child before attaching the
+/// controlling terminal, so the child pid is also the process-group id.
+/// Killing only the group leader leaves shell-launched grandchildren behind
+/// and can leak a timed-out backend past the durable job terminal.
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+
+    let Ok(pid) = i32::try_from(pid) else {
+        warn!(pid, "PTY process group id does not fit in pid_t");
+        return;
+    };
+    match killpg(Pid::from_raw(pid), Signal::SIGKILL) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+        Err(err) => warn!(pid, error = %err, "failed to kill PTY process group"),
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: u32) {}
+
 use crate::loop_runner::wave::heartbeat::{
     HeartbeatKind, LeaseConfig, LeaseDecision, LeaseState, classify_heartbeat_line,
 };
@@ -334,6 +358,7 @@ pub async fn drive_pty_lease_loop(
     on_line: &mut (dyn FnMut(&str) + Send),
     start: Instant,
 ) -> PtyLeaseOutcome {
+    let process_group_id = handle.pid();
     let child = &mut handle.child;
     let line_rx = &mut handle.line_rx;
 
@@ -345,6 +370,9 @@ pub async fn drive_pty_lease_loop(
     // sequence per kill kind.
     let mut kill_reason: Option<PtyKillReason> = None;
     let mut apply_kill = |reason: PtyKillReason, killed: &mut bool, timed_out: &mut bool| {
+        if let Some(pid) = process_group_id {
+            kill_process_group(pid);
+        }
         let _ = child.kill();
         kill_reason = Some(reason);
         *killed = true;
@@ -815,6 +843,49 @@ mod tests {
         assert!(
             !status.success(),
             "killed child must not report success (process cancel)"
+        );
+    }
+
+    /// A timeout must kill shell-launched descendants as well as the PTY
+    /// leader. `portable-pty` gives the child a fresh session, so the leader
+    /// pid is the safe process-group fence.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hard_cap_kills_the_entire_child_process_group() {
+        let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+        let pid_path = pid_file.path().display().to_string();
+        let script = format!("sleep 30 & echo $! > {pid_path}; wait");
+        let mut handle = spawn_pty_job(sh_spec(&script)).expect("spawn process group");
+        let outcome = drive_pty_lease_loop(
+            &mut handle,
+            &dual_clock_mode(300, 60_000),
+            OutputFormat::Text,
+            0,
+            &mut |_| {},
+            Instant::now(),
+        )
+        .await;
+        assert!(outcome.timed_out);
+        finish_pty_job(handle)
+            .await
+            .expect("reap process group leader");
+
+        let descendant = std::fs::read_to_string(&pid_path)
+            .expect("shell records descendant pid")
+            .trim()
+            .parse::<i32>()
+            .expect("valid descendant pid");
+        let descendant = nix::unistd::Pid::from_raw(descendant);
+        let gone = (0..20).any(|_| match nix::sys::signal::kill(descendant, None) {
+            Err(nix::errno::Errno::ESRCH) => true,
+            _ => {
+                std::thread::sleep(Duration::from_millis(10));
+                false
+            }
+        });
+        assert!(
+            gone,
+            "timed-out PTY group leaked descendant pid {descendant}"
         );
     }
 

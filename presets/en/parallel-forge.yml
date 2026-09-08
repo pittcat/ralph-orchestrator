@@ -55,7 +55,7 @@ mechanism:
     terminal_emits: [LOOP_COMPLETE]
     # 2026-07-28-001 plan §3.1: explicit declared flow authority. Each
     # cross-hat handoff uses the next step's `on`; multi-source block
-    # branches use `on_any_of` on `report`. exec_wave unit topics and
+    # branches use `on_any_of` on `report`. Per-Unit runtime topics and
     # `work.failed` are non-transition (NON_TRANSITION_TOPICS). The
     # generic positional fallback is preserved for any preset that does
     # not opt into the declared contract.
@@ -102,7 +102,7 @@ mechanism:
           - work.failed
       - id: full_verify
         kind: linear
-        # Two entries: the normal all-waves-settled path, and the
+        # Two entries: the normal all-Units-settled path, and the
         # correction-exhausted path where the tester runs the full gate
         # on the final correction's result (review 2026-08-26 F-003).
         on_any_of:
@@ -167,7 +167,7 @@ event_loop:
     aggregate_timeout_secs: 7200
     # A unit gets three executor attempts in total (one initial run plus
     # two retries). Every attempt is a fresh backend process resuming the
-    # same worktree, and only the third failure surfaces as a wave
+    # same worktree, and only the third failure surfaces as a typed Unit
     # failure for the correction path.
     slot_retry_budget: 2
     # 2026-09-08: the DAG execution face is active. The runtime is authoritative
@@ -191,11 +191,11 @@ event_loop:
   starting_event: forge.start
   max_iterations: 60
   max_runtime_seconds: 28800
-  # Legacy wave fan-out `forge.worktrees.ready` has no LLM precheck gate;
+  # Runtime DAG admission has no LLM precheck gate;
   # DAG admission starts from the accepted concurrency approval and does not
-  # wait for a dispatcher activation. Empty-field payload_consistency still
-  # rejects garbage identity on the compatibility topic. Other key-stage LLM
-  # gates below remain for the wave-mode compatibility path.
+  # wait for a dispatcher activation. Payload consistency still rejects
+  # malformed identity on runtime-owned receipts. Other key-stage LLM gates
+  # below remain for human-authored handoff artifacts.
   precheck:
     enabled: true
     rules:
@@ -384,7 +384,7 @@ core:
   guardrails:
     - "OPAC Observe: `ralph inspect loop` + `ralph tools task list`. Do not read `.ralph/events.jsonl` or `.ralph/supervisor.db`."
     - "OPAC Precheck: `ralph tools skill load ralph-tools-emit` then `ralph emit --policy-check` before every real emit (per `ralph-tools` §5)."
-    - "Wave Precheck: dispatcher must `ralph wave verify --payloads-stdin` then same payloads `ralph wave emit` (per `ralph-tools-wave`)."
+    - "Runtime receipt precheck: runtime-owned `forge.unit.*` receipts are emitted by the DAG scheduler; agents must not call `ralph wave emit` or manufacture wave receipts."
     - "Artifact templates: run `ralph preset materialize-artifacts parallel-forge --plan-key <plan-key>` then copy from `.ralph/forge/<plan-key>/templates/` — do not write free-form artifacts."
     - "Artifact lifecycle: `.ralph/forge/<plan-key>/` owner=cleanup (cleanup forge worktrees/branches before manager report); producers write; consumers read only via trigger/projection paths."
     - "Blocked/failed: write context artifact under blocks/ or failures/ before emit; include context_artifact_path + forge_artifact_root + plan_key."
