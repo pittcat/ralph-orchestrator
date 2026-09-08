@@ -1846,6 +1846,53 @@ units:
         assert!(runtime.merge_queue.is_empty());
     }
 
+    /// The same identity fence must hold after restart, when the
+    /// post-acceptance map is empty and the durable journal is the only
+    /// source of the current job identity.
+    #[cfg(feature = "supervisor-db")]
+    #[test]
+    fn forged_result_cannot_advance_durable_current_job() {
+        let (_tmp, mut runtime) = dag_fixture();
+        let identity = JobIdentity {
+            plan_key: "pf-test".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "job-durable-fence".to_string(),
+            hat: HAT_EXECUTOR.to_string(),
+            stage: "execute".to_string(),
+            attempt: 0,
+            token: "token-durable-fence".to_string(),
+        };
+        runtime
+            .journal()
+            .expect("durable journal")
+            .reserve_job(&identity, 1)
+            .expect("reserve job");
+
+        runtime.observe_unit_event_dag(
+            "forge.unit.executed",
+            "U1",
+            &serde_json::json!({
+                "plan_key": "pf-test",
+                "unit_id": "U1",
+                "job_id": "job-durable-fence",
+                "job_token": "wrong-token",
+                "stage": "execute",
+                "attempt": 0,
+            }),
+            Some(HAT_EXECUTOR),
+        );
+
+        let jobs = runtime
+            .journal()
+            .expect("durable journal")
+            .list_jobs("pf-test")
+            .expect("list jobs");
+        assert!(runtime.merge_queue.is_empty());
+        assert!(jobs.iter().any(|job| {
+            job.identity.job_id == "job-durable-fence" && job.terminal.is_none()
+        }));
+    }
+
     /// The inner keepalive gate: a fresh dag runtime owns no work; a
     /// queued failure event flips it so the loop cannot fall into
     /// fallback termination while the result awaits merge.
