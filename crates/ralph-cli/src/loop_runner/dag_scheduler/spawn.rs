@@ -1313,6 +1313,7 @@ fn build_job_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::loop_runner::runtime_job::RuntimeJobError;
 
     /// Routing table: executed → reviewer, reviewed ACCEPTED →
     /// verifier, reviewed REJECTED → fixer; verify topics and
@@ -1590,6 +1591,52 @@ units:
             "replayed admission is deduped before the journal reserve"
         );
         assert!(runtime.active_jobs.is_empty());
+    }
+
+    /// S4 facade evidence: a verify terminal releases the completing
+    /// Unit's slot before the next admission pass, so a Ready sibling
+    /// blocked by the global cap can be admitted immediately.
+    #[test]
+    fn verify_terminal_releases_slot_for_ready_sibling() {
+        let tmp = TempDir::new().expect("temp workspace");
+        let mut runtime = DagSchedulerRuntime::new(
+            SchedulerMode::Dag,
+            ResolvedDagPools {
+                global: 1,
+                executor: 1,
+                reviewer: 1,
+                verifier: 1,
+                fixer: 1,
+            },
+            tmp.path().to_path_buf(),
+        );
+        runtime
+            .pipeline
+            .ensure_unit("U-done", "job-done", HAT_EXECUTOR, Stage::Execute);
+        runtime
+            .pipeline
+            .ensure_unit("U-ready", "job-ready", HAT_EXECUTOR, Stage::Execute);
+
+        assert!(matches!(
+            runtime.pipeline.advance("U-done", Stage::Execute),
+            AdvanceOutcome::Admitted { .. }
+        ));
+        assert!(matches!(
+            runtime.pipeline.advance("U-ready", Stage::Execute),
+            AdvanceOutcome::Blocked(RuntimeJobError::GlobalCapExceeded { .. })
+        ));
+
+        runtime.observe_unit_event_dag(
+            topics_ext::UNIT_VERIFIED,
+            "U-done",
+            &serde_json::json!({"plan_key": "pf-test", "unit_id": "U-done"}),
+            None,
+        );
+
+        assert!(matches!(
+            runtime.pipeline.advance("U-ready", Stage::Execute),
+            AdvanceOutcome::Admitted { .. }
+        ));
     }
 
     /// Authoritative canary: a real DAG executor job uses the verified Git
