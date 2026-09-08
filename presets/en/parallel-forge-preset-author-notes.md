@@ -1,14 +1,14 @@
 # parallel-forge preset author notes
 
-## Scheduler Mode 过渡态记录（2026-09-05，PMI-002 收口；rubric Q3/HQ3 `scheduler_mode_transitional_state_undocumented`）
+## Scheduler Mode 执行面记录（2026-09-08，DAG runtime cutover）
 
-- **现状（如实）**：YAML 声明 `event_loop.supervisor.scheduler_mode: dag`（2026-09-03-0959 plan U10 §13 最小 cutover，commit `35adac73`），但 **DAG 执行面未接线**——调度行为与 `wave` 完全等价：forge-dispatcher wave fan-out + supervisor wave 账本 + `forge.wave.*` 事件链原样运行；`max_concurrent_workers: 8` 是唯一生效容量权威（`DagPools` 与 `max_concurrent_workers` 的单一权威收敛属 promote 义务 #2 后半，未落地）。**Step 1+2(2026-09-07) 已落地**：`runtime_job` kernel 与 `dag_scheduler::{driver,jobs}` 类型层 promote 为生产可见（去 `#[cfg(test)]`,无生产调用方的 item 以最小粒度 `#[allow(dead_code)]` 标注）;driver topic 切换为方案 (b) 新增的 `forge.unit.*` per-unit typed topic 族（`forge.unit.executed` / `forge.unit.execution_failed` / `forge.unit.reviewed` / `forge.unit.verified` / `forge.unit.verification_failed` / `forge.unit.integrated`,schema 已声明,executor/reviewer/verifier hat publishes 已追加;`forge.unit.integrated` 为 runtime 发射,D25）,verdict 值域统一为 `ACCEPTED`/`REJECTED`。**未落地**:driver 未接入 EventLoop acceptance 路径,hat instructions 未改（wave 模式下 hat 仍只发 `exec.unit.*`/`forge.wave.*`),integration 推进未消费 `forge.unit.verified`(Stage 枚举无 Integration 阶段)。
-- **发射权威（如实）**：`forge.exec.development.done` 由 **forge-dispatcher hat** 发射（schema field_docs `source: forge-dispatcher` 为准）；preset yml `scheduler_mode: dag` 上方注释已按 PMI-002 改写为同一事实。runtime 发射（「all Units integrated and projection-acknowledged, exactly once」）是 **promote 后目标态，当前不存在对应 runtime 代码**。
+- **现状（如实）**：YAML 声明 `event_loop.supervisor.scheduler_mode: dag`。DAG runtime 已接入 EventLoop acceptance 路径：审批后从 execution-plan dependency graph 做 admission，按 durable launch journal 启动 executor/reviewer/verifier，恢复未决 job，按 `integration_order` 串行 FF integration，并在 accepted `forge.unit.integrated`（含 close-task projection）后解锁后继 Unit。`forge.exec.development.done` 由 runtime 的 terminal fence 恰好一次发射。
+- **仍属后续收口**：旧 wave 正常路径 hats（forge-dispatcher / worktree / LLM integrator）的声明和 wave-only schema/topic 仍保留兼容；需要在删除这些声明后补齐 BDD×9、mock E2E、schema/文档/author-review skill 同步。`dag_pools` 与 `max_concurrent_workers` 的单一容量权威收敛，以及 PMI-004 / TG-S13 残余也仍待处理。
 - **inspect 语义**：`scheduler_mode ≠ wave` 时 `ralph inspect loop --format json` 输出只读 `scheduler` 块（空计数 = 零观测的如实反映，非伪造）。
 - **promote 前置义务清单（follow-up 载体，本 notes 即 git-tracked 认领）**——任何「把 DAG 调度器接进 EventLoop」的 PR 必须同批交付，缺一即半接线（TG-S05 变红 = P0）：
-  1. `DagSchedulerDriver::observe_accepted` 接入真实 EventLoop acceptance 路径。**topic 映射决策已做(Step 1+2,方案 (b))**:driver 消费新增的 `forge.unit.*` per-unit 族,verdict 值域已统一为 `ACCEPTED`/`REJECTED`,不再是旧的 `forge.exec.unit.completed`/`forge.review.verdict` 平行宇宙;剩余义务是接线本身(driver 仍未被 EventLoop 调用)。
+  1. `DagSchedulerDriver::observe_accepted` 接入真实 EventLoop acceptance 路径。**已完成**：driver 消费 `forge.unit.*` per-unit 族，runtime 在 accepted 边界调用并继续推进 pipeline。
   2. `JobPipeline`/`DagPools`/`RuntimeJob` kernel promote 到非 `#[cfg(test)]`(**Step 1 已落地**,item 级 `#[allow(dead_code)]` 过渡标注),容量模型与 `max_concurrent_workers` 收敛为单一权威(plan D16:`dag_pools` 默认各等于 `max_concurrent_workers`)——**收敛未落地**。
-  3. U5 shadow parity（dag_shadow 在共同边界 exact parity）+ U10 §7 第 7 条 authoritative DAG canary（真实 runtime jobs + 临时 git worktrees + 完整 crash matrix）。
+  3. U5 shadow parity（dag_shadow 在共同边界 exact parity）+ U10 §7 第 7 条 authoritative DAG canary（真实 runtime jobs + 临时 git worktrees + 完整 crash matrix）。**运行时主链已接通；canary 与 crash matrix 回归仍待补齐。**
   4. BDD ×9（plan U10 第 9 条：immediate refill / receipt crash / attempt forgery / env-path guard / sibling candidate / integrated task close / correction / resume / final once）+ mock E2E。
   5. 退休 wave 正常路径 hats（forge-dispatcher / worktree hat / LLM integrator 的正常路径），孤儿 topic 清理，schema 同步。
   6. 文档同步：`CLAUDE.md`/`AGENTS.md` 过渡态段翻转 + `crates/ralph-core/data/*.md`（若 agent-facing 命令语义实际改变）。

@@ -82,7 +82,7 @@ ralph wave emit review.file --payloads "src/main.rs" "src/lib.rs" "src/config.rs
 
 - **fail-closed 组合**：`dag_shadow` / `dag` 要求 `event_loop.supervisor.enabled: true` 且 `event_loop.execution_mode: isolated`；违反组合在 preflight / `ralph preset check` / `ralph run` 启动即拒（错误含字段路径 `event_loop.supervisor.scheduler_mode`），不会静默降级回 `wave`。校验函数：`crates/ralph-core/src/config/scheduler_mode.rs`（`validate_scheduler_mode`）。
 - **inspect 可见性**：`ralph inspect loop --format json` 在 mode ≠ `wave` 时输出脱敏 `scheduler` 块（`scheduler_mode` / `plan_keys` / 观测计数）；`wave` 无该键。
-- **过渡态现状**：builtin `parallel-forge` 已声明 `scheduler_mode: dag`（配置先行 cutover），但 runtime 调度行为当前与 `wave` 完全等价（DAG 执行面未接线，`DagSchedulerDriver` 等为 `#[cfg(test)]`）。写文档 / preset 审查时以「wave 为现行执行面、dag 为配置先行过渡态」叙述，不得把 `dag` 描述为已生效行为。
+- **当前现状**：builtin `parallel-forge` 声明 `scheduler_mode: dag` 时由 DAG runtime 负责 per-Unit admission、job launch/recovery、integration 和 development completion；`wave` 仍是显式选择的兼容执行面。写文档 / preset 审查时不得把 DAG 描述成只读 shadow，也不得把 wave-only `exec.wave.*` 误写成 DAG runtime 的业务收据。
 
 ## Smoke Tests (Replay-Based)
 

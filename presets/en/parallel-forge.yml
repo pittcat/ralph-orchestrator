@@ -1,17 +1,18 @@
 # parallel-forge (Parallel Forge): Spec-First multi-worktree parallel development
 #
 # Based on parallel-dev-preset.md v2.0. **execution_model: supervisor**
-# (`event_loop.supervisor.enabled: true`): runtime manages per-slot worktrees,
-# forge-dispatcher fans out `exec.unit.ready` waves; up to three independent
-# waves may overlap; executor slots publish
-# `exec.unit.done` / `exec.unit.failed`; supervisor injects
-# `exec.wave.complete` / `exec.wave.failed` (agents must NOT emit those).
-# Development is required to fan out via supervisor waves; integration serial; one atomic
-# commit per Unit; manager Markdown report terminal.
+# (`event_loop.supervisor.enabled: true`): in `scheduler_mode: dag`, the
+# runtime admits Units from the execution-plan dependency graph, owns per-Unit
+# worktrees, spawns executor/reviewer/verifier jobs, and serially integrates
+# verified Units. Runtime-emitted `forge.unit.*` receipts are the execution
+# handoffs; `forge.exec.development.done` is emitted only after every accepted
+# integration receipt has closed its task projection. The legacy wave hats and
+# `exec.wave.*` path remain available only for `wave` mode compatibility.
 #
-# Hats: 12 spec hats + forge-dispatcher + forge-failure-handler (supervisor
-# infrastructure; mirrors ce-executor-supervisor exec-wave-dispatcher /
-# exec-failure-handler).
+# Hats: planning, review, failure, and delivery hats. In `dag` mode the
+# runtime-driven worktree, dispatcher, integrator, executor, reviewer, and
+# verifier declarations serve as job templates; they are not independently
+# activated by the EventLoop.
 #
 # Usage:
 #   ralph run -H builtin:parallel-forge -p <plan-or-requirements.md>
@@ -186,21 +187,11 @@ event_loop:
     # same worktree, and only the third failure surfaces as a wave
     # failure for the correction path.
     slot_retry_budget: 2
-    # 2026-09-03-0959 plan U10 §13 minimum: this preset declares
-    # `scheduler_mode: dag` as a config-first cutover. Transitional
-    # state (honest, per PMI-002): the DAG execution surface is NOT
-    # wired yet — scheduling behaviour is identical to `wave`
-    # (forge-dispatcher wave fan-out + supervisor wave ledger +
-    # `forge.wave.*` events all run unchanged). Until the follow-up
-    # promote lands (driver wiring into the EventLoop + per-Unit
-    # admission + BDD + E2E, tracked in
-    # `presets/en/parallel-forge-preset-author-notes.md`):
-    # - `forge.exec.development.done` is still emitted by the
-    #   forge-dispatcher hat (NOT by the runtime), exactly as the
-    #   schema field_docs state.
-    # - The legacy WaveTracker authority (the `forge.wave.*` /
-    #   forge-dispatcher wave-fan-in path) remains the actual
-    #   scheduling authority.
+    # 2026-09-08: the DAG execution face is active. The runtime is authoritative
+    # for dependency admission, worker launch/recovery, per-Unit integration,
+    # task-close acknowledgement, and the exactly-once development completion
+    # receipt. The runtime-driven declarations below remain as typed job
+    # templates and are suppressed as normal EventLoop activations in `dag` mode.
     scheduler_mode: dag
   ephemeral_isolation: true
   enforce_current_unit: true
@@ -217,12 +208,11 @@ event_loop:
   starting_event: forge.start
   max_iterations: 60
   max_runtime_seconds: 28800
-  # Fan-out `forge.worktrees.ready` has no LLM precheck gate: a
-  # synthesized `precheck-forge.worktrees.ready` hat sat between
-  # worktree and forge-dispatcher and could leave dispatcher unactivated
-  # after an accepted ready. Empty-field payload_consistency still
-  # rejects garbage identity on the bare topic. Other key-stage LLM
-  # gates below are unchanged.
+  # Legacy wave fan-out `forge.worktrees.ready` has no LLM precheck gate;
+  # DAG admission starts from the accepted concurrency approval and does not
+  # wait for a dispatcher activation. Empty-field payload_consistency still
+  # rejects garbage identity on the compatibility topic. Other key-stage LLM
+  # gates below remain for the wave-mode compatibility path.
   precheck:
     enabled: true
     rules:
