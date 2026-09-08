@@ -638,18 +638,18 @@ schemas:
     payload: json_object
     field_docs:
       execution_plan_path:
-        meaning: Execution plan SSOT; all development waves finished.
-        source: forge-dispatcher after last exec wave fan-in.
+        meaning: Execution plan SSOT; all integrated development Units finished.
+        source: DAG runtime after every Unit integration acknowledgement is durable.
         fill_rule: Same path used since Planner handoff.
         examples: [".ralph/<plan>/execution-plan.yml"]
       completed_unit_count:
-        meaning: Units that reached exec.unit.done.
-        source: ralph tools task list done count for plan units.
+        meaning: Units whose runtime integration acknowledgement is complete.
+        source: DAG integration projection, not an agent-emitted wave count.
         fill_rule: Non-negative integer.
       failed_unit_count:
-        meaning: Units that reached exec.unit.failed.
-        source: ralph tools task list failed count.
-        fill_rule: Zero when proceeding to review.
+        meaning: Units with an unresolved terminal failure.
+        source: DAG runtime failure projection.
+        fill_rule: Zero when proceeding to the final verification path.
       plan_key:
         meaning: Forge plan key basename (artifact root segment under .ralph/forge/).
         source: Basename of operator plan without .md, or path parent of execution_plan_path.
@@ -659,7 +659,7 @@ schemas:
   # DAG 模式 per-unit typed topic 族(2026-09-03-0959 plan DAG 接线
   # Step 2,方案 (b))。scheduler_mode: dag 下由 runtime 驱动的 per-unit
   # worker(executor/reviewer/verifier hat)发射;wave 路径的
-  # exec.unit.done / forge.wave.reviewed 不动,退休属后续 Step。
+  # exec.unit.done / forge.wave.reviewed remain legacy wave-only topics.
   # `forge.unit.integrated` 由 runtime 在 lane CAS FF 后发射(D25),
   # 无 hat 发射方——比照 exec.wave.failed 的 runtime-injected 先例。
   # ──────────────────────────────────────────────────────────────────────
