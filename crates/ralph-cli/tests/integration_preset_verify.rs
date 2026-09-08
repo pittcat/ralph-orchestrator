@@ -724,27 +724,20 @@ fn contains_in_order(haystack: &[String], needles: &[&str]) -> bool {
 
 #[test]
 fn preset_verify_builtin_parallel_forge_success_dynamic() {
-    // Fan-out has no LLM precheck: the verifier must accept the bare
-    // `forge.worktrees.ready` and wake `forge-dispatcher` (development.done).
-    // Remaining LLM gates (audit.done) still stop the driver's next_hat
-    // at `.proposed`, so the scenario stays a nonzero/static-pass contract
-    // unless the driver later reaches LOOP_COMPLETE.
+    // This verifier uses a scripted EventLoop and does not attach the live DAG
+    // runtime. Approval is therefore the last accepted execution handoff;
+    // runtime-owned fan-out/completion receipts must not be synthesized here.
     let (code, json, stderr) = run_verify_json("parallel-forge-success.yml");
     assert_eq!(json["static"]["passed"], serde_json::Value::Bool(true));
 
     let accepted = accepted_events(&json);
-    assert!(
-        accepted.contains(&"forge.worktrees.ready".to_string()),
-        "accepted_events must include the bare fan-out topic; got {accepted:?}"
-    );
-    assert!(
-        !accepted.contains(&"forge.worktrees.ready.proposed".to_string()),
-        "fan-out must not be rewritten to .proposed; got {accepted:?}"
-    );
-    assert!(
-        accepted.contains(&"forge.exec.development.done".to_string()),
-        "dispatcher must wake after bare ready; got {accepted:?}"
-    );
+    assert!(accepted.contains(&"forge.concurrency.approved".to_string()));
+    for retired in ["forge.worktrees.ready", "forge.exec.development.done"] {
+        assert!(
+            !accepted.iter().any(|event| event == retired),
+            "retired runtime receipt {retired} must not appear; got {accepted:?}"
+        );
+    }
     for forbidden in [
         "forge.plan.blocked",
         "work.failed",
@@ -759,7 +752,9 @@ fn preset_verify_builtin_parallel_forge_success_dynamic() {
     let last = accepted.last().map(String::as_str);
     let allowed_tail = matches!(
         last,
-        Some("LOOP_COMPLETE") | Some("forge.audit.done.proposed")
+        Some("LOOP_COMPLETE")
+            | Some("forge.audit.done.proposed")
+            | Some("forge.concurrency.approved")
     );
     assert!(
         allowed_tail,
@@ -776,32 +771,22 @@ fn preset_verify_builtin_parallel_forge_success_dynamic() {
 
 #[test]
 fn preset_verify_builtin_parallel_forge_recovery_dynamic() {
-    // Recovery fixture no longer exercises a fan-out LLM reject/retry;
-    // it must still land the bare ready and wake the dispatcher. Audit
-    // LLM precheck remains the verifier driver's stop.
+    // Recovery fixture exercises the scripted approval boundary only;
+    // runtime-owned fan-out and completion receipts are out of scope here.
     let (code, json, stderr) = run_verify_json("parallel-forge-evidence-recovery.yml");
 
     let accepted = accepted_events(&json);
-    assert!(
-        accepted.contains(&"forge.worktrees.ready".to_string()),
-        "recovery trace must include the bare ready; got {accepted:?}"
-    );
-    assert!(
-        !accepted.contains(&"forge.worktrees.ready.proposed".to_string()),
-        "fan-out must not be rewritten to .proposed; got {accepted:?}"
-    );
-    assert!(
-        !accepted
-            .iter()
-            .any(|event| event == "forge.worktrees.ready.rejected"),
-        "fan-out LLM reject is gone; got {accepted:?}"
-    );
-    assert!(
-        accepted
-            .iter()
-            .any(|event| event == "forge.exec.development.done"),
-        "dispatcher must wake after bare ready; got {accepted:?}"
-    );
+    assert!(accepted.contains(&"forge.concurrency.approved".to_string()));
+    for retired in [
+        "forge.worktrees.ready",
+        "forge.exec.development.done",
+        "forge.worktrees.ready.rejected",
+    ] {
+        assert!(
+            !accepted.iter().any(|event| event == retired),
+            "retired runtime receipt {retired} must not appear; got {accepted:?}"
+        );
+    }
     let last = accepted.last().map(String::as_str);
     if last != Some("LOOP_COMPLETE") {
         assert_ne!(
