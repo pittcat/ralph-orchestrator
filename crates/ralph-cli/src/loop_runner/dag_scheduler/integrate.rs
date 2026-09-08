@@ -96,12 +96,9 @@ impl DagSchedulerRuntime {
                     self.block_plan(&plan_key, "integration reconciliation read failed");
                     continue;
                 };
-                let Some(record) = records
-                    .into_iter()
-                    .find(|record| record.target_branch == target_branch && !record.acked)
-                else {
-                    continue;
-                };
+                let matching_record = records
+                    .iter()
+                    .find(|record| record.target_branch == target_branch);
                 let event_present = ledger.iter().any(|event| {
                     if event.topic != UNIT_INTEGRATED {
                         return false;
@@ -115,6 +112,19 @@ impl DagSchedulerRuntime {
                                 && payload.get("unit_id").and_then(Value::as_str) == Some(&unit_id)
                         })
                 });
+                if matching_record.is_some_and(|record| record.acked) && !event_present {
+                    self.block_plan(
+                        &plan_key,
+                        "durable integration acknowledgement exists but trusted event is missing",
+                    );
+                    continue;
+                }
+                let Some(record) = records
+                    .into_iter()
+                    .find(|record| record.target_branch == target_branch && !record.acked)
+                else {
+                    continue;
+                };
                 if event_present {
                     self.block_plan(
                         &plan_key,
@@ -1084,6 +1094,44 @@ units:
         assert!(runtime.blocked_plans.contains("pf-test"));
         assert_eq!(ledger_contains(tmp.path(), UNIT_INTEGRATED), 1);
         assert!(!store.list_for_unit("U1").expect("list")[0].acked);
+    }
+
+    /// Crash window: the durable acknowledgement committed, but the trusted
+    /// coordination event is absent from the ledger. Recovery must not treat
+    /// the receipt as proof that the event was accepted; it blocks the plan
+    /// before a terminal event can be emitted.
+    #[cfg(feature = "supervisor-db")]
+    #[test]
+    fn recovery_blocks_acked_integration_without_ledger_event() {
+        let (tmp, mut runtime) = git_fixture(PLAN_ARTIFACT, false);
+        let target_branch = runtime
+            .plans
+            .get("pf-test")
+            .expect("plan")
+            .target_branch
+            .clone();
+        let store = runtime
+            .journal()
+            .expect("durable journal")
+            .shared_with_integration();
+        store
+            .record_integrated(&ralph_core::supervisor::dag_integration::IntegrationInput {
+                unit_id: "U1".to_string(),
+                target_branch: target_branch.clone(),
+                base_commit: "base".to_string(),
+                integrated_commit: "integrated".to_string(),
+                expected_head_before: "base".to_string(),
+                created_at_ms: 1,
+            })
+            .expect("record integration");
+        store.ack("U1", &target_branch).expect("ack integration");
+
+        runtime.reconcile_after_restart();
+        runtime.maybe_emit_development_done();
+
+        assert!(runtime.blocked_plans.contains("pf-test"));
+        assert_eq!(ledger_contains(tmp.path(), UNIT_INTEGRATED), 0);
+        assert_eq!(ledger_contains(tmp.path(), DEVELOPMENT_DONE), 0);
     }
 
     /// Crash window: the terminal fence was committed, but the final event
