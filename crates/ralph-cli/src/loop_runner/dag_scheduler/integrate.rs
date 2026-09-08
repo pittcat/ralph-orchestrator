@@ -397,6 +397,18 @@ impl DagSchedulerRuntime {
             .map(|u| u.integration_order)
             .unwrap_or(u32::MAX);
 
+        // A Unit without an explicit path policy has no authorization
+        // boundary. Never derive one from the observed diff: that would let
+        // the candidate choose its own allowlist after the fact.
+        if allowed_paths.is_empty() {
+            self.fail_integration(
+                &pending,
+                "integration_path_policy_unconfigured",
+                "unit declares no `allowed_paths` in the execution plan",
+            );
+            return;
+        }
+
         // Fail-closed BEFORE the orchestrator when the unit declares
         // no targeted gate commands (PMI-0041: an empty gate set must
         // never silently pass).
@@ -451,22 +463,6 @@ impl DagSchedulerRuntime {
                 return;
             }
         };
-        // The verified artifact supplies the Unit path policy when present.
-        // The explicit legacy fallback below keeps older artifacts usable,
-        // while new artifacts cannot define their own authorization boundary
-        // from the observed diff.
-        let actual_paths: Vec<std::path::PathBuf> =
-            changed_paths.iter().map(|e| e.path.clone()).collect();
-        // Artifacts that declare no path policy retain the legacy behavior
-        // for older fixtures. New artifacts carry roots from the verified
-        // handoff, so actual diff paths cannot silently define their own
-        // authorization boundary.
-        let policy_paths = if allowed_paths.is_empty() {
-            actual_paths
-        } else {
-            allowed_paths
-        };
-
         let request = IntegrationRequest {
             unit_id: unit_id.clone(),
             integration_order,
@@ -474,8 +470,8 @@ impl DagSchedulerRuntime {
             base_commit,
             unit_commit,
             changed_paths,
-            allowlist: policy_paths.clone(),
-            declared_paths: policy_paths,
+            allowlist: allowed_paths.clone(),
+            declared_paths: allowed_paths,
             forbidden_paths,
             created_at_ms: now_ms() as i64,
         };
@@ -776,6 +772,7 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1-foundation
+    allowed_paths: [u1.txt]
     tests:
       - "true"
   - id: U2
@@ -784,11 +781,10 @@ units:
     execution_wave: 1
     integration_order: 2
     target_branch: feat/u2-feature
+    allowed_paths: [u2.txt]
 "#;
 
-    /// U2 has one valid-looking gate and one malformed entry. The malformed
-    /// entry must not be silently discarded while the valid gate runs.
-    const PLAN_ARTIFACT_U2_INVALID_TEST: &str = r#"version: 1
+    const PLAN_ARTIFACT_NO_PATH_POLICY: &str = r#"version: 1
 plan_key: pf-test
 units:
   - id: U1
@@ -805,6 +801,31 @@ units:
     execution_wave: 1
     integration_order: 2
     target_branch: feat/u2-feature
+    tests:
+      - "true"
+"#;
+
+    /// U2 has one valid-looking gate and one malformed entry. The malformed
+    /// entry must not be silently discarded while the valid gate runs.
+    const PLAN_ARTIFACT_U2_INVALID_TEST: &str = r#"version: 1
+plan_key: pf-test
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1-foundation
+    allowed_paths: [u1.txt]
+    tests:
+      - "true"
+  - id: U2
+    title: Feature
+    depends_on: []
+    execution_wave: 1
+    integration_order: 2
+    target_branch: feat/u2-feature
+    allowed_paths: [u2.txt]
     tests:
       - "true"
       - "cargo test 'unterminated"
@@ -940,6 +961,25 @@ units:
         let event = &runtime.merge_queue.front().expect("queued").event;
         assert_eq!(event.topic.as_str(), "forge.unit.execution_failed");
         assert!(event.payload.contains("integration_gate_unconfigured"));
+    }
+
+    /// A verified Unit without an explicit path policy must not derive
+    /// authorization from its observed diff. Missing policy is a contract
+    /// failure, not permission to integrate every changed path.
+    #[test]
+    fn missing_path_policy_fails_closed() {
+        let (_tmp, mut runtime) = git_fixture(PLAN_ARTIFACT_NO_PATH_POLICY, true);
+        runtime.queue_integration("pf-test", "U1");
+        runtime.maybe_integrate_one();
+
+        assert_eq!(runtime.merge_queue.len(), 1);
+        let event = &runtime.merge_queue.front().expect("queued").event;
+        assert_eq!(event.topic.as_str(), "forge.unit.execution_failed");
+        assert!(
+            event.payload.contains("no `allowed_paths`"),
+            "unexpected failure payload: {}",
+            event.payload
+        );
     }
 
     /// A malformed gate entry fails closed even when another gate entry is
