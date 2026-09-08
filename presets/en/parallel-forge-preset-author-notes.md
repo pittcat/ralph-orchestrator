@@ -3,14 +3,15 @@
 ## Scheduler Mode 执行面记录（2026-09-08，DAG runtime cutover）
 
 - **现状（如实）**：YAML 声明 `event_loop.supervisor.scheduler_mode: dag`。DAG runtime 已接入 EventLoop acceptance 路径：审批后从 execution-plan dependency graph 做 admission，按 durable launch journal 启动 executor/reviewer/verifier，恢复未决 job，按 `integration_order` 串行 FF integration，并在 accepted `forge.unit.integrated`（含 close-task projection）后解锁后继 Unit。`forge.exec.development.done` 由 runtime 的 terminal fence 恰好一次发射。
-- **仍属后续收口**：旧 wave 正常路径 hats（forge-dispatcher / worktree / LLM integrator）的声明和 wave-only schema/topic 仍保留兼容；需要在删除这些声明后补齐 BDD×9、mock E2E、schema/文档/author-review skill 同步。`dag_pools` 与 `max_concurrent_workers` 的单一容量权威收敛，以及 PMI-004 / TG-S13 残余也仍待处理。
+- **已完成**：旧 wave 正常路径 hats（forge-dispatcher / worktree / LLM integrator / wave-fixer）及其 wave-only schema/topic 已从 builtin DAG 拓扑退役；静态 WAC/runtime-contract 已按 runtime control-plane 接缝同步，scripted preset verification 与 parallel-forge mock E2E 场景已通过。
+- **仍属后续收口**：BDD×9、author/review skill references、真实 authoritative DAG canary/crash matrix、`dag_pools` 与 `max_concurrent_workers` 的单一容量权威收敛，以及 PMI-004 / TG-S13 残余仍待处理。
 - **inspect 语义**：`scheduler_mode ≠ wave` 时 `ralph inspect loop --format json` 输出只读 `scheduler` 块（空计数 = 零观测的如实反映，非伪造）。
 - **promote 前置义务清单（follow-up 载体，本 notes 即 git-tracked 认领）**——任何「把 DAG 调度器接进 EventLoop」的 PR 必须同批交付，缺一即半接线（TG-S05 变红 = P0）：
   1. `DagSchedulerDriver::observe_accepted` 接入真实 EventLoop acceptance 路径。**已完成**：driver 消费 `forge.unit.*` per-unit 族，runtime 在 accepted 边界调用并继续推进 pipeline。
   2. `JobPipeline`/`DagPools`/`RuntimeJob` kernel promote 到非 `#[cfg(test)]`(**Step 1 已落地**,item 级 `#[allow(dead_code)]` 过渡标注),容量模型与 `max_concurrent_workers` 收敛为单一权威(plan D16:`dag_pools` 默认各等于 `max_concurrent_workers`)——**收敛未落地**。
   3. U5 shadow parity（dag_shadow 在共同边界 exact parity）+ U10 §7 第 7 条 authoritative DAG canary（真实 runtime jobs + 临时 git worktrees + 完整 crash matrix）。**运行时主链已接通；canary 与 crash matrix 回归仍待补齐。**
   4. BDD ×9（plan U10 第 9 条：immediate refill / receipt crash / attempt forgery / env-path guard / sibling candidate / integrated task close / correction / resume / final once）+ mock E2E。
-  5. 退休 wave 正常路径 hats（forge-dispatcher / worktree hat / LLM integrator 的正常路径），孤儿 topic 清理，schema 同步。
+  5. **已完成**：退休 wave 正常路径 hats（forge-dispatcher / worktree hat / LLM integrator / wave-fixer），清理孤儿 topic 并同步 schema。
   6. 文档同步：`CLAUDE.md`/`AGENTS.md` 过渡态段翻转 + `crates/ralph-core/data/*.md`（若 agent-facing 命令语义实际改变）。
   7. 既有 promote 前置（PMI-004 残余 / TG-S13 第 3 项孤儿子进程 process-group 语义）。
 - **回归 pin（不可删）**：TG-S05（`tg_s05_scheduler_mode_dag_wave_equivalence`，dag≡wave 事件序列逐条相等——变红即半接线，升 P0）+ TG-S06（**Step 2 已按 pin 内建指引翻转**:「真实 topic 喂 driver 必须 Ignored」随映射决策删除;静态 pin 翻转为正包含——driver topic 集合必须 ⊆ schema 的 `forge.unit.*` 族且族成员精确等于钉住的 6 个 topic;PMI-003 的 `compute_resource_aware_digest` 零生产消费 + `PHASE_*` 无 `as u8` 绑定两段保持原样——变红即族/接线失配,先同步再推进）。
