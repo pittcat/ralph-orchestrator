@@ -184,6 +184,53 @@ impl HandoffGraph {
             }
         }
 
+        // 2026-09-08 DAG execution-face cutover: in `dag` and
+        // `dag_shadow` modes the runtime owns the per-Unit handoffs.
+        // Model that owner as a virtual node so WAC sees the same
+        // closed path that the runtime implements without requiring
+        // an agent hat to subscribe to its own job results.
+        if config.event_loop.supervisor.enabled
+            && matches!(
+                config.event_loop.supervisor.scheduler_mode,
+                crate::config::SchedulerMode::Dag | crate::config::SchedulerMode::DagShadow
+            )
+        {
+            const DAG_RUNTIME_ID: &str = "dag_runtime";
+            const DAG_RUNTIME_PUBLISHES: &[&str] = &[
+                "exec.unit.ready",
+                "forge.unit.integrated",
+                "forge.exec.development.done",
+            ];
+            const DAG_RUNTIME_ENTRY_TOPICS: &[&str] = &["forge.concurrency.approved"];
+            let runtime_id = DAG_RUNTIME_ID.to_string();
+            hat_order.push(runtime_id.clone());
+            for topic in DAG_RUNTIME_PUBLISHES {
+                topic_publishers
+                    .entry((*topic).to_string())
+                    .or_default()
+                    .push(runtime_id.clone());
+                hat_publishes
+                    .entry(runtime_id.clone())
+                    .or_default()
+                    .push((*topic).to_string());
+            }
+            for topic in crate::event_origin::DAG_RUNTIME_UNIT_TOPICS {
+                if *topic == "forge.unit.integrated" {
+                    continue;
+                }
+                topic_subscribers
+                    .entry((*topic).to_string())
+                    .or_default()
+                    .push(runtime_id.clone());
+            }
+            for topic in DAG_RUNTIME_ENTRY_TOPICS {
+                topic_subscribers
+                    .entry((*topic).to_string())
+                    .or_default()
+                    .push(runtime_id.clone());
+            }
+        }
+
         hat_order.sort();
 
         // Sort the value vectors for deterministic test output.
@@ -1069,6 +1116,83 @@ hats:
             "work.ready should be excluded from handoff_pairing when wildcard subscriber exists: {:?}",
             findings
         );
+    }
+
+    #[test]
+    fn dag_runtime_virtual_node_closes_runtime_driven_handoffs() {
+        let yaml = r#"
+event_loop:
+  starting_event: "forge.start"
+  completion_promise: "LOOP_COMPLETE"
+  supervisor:
+    enabled: true
+    scheduler_mode: dag
+hats:
+  planner:
+    name: "Planner"
+    triggers: [forge.start]
+    publishes: [forge.concurrency.approved]
+  executor:
+    name: "Executor"
+    runtime_driven: true
+    triggers: [exec.unit.ready]
+    publishes: [forge.unit.executed, forge.unit.execution_failed]
+  reviewer:
+    name: "Reviewer"
+    runtime_driven: true
+    triggers: [forge.unit.executed]
+    publishes: [forge.unit.reviewed]
+  verifier:
+    name: "Verifier"
+    runtime_driven: true
+    triggers: [forge.unit.reviewed]
+    publishes: [forge.unit.verified, forge.unit.verification_failed]
+  tester:
+    name: "Tester"
+    triggers: [forge.exec.development.done]
+    publishes: [LOOP_COMPLETE]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse dag WAC fixture");
+        let graph = HandoffGraph::from_config(&config);
+
+        assert_eq!(graph.publishers_of("exec.unit.ready"), &["dag_runtime"]);
+        assert_eq!(
+            graph.publishers_of("forge.exec.development.done"),
+            &["dag_runtime"]
+        );
+        assert!(
+            graph
+                .topic_subscribers
+                .get("forge.unit.executed")
+                .is_some_and(|hats| hats.contains(&"dag_runtime".to_string()))
+        );
+        assert!(check_activation_egress(&config, &graph, true, false).is_empty());
+        assert!(
+            check_trigger_publish_asymmetry(&config, &graph, true, false)
+                .iter()
+                .all(|finding| finding.topic.as_deref() != Some("exec.unit.ready"))
+        );
+    }
+
+    #[test]
+    fn wave_mode_does_not_get_dag_runtime_virtual_edges() {
+        let yaml = r#"
+event_loop:
+  starting_event: "forge.start"
+  completion_promise: "LOOP_COMPLETE"
+  supervisor:
+    enabled: true
+    scheduler_mode: wave
+hats:
+  executor:
+    name: "Executor"
+    triggers: [exec.unit.ready]
+    publishes: [forge.unit.executed]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse wave WAC fixture");
+        let graph = HandoffGraph::from_config(&config);
+        assert!(graph.publishers_of("exec.unit.ready").is_empty());
+        assert!(!check_trigger_publish_asymmetry(&config, &graph, true, false).is_empty());
     }
 
     // T-U1-07: deterministic output ordering
