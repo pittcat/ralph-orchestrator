@@ -63,8 +63,11 @@ mod imp {
     /// v16 (2026-09-03-0959 plan Step E2, S15) adds the
     /// `dag_terminal_emits` exactly-once fence table for
     /// runtime-emitted terminal coordination events in dag mode.
+    /// v17 (2026-09-03-0959 plan Step E3) adds the `dag_plan_meta`
+    /// per-plan metadata table holding the approval-time verified
+    /// base commit so crash recovery can re-pin it without guessing.
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 16;
+    pub const CURRENT_VERSION: i64 = 17;
 
     /// PMI-013 / TGP-02: typed error returned when a database's
     /// `user_version` is ABOVE this binary's migration ledger tail
@@ -505,6 +508,15 @@ mod imp {
                 ddl: include_str!("migrations/v16.sql"),
                 column_probe: None,
             },
+            // 2026-09-03-0959 plan Step E3: adds the `dag_plan_meta`
+            // per-plan metadata table (approval-time verified base
+            // commit) the crash-recovery path reads. Forward-only
+            // `CREATE TABLE`; no ALTERs, so no column probe.
+            Migration {
+                version: 17,
+                ddl: include_str!("migrations/v17.sql"),
+                column_probe: None,
+            },
         ]
     }
 }
@@ -593,6 +605,9 @@ mod tests {
             // Step E2 (2026-09-03-0959 plan, S15): exactly-once
             // terminal-emit fence.
             "dag_terminal_emits",
+            // Step E3 (2026-09-03-0959 plan): per-plan metadata for
+            // crash recovery (approval-time verified base commit).
+            "dag_plan_meta",
         ];
         for table in tables {
             let count: i64 = conn

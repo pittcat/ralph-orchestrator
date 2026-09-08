@@ -259,6 +259,24 @@ impl RusqliteDagSchedulerStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(plan_io_err)
     }
+
+    /// E3 recovery read: every journaled job of a plan, resolved or
+    /// not, in launch order. The pipeline hydration pass replays this
+    /// history to rebuild each unit's stage/attempt without guessing.
+    pub fn list_jobs(&self, plan_key: &str) -> DagStoreResult<Vec<JournalJob>> {
+        let conn = self
+            .inner
+            .conn
+            .lock()
+            .map_err(|_| conflict("connection poisoned"))?;
+        let mut stmt = conn
+            .prepare("SELECT * FROM dag_jobs WHERE plan_key=?1 ORDER BY id")
+            .map_err(plan_io_err)?;
+        stmt.query_map([plan_key], read_job)
+            .map_err(plan_io_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(plan_io_err)
+    }
 }
 
 #[cfg(test)]

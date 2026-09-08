@@ -310,6 +310,82 @@ impl RusqliteDagSchedulerStore {
         }
         Ok(false)
     }
+
+    /// E3 recovery read: whether a terminal-emit fence row exists
+    /// for `(plan_key, topic)`. The fence row alone does NOT prove
+    /// the event reached the ledger — recovery reconciles the two.
+    pub fn has_terminal_emit(&self, plan_key: &str, topic: &str) -> Result<bool, DagStoreError> {
+        let conn = self
+            .inner
+            .conn
+            .lock()
+            .map_err(|_| DagStoreError::IoError("dag store mutex poisoned".into()))?;
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dag_terminal_emits \
+             WHERE plan_key = ?1 AND topic = ?2)",
+            rusqlite::params![plan_key, topic],
+            |row| row.get(0),
+        )
+        .map_err(|err| DagStoreError::IoError(format!("terminal-emit fence probe: {err}")))
+    }
+
+    /// E3: persist the approval-time verified base commit for a plan.
+    /// `INSERT OR IGNORE` keeps the first write authoritative; a
+    /// conflicting rewrite fails closed (the base is pinned once, at
+    /// the approval boundary, and never moves).
+    pub fn record_verified_base(
+        &self,
+        plan_key: &str,
+        verified_base_commit: &str,
+        created_at_ms: i64,
+    ) -> Result<(), DagStoreError> {
+        let conn = self
+            .inner
+            .conn
+            .lock()
+            .map_err(|_| DagStoreError::IoError("dag store mutex poisoned".into()))?;
+        let inserted = conn
+            .execute(
+                "INSERT OR IGNORE INTO dag_plan_meta \
+                 (plan_key, verified_base_commit, created_at_ms) \
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![plan_key, verified_base_commit, created_at_ms],
+            )
+            .map_err(|err| DagStoreError::IoError(format!("plan-meta insert: {err}")))?;
+        if inserted == 1 {
+            return Ok(());
+        }
+        let existing: String = conn
+            .query_row(
+                "SELECT verified_base_commit FROM dag_plan_meta WHERE plan_key = ?1",
+                [plan_key],
+                |row| row.get(0),
+            )
+            .map_err(|err| DagStoreError::IoError(format!("plan-meta read: {err}")))?;
+        if existing != verified_base_commit {
+            return Err(DagStoreError::IoError(format!(
+                "verified base conflict for {plan_key}: persisted {existing} != candidate {verified_base_commit}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// E3 recovery read: the approval-time verified base commit for a
+    /// plan, if one was recorded.
+    pub fn verified_base(&self, plan_key: &str) -> Result<Option<String>, DagStoreError> {
+        let conn = self
+            .inner
+            .conn
+            .lock()
+            .map_err(|_| DagStoreError::IoError("dag store mutex poisoned".into()))?;
+        conn.query_row(
+            "SELECT verified_base_commit FROM dag_plan_meta WHERE plan_key = ?1",
+            [plan_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|err| DagStoreError::IoError(format!("plan-meta probe: {err}")))
+    }
 }
 
 impl std::fmt::Debug for RusqliteDagSchedulerStore {
@@ -1280,6 +1356,42 @@ mod tests {
                 .expect("replay after reopen"),
             "the fence survives process restart"
         );
+    }
+
+    /// E3: the fence probe distinguishes fenced vs unfenced pairs
+    /// and survives a reopen (recovery reconciles fence vs ledger).
+    #[test]
+    fn has_terminal_emit_reflects_fence_state_across_reopen() {
+        let (dir, store) = fresh_plan_store();
+        assert!(!store.has_terminal_emit("pf", "forge.exec.development.done").unwrap());
+        store
+            .try_record_terminal_emit("pf", "forge.exec.development.done", "k1", 100)
+            .unwrap();
+        assert!(store.has_terminal_emit("pf", "forge.exec.development.done").unwrap());
+        assert!(!store.has_terminal_emit("pf", "forge.plan.complete").unwrap());
+        assert!(!store.has_terminal_emit("other", "forge.exec.development.done").unwrap());
+        drop(store);
+        let reopened = RusqliteDagSchedulerStore::open(dir.path().join("dag.db")).unwrap();
+        assert!(reopened.has_terminal_emit("pf", "forge.exec.development.done").unwrap());
+    }
+
+    /// E3: the verified base commit is written once, replays are
+    /// no-ops, a conflicting rewrite fails closed, and the value
+    /// survives a reopen (the recovery path re-pins it from here).
+    #[test]
+    fn verified_base_commit_is_durable_and_conflict_fails_closed() {
+        let (dir, store) = fresh_plan_store();
+        assert_eq!(store.verified_base("pf").unwrap(), None);
+        store.record_verified_base("pf", "a".repeat(64).as_str(), 1).unwrap();
+        // Same-value replay is a no-op.
+        store.record_verified_base("pf", "a".repeat(64).as_str(), 2).unwrap();
+        // A conflicting rewrite fails closed.
+        assert!(store.record_verified_base("pf", "b".repeat(64).as_str(), 3).is_err());
+        assert_eq!(store.verified_base("pf").unwrap(), Some("a".repeat(64)));
+        drop(store);
+        let reopened = RusqliteDagSchedulerStore::open(dir.path().join("dag.db")).unwrap();
+        assert_eq!(reopened.verified_base("pf").unwrap(), Some("a".repeat(64)));
+        assert_eq!(reopened.verified_base("unknown").unwrap(), None);
     }
 
     // -----------------------------------------------------------------
