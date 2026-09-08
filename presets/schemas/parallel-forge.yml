@@ -96,74 +96,24 @@ schemas:
 
   forge.correction.requested:
     required_fields:
-      - wave_id
-      - wave_index
-      - correction_round
-      - affected_unit_ids
-      - affected_task_ids
-      - base_commit
-      - candidate_branch
-      - allowed_paths
-      - forbidden_paths
       - plan_key
-      - failure_fingerprint
+      - affected_unit_ids
       - correction_request_path
     payload: json_object
     field_docs:
-      wave_id:
-        meaning: Wave whose correction is requested.
-        source: forge-failure-handler.
-        fill_rule: Must match the failure event's wave_id.
-      wave_index:
-        meaning: Wave index whose correction is requested.
-        source: forge-failure-handler.
-        fill_rule: Non-negative integer.
-      correction_round:
-        meaning: 0-indexed round counter (max 3 different hypotheses).
-        source: forge-failure-handler.
-        fill_rule: 0..3; identical rounds not allowed.
-      affected_unit_ids:
-        meaning: Unit ids the wave-fixer is allowed to edit.
-        source: forge-failure-handler.
-        fill_rule: Subset of the wave's unit_ids.
-      affected_task_ids:
-        meaning: Live task IDs corresponding to affected_unit_ids.
-        source: ralph tools task list.
-        fill_rule: Each task_id maps to one affected_unit_id.
-      base_commit:
-        meaning: Verified base commit the fixer should branch from.
-        source: forge-failure-handler.
-        fill_rule: 40-char SHA.
-      candidate_branch:
-        meaning: Candidate branch carrying the failed work.
-        source: forge-failure-handler.
-        fill_rule: Branch name; never the formal integration branch.
-      allowed_paths:
-        meaning: Repo-relative paths the wave-fixer may modify.
-        source: forge-failure-handler from execution-plan unit allowed_files.
-        fill_rule: Subset of unit.template.yml allowed_paths.
-      forbidden_paths:
-        meaning: Repo-relative paths the wave-fixer must not touch.
-        source: forge-failure-handler from outside-of-unit scope.
-        fill_rule: Path policy guard.
       plan_key:
-        meaning: Forge plan key basename.
-        source: forge.wave.prepare.plan_key.
-        fill_rule: Must match .ralph/forge/<plan-key>/.
-      failure_fingerprint:
-        meaning: Failure fingerprint the fixer must address.
+        meaning: Forge plan key basename for the runtime correction.
+        source: The accepted per-Unit or full-verification failure event.
+        fill_rule: Must match the active execution-plan artifact root.
+      affected_unit_ids:
+        meaning: Unit ids whose next fixer attempt is requested.
         source: forge-failure-handler.
-        fill_rule: >-
-          Copy the fingerprint from the failure event. exec.wave.failed
-          carries none, so synthesise the stable form
-          `exec:<wave_id>:<sorted blocking_slots>:<sorted distinct
-          failure_class>` — an identical re-failure must produce an
-          identical fingerprint or duplicate-round detection breaks.
+        fill_rule: Non-empty subset of the active plan's Unit ids.
       correction_request_path:
-        meaning: Correction request artifact.
-        source: File at .ralph/forge/<plan-key>/waves/<wave_id>/corrections/round-<n>.md.
-        fill_rule: Must exist; contains round, fingerprint, scope, evidence path.
-        examples: [".ralph/<plan>/<wave>/corrections/round-<n>.md"]
+        meaning: Evidence artifact that the fixer must use as feedback.
+        source: Failure handler correction artifact.
+        fill_rule: Must exist and be repo-relative; runtime passes it to the fixer prompt.
+        examples: [".ralph/<plan>/corrections/U1-round-1.md"]
 
   forge.final.correction.settled:
     required_fields:
@@ -231,8 +181,8 @@ schemas:
   # ──────────────────────────────────────────────────────────────────────
   # DAG 模式 per-unit typed topic 族(2026-09-03-0959 plan DAG 接线
   # Step 2,方案 (b))。scheduler_mode: dag 下由 runtime 驱动的 per-unit
-  # worker(executor/reviewer/verifier hat)发射;wave 路径的
-  # exec.unit.done / forge.wave.reviewed remain legacy wave-only topics.
+  # worker(executor/reviewer/verifier hat)发射; legacy wave topics are not
+  # part of the active DAG execution face.
   # `forge.unit.integrated` 由 runtime 在 lane CAS FF 后发射(D25),
   # 无 hat 发射方——比照 exec.wave.failed 的 runtime-injected 先例。
   # ──────────────────────────────────────────────────────────────────────

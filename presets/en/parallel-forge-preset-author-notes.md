@@ -4,7 +4,7 @@
 
 - **现状（如实）**：YAML 声明 `event_loop.supervisor.scheduler_mode: dag`。DAG runtime 已接入 EventLoop acceptance 路径：审批后从 execution-plan dependency graph 做 admission，按 durable launch journal 启动 executor/reviewer/verifier，恢复未决 job，按 `integration_order` 串行 FF integration，并在 accepted `forge.unit.integrated`（含 close-task projection）后解锁后继 Unit。`forge.exec.development.done` 由 runtime 的 terminal fence 恰好一次发射。
 - **已完成**：旧 wave 正常路径 hats（forge-dispatcher / worktree / LLM integrator / wave-fixer）及其 wave-only schema/topic 已从 builtin DAG 拓扑退役；静态 WAC/runtime-contract 已按 runtime control-plane 接缝同步，scripted preset verification 与 parallel-forge mock E2E 场景已通过。
-- **仍属后续收口**：BDD×9、authoritative DAG 的完整 crash matrix 仍待处理；真实 executor canary 已补齐。author/review skill references、mock E2E、DAG 资源准入接线与 PMI-004/TG-S13 的 process-group 清理已完成。
+- **仍属后续收口**：BDD×9、authoritative DAG 的完整 crash matrix 仍待处理；真实 executor canary 已补齐。author/review skill references、mock E2E、DAG 资源准入接线与 PMI-004/TG-S13 的 process-group 清理已完成。另已修正 `forge.correction.requested` schema 与 DAG failure-handler 指令，使 correction acceptance 使用 runtime 实际消费的 `plan_key` / `affected_unit_ids` / `correction_request_path` 字段，不再要求已退役的 wave 字段。
 - **inspect 语义**：`scheduler_mode ≠ wave` 时 `ralph inspect loop --format json` 输出只读 `scheduler` 块（空计数 = 零观测的如实反映，非伪造）。
 - **promote 前置义务清单（follow-up 载体，本 notes 即 git-tracked 认领）**——任何「把 DAG 调度器接进 EventLoop」的 PR 必须同批交付，缺一即半接线（TG-S05 变红 = P0）：
   1. `DagSchedulerDriver::observe_accepted` 接入真实 EventLoop acceptance 路径。**已完成**：driver 消费 `forge.unit.*` per-unit 族，runtime 在 accepted 边界调用并继续推进 pipeline。

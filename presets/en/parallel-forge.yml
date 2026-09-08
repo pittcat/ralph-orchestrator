@@ -1,6 +1,6 @@
 # parallel-forge (Parallel Forge): Spec-First multi-worktree parallel development
 #
-# Based on parallel-dev-preset.md v2.0. **execution_model: supervisor**
+# Based on parallel-dev-preset.md v2.0. **execution_model: supervisor+dag**
 # (`event_loop.supervisor.enabled: true`): in `scheduler_mode: dag`, the
 # runtime admits Units from the execution-plan dependency graph, owns per-Unit
 # worktrees, spawns executor/reviewer/verifier jobs, and serially integrates
@@ -11,8 +11,8 @@
 # not an alternate authority for the builtin DAG preset.
 #
 # Hats: planning, review, failure, and delivery hats. In `dag` mode the
-# runtime-driven worktree, dispatcher, integrator, executor, reviewer, and
-# verifier declarations serve as job templates; they are not independently
+# runtime-driven executor, reviewer, and verifier declarations serve as job
+# templates; they are not independently
 # activated by the EventLoop. The scheduler-mode validator rejects this preset
 # if those declarations are used with the legacy `wave` authority.
 #
@@ -637,48 +637,25 @@ hats:
 
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
-      ### When the trigger is `exec.wave.failed` (the whole execution wave failed)
+      ### When the trigger is a DAG Unit failure
 
-      This trigger contains only `wave_id`, `reason`, `blocking_slots`,
-      `slot_failures` (each with `slot_index` / `reason` / `failure_class`),
-      `salvaged_slots`, and `redrive_slots`. It does **not** contain `plan_key`,
-      `wave_index`, `execution_plan_path`, `worktree_map_path`, or
-      `failure_fingerprint`; reconstruct those four context values before the
-      common Steps.
+      The runtime supplies `unit_id`, `plan_key`, `task_key`, `reason`, and a
+      typed failure class (or the verifier's failure artifact path). Treat the
+      trigger as one Unit failure, not as a wave barrier. Read the Unit entry
+      from `execution_plan_path` and write one repo-relative correction artifact
+      under `.ralph/forge/<plan-key>/corrections/`. Include the failure reason,
+      the affected Unit, the attempted stage, and the evidence path.
 
-      This trigger means every slot in `blocking_slots` exhausted all attempts
-      (each retry is a new process continuing in the same worktree), not that it
-      failed once. Do not simply rerun it; correction must address the root cause.
+      For `forge.unit.execution_failed` and `forge.unit.verification_failed`,
+      set `affected_unit_ids` to the exact Unit id from the trigger and preserve
+      `plan_key` from the same trigger. Do not invent wave ids, slot indexes,
+      candidate branches, or task ids. The runtime owns the verified base,
+      worktree, attempt number, and fixer admission.
 
-      - **Route permanent failures first.** If every `failure_class` in
-        `slot_failures` is `identity_mismatch` or `unknown`, write
-        `blocks/forge-failure-handler-blocked.md` with the slots and classes,
-        then emit `forge.plan.blocked` with `reason`, `plan_path`,
-        `context_artifact_path`, `forge_artifact_root`, and `plan_key`.
-        If any class is `timeout`, `orphan_or_empty_result`,
-        `required_slot_failure`, or `cancel`, continue because partial work may exist.
-      - **Restore wave context.** Read the global projection keys
-        (`forge.plan_key`, `forge.execution_plan_path`,
-        `forge.worktree_map_path`) and the wave-scoped projection keys
-        (`forge.wave.current_wave_id`, `forge.wave.current_wave_index`,
-        `forge.wave.verified_base_commit` — pinned by
-        the runtime's current Unit job and candidate commit. Fail closed if
-        the job identity, plan key, or candidate base does not match the
-        failure artifact; write `blocks/forge-failure-handler-blocked.md`
-        and emit `forge.plan.blocked` rather than correcting another job.
-      - **Map slots back to Units.** Use `worktree_map_path` to map each
-        `blocking_slots.slot_index` to `unit_id` and `candidate_branch`, producing
-        `affected_unit_ids`. Get live `affected_task_ids` from
-        `ralph tools task list`; never hand-write task IDs.
-      - **Build `failure_fingerprint`.** Use this stable format so the same slot
-        set produces the same fingerprint:
-        `exec:<wave_id>:<blocking_slots ascending comma-separated>:<failure_class
-        deduplicated ascending comma-separated>`.
-
-      Continue with common Steps 2-6 after restoring context, and set
-      `failure_topic` to `exec.wave.failed`. `salvaged_slots` are complete and
-      must not enter `affected_unit_ids`. `redrive_slots` is informational; you
-      cannot redispatch workers, and correction is the only repair path.
+      Emit one `forge.correction.requested` with `plan_key`,
+      `affected_unit_ids`, and `correction_request_path`. Run the policy check
+      first. The runtime reads this accepted event and starts the bounded fixer
+      attempt in the Unit's existing worktree.
 
       ### When the trigger is `forge.full.verification.failed` (full gate failed)
 
@@ -687,8 +664,7 @@ hats:
       `forge.correction.requested` here — there is no wave left to fix.
 
       - Rebuild the context: read `plan_key` from the trigger and derive
-        `plan_path` from the loop anchor / projection (`forge.plan_key` is
-        pinned by `forge.worktrees.ready`); `forge_artifact_root` is
+        `plan_path` from the loop anchor / projection; `forge_artifact_root` is
         `.ralph/forge/<plan-key>/`.
       - Write `.ralph/forge/<plan-key>/failures/forge-failure-handler-failed.md`
         summarizing the tester's `reason`, `failure_fingerprint`, and
@@ -700,17 +676,14 @@ hats:
         emit for real. Cleanup and the reporter take over from there.
 
       ### Steps
-      1. Read wave_id, wave_index, failure_fingerprint, affected_task_ids from the trigger.
-      2. Read `ralph tools task list` to confirm ids are live; record `correction_round` from `.ralph/forge/<plan-key>/waves/<wave_id>/corrections/counter` (start at 0).
-      3. Scan `.ralph/forge/<plan-key>/waves/<wave_id>/corrections/` for prior round
-         fingerprints; reject duplicate-round requests (no confidence gain).
-      4. Read `execution_plan_path` from trigger / projection.
-         Derive `allowed_paths` from each `affected_unit_ids`'s
-         `unit.template.yml` `allowed_paths`; `forbidden_paths` is the
-         complement of the union.
-      5. Write `.ralph/forge/<plan-key>/waves/<wave_id>/corrections/round-<n>.md`
-         (round, fingerprint, scope, evidence path).
-      6. Emit `forge.correction.requested` with `correction_request_path`.
+      1. Read the trigger's `plan_key`, `unit_id`, failure reason, and evidence
+         path; use the execution-plan path from the trigger or current
+         projection to confirm the Unit exists.
+      2. Read the Unit's prior correction artifacts and choose the next bounded
+         round; do not repeat an identical failure without new evidence.
+      3. Write `.ralph/forge/<plan-key>/corrections/<unit-id>-round-<n>.md`.
+      4. Emit exactly one `forge.correction.requested` with the three schema
+         fields above. Do not close a task or emit a second business event.
 
       ### Final correction (3 rounds exhausted)
 
