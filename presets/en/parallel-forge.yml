@@ -74,21 +74,6 @@ mechanism:
         allowed_emits:
           - forge.concurrency.approved
           - forge.plan.blocked
-      - id: worktree_setup
-        kind: linear
-        "on": forge.concurrency.approved
-        allowed_emits:
-          - forge.worktrees.ready
-          - forge.wave.worktrees.ready
-          - forge.plan.blocked
-        # Explicit: do not inherit allowed_emits as transitions.
-        # `forge.wave.worktrees.ready` is in-loop (development_loop), not
-        # a forward `on` for the next step. Leaving transition_emits empty
-        # lets precheck desugar copy every allowed topic and fail
-        # `flow_transition_emit_no_forward_target`.
-        transition_emits:
-          - forge.worktrees.ready
-          - forge.plan.blocked
       # U7: repeatable per-wave spine. The development loop may have
       # several independent waves active at once. Each wave emits its
       # full handoff chain and a `forge.wave.settled` terminal; that
@@ -102,7 +87,7 @@ mechanism:
       - id: development_loop
         kind: loop
         runs: forge.development_loop
-        "on": forge.worktrees.ready
+        "on": forge.concurrency.approved
         allowed_emits:
           - forge.wave.worktrees.ready
           - forge.wave.prepare
@@ -187,8 +172,6 @@ mechanism:
 
 tasks:
   enabled: true
-  coordinator_hats:
-    - forge-dispatcher
 
 event_loop:
   execution_mode: isolated
@@ -777,6 +760,7 @@ hats:
   worktree:
     name: "Worktree"
     description: "Per-wave integration branch + lazy worktree creation from verified_base_commit."
+    runtime_driven: true
     triggers:
       - forge.concurrency.approved
       - forge.wave.prepare
@@ -895,6 +879,7 @@ hats:
   forge-dispatcher:
     name: "Forge Dispatcher"
     description: "Supervisor exec-wave dispatcher: static-wave fan-out from execution-plan.yml via ralph wave emit exec.unit.ready."
+    runtime_driven: true
     triggers:
       - forge.wave.worktrees.ready
       - forge.worktrees.ready
@@ -1379,6 +1364,7 @@ hats:
   integrator:
     name: "Integrator"
     description: "Per-wave sequential rebase/merge of approved Units; emits forge.wave.integrated then fast-forwards and emits forge.wave.settled."
+    runtime_driven: true
     triggers: [forge.wave.reviewed, forge.wave.verified]
     publishes: [forge.wave.integrated, forge.wave.settled, forge.wave.integration.failed, forge.integration.done, forge.plan.blocked]
     exempt_topics: [forge.wave.integrated, forge.wave.settled, forge.wave.integration.failed, forge.integration.done, forge.plan.blocked]

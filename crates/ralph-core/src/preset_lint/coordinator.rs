@@ -2,7 +2,8 @@
 //!
 //! This module owns `check_coordinator_rules` — the R5 checks that
 //! enforce `tasks.coordinator_hats` invariants when `tasks.enabled` is
-//! true.
+//! true. DAG runtime mode supplies a virtual coordinator for task
+//! projection, so it is exempt from the agent-hat requirement.
 //!
 //! Implementation Plan Unit: U2 of `2026-06-08-003-feat-preset-static-lint-plan`.
 
@@ -22,6 +23,18 @@ pub fn check_coordinator_rules(config: &RalphConfig) -> Vec<LintFinding> {
     let mut findings = Vec::new();
 
     if !config.tasks.enabled {
+        return findings;
+    }
+
+    // DAG runtime owns task projection and task-close effects through
+    // its durable scheduler; no agent hat should receive coordinator
+    // mutation rights in that mode.
+    if config.event_loop.supervisor.enabled
+        && matches!(
+            config.event_loop.supervisor.scheduler_mode,
+            crate::config::SchedulerMode::Dag | crate::config::SchedulerMode::DagShadow
+        )
+    {
         return findings;
     }
 
