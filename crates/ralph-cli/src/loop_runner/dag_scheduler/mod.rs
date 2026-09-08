@@ -269,6 +269,8 @@ impl DagSchedulerRuntime {
     /// validation and journal fencing remain identical to a live worker.
     #[cfg(feature = "supervisor-db")]
     pub(crate) fn recover_after_restart(&mut self) {
+        use ralph_core::supervisor::dag_integration::IntegrationStore as _;
+
         if self.mode != SchedulerMode::Dag || self.exec.is_none() || !self.db_path.exists() {
             return;
         }
@@ -345,6 +347,28 @@ impl DagSchedulerRuntime {
                     continue;
                 }
             };
+            // A verify terminal may have been persisted immediately before
+            // the integration enqueue. Re-drive that seam from durable facts
+            // instead of waiting for a historical event that resume does not
+            // replay.
+            for unit_id in &unit_ids {
+                let verified = jobs.iter().rev().any(|job| {
+                    job.identity.unit_id == *unit_id
+                        && job.identity.stage == "verify"
+                        && job.terminal.as_deref() == Some("accepted")
+                });
+                let has_record = integration_store
+                    .list_for_unit(unit_id)
+                    .ok()
+                    .is_some_and(|records| {
+                        records.iter().any(|record| {
+                            record.target_branch == registration.target_branch
+                        })
+                    });
+                if verified && !has_record {
+                    self.queue_integration(&plan_key, unit_id);
+                }
+            }
             for job in jobs {
                 let Some(stage) = recovery::stage_from_str(&job.identity.stage) else {
                     self.block_plan(&plan_key, "DAG journal contains an unknown stage");
