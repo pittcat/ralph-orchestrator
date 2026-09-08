@@ -394,12 +394,18 @@ impl DagSchedulerRuntime {
         }
         // `tests` entries are argv strings; quotes only group an argument and
         // shell metacharacters are never interpreted by the runtime.
-        let gate_commands: Vec<GateCommandSpec> = tests
-            .iter()
-            .filter_map(|cmd| {
-                parse_gate_command(cmd).map(|(program, args)| GateCommandSpec { program, args })
-            })
-            .collect();
+        let mut gate_commands = Vec::with_capacity(tests.len());
+        for command in &tests {
+            let Some((program, args)) = parse_gate_command(command) else {
+                self.fail_integration(
+                    &pending,
+                    "integration_gate_invalid",
+                    "unit `tests` contains an unterminated quote or escape",
+                );
+                return;
+            };
+            gate_commands.push(GateCommandSpec { program, args });
+        }
         if gate_commands.is_empty() {
             self.fail_integration(
                 &pending,
@@ -754,6 +760,30 @@ units:
     target_branch: feat/u2-feature
 "#;
 
+    /// U2 has one valid-looking gate and one malformed entry. The malformed
+    /// entry must not be silently discarded while the valid gate runs.
+    const PLAN_ARTIFACT_U2_INVALID_TEST: &str = r#"version: 1
+plan_key: pf-test
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1-foundation
+    tests:
+      - "true"
+  - id: U2
+    title: Feature
+    depends_on: []
+    execution_wave: 1
+    integration_order: 2
+    target_branch: feat/u2-feature
+    tests:
+      - "true"
+      - "cargo test 'unterminated"
+"#;
+
     fn exec_context(workspace: &Path) -> DagExecutionContext {
         let mut config = RalphConfig::default();
         for hat in ["executor", "reviewer", "verifier"] {
@@ -884,6 +914,22 @@ units:
         let event = &runtime.merge_queue.front().expect("queued").event;
         assert_eq!(event.topic.as_str(), "forge.unit.execution_failed");
         assert!(event.payload.contains("integration_gate_unconfigured"));
+    }
+
+    /// A malformed gate entry fails closed even when another gate entry is
+    /// valid; silently dropping it would weaken the declared integration
+    /// contract.
+    #[test]
+    fn malformed_gate_entry_fails_closed() {
+        let (_tmp, mut runtime) = git_fixture(PLAN_ARTIFACT_U2_INVALID_TEST, false);
+        runtime.queue_integration("pf-test", "U2");
+        runtime.maybe_integrate_one();
+
+        assert!(runtime.pending_integrations.is_empty());
+        assert_eq!(runtime.merge_queue.len(), 1);
+        let event = &runtime.merge_queue.front().expect("queued").event;
+        assert_eq!(event.topic.as_str(), "forge.unit.execution_failed");
+        assert!(event.payload.contains("integration_gate_invalid"));
     }
 
     /// Duplicate queue requests for the same unit collapse to one
