@@ -138,7 +138,7 @@ User YAML → RalphConfig → EventLoopConfig → HatConfig overrides → effect
 - **三态**：`wave`（默认，legacy WaveTracker 执行面） / `dag_shadow`（legacy 路径执行 + DAG 调度器旁路观察，dry-run 无副作用） / `dag`（声明运行时自有 work-conserving DAG 调度器）。
 - **fail-closed 组合**：`dag_shadow` / `dag` 要求 `event_loop.supervisor.enabled: true` **且** `event_loop.execution_mode: isolated`；不满足的组合在 `ralph preset check` / preflight / `ralph run` 启动即被拒（错误信息含字段路径 `event_loop.supervisor.scheduler_mode`，不会静默降级回 wave）。`wave` 任意组合恒合法。
 - **inspect 可见性**：`ralph inspect loop --format json` 在 mode ≠ `wave` 时输出 `scheduler` 块（`scheduler_mode` / `plan_keys` / `total_observations` / `admitted_total` / `blocked_total`，只读且脱敏）；`wave` 模式无该键（v2 JSON shape 不变）。
-- **当前语义**：builtin `parallel-forge` 的 `scheduler_mode: dag` 已启用 DAG runtime 执行面：runtime 负责 per-Unit admission、job launch/recovery、integration、task-close acknowledgement 与 exactly-once `forge.exec.development.done`；显式 `wave` 仍保留旧 wave 执行面兼容。旧 wave hats 在 DAG 模式只作为 runtime job template，不应被描述为独立调度权威。
+- **当前语义**：builtin `parallel-forge` 的 `scheduler_mode: dag` 已启用 DAG runtime 执行面：runtime 负责 per-Unit admission、job launch/recovery、integration、task-close acknowledgement 与 exactly-once `forge.exec.development.done`。旧 wave hats 在 DAG 模式只作为过渡期 runtime job template，不应被描述为独立调度权威；该 builtin 不再宣称 `wave` 是可切换兼容执行面。
 
 ### Multi-Hat Isolation Policy（强制）
 
