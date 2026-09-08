@@ -1165,7 +1165,10 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ralph_adapters::CliBackend;
+    use ralph_core::config::{CliConfig, HatConfig, RalphConfig};
     use ralph_core::parallel_forge_handoff::load_plan_handoff;
+    use ralph_core::supervisor::dag_store_rusqlite::jobs::JobIdentity;
     use tempfile::TempDir;
 
     /// Two independent units in one wave (the handoff contract
@@ -1279,6 +1282,42 @@ units:
             "approved": true,
         });
         ralph_proto::Event::new(seam_topics::CONCURRENCY_APPROVED, payload.to_string())
+    }
+
+    #[cfg(feature = "supervisor-db")]
+    fn execution_context(workspace: &std::path::Path) -> DagExecutionContext {
+        let mut config = RalphConfig::default();
+        for hat in ["executor", "reviewer", "verifier"] {
+            config.hats.insert(
+                hat.to_string(),
+                HatConfig {
+                    name: hat.to_string(),
+                    instructions: format!("{hat} instructions"),
+                    ..HatConfig::default()
+                },
+            );
+        }
+        let backend = CliBackend::from_config(&CliConfig::default()).expect("backend builds");
+        DagExecutionContext::new(
+            &config,
+            &backend,
+            "loop-test",
+            workspace.join("events.jsonl"),
+            None,
+        )
+    }
+
+    #[cfg(feature = "supervisor-db")]
+    fn execute_identity() -> JobIdentity {
+        JobIdentity {
+            plan_key: "pf-test".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "job-execute-0".to_string(),
+            hat: "executor".to_string(),
+            stage: "execute".to_string(),
+            attempt: 0,
+            token: "token-execute-0".to_string(),
+        }
     }
 
     #[cfg(feature = "supervisor-db")]
@@ -1595,5 +1634,87 @@ units:
         let handoff = load_plan_handoff(&payload, tmp.path()).expect("handoff loads");
         assert_eq!(handoff.tasks.len(), 3);
         assert_eq!(handoff.wave_total, 2);
+    }
+
+    /// Crash window: the durable reservation exists but the process has not
+    /// reached the PID handshake. Recovery must block instead of guessing
+    /// that no child was spawned and launching a duplicate.
+    #[cfg(feature = "supervisor-db")]
+    #[test]
+    fn recovery_blocks_reservation_without_pid() {
+        let (tmp, mut runtime) = fixture(SchedulerMode::Dag);
+        init_git_head(tmp.path());
+        runtime.observe_accepted_events(&[plan_ready_event(tmp.path())]);
+        runtime.observe_accepted_events(&[approved_event()]);
+        runtime.attach_execution_context(execution_context(tmp.path()));
+        runtime
+            .journal()
+            .expect("durable journal")
+            .reserve_job(&execute_identity(), 1)
+            .expect("reserve job");
+        drop(runtime);
+
+        let mut recovered = DagSchedulerRuntime::new(
+            SchedulerMode::Dag,
+            resolved_pools(),
+            tmp.path().to_path_buf(),
+        );
+        recovered.attach_execution_context(execution_context(tmp.path()));
+        recovered.recover_after_restart();
+
+        assert!(
+            recovered.blocked_plans.contains("pf-test"),
+            "NULL PID launch reservation must fail closed"
+        );
+        assert!(recovered.active_jobs.is_empty());
+        assert!(recovered.pending_spawns.is_empty());
+    }
+
+    /// Crash window: the PID handshake was durable, but the child died before
+    /// producing a result. Recovery must settle the same typed failure path
+    /// and must not reserve a replacement in the same pass.
+    #[cfg(feature = "supervisor-db")]
+    #[test]
+    fn recovery_settles_dead_pid_as_typed_failure() {
+        let (tmp, mut runtime) = fixture(SchedulerMode::Dag);
+        init_git_head(tmp.path());
+        runtime.observe_accepted_events(&[plan_ready_event(tmp.path())]);
+        runtime.observe_accepted_events(&[approved_event()]);
+        runtime.attach_execution_context(execution_context(tmp.path()));
+        let identity = execute_identity();
+        runtime
+            .journal()
+            .expect("durable journal")
+            .reserve_job(&identity, 1)
+            .expect("reserve job");
+        runtime
+            .journal()
+            .expect("durable journal")
+            .record_job_pid(&identity, 999_999, 2)
+            .expect("record dead child pid");
+        drop(runtime);
+
+        let mut recovered = DagSchedulerRuntime::new(
+            SchedulerMode::Dag,
+            resolved_pools(),
+            tmp.path().to_path_buf(),
+        );
+        recovered.attach_execution_context(execution_context(tmp.path()));
+        recovered.recover_after_restart();
+
+        assert!(recovered.blocked_plans.is_empty());
+        assert_eq!(recovered.merge_queue.len(), 1);
+        let failure = &recovered.merge_queue.front().expect("failure event").event;
+        assert_eq!(failure.topic.as_str(), "forge.unit.execution_failed");
+        assert!(failure.payload.contains("orphan_or_empty_result"));
+        assert!(
+            recovered
+                .journal()
+                .expect("durable journal")
+                .list_jobs("pf-test")
+                .expect("list jobs")
+                .iter()
+                .any(|job| job.identity == identity && job.terminal.as_deref() == Some("failed"))
+        );
     }
 }

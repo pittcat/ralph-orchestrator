@@ -999,6 +999,89 @@ units:
         assert!(store.list_for_unit("U1").expect("list")[0].acked);
     }
 
+    /// Crash window: the durable integration record was written, but the
+    /// coordination event was not. Recovery re-emits the event and leaves the
+    /// record unacked until the real acceptance projection runs.
+    #[cfg(feature = "supervisor-db")]
+    #[test]
+    fn recovery_reemits_unacked_integration_without_prior_event() {
+        let (tmp, mut runtime) = git_fixture(PLAN_ARTIFACT, false);
+        let target_branch = runtime
+            .plans
+            .get("pf-test")
+            .expect("plan")
+            .target_branch
+            .clone();
+        let store = runtime
+            .journal()
+            .expect("durable journal")
+            .shared_with_integration();
+        store
+            .record_integrated(&ralph_core::supervisor::dag_integration::IntegrationInput {
+                unit_id: "U1".to_string(),
+                target_branch,
+                base_commit: "base".to_string(),
+                integrated_commit: "integrated".to_string(),
+                expected_head_before: "base".to_string(),
+                created_at_ms: 1,
+            })
+            .expect("record integration");
+
+        runtime.reconcile_after_restart();
+
+        assert_eq!(store.list_for_unit("U1").expect("list").len(), 1);
+        assert!(runtime.blocked_plans.is_empty());
+        assert_eq!(ledger_contains(tmp.path(), UNIT_INTEGRATED), 1);
+        assert!(!store.list_for_unit("U1").expect("list")[0].acked);
+    }
+
+    /// Crash window: the integration event reached the trusted ledger, but
+    /// the task projection/ack did not. Recovery must block rather than ack a
+    /// possibly incomplete projection or emit a duplicate event.
+    #[cfg(feature = "supervisor-db")]
+    #[test]
+    fn recovery_blocks_event_present_but_unacked_integration() {
+        let (tmp, mut runtime) = git_fixture(PLAN_ARTIFACT, false);
+        let target_branch = runtime
+            .plans
+            .get("pf-test")
+            .expect("plan")
+            .target_branch
+            .clone();
+        let store = runtime
+            .journal()
+            .expect("durable journal")
+            .shared_with_integration();
+        store
+            .record_integrated(&ralph_core::supervisor::dag_integration::IntegrationInput {
+                unit_id: "U1".to_string(),
+                target_branch,
+                base_commit: "base".to_string(),
+                integrated_commit: "integrated".to_string(),
+                expected_head_before: "base".to_string(),
+                created_at_ms: 1,
+            })
+            .expect("record integration");
+        append_supervisor_coord_event(
+            &tmp.path().join("events.jsonl"),
+            UNIT_INTEGRATED,
+            &serde_json::json!({
+                "plan_key": "pf-test",
+                "unit_id": "U1",
+                "task_key": "forge:pf-test:U1",
+                "integrated_commit": "integrated",
+            }),
+        )
+        .expect("append integration event");
+
+        runtime.reconcile_after_restart();
+
+        assert_eq!(store.list_for_unit("U1").expect("list").len(), 1);
+        assert!(runtime.blocked_plans.contains("pf-test"));
+        assert_eq!(ledger_contains(tmp.path(), UNIT_INTEGRATED), 1);
+        assert!(!store.list_for_unit("U1").expect("list")[0].acked);
+    }
+
     /// S15: development.done waits for every unit's ack, then emits
     /// exactly once; the durable fence makes replays no-ops.
     #[test]
