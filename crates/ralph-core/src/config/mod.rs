@@ -88,7 +88,8 @@ pub use profiles::{ProfileScope, ProfileSpec, ProfilesConfig};
 // on `SchedulerMode` without reaching into the `config::scheduler_mode`
 // private path.
 pub use scheduler_mode::{
-    SchedulerMode, SchedulerModeError, validate_dag_pools, validate_scheduler_mode,
+    SchedulerMode, SchedulerModeError, validate_dag_pools, validate_runtime_driven_hats,
+    validate_scheduler_mode,
 };
 pub use skills::{SkillOverride, SkillsConfig};
 pub use state_files::{StateFileEntry, StateFileFormat, StateFilesConfig};

@@ -624,6 +624,28 @@ pub struct HatConfig {
     /// Does not affect runtime event policy enforcement.
     #[serde(default)]
     pub ignore_payload_fields: Vec<String>,
+
+    /// 2026-09-07 DAG wiring step E0: marks this hat as a **runtime job
+    /// template** under `event_loop.supervisor.scheduler_mode: dag`.
+    ///
+    /// Semantics:
+    /// - `dag` mode: the runtime DAG driver spawns this hat directly as a
+    ///   job (using its `instructions` / `backend` / `timeout` as the
+    ///   template); the EventLoop's event-topology trigger matching is
+    ///   suppressed for this hat — incoming events never activate it.
+    /// - `dag_shadow` mode: the field is accepted but inert — the shadow
+    ///   path keeps the legacy wave execution face, so trigger-based
+    ///   activation is NOT suppressed.
+    /// - `wave` mode: the field is illegal. Config validation
+    ///   (`validate_runtime_driven_hats`, wired into the preflight
+    ///   scheduler-mode gate) fails closed with a
+    ///   `hats[].runtime_driven` field-path error.
+    ///
+    /// `triggers` / `publishes` stay declared: they document the job
+    /// template's input/output topics for the DAG driver and keep the
+    /// lint topology closed.
+    #[serde(default)]
+    pub runtime_driven: bool,
 }
 
 /// Custom deserializer for `terminal_events` that accepts both:
@@ -715,6 +737,7 @@ impl Default for HatConfig {
             ignore_payload_fields: Vec::new(),
             obligations: Vec::new(),
             trigger_multi_consumer_topics: HashSet::new(),
+            runtime_driven: false,
         }
     }
 }
@@ -1026,6 +1049,43 @@ timeout: 600
         );
     }
 
+    // ─── 2026-09-07 DAG wiring step E0: runtime_driven flag ───
+
+    /// Legacy preset (no `runtime_driven` key) parses with the flag at
+    /// `false` — the default keeps every existing preset on the
+    /// event-topology activation path.
+    #[test]
+    fn hat_config_runtime_driven_defaults_to_false() {
+        let yaml = r#"
+name: "Legacy worker"
+triggers: ["work.ready"]
+publishes: ["work.done"]
+"#;
+        let hat: HatConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        assert!(
+            !hat.runtime_driven,
+            "omitted runtime_driven must default to false"
+        );
+    }
+
+    /// Explicit `runtime_driven: true` survives the YAML → struct
+    /// round-trip.
+    #[test]
+    fn hat_config_parses_runtime_driven_true() {
+        let yaml = r#"
+name: "Executor"
+triggers: ["exec.unit.ready"]
+publishes: ["exec.unit.done"]
+runtime_driven: true
+"#;
+        let hat: HatConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        assert!(hat.runtime_driven);
+
+        let yaml_out = serde_yaml::to_string(&hat).expect("serialize");
+        let hat2: HatConfig = serde_yaml::from_str(&yaml_out).expect("re-parse");
+        assert!(hat2.runtime_driven, "runtime_driven must round-trip");
+    }
+
     /// New preset declares both idle fields and they survive the
     /// YAML → struct round-trip. The zero value of `idle_heartbeat_secs`
     /// is preserved literally (`Some(0)`) — disabling idle mode is a
@@ -1183,6 +1243,9 @@ startup_grace_secs: 0
             ignore_payload_fields: Vec::new(),
             obligations,
             trigger_multi_consumer_topics: HashSet::new(),
+            // 2026-09-07 DAG wiring step E0: test helper keeps the
+            // event-topology activation default.
+            runtime_driven: false,
         }
     }
 

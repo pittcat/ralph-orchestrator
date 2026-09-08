@@ -782,6 +782,23 @@ pub(crate) fn validate_scheduler_mode_for_config(config: &RalphConfig) -> Result
              (field path: event_loop.supervisor.dag_pools)"
         );
     }
+    // 2026-09-07 DAG wiring step E0: `hats[].runtime_driven` marks a
+    // hat as a runtime DAG driver job template. Under `wave` there is
+    // no driver to spawn it, so the flag is rejected fail-closed here
+    // instead of leaving the hat silently inert.
+    let runtime_driven_hats: Vec<String> = config
+        .hats
+        .iter()
+        .filter(|(_, hat)| hat.runtime_driven)
+        .map(|(id, _)| id.clone())
+        .collect();
+    if let Err(err) = ralph_core::config::validate_runtime_driven_hats(mode, &runtime_driven_hats)
+    {
+        anyhow::bail!(
+            "runtime_driven validation failed: {err} \
+             (field path: hats[].runtime_driven)"
+        );
+    }
     Ok(())
 }
 

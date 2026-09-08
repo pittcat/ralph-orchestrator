@@ -256,6 +256,9 @@ pub(crate) fn make_wave_with_count(
             ignore_payload_fields: vec![],
             obligations: vec![],
             trigger_multi_consumer_topics: HashSet::new(),
+            // 2026-09-07 DAG wiring step E0: wave fixture stays on
+            // the event-topology activation default.
+            runtime_driven: false,
         },
         events,
         total,

@@ -16,6 +16,30 @@ impl EventLoop {
         active_hats
     }
 
+    /// 2026-09-07 DAG wiring step E0: returns `true` when `hat_id`
+    /// declares `runtime_driven: true` AND the loop runs under
+    /// `event_loop.supervisor.scheduler_mode: dag`.
+    ///
+    /// In `dag` mode a runtime-driven hat is a job template for the
+    /// runtime DAG driver: the driver spawns it directly, so the
+    /// event-topology trigger matching must not activate it. The
+    /// suppression is intentionally `dag`-only:
+    /// - `dag_shadow` keeps the legacy wave execution face (the DAG
+    ///   scheduler only observes), so trigger activation must NOT be
+    ///   suppressed;
+    /// - `wave` never reaches this check — the preflight
+    ///   scheduler-mode gate rejects `runtime_driven` under `wave`
+    ///   (`hats[].runtime_driven` field-path error), and even without
+    ///   the gate the `mode == Dag` guard keeps the legacy path
+    ///   byte-identical.
+    pub(super) fn is_runtime_driven_suppressed(&self, hat_id: &HatId) -> bool {
+        self.config.event_loop.supervisor.scheduler_mode == SchedulerMode::Dag
+            && self
+                .registry
+                .get_config(hat_id)
+                .is_some_and(|config| config.runtime_driven)
+    }
+
     pub(super) fn determine_active_hat_ids(&self, events: &[Event]) -> Vec<HatId> {
         let mut entrypoint_hat_ids = Vec::new();
         let mut progressed_hat_ids = Vec::new();
@@ -40,6 +64,14 @@ impl EventLoop {
             } else {
                 continue;
             };
+
+            // 2026-09-07 DAG wiring step E0: in `dag` mode a
+            // runtime-driven hat is spawned by the runtime DAG driver,
+            // not by the event topology — suppress its activation here
+            // (the event itself still flows to the bus / projections).
+            if self.is_runtime_driven_suppressed(&hat_id) {
+                continue;
+            }
 
             let list = if self.is_entrypoint_topic(event.topic.as_str()) {
                 &mut entrypoint_hat_ids

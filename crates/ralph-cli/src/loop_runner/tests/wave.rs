@@ -232,6 +232,9 @@ fn make_test_wave_with_timeout_and_payload(
             ignore_payload_fields: vec![],
             obligations: vec![],
             trigger_multi_consumer_topics: HashSet::new(),
+            // 2026-09-07 DAG wiring step E0: wave fixture stays on
+            // the event-topology activation default.
+            runtime_driven: false,
         },
         events: vec![event],
         total: 1,

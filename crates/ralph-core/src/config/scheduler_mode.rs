@@ -103,6 +103,16 @@ pub enum SchedulerModeError {
     /// admitted), so zero caps are rejected at validation time
     /// rather than deadlocking the scheduler at runtime.
     DagPoolsZeroCap { field: &'static str },
+
+    /// 2026-09-07 DAG wiring step E0: a hat declared
+    /// `hats[].runtime_driven: true` while `scheduler_mode = wave`.
+    /// Runtime-driven hats are job templates for the runtime DAG
+    /// driver; the legacy `WaveTracker` authority has no driver to
+    /// spawn them, so accepting the field would leave the hat
+    /// silently inert. Fail-closed: the operator must either drop
+    /// `runtime_driven` or switch the scheduler mode to
+    /// `dag_shadow` / `dag`.
+    RuntimeDrivenWithWaveMode { hat: String },
 }
 
 impl core::fmt::Display for SchedulerModeError {
@@ -134,6 +144,13 @@ impl core::fmt::Display for SchedulerModeError {
             SchedulerModeError::DagPoolsZeroCap { field } => write!(
                 f,
                 "event_loop.supervisor.dag_pools.{field} must be >= 1 (got 0)"
+            ),
+            SchedulerModeError::RuntimeDrivenWithWaveMode { hat } => write!(
+                f,
+                "hats[].runtime_driven: hat \"{hat}\" declares runtime_driven = true but \
+                 event_loop.supervisor.scheduler_mode = wave; runtime_driven hats only \
+                 apply to scheduler_mode = dag_shadow | dag (remove the runtime_driven \
+                 field or switch scheduler_mode)"
             ),
         }
     }
@@ -218,6 +235,34 @@ pub fn validate_dag_pools(
         return Err(SchedulerModeError::DagPoolsWithWaveMode);
     }
     Ok(())
+}
+
+/// 2026-09-07 DAG wiring step E0: validates the per-hat
+/// `hats[].runtime_driven` flag against the chosen [`SchedulerMode`].
+///
+/// A runtime-driven hat is a job template for the runtime DAG driver:
+/// under `dag` its event-topology trigger matching is suppressed (the
+/// driver spawns it directly); under `dag_shadow` the flag is accepted
+/// but inert (shadow only observes — the legacy wave execution face
+/// keeps activating the hat). Under `wave` there is no driver at all,
+/// so the flag is rejected fail-closed rather than leaving the hat
+/// silently inert.
+///
+/// `runtime_driven_hats` carries the IDs of hats that declared
+/// `runtime_driven: true`; the first one (sorted, deterministic) is
+/// reported. The empty case is always legal.
+pub fn validate_runtime_driven_hats(
+    mode: SchedulerMode,
+    runtime_driven_hats: &[String],
+) -> Result<(), SchedulerModeError> {
+    if !mode.uses_legacy_authority() || runtime_driven_hats.is_empty() {
+        return Ok(());
+    }
+    let mut sorted: Vec<&String> = runtime_driven_hats.iter().collect();
+    sorted.sort();
+    Err(SchedulerModeError::RuntimeDrivenWithWaveMode {
+        hat: sorted[0].clone(),
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -514,6 +559,80 @@ mod scheduler_mode_tests {
         assert!(
             rendered.contains("event_loop.supervisor.dag_pools.reviewer"),
             "error must reference the offending leaf field; got: {rendered}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 2026-09-07 DAG wiring step E0: runtime_driven validation tests.
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn runtime_driven_absent_is_always_legal() {
+        for mode in [
+            SchedulerMode::Wave,
+            SchedulerMode::DagShadow,
+            SchedulerMode::Dag,
+        ] {
+            assert!(
+                validate_runtime_driven_hats(mode, &[]).is_ok(),
+                "no runtime_driven hats must validate under any mode ({mode:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_driven_rejected_under_wave_mode() {
+        let hats = vec!["executor".to_string()];
+        let err = validate_runtime_driven_hats(SchedulerMode::Wave, &hats).unwrap_err();
+        assert_eq!(
+            err,
+            SchedulerModeError::RuntimeDrivenWithWaveMode {
+                hat: "executor".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_driven_accepted_under_dag_modes() {
+        let hats = vec!["executor".to_string(), "reviewer".to_string()];
+        for mode in [SchedulerMode::DagShadow, SchedulerMode::Dag] {
+            assert!(
+                validate_runtime_driven_hats(mode, &hats).is_ok(),
+                "runtime_driven hats must be legal under {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_driven_reports_first_hat_sorted() {
+        let hats = vec!["verifier".to_string(), "executor".to_string()];
+        let err = validate_runtime_driven_hats(SchedulerMode::Wave, &hats).unwrap_err();
+        assert_eq!(
+            err,
+            SchedulerModeError::RuntimeDrivenWithWaveMode {
+                hat: "executor".to_string()
+            },
+            "offending hat report must be deterministic (sorted)"
+        );
+    }
+
+    #[test]
+    fn runtime_driven_error_message_includes_field_path() {
+        let rendered = SchedulerModeError::RuntimeDrivenWithWaveMode {
+            hat: "executor".to_string(),
+        }
+        .to_string();
+        assert!(
+            rendered.contains("hats[].runtime_driven"),
+            "error must reference the field path; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("executor"),
+            "error must name the offending hat; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("wave"),
+            "error must report the offending mode; got: {rendered}"
         );
     }
 }

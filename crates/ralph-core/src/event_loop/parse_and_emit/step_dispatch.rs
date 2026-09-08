@@ -565,14 +565,26 @@ impl EventLoop {
         //
         // Uses find_by_trigger + get_config — the same resolution path as
         // detect_wave_events — to ensure partition and detection agree.
+        //
+        // 2026-09-07 DAG wiring step E0: in `dag` mode a runtime-driven
+        // hat is spawned by the runtime DAG driver, not by wave
+        // dispatch. Such events stay on the regular path, where
+        // `determine_active_hat_ids` suppresses the activation; the
+        // wave spawn is skipped here. `dag_shadow` / `wave` are
+        // unaffected (`is_runtime_driven_suppressed` is Dag-only).
         let (wave_events, regular_events): (Vec<_>, Vec<_>) =
             result.events.into_iter().partition(|e| {
                 e.wave_id.is_some()
                     && self
                         .registry
                         .find_by_trigger(e.topic.as_str())
-                        .and_then(|hat_id| self.registry.get_config(hat_id))
-                        .is_some_and(|hat_config| hat_config.concurrency > 1)
+                        .is_some_and(|hat_id| {
+                            !self.is_runtime_driven_suppressed(hat_id)
+                                && self
+                                    .registry
+                                    .get_config(hat_id)
+                                    .is_some_and(|hat_config| hat_config.concurrency > 1)
+                        })
             });
 
         // --- Origin guard: validate wave event provenance before policy validation ---

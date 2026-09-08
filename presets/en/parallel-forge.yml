@@ -1170,6 +1170,11 @@ hats:
   executor:
     name: "Executor"
     description: "Per-slot TDD implementation in an isolated worktree for one Unit."
+    # Step E0(2026-09-07 DAG 接线):dag 模式下本 hat 由 runtime DAG driver
+    # 作为 job 直接 spawn(instructions/backend/timeout 作模板),EventLoop
+    # 事件拓扑的 trigger 激活被抑制;triggers/publishes 保留为 job 模板的
+    # 输入/输出 topic 声明(wave 模式下本字段非法,preflight fail-closed)。
+    runtime_driven: true
     concurrency: 8
     timeout: 3600
     idle_heartbeat_secs: 600
@@ -1280,6 +1285,9 @@ hats:
   reviewer:
     name: "Reviewer"
     description: "Per-wave independent review after supervisor fan-in; emits forge.wave.reviewed (accept) or forge.wave.review.failed (reject)."
+    # Step E0(2026-09-07 DAG 接线):dag 模式下由 runtime DAG driver 直接
+    # spawn,trigger 激活被抑制;triggers/publishes 保留为 job 模板声明。
+    runtime_driven: true
     triggers: [exec.wave.complete, forge.correction.done]
     # Step 2(2026-09-03-0959 DAG 接线):追加 dag 模式 per-unit topic
     # `forge.unit.reviewed`(verdict 值域 ACCEPTED/REJECTED)。
@@ -1445,6 +1453,9 @@ hats:
   verifier:
     name: "Verifier"
     description: "Per-wave verification on candidate HEAD; emits forge.wave.verified (pass) or forge.verification.failed (fail)."
+    # Step E0(2026-09-07 DAG 接线):dag 模式下由 runtime DAG driver 直接
+    # spawn,trigger 激活被抑制;triggers/publishes 保留为 job 模板声明。
+    runtime_driven: true
     triggers: [forge.wave.integrated, forge.integration.done]
     # Step 2(2026-09-03-0959 DAG 接线):追加 dag 模式 per-unit topic
     # `forge.unit.verified` / `forge.unit.verification_failed`。

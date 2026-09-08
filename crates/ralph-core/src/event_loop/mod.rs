@@ -250,7 +250,9 @@ mod prompt_helpers {
     }
 }
 
-use crate::config::{HatBackend, HatExecutionMode, InjectMode, RalphConfig, ScratchpadConfig};
+use crate::config::{
+    HatBackend, HatExecutionMode, InjectMode, RalphConfig, SchedulerMode, ScratchpadConfig,
+};
 
 use crate::diagnosis::{
     RUNTIME_DIAGNOSIS_ALERT_HEADER, RecoveryDiagnosisEnvelope, RecoveryJournalEntry,
