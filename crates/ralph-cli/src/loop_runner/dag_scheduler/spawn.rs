@@ -1420,6 +1420,7 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1-foundation
+    allowed_paths: [u1.txt]
     tests:
       - cargo nextest run -p ralph-core -- u1
   - id: U2
@@ -1428,6 +1429,7 @@ units:
     execution_wave: 1
     integration_order: 2
     target_branch: feat/u2-feature
+    allowed_paths: [u2.txt]
 "#;
 
     fn exec_context(workspace: &Path) -> DagExecutionContext {
@@ -1468,8 +1470,7 @@ units:
         cli.prompt_mode = "stdin".to_string();
         cli.args = vec![
             "-c".to_string(),
-            "printf '%s\\n' '{\"topic\":\"forge.unit.executed\",\"payload\":\"{}\"}' >> \"$RALPH_EVENTS_FILE\""
-                .to_string(),
+            "grep -F 'Allowed paths for this Unit: `u1.txt`' >/dev/null || exit 41; printf '%s\\n' '{\"topic\":\"forge.unit.executed\",\"payload\":\"{}\"}' >> \"$RALPH_EVENTS_FILE\"".to_string(),
         ];
         let backend = CliBackend::from_config(&cli).expect("custom fixture backend builds");
         DagExecutionContext::new(
