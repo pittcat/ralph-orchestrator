@@ -569,7 +569,20 @@ impl DagSchedulerRuntime {
             warn!(plan_key, "DAG correction request has no affected_unit_ids");
             return;
         };
+        let Some(plan) = self.plans.get(&plan_key) else {
+            warn!(plan_key, "DAG correction request references an unknown plan");
+            return;
+        };
+        let known_units: HashSet<String> = plan
+            .units
+            .iter()
+            .map(|unit| unit.unit_id.clone())
+            .collect();
         for unit_id in unit_ids.iter().filter_map(Value::as_str) {
+            if !known_units.contains(unit_id) {
+                warn!(plan_key, unit_id, "DAG correction request references an unknown unit");
+                continue;
+            }
             let outcome = self
                 .pipeline
                 .bump_attempt_and_advance(unit_id, Stage::Review);
@@ -949,6 +962,26 @@ impl DagSchedulerRuntime {
             debug!(topic, "DAG seam: unit event without unit_id; ignored");
             return;
         };
+        if self.mode == SchedulerMode::Dag {
+            let plan_key = payload
+                .get("plan_key")
+                .and_then(Value::as_str)
+                .filter(|key| !key.trim().is_empty());
+            let belongs_to_plan = plan_key.is_some_and(|key| {
+                self.plans.get(key).is_some_and(|plan| {
+                    plan.units.iter().any(|unit| unit.unit_id == unit_key)
+                })
+            });
+            if !belongs_to_plan {
+                debug!(
+                    unit_key,
+                    ?plan_key,
+                    topic,
+                    "DAG seam: unit event has invalid plan ownership"
+                );
+                return;
+            }
+        }
         // E1: in `dag` mode the execution face owns the follow-up —
         // journal terminal for the completing job, slot release, and
         // the next-stage spawn. Shadow mode keeps the pure
@@ -1565,6 +1598,54 @@ units:
 
         assert_eq!(runtime.pipeline_stage("U1"), Some(Stage::Review));
         assert_eq!(runtime.pipeline.attempt_of("U1"), Some(1));
+    }
+
+    /// A unit event from another plan must not advance the same-named Unit;
+    /// plan ownership is part of the runtime identity fence.
+    #[test]
+    fn unit_event_from_wrong_plan_is_ignored() {
+        let (tmp, mut runtime) = fixture(SchedulerMode::Dag);
+        runtime.observe_accepted_events(&[plan_ready_event(tmp.path())]);
+        runtime.observe_accepted_events(&[approved_event()]);
+
+        let forged = ralph_proto::Event::new(
+            topics::UNIT_EXECUTED,
+            serde_json::json!({
+                "unit_id": "U1",
+                "plan_key": "pf-other",
+                "task_key": "forge:pf-other:U1",
+                "content_hash": "forged",
+                "unit_report_path": ".ralph/forged.md",
+            })
+            .to_string(),
+        );
+        runtime.observe_accepted_events(&[forged]);
+
+        assert_eq!(runtime.pipeline_stage("U1"), Some(Stage::Execute));
+        assert!(runtime.pending_spawns.is_empty());
+    }
+
+    /// A correction request may only bump Units declared by its plan; an
+    /// unknown Unit ID must not reach the process-global pipeline.
+    #[test]
+    fn correction_request_unknown_unit_is_ignored() {
+        let (tmp, mut runtime) = fixture(SchedulerMode::Dag);
+        runtime.observe_accepted_events(&[plan_ready_event(tmp.path())]);
+        runtime.observe_accepted_events(&[approved_event()]);
+
+        let correction = ralph_proto::Event::new(
+            seam_topics::CORRECTION_REQUESTED,
+            serde_json::json!({
+                "plan_key": "pf-test",
+                "affected_unit_ids": ["U-not-in-plan"],
+                "correction_request_path": ".ralph/forge/pf-test/failures/U1.md",
+            })
+            .to_string(),
+        );
+        runtime.observe_accepted_events(&[correction]);
+
+        assert_eq!(runtime.pipeline_stage("U1"), Some(Stage::Execute));
+        assert_eq!(runtime.pipeline.attempt_of("U1"), Some(0));
     }
 
     /// The observation tick reflects dependency gating: with no

@@ -234,6 +234,10 @@ impl DagSchedulerRuntime {
             debug!(plan_key, "DAG integration: ack for unknown plan; ignored");
             return;
         };
+        if !plan.units.iter().any(|unit| unit.unit_id == unit_id) {
+            debug!(plan_key, unit_id, "DAG integration: ack for unknown unit; ignored");
+            return;
+        }
         let target_branch = plan.target_branch.clone();
         let Some(store) = self.integration_store() else {
             // Non-durable builds never reach here (spawn refuses
@@ -1104,6 +1108,26 @@ units:
 
         assert!(runtime.blocked_plans.contains("pf-test"));
         assert_eq!(ledger_contains(tmp.path(), DEVELOPMENT_DONE), 0);
+    }
+
+    /// An accepted integrated event cannot ack a different Unit merely by
+    /// reusing a valid plan key; the projection identity is plan-topology
+    /// scoped as well.
+    #[test]
+    fn integrated_ack_for_unknown_unit_is_ignored() {
+        let (_tmp, mut runtime) = git_fixture(PLAN_ARTIFACT, false);
+        runtime.on_unit_integrated_accepted(&serde_json::json!({
+            "plan_key": "pf-test",
+            "unit_id": "U-not-in-plan",
+            "integrated_commit": "integrated",
+        }));
+
+        assert!(!runtime
+            .plans
+            .get("pf-test")
+            .expect("plan")
+            .integrated
+            .contains("U-not-in-plan"));
     }
 
     /// S15: development.done waits for every unit's ack, then emits
