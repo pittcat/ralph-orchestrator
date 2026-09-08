@@ -1168,6 +1168,62 @@ actions:
     );
 }
 
+// A retried accepted integration event must be a terminal no-op: the
+// second projection succeeds without rewriting the task's close timestamp.
+#[test]
+fn close_task_replay_is_idempotent_noop() {
+    let tmp = workspace();
+    let config: StateProjectionConfig = serde_yaml::from_str(
+        r#"
+enabled: true
+actions:
+  forge.plan.ready:
+    kind: ensure_task_batch
+    items: unit_tasks
+    count: unit_count
+    key: task_key
+    title: title
+    blocked_by_keys: depends_on_task_keys
+  forge.unit.integrated:
+    kind: close_task
+    task_id: task_id
+"#,
+    )
+    .unwrap();
+    let mut projector = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), config));
+
+    let ready = make_event(
+        "forge.plan.ready",
+        json!({
+            "unit_count": 1,
+            "unit_tasks": [
+                {"task_key": "forge:p:U1", "title": "U1", "depends_on_task_keys": []}
+            ]
+        })
+        .to_string(),
+    );
+    assert_eq!(projector.apply(&[ready]).applied, 1);
+    let task_id = projector.context().tasks_cache[0].id.clone();
+    let payload = json!({
+        "task_id": task_id,
+        "task_key": "forge:p:U1"
+    })
+    .to_string();
+
+    let first = projector.apply(&[make_event("forge.unit.integrated", payload.clone())]);
+    assert_eq!(first.applied, 1);
+    let disk_after_first = std::fs::read_to_string(tasks_path(tmp.path())).unwrap();
+
+    let replay = projector.apply(&[make_event("forge.unit.integrated", payload)]);
+    assert_eq!(replay.applied, 1, "replay must remain accepted");
+    assert_eq!(replay.rejected, 0);
+    assert_eq!(
+        std::fs::read_to_string(tasks_path(tmp.path())).unwrap(),
+        disk_after_first,
+        "replay must not rewrite the terminal task row"
+    );
+}
+
 // Plan 2026-07-29-002 U1 (R1 / S3): an `exec.unit.done` whose
 // `task_id` does not match any live task is rejected, and the
 // projection produces zero task-state side effects.

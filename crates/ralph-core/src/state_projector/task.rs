@@ -708,33 +708,57 @@ pub(crate) fn project_close_task(
     // report P0-4 is targeting remain rejected (they
     // never go through `work.done`).
     let mut outcome = CloseOutcome::Missing;
+    let mut mutated = false;
     if let Some(task_key) = json_pointer(payload, "task_key") {
-        if let Some(row) = store.get_by_key_mut(task_key) {
+        if store
+            .get_by_key(task_key)
+            .is_some_and(|row| row.status == crate::task::TaskStatus::Closed)
+        {
+            // A retried accepted event must not rewrite the terminal
+            // timestamp or otherwise mutate an already-closed row.
+            outcome = CloseOutcome::Closed;
+        } else if let Some(row) = store.get_by_key_mut(task_key) {
             if row.started.is_none() && !is_fix_unit_key(task_key) {
                 row.start();
+                mutated = true;
             }
             if store.close_by_key(task_key).is_some() {
                 outcome = CloseOutcome::Closed;
+                mutated = true;
             }
         } else {
             // Key mismatch — fall back to id lookup so we don't
             // silently no-op on malformed payloads.
-            if let Some(row) = store.get_mut(&task_id)
+            if store
+                .get(&task_id)
+                .is_some_and(|row| row.status == crate::task::TaskStatus::Closed)
+            {
+                outcome = CloseOutcome::Closed;
+            } else if let Some(row) = store.get_mut(&task_id)
                 && row.started.is_none()
                 && !is_fix_unit_id(&task_id)
             {
                 row.start();
+                mutated = true;
             }
-            if store.close(&task_id).is_some() {
+            if matches!(outcome, CloseOutcome::Missing) && store.close(&task_id).is_some() {
                 outcome = CloseOutcome::Closed;
+                mutated = true;
             }
         }
+    } else if store
+        .get(&task_id)
+        .is_some_and(|row| row.status == crate::task::TaskStatus::Closed)
+    {
+        outcome = CloseOutcome::Closed;
     } else if let Some(row) = store.get_mut(&task_id) {
         if row.started.is_none() && !is_fix_unit_id(&task_id) {
             row.start();
+            mutated = true;
         }
         if store.close(&task_id).is_some() {
             outcome = CloseOutcome::Closed;
+            mutated = true;
         }
     }
     match outcome {
@@ -747,7 +771,9 @@ pub(crate) fn project_close_task(
             return Err(format!("task_not_found: {task_id}"));
         }
     }
-    persist(&ctx.tasks_path, &store, &mut ctx.tasks_cache)?;
+    if mutated {
+        persist(&ctx.tasks_path, &store, &mut ctx.tasks_cache)?;
+    }
 
     // If the event also carries a `step`, advance the progress
     // ledger. We delegate the progress write to the progress
