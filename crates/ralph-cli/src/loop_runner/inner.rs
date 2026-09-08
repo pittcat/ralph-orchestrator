@@ -1213,6 +1213,9 @@ pub(super) async fn run_loop_impl_inner(
                 hats_source_label.clone(),
             ),
         );
+        if resume {
+            dag.recover_after_restart();
+        }
     }
 
     // 2026-07-28-002 plan U4 (G1 / R-F1): redrive boot dispatch. When

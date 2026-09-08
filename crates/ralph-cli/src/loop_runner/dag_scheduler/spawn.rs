@@ -152,6 +152,20 @@ pub(crate) struct JobCompletion {
     timed_out: bool,
 }
 
+impl JobCompletion {
+    /// Build a completion during restart recovery. The worker event file is
+    /// read by the normal drain path, so recovered results retain exactly the
+    /// same schema and journal fencing as live jobs.
+    pub(crate) fn recovered(identity: JobIdentity, events_file: PathBuf) -> Self {
+        Self {
+            identity,
+            events_file,
+            exit_code: Some(0),
+            timed_out: false,
+        }
+    }
+}
+
 /// A completed result waiting for its OPAC merge slot.
 #[derive(Debug)]
 pub(crate) struct PendingMerge {
@@ -347,12 +361,7 @@ impl DagSchedulerRuntime {
             let payload = self.complete_payload(kind, &completion.identity, payload);
             let digest = sha256_hex(&payload.to_string());
             self.write_terminal(&completion.identity, "failed", &digest);
-            self.queue_result_event(
-                kind.failure_topic(),
-                completion.identity.hat.clone(),
-                payload,
-                None,
-            );
+            self.queue_failure_event(kind, &completion.identity, payload);
             return;
         }
 
@@ -515,6 +524,18 @@ impl DagSchedulerRuntime {
             "failure_class": failure_class,
         });
         let payload = self.complete_payload(kind, identity, payload);
+        self.queue_failure_event(kind, identity, payload);
+    }
+
+    /// Queue a failure business event with the runtime-owned identity fields
+    /// applied. Keeping this separate lets restart recovery mirror a dead
+    /// child through the same failure path without fabricating a worker file.
+    pub(crate) fn queue_failure_event(
+        &mut self,
+        kind: SpawnKind,
+        identity: &JobIdentity,
+        payload: Value,
+    ) {
         self.queue_result_event(kind.failure_topic(), identity.hat.clone(), payload, None);
     }
 

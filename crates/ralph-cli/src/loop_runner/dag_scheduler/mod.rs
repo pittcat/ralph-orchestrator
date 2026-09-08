@@ -208,6 +208,9 @@ pub struct DagSchedulerRuntime {
     /// D16: in-flight fixer jobs; the cap is enforced here because
     /// the pipeline `Stage` enum has no Fix variant.
     fixer_in_flight: u32,
+    /// Plans whose durable state was ambiguous during restart recovery.
+    /// A blocked plan is never admitted or allowed to emit completion.
+    blocked_plans: HashSet<String>,
     /// Monotonic worker index for kernel log lines.
     job_seq: u32,
 }
@@ -247,6 +250,7 @@ impl DagSchedulerRuntime {
             pending_integrations: Vec::new(),
             executors_launched: HashSet::new(),
             fixer_in_flight: 0,
+            blocked_plans: HashSet::new(),
             job_seq: 0,
         }
     }
@@ -258,6 +262,133 @@ impl DagSchedulerRuntime {
             self.exec = Some(ctx);
         }
     }
+
+    /// Rebuild the process-local DAG view from the durable store after a
+    /// restart. Ambiguous launches are blocked; they are never respawned.
+    /// Result files are fed through the ordinary completion drain so event
+    /// validation and journal fencing remain identical to a live worker.
+    #[cfg(feature = "supervisor-db")]
+    pub(crate) fn recover_after_restart(&mut self) {
+        if self.mode != SchedulerMode::Dag || self.exec.is_none() || !self.db_path.exists() {
+            return;
+        }
+        let active = match self.ensure_stores().and_then(|s| s.plans.list_active_plans()) {
+            Ok(plans) => plans,
+            Err(err) => {
+                warn!(error = %err, "DAG recovery: active-plan scan failed");
+                return;
+            }
+        };
+        for registration in active {
+            let plan_key = registration.plan_key.clone();
+            let receipt = match self
+                .stores
+                .as_ref()
+                .and_then(|stores| stores.receipts.get(&plan_key).ok().flatten())
+            {
+                Some(receipt) => receipt,
+                None => {
+                    self.block_plan(&plan_key, "durable plan receipt is missing");
+                    continue;
+                }
+            };
+            if !self.plans.contains_key(&plan_key)
+                && !self.rebuild_topology(&plan_key, &receipt.artifact_path)
+            {
+                self.block_plan(&plan_key, "execution-plan artifact could not be rebuilt");
+                continue;
+            }
+            if let Some(plan) = self.plans.get_mut(&plan_key) {
+                plan.target_branch = registration.target_branch.clone();
+            }
+            let Some(journal) = self.journal() else {
+                self.block_plan(&plan_key, "durable DAG journal is unavailable");
+                continue;
+            };
+            let Some(base) = journal.verified_base(&plan_key).ok().flatten() else {
+                self.block_plan(&plan_key, "approval-time verified base is missing");
+                continue;
+            };
+            if let Some(plan) = self.plans.get_mut(&plan_key) {
+                plan.verified_base_commit = Some(base);
+            }
+            let integration_store = journal.shared_with_integration();
+            let unit_ids = self
+                .plans
+                .get(&plan_key)
+                .map(|plan| {
+                    plan.units
+                        .iter()
+                        .map(|unit| unit.unit_id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for unit_id in &unit_ids {
+                if let Ok(records) =
+                    ralph_core::supervisor::dag_integration::IntegrationStore::list_for_unit(
+                        &integration_store,
+                        unit_id,
+                    )
+                    && records.iter().any(|record| {
+                        record.target_branch == registration.target_branch && record.acked
+                    })
+                    && let Some(plan) = self.plans.get_mut(&plan_key)
+                {
+                    plan.integrated.insert(unit_id.clone());
+                }
+            }
+            let jobs = match journal.list_jobs(&plan_key) {
+                Ok(jobs) => jobs,
+                Err(err) => {
+                    self.block_plan(&plan_key, "DAG job journal could not be read");
+                    warn!(plan_key, error = %err, "DAG recovery: job scan failed");
+                    continue;
+                }
+            };
+            for job in jobs {
+                let Some(stage) = recovery::stage_from_str(&job.identity.stage) else {
+                    self.block_plan(&plan_key, "DAG journal contains an unknown stage");
+                    continue;
+                };
+                let unit_key = job.identity.unit_key();
+                self.pipeline.restore_unit(
+                    unit_key.clone(),
+                    job.identity.job_id.clone(),
+                    job.identity.hat.clone(),
+                    stage,
+                    u64::from(job.identity.attempt),
+                );
+                if job.identity.stage == "execute" {
+                    self.executors_launched.insert(job.identity.unit_id.clone());
+                }
+                if job.terminal.is_some() {
+                    continue;
+                }
+                let events_file = self
+                    .workspace
+                    .join(".ralph")
+                    .join("dag")
+                    .join(&plan_key)
+                    .join(&job.identity.unit_id)
+                    .join(format!("{}.events.jsonl", job.identity.job_id));
+                if events_file.exists()
+                    && !crate::loop_runner::wave::io::read_worker_events(&events_file).is_empty()
+                {
+                    self.active_jobs.insert(job.identity.job_id.clone());
+                    let _ = self
+                        .completion_tx
+                        .send(spawn::JobCompletion::recovered(job.identity, events_file));
+                } else {
+                    // NULL PID and unknown liveness are deliberately
+                    // indistinguishable here: recovery must stop safely.
+                    self.block_plan(&plan_key, "unresolved DAG launch has no trustworthy result");
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "supervisor-db"))]
+    pub(crate) fn recover_after_restart(&mut self) {}
 
     /// Route one iteration's accepted events, then run one
     /// observation tick. Called once per loop iteration from
@@ -551,7 +682,15 @@ impl DagSchedulerRuntime {
         // and the spawn seam fails closed on it.
         let verified_base = ralph_core::get_head_sha(&self.workspace).ok();
         if let Some(plan) = self.plans.get_mut(&plan_key) {
-            plan.verified_base_commit = verified_base;
+            plan.verified_base_commit = verified_base.clone();
+        }
+        #[cfg(feature = "supervisor-db")]
+        if let Some(base) = verified_base.as_deref()
+            && let Some(journal) = self.journal()
+            && let Err(err) = journal.record_verified_base(&plan_key, base, now_ms() as i64)
+        {
+            self.block_plan(&plan_key, "verified base could not be durably pinned");
+            warn!(plan_key, error = %err, "DAG approval: verified base persistence failed");
         }
         // Seed the in-memory pipeline so per-unit events route. The
         // job id is a deterministic observation label — Step 4 never
@@ -749,6 +888,9 @@ impl DagSchedulerRuntime {
         let target_head = ralph_core::get_head_sha(&self.workspace).ok();
         let mut admitted: Vec<(String, String)> = Vec::new();
         for (plan_key, plan) in &self.plans {
+            if self.blocked_plans.contains(plan_key) {
+                continue;
+            }
             let inputs: Vec<UnitAdmissionInput> = plan
                 .units
                 .iter()
@@ -791,6 +933,17 @@ impl DagSchedulerRuntime {
                 self.maybe_spawn_executor(&plan_key, &unit_id);
             }
             self.maybe_emit_development_done();
+        }
+    }
+
+    /// Mark a plan blocked after recovery finds an ambiguous launch or
+    /// projection state. This is intentionally monotonic for the lifetime of
+    /// the runtime; an operator must resolve the durable evidence before a
+    /// fresh loop can safely retry it.
+    pub(crate) fn block_plan(&mut self, plan_key: impl Into<String>, reason: &str) {
+        let plan_key = plan_key.into();
+        if self.blocked_plans.insert(plan_key.clone()) {
+            error!(plan_key, reason, "DAG recovery blocked plan");
         }
     }
 

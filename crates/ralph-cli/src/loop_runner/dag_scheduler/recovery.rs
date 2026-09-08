@@ -26,6 +26,19 @@
 // transitional state for the U6/U7/U8/U10 surface.
 #![allow(dead_code)]
 
+use crate::loop_runner::runtime_job::Stage;
+
+/// Convert the durable journal spelling into the pipeline stage enum.
+/// Unknown values are rejected rather than guessed during recovery.
+pub(crate) fn stage_from_str(raw: &str) -> Option<Stage> {
+    match raw {
+        "execute" => Some(Stage::Execute),
+        "review" | "fix" => Some(Stage::Review),
+        "verify" => Some(Stage::Verify),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Launch fencing: attempt-token CAS.
 // ---------------------------------------------------------------------------

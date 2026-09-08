@@ -329,6 +329,35 @@ impl JobPipeline {
             .or_insert_with(|| UnitPipelineState::new(key, job_id.into(), hat.into(), stage))
     }
 
+    /// Restore a unit from the durable launch journal after a process
+    /// restart. Recovery deliberately restores no in-flight slot: an
+    /// unresolved launch is settled by the recovery planner first, and an
+    /// adopted child is the only path that reserves a live slot again.
+    pub fn restore_unit(
+        &mut self,
+        unit_key: impl Into<String>,
+        job_id: impl Into<String>,
+        hat: impl Into<String>,
+        stage: Stage,
+        attempt: u64,
+    ) -> &mut UnitPipelineState {
+        let key = unit_key.into();
+        let job_id = job_id.into();
+        let hat = hat.into();
+        let state = self
+            .state
+            .units
+            .entry(key.clone())
+            .or_insert_with(|| UnitPipelineState::new(key, job_id.clone(), hat.clone(), stage));
+        state.job_id = job_id;
+        state.hat = hat;
+        state.stage = stage;
+        state.attempt = attempt;
+        state.in_flight = 0;
+        state.in_flight_stage = None;
+        state
+    }
+
     /// Reserve a slot for `(unit_key, stage)`. Returns
     /// `Admitted` with a freshly minted `JobToken`, or `Blocked`
     /// with the typed reason. See the struct-level doc for the
@@ -519,6 +548,23 @@ mod tests {
         assert!(pipeline.state.units.get("U-slow").unwrap().stage == Stage::Execute);
         // Fast unit is in Review.
         assert!(pipeline.state.units.get("U-fast").unwrap().stage == Stage::Review);
+    }
+
+    #[test]
+    fn restore_unit_rehydrates_state_without_reserving_a_slot() {
+        let mut pipeline = JobPipeline::new(DagPools::small_test_default());
+        let state = pipeline.restore_unit(
+            "forge:plan:U1",
+            "job-1",
+            "reviewer",
+            Stage::Review,
+            2,
+        );
+        assert_eq!(state.job_id, "job-1");
+        assert_eq!(state.attempt, 2);
+        assert_eq!(state.in_flight, 0);
+        assert_eq!(state.in_flight_stage, None);
+        assert_eq!(pipeline.state.in_flight.total, 0);
     }
 
     /// Three review rejections ⇒ typed `Blocked`. The fourth
