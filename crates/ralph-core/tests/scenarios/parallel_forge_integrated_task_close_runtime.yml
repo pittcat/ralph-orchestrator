@@ -1,0 +1,60 @@
+# Runtime BDD for the DAG integration acceptance boundary.
+# `forge.unit.integrated` is accepted by the real EventLoop and its
+# state projection closes the matching task exactly once.
+
+name: pf_integrated_task_close_runtime
+description: accepted forge.unit.integrated closes the matching task through the real EventLoop projection
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  event_loop:
+    execution_mode: isolated
+    starting_event: forge.start
+    completion_promise: LOOP_COMPLETE
+    state_projection:
+      enabled: true
+      actions:
+        forge.unit.integrated:
+          kind: close_task
+          task_id: task_id
+  hats:
+    pf-integrator:
+      subscribes_to: [forge.start]
+      publishes: [forge.unit.integrated]
+    pf-reporter:
+      subscribes_to: [forge.unit.integrated]
+      publishes: [LOOP_COMPLETE]
+
+fixture_files:
+  - path: .ralph/agent/tasks.jsonl
+    content: |
+      {"id":"task-pf-integrated-u1","title":"U1","key":"forge:pf-integrated:U1","status":"open","priority":1,"created":"2026-09-08T00:00:00Z"}
+
+mock_responses:
+  - hat: pf-integrator
+    text: |
+      <event topic="forge.unit.integrated">
+      {"plan_key":"pf-integrated","unit_id":"U1","task_id":"task-pf-integrated-u1","task_key":"forge:pf-integrated:U1","integrated_commit":"0123456789abcdef0123456789abcdef01234567"}
+      </event>
+  - hat: pf-reporter
+    text: |
+      <event topic="LOOP_COMPLETE">
+      {"reason":"integration accepted"}
+      </event>
+
+expected:
+  iterations: 2
+  events:
+    - topic: forge.unit.integrated
+  event_topic_counts:
+    - topic: forge.unit.integrated
+      count: 1
+  task_ledger:
+    - task_key: forge:pf-integrated:U1
+      status: closed
+      blocked_by_keys: []
+  absent_events:
+    - topic: forge.unit.integrated.proposed
+    - topic: work.failed
+  completion: true

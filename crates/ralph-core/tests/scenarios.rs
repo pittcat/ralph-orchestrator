@@ -2196,6 +2196,14 @@ fn test_parallel_forge_receipt_consistency_runtime() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// DAG integration acceptance must close the matching task through the
+/// real EventLoop state projection, not through a hat-side task mutation.
+#[test]
+fn test_parallel_forge_integrated_task_close_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_integrated_task_close_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// Accepted `forge.worktrees.ready` must activate the dispatcher next
 /// with no synthesized precheck hat in between.
 #[test]
