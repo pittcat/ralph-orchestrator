@@ -397,8 +397,8 @@ pub const LOOP_RUNNER_INTERNAL_TOPICS: &[&str] = &[
 use crate::config::ConfigError;
 use crate::config::ConfigWarning;
 use crate::event_origin::{
-    is_dag_runtime_unit_topic, is_supervisor_coordination_topic, is_supervisor_slot_topic,
-    is_wave_coordination_topic,
+    is_dag_runtime_control_topic, is_dag_runtime_unit_topic, is_supervisor_coordination_topic,
+    is_supervisor_slot_topic, is_wave_coordination_topic,
 };
 use crate::hat_registry::HatRegistry;
 use crate::payload_contract::{
@@ -908,6 +908,11 @@ pub fn detect_orphan_topics(
             if preset_uses_dag_runtime(config) && is_dag_runtime_unit_topic(topic) {
                 continue;
             }
+            // DAG control-plane inputs are accepted by the runtime at the
+            // approval/correction boundary; no agent hat subscribes to them.
+            if preset_uses_dag_runtime(config) && is_dag_runtime_control_topic(topic) {
+                continue;
+            }
             if is_precheck_rejected_topic(config, topic) {
                 continue;
             }
@@ -1046,6 +1051,9 @@ pub fn detect_required_topic_gaps(
         // wave-mode preset declaring same-named topics is still
         // checked normally.
         if is_dag_runtime_unit_topic(topic) && preset_uses_dag_runtime(config) {
+            continue;
+        }
+        if is_dag_runtime_control_topic(topic) && preset_uses_dag_runtime(config) {
             continue;
         }
         // plan 2026-08-27-1430 U4: `<X>.proposed` topics derived from a

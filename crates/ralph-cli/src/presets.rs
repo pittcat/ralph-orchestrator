@@ -1272,7 +1272,6 @@ mod tests {
                     "forge.plan.inspected",
                     "forge.plan.ready",
                     "forge.concurrency.approved",
-                    "forge.worktrees.ready",
                 ],
             ),
             "development_loop",
@@ -1333,7 +1332,6 @@ mod tests {
                     "forge.plan.inspected",
                     "forge.plan.ready",
                     "forge.concurrency.approved",
-                    "forge.worktrees.ready",
                     "forge.exec.development.done",
                     "forge.full.verified",
                     "forge.audit.done",
@@ -1377,21 +1375,13 @@ mod tests {
         );
 
         // S3 (U7): development_loop's `transition_emits` is the
-        // single advance path. Forge-side wave topics are
-        // allowed (in-scope) but only `forge.exec.development.done`
-        // and `work.failed` advance the step.
+        // single advance path. Runtime per-Unit receipts stay in-step;
+        // only `forge.exec.development.done` and `work.failed` advance it.
         let dev_loop = flow
             .steps
             .iter()
             .find(|s| s.id == "development_loop")
             .expect("development_loop step");
-        assert!(
-            dev_loop
-                .allowed_emits
-                .iter()
-                .any(|t| t == "forge.wave.settled"),
-            "development_loop must allow forge.wave.settled (per-wave terminal)"
-        );
         assert!(
             dev_loop
                 .transition_emits
@@ -1414,62 +1404,14 @@ mod tests {
     /// on `exec.unit.done`, and the same preset must wire the
     /// projection that closes that task atomically. This is a
     /// structural contract — the agent never calls `task close`.
-    #[test]
-    fn test_parallel_forge_exec_unit_done_requires_task_identity() {
-        let preset = get_preset("parallel-forge").expect("parallel-forge preset");
-        let config = RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML parses");
-        let policy = config
-            .event_loop
-            .event_policy
-            .as_ref()
-            .expect("parallel-forge declares event_policy");
-        let entry = policy
-            .schemas
-            .get("exec.unit.done")
-            .expect("parallel-forge schema must declare exec.unit.done");
-        let required: std::collections::BTreeSet<&str> =
-            entry.required_fields.iter().map(String::as_str).collect();
-        for field in ["task_id", "task_key"] {
-            assert!(
-                required.contains(field),
-                "exec.unit.done.required_fields missing `{field}`; got {required:?}"
-            );
-        }
-    }
-
     /// Plan 2026-08-27-1430 U3 / R1: the embedded parallel-forge schema
     /// must declare `target_start_sha` / `target_status_fingerprint` as
     /// required fields on `forge.worktrees.ready`, so the fan-out handoff
     /// always carries the target-branch identity snapshot consumed later
     /// by the audit gate.
-    #[test]
-    fn parallel_forge_worktrees_ready_requires_target_identity() {
-        let preset = get_preset("parallel-forge").expect("parallel-forge preset");
-        let config = RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML parses");
-        let policy = config
-            .event_loop
-            .event_policy
-            .as_ref()
-            .expect("parallel-forge declares event_policy");
-        let entry = policy
-            .schemas
-            .get("forge.worktrees.ready")
-            .expect("parallel-forge schema must declare forge.worktrees.ready");
-        let required: std::collections::BTreeSet<&str> =
-            entry.required_fields.iter().map(String::as_str).collect();
-        for field in ["target_start_sha", "target_status_fingerprint"] {
-            assert!(
-                required.contains(field),
-                "forge.worktrees.ready.required_fields missing `{field}`; got {required:?}"
-            );
-        }
-    }
-
     /// Fan-out `forge.worktrees.ready` must not go through an LLM
-    /// precheck hat: after normalize(), worktree still publishes the
-    /// bare topic, dispatcher still triggers on it, no synthesized
-    /// `precheck-forge.worktrees.ready` exists, and the four empty-field
-    /// consistency rules target the bare topic.
+    /// precheck hat: DAG admission starts at the accepted approval and
+    /// runtime-owned per-Unit jobs do not need a fan-out handoff gate.
     #[test]
     fn parallel_forge_fanout_short_circuits_worktrees_ready_llm_precheck() {
         let preset = get_preset("parallel-forge").expect("parallel-forge preset");
@@ -1490,42 +1432,12 @@ mod tests {
         );
         assert_eq!(
             precheck.rules.len(),
-            5,
-            "remaining key-stage LLM precheck rules: wave worktrees/reviewed/settled, work.failed, audit.done"
+            2,
+            "remaining key-stage LLM precheck rules: work.failed and audit.done"
         );
         assert!(
             !config.hats.contains_key("precheck-forge.worktrees.ready"),
             "normalize must not synthesize a fan-out precheck hat"
-        );
-
-        let worktree = config.hats.get("worktree").expect("worktree hat");
-        assert!(
-            worktree
-                .publishes
-                .iter()
-                .any(|t| t == "forge.worktrees.ready"),
-            "worktree must publish the bare ready topic; got {:?}",
-            worktree.publishes
-        );
-        assert!(
-            !worktree
-                .publishes
-                .iter()
-                .any(|t| t == "forge.worktrees.ready.proposed"),
-            "worktree must not be rewritten to .proposed; got {:?}",
-            worktree.publishes
-        );
-        let dispatcher = config
-            .hats
-            .get("forge-dispatcher")
-            .expect("forge-dispatcher hat");
-        assert!(
-            dispatcher
-                .triggers
-                .iter()
-                .any(|t| t == "forge.worktrees.ready"),
-            "dispatcher must trigger on the accepted bare topic; got {:?}",
-            dispatcher.triggers
         );
 
         let policy = config
@@ -1533,23 +1445,15 @@ mod tests {
             .event_policy
             .as_ref()
             .expect("parallel-forge declares event_policy");
-        for id in [
-            "parallel-forge-worktrees-ready-empty-target-branch",
-            "parallel-forge-worktrees-ready-empty-start-sha",
-            "parallel-forge-worktrees-ready-empty-fingerprint",
-            "parallel-forge-worktrees-ready-empty-map-path",
-        ] {
-            let rule = policy
-                .payload_consistency
-                .rules
-                .iter()
-                .find(|rule| rule.id == id)
-                .unwrap_or_else(|| panic!("missing payload_consistency rule {id}"));
-            assert_eq!(
-                rule.topic, "forge.worktrees.ready",
-                "rule {id} must target the bare fan-out topic"
-            );
-        }
+        assert!(config.hats.keys().all(|id| {
+            !matches!(id.as_str(), "worktree" | "forge-dispatcher" | "integrator" | "wave-fixer")
+        }));
+        assert!(policy.schemas.keys().all(|topic| {
+            !topic.starts_with("forge.wave.")
+                && !topic.starts_with("exec.unit.")
+                && topic != "forge.integration.done"
+                && topic != "forge.units.reviewed"
+        }));
     }
 
     /// Plan 2026-07-30-001 U4 / R4: the embedded parallel-forge preset
@@ -1588,138 +1492,6 @@ mod tests {
         assert_eq!(match_cfg.topic, "forge.report.done");
         assert_eq!(match_cfg.fields, vec!["report_path"]);
         assert!(match_cfg.validate().is_ok());
-    }
-
-    #[test]
-    fn parallel_forge_requires_final_delivery_handoff() {
-        let preset = get_preset("parallel-forge").expect("parallel-forge preset");
-        let config = RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML parses");
-        let flow = config
-            .mechanism
-            .as_ref()
-            .and_then(|mechanism| mechanism.flow.as_ref())
-            .expect("parallel-forge declares mechanism.flow");
-
-        let finalize = flow
-            .steps
-            .iter()
-            .find(|step| step.id == "finalize")
-            .expect("parallel-forge must have a final delivery step");
-        assert_eq!(finalize.on.as_deref(), Some("forge.audit.done"));
-        assert!(
-            finalize
-                .allowed_emits
-                .iter()
-                .any(|topic| topic == "forge.finalized")
-        );
-
-        let cleanup = flow
-            .steps
-            .iter()
-            .find(|step| step.id == "cleanup")
-            .expect("parallel-forge must have a cleanup step");
-        assert!(
-            cleanup
-                .on_any_of
-                .iter()
-                .any(|topic| topic == "forge.finalized")
-        );
-        assert!(
-            cleanup
-                .allowed_emits
-                .iter()
-                .any(|topic| topic == "forge.cleanup.done")
-        );
-
-        let report = flow
-            .steps
-            .iter()
-            .find(|step| step.id == "report")
-            .expect("parallel-forge must have a report step");
-        assert!(report.on_any_of.is_empty());
-        assert_eq!(report.on.as_deref(), Some("forge.cleanup.done"));
-        assert!(
-            !report
-                .on_any_of
-                .iter()
-                .any(|topic| topic == "forge.audit.done")
-        );
-
-        let finalizer = config
-            .hats
-            .get("finalizer")
-            .expect("parallel-forge must define finalizer");
-        assert!(
-            finalizer
-                .triggers
-                .iter()
-                .any(|topic| topic == "forge.audit.done")
-        );
-        assert!(
-            finalizer
-                .publishes
-                .iter()
-                .any(|topic| topic == "forge.finalized")
-        );
-
-        let worktrees_ready = config
-            .event_loop
-            .event_policy
-            .as_ref()
-            .and_then(|policy| policy.schemas.get("forge.worktrees.ready"))
-            .expect("forge.worktrees.ready schema");
-        assert!(
-            worktrees_ready
-                .required_fields
-                .iter()
-                .any(|field| field == "target_branch")
-        );
-
-        let finalized = config
-            .event_loop
-            .event_policy
-            .as_ref()
-            .and_then(|policy| policy.schemas.get("forge.finalized"))
-            .expect("forge.finalized schema");
-        for field in [
-            "audit_report_path",
-            "target_branch",
-            "integration_branch",
-            "target_commit_sha",
-            "finalization_report_path",
-            "plan_key",
-        ] {
-            assert!(
-                finalized
-                    .required_fields
-                    .iter()
-                    .any(|required| required == field),
-                "forge.finalized schema missing {field}"
-            );
-        }
-
-        let cleanup_done = config
-            .event_loop
-            .event_policy
-            .as_ref()
-            .and_then(|policy| policy.schemas.get("forge.cleanup.done"))
-            .expect("forge.cleanup.done schema");
-        for field in [
-            "cleanup_report_path",
-            "cleanup_status",
-            "attempted_count",
-            "cleaned_count",
-            "pending_count",
-            "plan_key",
-        ] {
-            assert!(
-                cleanup_done
-                    .required_fields
-                    .iter()
-                    .any(|required| required == field),
-                "forge.cleanup.done schema missing {field}"
-            );
-        }
     }
 
     #[test]
@@ -3171,44 +2943,6 @@ mod tests {
     // appear in `event_filter.events`. Topics still present in
     // `publishes` for backward-compat aliases do not have to be
     // mirrored in the filter.
-    #[test]
-    fn test_parallel_forge_event_filter_covers_triggers() {
-        let preset = get_preset("parallel-forge").expect("parallel-forge preset must exist");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML should parse");
-        let registry = HatRegistry::from_config(&config);
-        use ralph_proto::HatId;
-        let target_hats = ["reviewer", "integrator", "verifier", "tester"];
-        let mut problems: Vec<String> = Vec::new();
-        for hat_id in target_hats {
-            let hat_id_typed = HatId::new(hat_id);
-            let Some(hat_cfg) = registry.get_config(&hat_id_typed) else {
-                problems.push(format!(
-                    "hat `{hat_id}` missing from parallel-forge registry"
-                ));
-                continue;
-            };
-            let filter_events: std::collections::BTreeSet<&str> =
-                match hat_cfg.event_filter.as_ref() {
-                    Some(f) => f.events.iter().map(String::as_str).collect(),
-                    None => std::collections::BTreeSet::new(),
-                };
-            for trigger in &hat_cfg.triggers {
-                if !filter_events.contains(trigger.as_str()) {
-                    problems.push(format!(
-                        "hat `{hat_id}` trigger `{trigger}` not covered by event_filter.events {:?}",
-                        filter_events
-                    ));
-                }
-            }
-        }
-        assert!(
-            problems.is_empty(),
-            "parallel-forge event_filter does not cover triggers: {}",
-            problems.join("; ")
-        );
-    }
-
     // Plan 2026-07-29-005 U4 / G8: the forge-failure-handler hat
     // instructions must use a single consecutive step-number
     // sequence. Before U4 the "Final correction (3 rounds
@@ -3538,8 +3272,8 @@ mod tests {
             );
         }
 
-        // 3. integrator/verifier drop work.failed from all three lists.
-        for hat_id in ["integrator", "verifier"] {
+        // 3. verifier drops work.failed from all three lists.
+        for hat_id in ["verifier"] {
             let hat = config
                 .hats
                 .get(hat_id)
@@ -3556,14 +3290,13 @@ mod tests {
             }
         }
 
-        // 4. topic_deny_rules pin tester/integrator/verifier/forge-dispatcher
-        //    away from work.failed.
+        // 4. topic_deny_rules pin tester and verifier away from work.failed.
         let policy = config
             .event_loop
             .event_policy
             .as_ref()
             .expect("event_policy must be declared for parallel-forge");
-        for hat_id in ["tester", "integrator", "verifier", "forge-dispatcher"] {
+        for hat_id in ["tester", "verifier"] {
             assert!(
                 policy
                     .topic_deny_rules
@@ -3609,15 +3342,9 @@ mod tests {
             .as_ref()
             .expect("parallel-forge must declare precheck")
             .rules;
-        // Plan 2026-08-27 U5-U11 evidence gates: every key-stage emit
-        // except fan-out `forge.worktrees.ready` (which intentionally
-        // short-circuits the LLM precheck — see
-        // `parallel_forge_fanout_short_circuits_worktrees_ready_llm_precheck`)
-        // passes through a synthesized LLM gate hat.
+        // DAG mode keeps only the terminal evidence gates that still require
+        // an LLM judgment; runtime-owned per-Unit handoffs are deterministic.
         for topic in [
-            "forge.wave.worktrees.ready",
-            "forge.wave.reviewed",
-            "forge.wave.settled",
             "work.failed",
             "forge.audit.done",
         ] {
@@ -3633,18 +3360,6 @@ mod tests {
             .as_ref()
             .expect("parallel-forge must declare event_policy");
         for (id, topic) in [
-            (
-                "parallel-forge-worktrees-ready-empty-base",
-                "forge.wave.worktrees.ready.proposed",
-            ),
-            (
-                "parallel-forge-reviewed-empty-report",
-                "forge.wave.reviewed.proposed",
-            ),
-            (
-                "parallel-forge-settled-empty-task-ids",
-                "forge.wave.settled.proposed",
-            ),
             (
                 "parallel-forge-failed-empty-context",
                 "work.failed.proposed",

@@ -197,11 +197,13 @@ impl HandoffGraph {
         {
             const DAG_RUNTIME_ID: &str = "dag_runtime";
             const DAG_RUNTIME_PUBLISHES: &[&str] = &[
-                "exec.unit.ready",
                 "forge.unit.integrated",
                 "forge.exec.development.done",
             ];
-            const DAG_RUNTIME_ENTRY_TOPICS: &[&str] = &["forge.concurrency.approved"];
+            const DAG_RUNTIME_ENTRY_TOPICS: &[&str] = &[
+                "forge.concurrency.approved",
+                "forge.correction.requested",
+            ];
             let runtime_id = DAG_RUNTIME_ID.to_string();
             hat_order.push(runtime_id.clone());
             for topic in DAG_RUNTIME_PUBLISHES {
@@ -1155,7 +1157,6 @@ hats:
         let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse dag WAC fixture");
         let graph = HandoffGraph::from_config(&config);
 
-        assert_eq!(graph.publishers_of("exec.unit.ready"), &["dag_runtime"]);
         assert_eq!(
             graph.publishers_of("forge.exec.development.done"),
             &["dag_runtime"]
@@ -1167,11 +1168,6 @@ hats:
                 .is_some_and(|hats| hats.contains(&"dag_runtime".to_string()))
         );
         assert!(check_activation_egress(&config, &graph, true, false).is_empty());
-        assert!(
-            check_trigger_publish_asymmetry(&config, &graph, true, false)
-                .iter()
-                .all(|finding| finding.topic.as_deref() != Some("exec.unit.ready"))
-        );
     }
 
     #[test]

@@ -207,6 +207,18 @@ pub fn is_dag_runtime_unit_topic(topic: &str) -> bool {
     DAG_RUNTIME_UNIT_TOPICS.contains(&topic)
 }
 
+/// Control-plane topics consumed by the DAG runtime rather than an agent hat.
+/// These exact topics are exempt from static subscriber checks only when the
+/// preset also selects the DAG scheduler mode.
+pub const DAG_RUNTIME_CONTROL_TOPICS: &[&str] = &[
+    "forge.concurrency.approved",
+    "forge.correction.requested",
+];
+
+pub fn is_dag_runtime_control_topic(topic: &str) -> bool {
+    DAG_RUNTIME_CONTROL_TOPICS.contains(&topic)
+}
+
 /// U7 (2026-07-23-001, R10 / KTD-7): the canonical identifier of the
 /// **virtual supervisor** runtime consumer.
 ///
