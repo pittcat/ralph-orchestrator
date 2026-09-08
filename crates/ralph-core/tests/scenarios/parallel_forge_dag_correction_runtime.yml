@@ -1,0 +1,88 @@
+# Runtime BDD for the DAG correction event chain. The real EventLoop
+# drives one rejected review into a correction request, then re-enters
+# review through a fresh executed result and completes successfully.
+
+name: pf_dag_correction_runtime
+description: rejected DAG unit review enters correction and re-review through the real EventLoop
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 12
+  event_loop:
+    execution_mode: isolated
+    starting_event: forge.start
+    completion_promise: LOOP_COMPLETE
+  hats:
+    pf-executor:
+      subscribes_to: [forge.start, forge.correction.requested]
+      publishes: [forge.unit.executed]
+    pf-reviewer:
+      subscribes_to: [forge.unit.executed]
+      publishes: [forge.unit.reviewed]
+    pf-failure-handler:
+      subscribes_to: [forge.unit.reviewed]
+      publishes: [forge.correction.requested]
+    pf-verifier:
+      subscribes_to: [forge.unit.reviewed]
+      publishes: [forge.unit.verified]
+    pf-reporter:
+      subscribes_to: [forge.unit.verified]
+      publishes: [LOOP_COMPLETE]
+
+mock_responses:
+  - hat: pf-executor
+    text: |
+      <event topic="forge.unit.executed">
+      {"plan_key":"pf-dag-correction","unit_id":"U1","attempt":0,"execution_status":"accepted"}
+      </event>
+  - hat: pf-reviewer
+    text: |
+      <event topic="forge.unit.reviewed">
+      {"plan_key":"pf-dag-correction","unit_id":"U1","attempt":0,"verdict":"REJECTED","failure_fingerprint":"dag-correction-1"}
+      </event>
+  - hat: pf-failure-handler
+    text: |
+      <event topic="forge.correction.requested">
+      {"plan_key":"pf-dag-correction","affected_unit_ids":["U1"],"failure_observation_path":".ralph/forge/pf-dag-correction/failure.md"}
+      </event>
+  - hat: pf-executor
+    text: |
+      <event topic="forge.unit.executed">
+      {"plan_key":"pf-dag-correction","unit_id":"U1","attempt":1,"execution_status":"accepted"}
+      </event>
+  - hat: pf-reviewer
+    text: |
+      <event topic="forge.unit.reviewed">
+      {"plan_key":"pf-dag-correction","unit_id":"U1","attempt":1,"verdict":"ACCEPTED"}
+      </event>
+  - hat: pf-verifier
+    text: |
+      <event topic="forge.unit.verified">
+      {"plan_key":"pf-dag-correction","unit_id":"U1","attempt":1,"verification_status":"passed"}
+      </event>
+  - hat: pf-reporter
+    text: |
+      <event topic="LOOP_COMPLETE">
+      {"reason":"DAG correction recovered"}
+      </event>
+
+expected:
+  iterations: 7
+  events:
+    - topic: forge.unit.executed
+    - topic: forge.unit.reviewed
+    - topic: forge.correction.requested
+    - topic: forge.unit.executed
+    - topic: forge.unit.reviewed
+    - topic: forge.unit.verified
+    - topic: LOOP_COMPLETE
+  event_topic_counts:
+    - topic: forge.correction.requested
+      count: 1
+    - topic: forge.unit.executed
+      count: 2
+    - topic: forge.unit.reviewed
+      count: 2
+  absent_events:
+    - topic: work.failed
+  completion: true

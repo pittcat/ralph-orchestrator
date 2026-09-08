@@ -2154,6 +2154,14 @@ fn test_parallel_forge_correction_runtime() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// DAG correction must re-enter the unit review chain after one rejected
+/// review, without falling through to the terminal `work.failed` path.
+#[test]
+fn test_parallel_forge_dag_correction_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_dag_correction_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// Plan 2026-08-27-1430 U2 (S11 / D5): tester typed failure. The tester
 /// must NOT land `work.failed` directly (deny rule + origin guard); the
 /// rejected attempt resumes the tester, which then emits
