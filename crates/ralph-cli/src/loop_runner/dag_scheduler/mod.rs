@@ -379,9 +379,44 @@ impl DagSchedulerRuntime {
                         .completion_tx
                         .send(spawn::JobCompletion::recovered(job.identity, events_file));
                 } else {
-                    // NULL PID and unknown liveness are deliberately
-                    // indistinguishable here: recovery must stop safely.
-                    self.block_plan(&plan_key, "unresolved DAG launch has no trustworthy result");
+                    let Some(pid) = job.pid else {
+                        // NULL PID is the spawn-before-handshake window: an
+                        // orphan may exist, so do not guess or relaunch.
+                        self.block_plan(
+                            &plan_key,
+                            "unresolved DAG launch has no trustworthy PID or result",
+                        );
+                        continue;
+                    };
+                    match nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(pid as i32),
+                        None,
+                    ) {
+                        Ok(()) | Err(nix::errno::Errno::EPERM) => {
+                            let timeout = self
+                                .exec
+                                .as_ref()
+                                .map(|exec| exec.timeout_for_hat(&job.identity.hat))
+                                .unwrap_or_else(|| std::time::Duration::from_secs(3600));
+                            if !self.adopt_recovered_job(
+                                job.identity.clone(),
+                                pid,
+                                events_file,
+                                timeout,
+                            ) {
+                                self.block_plan(&plan_key, "recovered live job could not be adopted");
+                            }
+                        }
+                        Err(nix::errno::Errno::ESRCH) => {
+                            self.settle_recovered_dead_job(&job.identity);
+                        }
+                        Err(_) => {
+                            self.block_plan(
+                                &plan_key,
+                                "recovered job liveness probe was inconclusive",
+                            );
+                        }
+                    }
                 }
             }
         }

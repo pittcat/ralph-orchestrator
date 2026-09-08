@@ -141,6 +141,15 @@ impl DagExecutionContext {
                 .unwrap_or_default(),
         }
     }
+
+    pub(crate) fn timeout_for_hat(&self, hat: &str) -> Duration {
+        self.hats
+            .get(hat)
+            .and_then(|config| config.timeout)
+            .map_or(Duration::from_secs(3600), |seconds| {
+                Duration::from_secs(u64::from(seconds))
+            })
+    }
 }
 
 /// A fenced job's exit report, delivered over the completion channel.
@@ -268,6 +277,95 @@ fn sha256_hex(input: &str) -> String {
 }
 
 impl DagSchedulerRuntime {
+    /// Reattach to a child that survived the supervisor restart. A PID is
+    /// only adopted after the caller has positively probed it; the child is
+    /// observed until it exits and then enters the normal completion drain.
+    #[cfg(feature = "supervisor-db")]
+    pub(crate) fn adopt_recovered_job(
+        &mut self,
+        identity: JobIdentity,
+        pid: u32,
+        events_file: PathBuf,
+        timeout: Duration,
+    ) -> bool {
+        let Some(stage) = super::recovery::stage_from_str(&identity.stage) else {
+            return false;
+        };
+        if !matches!(self.pipeline.advance(&identity.unit_key(), stage), AdvanceOutcome::Admitted { .. }) {
+            return false;
+        }
+        self.active_jobs.insert(identity.job_id.clone());
+        if identity.stage == SpawnKind::Fix.stage_str() {
+            self.fixer_in_flight = self.fixer_in_flight.saturating_add(1);
+        }
+        let tx = self.completion_tx.clone();
+        tokio::spawn(async move {
+            let started = Instant::now();
+            loop {
+                match nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid as i32),
+                    None,
+                ) {
+                    Ok(()) | Err(nix::errno::Errno::EPERM) => {}
+                    Err(nix::errno::Errno::ESRCH) => {
+                        let _ = tx.send(JobCompletion::recovered(
+                            identity.clone(),
+                            events_file.clone(),
+                        ));
+                        break;
+                    }
+                    Err(_) => {
+                        let _ = tx.send(JobCompletion {
+                            identity: identity.clone(),
+                            events_file: events_file.clone(),
+                            exit_code: None,
+                            timed_out: true,
+                        });
+                        break;
+                    }
+                }
+                if started.elapsed() >= timeout {
+                    let _ = tx.send(JobCompletion {
+                        identity: identity.clone(),
+                        events_file: events_file.clone(),
+                        exit_code: None,
+                        timed_out: true,
+                    });
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        });
+        true
+    }
+
+    /// Settle a positively dead recovered child through the same typed
+    /// failure event used by live jobs. No replacement launch is attempted.
+    pub(crate) fn settle_recovered_dead_job(&mut self, identity: &JobIdentity) {
+        let kind = match identity.stage.as_str() {
+            "execute" => SpawnKind::Execute,
+            "review" => SpawnKind::Review,
+            "verify" => SpawnKind::Verify,
+            "fix" => SpawnKind::Fix,
+            _ => return,
+        };
+        let reason = format!(
+            "recovered DAG job {} is no longer alive and has no result",
+            identity.job_id
+        );
+        let digest = sha256_hex(&reason);
+        self.write_terminal(identity, "failed", &digest);
+        let payload = self.complete_payload(
+            kind,
+            identity,
+            serde_json::json!({
+                "reason": reason,
+                "failure_class": "orphan_or_empty_result",
+            }),
+        );
+        self.queue_failure_event(kind, identity, payload);
+    }
+
     /// True while the execution face has anything in flight or
     /// queued. Drives the `inner` keepalive: a dag-mode loop with
     /// pending DAG work must not fall into fallback recovery.
