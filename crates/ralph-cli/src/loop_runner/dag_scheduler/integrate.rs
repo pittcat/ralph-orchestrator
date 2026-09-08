@@ -1082,6 +1082,30 @@ units:
         assert!(!store.list_for_unit("U1").expect("list")[0].acked);
     }
 
+    /// Crash window: the terminal fence was committed, but the final event
+    /// append was interrupted. Recovery must block rather than re-emit after
+    /// the fence has already made the side effect irreversible.
+    #[cfg(feature = "supervisor-db")]
+    #[test]
+    fn recovery_blocks_terminal_fence_without_ledger_event() {
+        let (tmp, mut runtime) = git_fixture(PLAN_ARTIFACT, false);
+        runtime
+            .journal()
+            .expect("durable journal")
+            .try_record_terminal_emit(
+                "pf-test",
+                DEVELOPMENT_DONE,
+                "development-done-key",
+                1,
+            )
+            .expect("record terminal fence");
+
+        runtime.reconcile_after_restart();
+
+        assert!(runtime.blocked_plans.contains("pf-test"));
+        assert_eq!(ledger_contains(tmp.path(), DEVELOPMENT_DONE), 0);
+    }
+
     /// S15: development.done waits for every unit's ack, then emits
     /// exactly once; the durable fence makes replays no-ops.
     #[test]
