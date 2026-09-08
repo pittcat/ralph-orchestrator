@@ -3148,6 +3148,34 @@ mod tests {
         );
     }
 
+    /// The active DAG correction seam only carries the identity and evidence
+    /// needed by the runtime. Keeping the schema contract structural prevents
+    /// retired wave-only fields from blocking accepted correction requests.
+    #[test]
+    fn test_parallel_forge_dag_correction_contract_is_runtime_shaped() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset must exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML should parse");
+        let schema = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .and_then(|policy| policy.schemas.get("forge.correction.requested"))
+            .expect("DAG correction schema must exist");
+        assert_eq!(
+            schema.required_fields,
+            vec![
+                "plan_key".to_string(),
+                "affected_unit_ids".to_string(),
+                "correction_request_path".to_string(),
+            ]
+        );
+        assert!(
+            !schema.required_fields.iter().any(|field| field == "wave_id"),
+            "DAG correction must not require retired wave identity"
+        );
+    }
+
     // Plan 2026-08-27-1430 U10 (S19 / S20 / S21; R6 / R8; D3): the four
     // receipt topics (`forge.exec.development.done`,
     // `forge.full.verified`, `forge.finalized`, `forge.report.done`)
