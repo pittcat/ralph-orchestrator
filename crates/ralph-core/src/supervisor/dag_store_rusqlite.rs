@@ -58,6 +58,7 @@ use rusqlite::OptionalExtension;
 
 pub mod admission;
 pub mod jobs;
+pub mod registration;
 
 // ---------------------------------------------------------------------------
 // Shared connection wrapper.
