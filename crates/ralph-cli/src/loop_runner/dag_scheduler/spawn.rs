@@ -42,6 +42,9 @@ use serde_json::Value;
 use sha2::Digest as _;
 use tracing::{debug, warn};
 
+use futures::FutureExt;
+use std::panic::AssertUnwindSafe;
+
 use super::driver::{DagSchedulerDriver, DriverOutcome, ReviewVerdict, topics};
 use super::jobs::AdvanceOutcome;
 use super::worktree::UnitWorktree;
@@ -1511,28 +1514,61 @@ impl DagSchedulerRuntime {
         let tx = self.completion_tx.clone();
         let completion_identity = identity.clone();
         let completion_events_file = events_file.clone();
+        // Clone for `active_jobs.insert` below; the spawned task
+        // takes ownership of `job_id` so its panic boundary can
+        // surface it on the catch_unwind error path.
+        let active_jobs_id = job_id.clone();
         tokio::spawn(async move {
-            let start = Instant::now();
-            let mut on_line = |_line: &str| {};
-            let outcome = drive_pty_lease_loop(
-                &mut handle,
-                &lease_mode,
-                output_format,
-                worker_index,
-                &mut on_line,
-                start,
-            )
+            // F6 (U14): a panic inside `drive_pty_lease_loop` would
+            // otherwise leak this job — `tx.send` never runs, so
+            // `active_jobs` keeps the id and `pump_idle` can never
+            // drain it. Wrap the lease loop in a panic boundary and
+            // force-send a synthetic `JobCompletion` so the existing
+            // drain path observes the failure and removes the job.
+            let panic_tx = tx.clone();
+            let panic_identity = completion_identity.clone();
+            let panic_events_file = completion_events_file.clone();
+            let panic_job_id = job_id;
+            let panic_stage = kind.stage_str();
+            let result = AssertUnwindSafe(async move {
+                let start = Instant::now();
+                let mut on_line = |_line: &str| {};
+                let outcome = drive_pty_lease_loop(
+                    &mut handle,
+                    &lease_mode,
+                    output_format,
+                    worker_index,
+                    &mut on_line,
+                    start,
+                )
+                .await;
+                let status = finish_pty_job(handle).await.ok();
+                let _ = tx.send(JobCompletion {
+                    identity: completion_identity,
+                    events_file: completion_events_file,
+                    exit_code: status.map(|s| s.exit_code() as i32),
+                    timed_out: outcome.timed_out,
+                });
+            })
+            .catch_unwind()
             .await;
-            let status = finish_pty_job(handle).await.ok();
-            let _ = tx.send(JobCompletion {
-                identity: completion_identity,
-                events_file: completion_events_file,
-                exit_code: status.map(|s| s.exit_code() as i32),
-                timed_out: outcome.timed_out,
-            });
+
+            if result.is_err() {
+                tracing::error!(
+                    job_id = %panic_job_id,
+                    stage = panic_stage,
+                    "DAG spawn: drive_pty_lease_loop panicked; forcing JobCompletion to drain active_jobs"
+                );
+                let _ = panic_tx.send(JobCompletion {
+                    identity: panic_identity,
+                    events_file: panic_events_file,
+                    exit_code: None,
+                    timed_out: true,
+                });
+            }
         });
-        self.active_jobs.insert(job_id.clone());
-        debug!(job_id, stage = kind.stage_str(), "DAG spawn: job launched");
+        self.active_jobs.insert(active_jobs_id.clone());
+        debug!(job_id = %active_jobs_id, stage = kind.stage_str(), "DAG spawn: job launched");
     }
 }
 
