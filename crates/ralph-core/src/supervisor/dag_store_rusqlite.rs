@@ -763,25 +763,13 @@ impl DagSchedulerStore for RusqliteDagSchedulerStore {
                 ],
             )
             .map_err(plan_io_err)?;
-            let existing: Option<(
-                String,
-                String,
-                String,
-                String,
-            )> = tx
+            let existing: Option<(String, String, String, String)> = tx
                 .query_row(
                     "SELECT accepted_commit, base_commit, evidence_token, evidence_fingerprint \
                      FROM dag_stage_evidence \
                      WHERE plan_key = ?1 AND unit_key = ?2 AND stage = ?3 AND attempt = ?4",
                     rusqlite::params![plan_key, unit_key, stage, attempt as i64],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                        ))
-                    },
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .optional()
                 .map_err(plan_io_err)?;
@@ -1637,8 +1625,7 @@ mod tests {
                 .expect("independent topic")
         );
         drop(store);
-        let reopened = RusqliteDagSchedulerStore::open(dir.path().join("dag.db"))
-            .expect("reopen");
+        let reopened = RusqliteDagSchedulerStore::open(dir.path().join("dag.db")).expect("reopen");
         assert!(
             !reopened
                 .try_record_terminal_emit("pf", "forge.exec.development.done", "k1", 500)
@@ -1652,16 +1639,36 @@ mod tests {
     #[test]
     fn has_terminal_emit_reflects_fence_state_across_reopen() {
         let (dir, store) = fresh_plan_store();
-        assert!(!store.has_terminal_emit("pf", "forge.exec.development.done").unwrap());
+        assert!(
+            !store
+                .has_terminal_emit("pf", "forge.exec.development.done")
+                .unwrap()
+        );
         store
             .try_record_terminal_emit("pf", "forge.exec.development.done", "k1", 100)
             .unwrap();
-        assert!(store.has_terminal_emit("pf", "forge.exec.development.done").unwrap());
-        assert!(!store.has_terminal_emit("pf", "forge.plan.complete").unwrap());
-        assert!(!store.has_terminal_emit("other", "forge.exec.development.done").unwrap());
+        assert!(
+            store
+                .has_terminal_emit("pf", "forge.exec.development.done")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .has_terminal_emit("pf", "forge.plan.complete")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .has_terminal_emit("other", "forge.exec.development.done")
+                .unwrap()
+        );
         drop(store);
         let reopened = RusqliteDagSchedulerStore::open(dir.path().join("dag.db")).unwrap();
-        assert!(reopened.has_terminal_emit("pf", "forge.exec.development.done").unwrap());
+        assert!(
+            reopened
+                .has_terminal_emit("pf", "forge.exec.development.done")
+                .unwrap()
+        );
     }
 
     /// E3: the verified base commit is written once, replays are
@@ -1671,11 +1678,19 @@ mod tests {
     fn verified_base_commit_is_durable_and_conflict_fails_closed() {
         let (dir, store) = fresh_plan_store();
         assert_eq!(store.verified_base("pf").unwrap(), None);
-        store.record_verified_base("pf", "a".repeat(64).as_str(), 1).unwrap();
+        store
+            .record_verified_base("pf", "a".repeat(64).as_str(), 1)
+            .unwrap();
         // Same-value replay is a no-op.
-        store.record_verified_base("pf", "a".repeat(64).as_str(), 2).unwrap();
+        store
+            .record_verified_base("pf", "a".repeat(64).as_str(), 2)
+            .unwrap();
         // A conflicting rewrite fails closed.
-        assert!(store.record_verified_base("pf", "b".repeat(64).as_str(), 3).is_err());
+        assert!(
+            store
+                .record_verified_base("pf", "b".repeat(64).as_str(), 3)
+                .is_err()
+        );
         assert_eq!(store.verified_base("pf").unwrap(), Some("a".repeat(64)));
         drop(store);
         let reopened = RusqliteDagSchedulerStore::open(dir.path().join("dag.db")).unwrap();
@@ -1765,11 +1780,7 @@ mod tests {
         use crate::supervisor::migrations;
         let dir = TempDir::new().expect("tempdir");
         let store = RusqliteDagSchedulerStore::open(dir.path().join("dag.db")).expect("open");
-        let conn = store
-            .inner
-            .conn
-            .lock()
-            .expect("conn");
+        let conn = store.inner.conn.lock().expect("conn");
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("user_version");

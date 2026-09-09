@@ -35,7 +35,9 @@ pub enum BasePinOutcome {
 /// Pure dispatch: classify base pin outcome.
 pub fn compute_base_pin(input: &BasePinInput) -> BasePinOutcome {
     if input.dependency_unit_keys.is_empty() {
-        return BasePinOutcome::PinCurrentTarget { sha: input.current_target_sha.clone() };
+        return BasePinOutcome::PinCurrentTarget {
+            sha: input.current_target_sha.clone(),
+        };
     }
     if !input.candidate_ancestor_in_target {
         return BasePinOutcome::UnackedDependency {
@@ -49,7 +51,9 @@ pub fn compute_base_pin(input: &BasePinInput) -> BasePinOutcome {
     }
     // Skeleton: deps present → pin to current_target_sha. Real impl
     // joins the deps with current target and returns the merge-base.
-    BasePinOutcome::PinDepsBase { sha: input.current_target_sha.clone() }
+    BasePinOutcome::PinDepsBase {
+        sha: input.current_target_sha.clone(),
+    }
 }
 
 /// Decide whether a target rewrite blocks the pin.
@@ -84,10 +88,19 @@ mod tests {
     #[test]
     fn all_dependencies_must_be_acked_ancestors() {
         let mut input = base();
-        input.dependency_acked_commits.insert("commit-1".to_string());
-        input.dependency_acked_commits.insert("commit-2".to_string());
+        input
+            .dependency_acked_commits
+            .insert("commit-1".to_string());
+        input
+            .dependency_acked_commits
+            .insert("commit-2".to_string());
         let outcome = compute_base_pin(&input);
-        assert_eq!(outcome, BasePinOutcome::PinDepsBase { sha: "feedface".to_string() });
+        assert_eq!(
+            outcome,
+            BasePinOutcome::PinDepsBase {
+                sha: "feedface".to_string()
+            }
+        );
     }
 
     #[test]
@@ -106,7 +119,12 @@ mod tests {
         let mut input = base();
         input.dependency_unit_keys.clear();
         let outcome = compute_base_pin(&input);
-        assert_eq!(outcome, BasePinOutcome::PinCurrentTarget { sha: "feedface".to_string() });
+        assert_eq!(
+            outcome,
+            BasePinOutcome::PinCurrentTarget {
+                sha: "feedface".to_string()
+            }
+        );
     }
 
     #[test]

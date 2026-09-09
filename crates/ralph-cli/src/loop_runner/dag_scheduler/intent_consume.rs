@@ -89,11 +89,23 @@ pub fn classify_intent_recovery(input: &IntentRecoveryInput) -> IntentRecoveryOu
 /// Reference table: legal transitions of intent target states.
 pub fn legal_intent_target_transitions() -> BTreeMap<IntentTargetState, Vec<IntentTargetState>> {
     let mut m = BTreeMap::new();
-    m.insert(IntentTargetState::TargetExpected, vec![IntentTargetState::TargetCandidate, IntentTargetState::StaleUnapplied]);
-    m.insert(IntentTargetState::TargetCandidate, vec![IntentTargetState::TargetProvenDescendant]);
+    m.insert(
+        IntentTargetState::TargetExpected,
+        vec![
+            IntentTargetState::TargetCandidate,
+            IntentTargetState::StaleUnapplied,
+        ],
+    );
+    m.insert(
+        IntentTargetState::TargetCandidate,
+        vec![IntentTargetState::TargetProvenDescendant],
+    );
     m.insert(IntentTargetState::TargetProvenDescendant, vec![]);
     m.insert(IntentTargetState::ForeignTarget, vec![]);
-    m.insert(IntentTargetState::StaleUnapplied, vec![IntentTargetState::TargetExpected]);
+    m.insert(
+        IntentTargetState::StaleUnapplied,
+        vec![IntentTargetState::TargetExpected],
+    );
     m
 }
 
@@ -115,7 +127,10 @@ mod tests {
     #[test]
     fn intent_target_expected() {
         let outcome = classify_intent_recovery(&base());
-        assert!(matches!(outcome, IntentRecoveryOutcome::RetryCasWithExpected { .. }));
+        assert!(matches!(
+            outcome,
+            IntentRecoveryOutcome::RetryCasWithExpected { .. }
+        ));
     }
 
     #[test]
@@ -123,7 +138,10 @@ mod tests {
         let mut input = base();
         input.current_target_head = "cccc".to_string();
         let outcome = classify_intent_recovery(&input);
-        assert!(matches!(outcome, IntentRecoveryOutcome::ConsumeCasAndRecord { .. }));
+        assert!(matches!(
+            outcome,
+            IntentRecoveryOutcome::ConsumeCasAndRecord { .. }
+        ));
     }
 
     #[test]
@@ -131,7 +149,10 @@ mod tests {
         let mut input = base();
         input.current_target_head = "cccc1".to_string(); // descendant
         let outcome = classify_intent_recovery(&input);
-        assert!(matches!(outcome, IntentRecoveryOutcome::JustRecordDescendant { .. }));
+        assert!(matches!(
+            outcome,
+            IntentRecoveryOutcome::JustRecordDescendant { .. }
+        ));
     }
 
     #[test]
@@ -139,7 +160,10 @@ mod tests {
         let mut input = base();
         input.worktree_canonical_identity = "".to_string();
         let outcome = classify_intent_recovery(&input);
-        assert!(matches!(outcome, IntentRecoveryOutcome::RefusedForeign { .. }));
+        assert!(matches!(
+            outcome,
+            IntentRecoveryOutcome::RefusedForeign { .. }
+        ));
     }
 
     #[test]
@@ -148,6 +172,9 @@ mod tests {
         input.current_target_head = "zzzz".to_string(); // unrelated
         input.cas_applied = false;
         let outcome = classify_intent_recovery(&input);
-        assert!(matches!(outcome, IntentRecoveryOutcome::SupersedeStale { .. }));
+        assert!(matches!(
+            outcome,
+            IntentRecoveryOutcome::SupersedeStale { .. }
+        ));
     }
 }

@@ -78,10 +78,8 @@ impl RusqliteDagSchedulerStore {
         // Build the capacity lookup once; reserve_job gets a
         // parallel slice pair, the standalone `claim_resources`
         // gets its own.
-        let cap_map: std::collections::BTreeMap<&str, u32> = capacities
-            .iter()
-            .map(|(k, v)| (k.as_str(), *v))
-            .collect();
+        let cap_map: std::collections::BTreeMap<&str, u32> =
+            capacities.iter().map(|(k, v)| (k.as_str(), *v)).collect();
         let unit_key = identity.unit_key();
         for (resource_key, permits) in claims {
             // Capacity must be declared for EVERY claimed
@@ -187,11 +185,7 @@ impl RusqliteDagSchedulerStore {
     /// the full held-then-released timeline. The update is
     /// wrapped in a `BEGIN IMMEDIATE` transaction so future
     /// multi-statement release changes remain atomic.
-    pub fn release_resources_for_unit(
-        &self,
-        unit_key: &str,
-        now_ms: i64,
-    ) -> DagStoreResult<()> {
+    pub fn release_resources_for_unit(&self, unit_key: &str, now_ms: i64) -> DagStoreResult<()> {
         let mut conn = self
             .inner
             .conn
@@ -236,7 +230,9 @@ mod tests {
     use super::*;
     use crate::supervisor::dag_store::{CanonicalPlanRecord, DagSchedulerStore};
 
-    fn open_pair(dir: &tempfile::TempDir) -> (RusqliteDagSchedulerStore, RusqliteDagSchedulerStore) {
+    fn open_pair(
+        dir: &tempfile::TempDir,
+    ) -> (RusqliteDagSchedulerStore, RusqliteDagSchedulerStore) {
         // Two store handles, two SQLite connections, one file
         // — this is the cheapest faithful model of "two
         // supervisor processes racing the same DB" the schema

@@ -38,9 +38,11 @@ pub(super) fn run_startup_gates(
     hats_source_label: Option<&str>,
 ) -> Result<()> {
     enforce_payload_contract_gate(config)?;
-    if let Err(lint_error) =
-        enforce_preset_lint_gate_with_preset_name(config, source_is_builtin_embedded, hats_source_label)
-    {
+    if let Err(lint_error) = enforce_preset_lint_gate_with_preset_name(
+        config,
+        source_is_builtin_embedded,
+        hats_source_label,
+    ) {
         let diagnostics_dir = std::path::Path::new(".").join(".ralph").join("diagnostics");
         let _artifact_path = write_preset_lint_artifact(&diagnostics_dir, &lint_error);
         eprintln!(

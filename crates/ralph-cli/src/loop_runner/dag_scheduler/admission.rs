@@ -11,8 +11,8 @@
 
 use ralph_core::supervisor::dag_scheduler::UnitAdmissionInput;
 
-use super::jobs::JobPipeline;
 use super::PlanTopology;
+use super::jobs::JobPipeline;
 
 /// 从 plan 与 pipeline 派生 admission 候选输入。
 ///
@@ -32,7 +32,10 @@ use super::PlanTopology;
 /// (plan.integrated 的 clone),因为 admission 引擎自身的依赖
 /// 判定是依赖 `integrated_units` 的;本过滤只排除「unit 自己
 /// 已经 integrated」的特例。
-pub(crate) fn build_candidates(plan: &PlanTopology, pipeline: &JobPipeline) -> Vec<UnitAdmissionInput> {
+pub(crate) fn build_candidates(
+    plan: &PlanTopology,
+    pipeline: &JobPipeline,
+) -> Vec<UnitAdmissionInput> {
     let live_unit_ids = pipeline.live_unit_ids();
     plan.units
         .iter()
@@ -73,7 +76,10 @@ mod tests {
         }
     }
 
-    fn plan(units: Vec<super::super::UnitTopology>, integrated: &[&str]) -> super::super::PlanTopology {
+    fn plan(
+        units: Vec<super::super::UnitTopology>,
+        integrated: &[&str],
+    ) -> super::super::PlanTopology {
         super::super::PlanTopology {
             artifact_path: String::new(),
             artifact_digest: String::new(),
@@ -129,7 +135,10 @@ mod tests {
         let ids: Vec<&str> = candidates.iter().map(|c| c.unit_id.as_str()).collect();
         assert_eq!(ids, vec!["U2"]);
         // U2 的依赖图里仍能看到 U1 integrated(供 admission 引擎解锁)
-        assert_eq!(candidates[0].integrated_units, std::iter::once("U1".to_string()).collect());
+        assert_eq!(
+            candidates[0].integrated_units,
+            std::iter::once("U1".to_string()).collect()
+        );
     }
 
     /// 持有 live job 的 unit 必须被过滤,即使它没有 integrated。
@@ -148,7 +157,10 @@ mod tests {
         pipeline.ensure_unit("U1", "j-U1", "executor", Stage::Execute);
         // 模拟 U1 处于 live Execute 状态(已 admission 但尚未 release)
         let outcome = pipeline.advance("U1", Stage::Execute);
-        assert!(matches!(outcome, super::super::jobs::AdvanceOutcome::Admitted { .. }));
+        assert!(matches!(
+            outcome,
+            super::super::jobs::AdvanceOutcome::Admitted { .. }
+        ));
 
         let candidates = build_candidates(&plan, &pipeline);
         let ids: Vec<&str> = candidates.iter().map(|c| c.unit_id.as_str()).collect();
@@ -168,7 +180,10 @@ mod tests {
         let mut pipeline = empty_pipeline();
         pipeline.ensure_unit("U1", "j-U1", "executor", Stage::Execute);
         let outcome = pipeline.advance("U1", Stage::Execute);
-        assert!(matches!(outcome, super::super::jobs::AdvanceOutcome::Admitted { .. }));
+        assert!(matches!(
+            outcome,
+            super::super::jobs::AdvanceOutcome::Admitted { .. }
+        ));
 
         let candidates = build_candidates(&plan, &pipeline);
         let ids: Vec<&str> = candidates.iter().map(|c| c.unit_id.as_str()).collect();

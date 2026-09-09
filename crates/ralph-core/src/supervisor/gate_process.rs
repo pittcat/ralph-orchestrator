@@ -28,7 +28,11 @@ impl BoundedTail {
     }
 
     pub fn with_capacity(cap: usize) -> Self {
-        Self { capacity: cap, inner: VecDeque::with_capacity(cap), truncated: 0 }
+        Self {
+            capacity: cap,
+            inner: VecDeque::with_capacity(cap),
+            truncated: 0,
+        }
     }
 
     pub fn push(&mut self, bytes: &[u8]) {
@@ -40,7 +44,8 @@ impl BoundedTail {
             self.truncated += drop_prefix;
             // Drain everything and refill from bytes tail.
             self.inner.clear();
-            self.inner.extend(bytes[bytes.len() - self.capacity..].iter().copied());
+            self.inner
+                .extend(bytes[bytes.len() - self.capacity..].iter().copied());
             return;
         }
         if self.inner.len() + bytes.len() > self.capacity {
@@ -94,7 +99,10 @@ impl GateOutcome {
 /// Short-circuit decision: when one command fails non-zero, should we
 /// continue with subsequent commands in the same gate?
 pub fn should_short_circuit(outcome: &GateOutcome) -> bool {
-    matches!(outcome, GateOutcome::Fail { .. } | GateOutcome::Timeout | GateOutcome::SpawnError { .. })
+    matches!(
+        outcome,
+        GateOutcome::Fail { .. } | GateOutcome::Timeout | GateOutcome::SpawnError { .. }
+    )
 }
 
 #[cfg(test)]
@@ -132,7 +140,9 @@ mod tests {
 
     #[test]
     fn spawn_error_returns_fail() {
-        let o = GateOutcome::SpawnError { reason: "ENOENT".to_string() };
+        let o = GateOutcome::SpawnError {
+            reason: "ENOENT".to_string(),
+        };
         assert!(should_short_circuit(&o));
         assert!(!o.is_pass());
     }
@@ -146,7 +156,10 @@ mod tests {
 
     #[test]
     fn nonzero_short_circuits_next_command() {
-        let o = GateOutcome::Fail { code: 1, reason: "x".to_string() };
+        let o = GateOutcome::Fail {
+            code: 1,
+            reason: "x".to_string(),
+        };
         assert!(should_short_circuit(&o));
     }
 }

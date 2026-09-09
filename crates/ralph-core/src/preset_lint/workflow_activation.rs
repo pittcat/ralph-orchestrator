@@ -196,14 +196,10 @@ impl HandoffGraph {
             )
         {
             const DAG_RUNTIME_ID: &str = "dag_runtime";
-            const DAG_RUNTIME_PUBLISHES: &[&str] = &[
-                "forge.unit.integrated",
-                "forge.exec.development.done",
-            ];
-            const DAG_RUNTIME_ENTRY_TOPICS: &[&str] = &[
-                "forge.concurrency.approved",
-                "forge.correction.requested",
-            ];
+            const DAG_RUNTIME_PUBLISHES: &[&str] =
+                &["forge.unit.integrated", "forge.exec.development.done"];
+            const DAG_RUNTIME_ENTRY_TOPICS: &[&str] =
+                &["forge.concurrency.approved", "forge.correction.requested"];
             let runtime_id = DAG_RUNTIME_ID.to_string();
             hat_order.push(runtime_id.clone());
             for topic in DAG_RUNTIME_PUBLISHES {

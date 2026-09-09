@@ -161,12 +161,8 @@ mod tests {
 
     #[test]
     fn duplicate_target_owner_refused() {
-        let outcome = classify_activation(
-            &base_input(),
-            Some("accepted"),
-            None,
-            Some("other-plan"),
-        );
+        let outcome =
+            classify_activation(&base_input(), Some("accepted"), None, Some("other-plan"));
         assert!(matches!(outcome, ActivationOutcome::DuplicateTarget { .. }));
     }
 }

@@ -205,13 +205,8 @@ pub(crate) struct PostAcceptance {
 /// was bound to the durable reservation. Agent output cannot choose these
 /// values; `complete_payload` overlays them before the event enters the
 /// EventLoop acceptance path.
-fn accepted_identity_matches(
-    post: &PostAcceptance,
-    payload: &Value,
-    source: Option<&str>,
-) -> bool {
-    source == Some(post.identity.hat.as_str())
-        && payload_matches_identity(&post.identity, payload)
+fn accepted_identity_matches(post: &PostAcceptance, payload: &Value, source: Option<&str>) -> bool {
+    source == Some(post.identity.hat.as_str()) && payload_matches_identity(&post.identity, payload)
 }
 
 fn payload_matches_identity(identity: &JobIdentity, payload: &Value) -> bool {
@@ -634,7 +629,10 @@ impl DagSchedulerRuntime {
             Value::String(self.resolve_task_id(&identity.unit_key())),
         );
         obj.insert("job_id".to_string(), Value::String(identity.job_id.clone()));
-        obj.insert("job_token".to_string(), Value::String(identity.token.clone()));
+        obj.insert(
+            "job_token".to_string(),
+            Value::String(identity.token.clone()),
+        );
         obj.insert("stage".to_string(), Value::String(identity.stage.clone()));
         obj.insert("attempt".to_string(), Value::from(identity.attempt));
         Value::Object(obj)
@@ -805,8 +803,7 @@ impl DagSchedulerRuntime {
         {
             warn!(
                 unit_key,
-                topic,
-                "DAG seam: accepted event identity does not match the current job"
+                topic, "DAG seam: accepted event identity does not match the current job"
             );
             return;
         }
@@ -816,8 +813,7 @@ impl DagSchedulerRuntime {
         {
             warn!(
                 unit_key,
-                topic,
-                "DAG seam: worker result does not match the durable current job"
+                topic, "DAG seam: worker result does not match the durable current job"
             );
             return;
         }
@@ -1176,12 +1172,7 @@ impl DagSchedulerRuntime {
     /// a non-existent tip). A failed evidence write logs a
     /// warning and continues — the next stage's spawn re-tries
     /// the lookup against plan HEAD as the last-resort fallback.
-    fn record_accepted_evidence(
-        &mut self,
-        kind: SpawnKind,
-        identity: &JobIdentity,
-        digest: &str,
-    ) {
+    fn record_accepted_evidence(&mut self, kind: SpawnKind, identity: &JobIdentity, digest: &str) {
         let plan_key = identity.plan_key.clone();
         let unit_key = identity.unit_id.clone();
         let stage = identity.stage.clone();
@@ -1241,9 +1232,7 @@ impl DagSchedulerRuntime {
             .ok_or_else(|| "DAG evidence: no execution context".to_string())?;
         let reference = format!(
             "refs/heads/ralph/{}/{}{}",
-            exec.loop_id,
-            unit_key,
-            "{commit}"
+            exec.loop_id, unit_key, "{commit}"
         );
         let output = std::process::Command::new("git")
             .arg("-C")
@@ -1375,19 +1364,15 @@ impl DagSchedulerRuntime {
                 return;
             }
         };
-        let worktree = match UnitWorktree::acquire(
-            &self.workspace,
-            &loop_id,
-            bare_unit_id,
-            &verified_base,
-        ) {
-            Ok(wt) => wt,
-            Err(err) => {
-                let reason = format!("unit worktree acquire failed: {err}");
-                self.fail_job(&identity, kind, &reason, "unknown");
-                return;
-            }
-        };
+        let worktree =
+            match UnitWorktree::acquire(&self.workspace, &loop_id, bare_unit_id, &verified_base) {
+                Ok(wt) => wt,
+                Err(err) => {
+                    let reason = format!("unit worktree acquire failed: {err}");
+                    self.fail_job(&identity, kind, &reason, "unknown");
+                    return;
+                }
+            };
 
         let events_file = self
             .workspace
@@ -1988,19 +1973,28 @@ units:
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        assert!(runtime.active_jobs.is_empty(), "canary child must be reaped");
+        assert!(
+            runtime.active_jobs.is_empty(),
+            "canary child must be reaped"
+        );
         let merge = runtime.merge_queue.front().expect("success event queued");
         assert_eq!(merge.event.topic.as_str(), "forge.unit.executed");
         let payload: Value = serde_json::from_str(&merge.event.payload).expect("JSON result");
-        assert_eq!(merge.event.source.as_ref().map(ToString::to_string).as_deref(), Some(HAT_EXECUTOR));
+        assert_eq!(
+            merge
+                .event
+                .source
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some(HAT_EXECUTOR)
+        );
         assert_eq!(payload["job_id"], "dag-U1-execute-a0");
         assert_eq!(payload["job_token"], "tok-U1-execute-a0");
         assert_eq!(payload["stage"], "execute");
         assert_eq!(payload["attempt"], 0);
         assert!(
-            tmp.path()
-                .join(".ralph/worktrees/loop-test-U1")
-                .is_dir(),
+            tmp.path().join(".ralph/worktrees/loop-test-U1").is_dir(),
             "executor must run in its isolated unit worktree"
         );
     }
@@ -2070,7 +2064,10 @@ units:
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        assert!(!recovered.merge_queue.is_empty(), "recovery adopts the worker result");
+        assert!(
+            !recovered.merge_queue.is_empty(),
+            "recovery adopts the worker result"
+        );
         assert_eq!(
             std::fs::read_to_string(&counter)
                 .expect("worker startup counter")
@@ -2175,12 +2172,7 @@ units:
         });
         // U1 (2026-09-09-0917): pipeline callers must use the
         // plan-namespaced `unit_key` registered in `on_concurrency_approved`.
-        runtime.observe_unit_event_dag(
-            topics::UNIT_REVIEWED,
-            "forge:pf-test:U1",
-            &payload,
-            None,
-        );
+        runtime.observe_unit_event_dag(topics::UNIT_REVIEWED, "forge:pf-test:U1", &payload, None);
 
         assert!(
             runtime.pending_spawns.is_empty(),
@@ -2379,9 +2371,11 @@ units:
             .list_jobs("pf-test")
             .expect("list jobs");
         assert!(runtime.merge_queue.is_empty());
-        assert!(jobs.iter().any(|job| {
-            job.identity.job_id == "job-durable-fence" && job.terminal.is_none()
-        }));
+        assert!(
+            jobs.iter().any(|job| {
+                job.identity.job_id == "job-durable-fence" && job.terminal.is_none()
+            })
+        );
     }
 
     /// The inner keepalive gate: a fresh dag runtime owns no work; a

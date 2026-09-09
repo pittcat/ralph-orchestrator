@@ -375,7 +375,8 @@ mod tests {
     #[test]
     fn dag_runtime_dispatch_assertion_passed() {
         let scenario = ParallelForgeDispatchContractScenario::new();
-        let assertion = scenario.runtime_dispatches_units_without_wave_barrier(&mock_execution_result());
+        let assertion =
+            scenario.runtime_dispatches_units_without_wave_barrier(&mock_execution_result());
         assert!(assertion.passed, "two Units are dispatched and integrated");
     }
 
@@ -385,9 +386,12 @@ mod tests {
         let mut result = mock_execution_result();
         result.stdout = "<event topic=\"forge.wave.worktrees.ready\">wave=1</event>\n\
             <event topic=\"forge.unit.executed\">unit_id=U1</event>\n\
-            <event topic=\"forge.unit.integrated\">unit_id=U1</event>\n".to_string();
+            <event topic=\"forge.unit.integrated\">unit_id=U1</event>\n"
+            .to_string();
         assert!(
-            !scenario.runtime_dispatches_units_without_wave_barrier(&result).passed,
+            !scenario
+                .runtime_dispatches_units_without_wave_barrier(&result)
+                .passed,
             "a retired wave receipt must fail the active DAG assertion"
         );
     }
@@ -428,8 +432,7 @@ mod tests {
             .bus_events()
             .iter()
             .filter(|r| {
-                r.record.data.get("topic").and_then(|v| v.as_str())
-                    == Some("forge.unit.executed")
+                r.record.data.get("topic").and_then(|v| v.as_str()) == Some("forge.unit.executed")
             })
             .count();
         assert_eq!(executed_units, 2, "both Unit jobs must be recorded");

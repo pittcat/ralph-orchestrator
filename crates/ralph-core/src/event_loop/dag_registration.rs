@@ -74,9 +74,14 @@ pub fn classify_registration(
     }
     if existing_receipt_state == Some(ReceiptState::Candidate) {
         match existing_artifact_digest {
-            Some(prev) if prev != candidate.artifact_digest => RegistrationOutcome::DigestConflict {
-                reason: format!("existing candidate digest {prev} != new {}", candidate.artifact_digest),
-            },
+            Some(prev) if prev != candidate.artifact_digest => {
+                RegistrationOutcome::DigestConflict {
+                    reason: format!(
+                        "existing candidate digest {prev} != new {}",
+                        candidate.artifact_digest
+                    ),
+                }
+            }
             _ => RegistrationOutcome::CandidateIdempotent,
         }
     } else {
@@ -87,7 +92,10 @@ pub fn classify_registration(
 /// Reference table: allowed receipt state transitions.
 pub fn legal_receipt_transitions() -> BTreeMap<ReceiptState, Vec<ReceiptState>> {
     let mut m = BTreeMap::new();
-    m.insert(ReceiptState::Candidate, vec![ReceiptState::Accepted, ReceiptState::Rejected]);
+    m.insert(
+        ReceiptState::Candidate,
+        vec![ReceiptState::Accepted, ReceiptState::Rejected],
+    );
     m.insert(ReceiptState::Accepted, vec![]);
     m.insert(ReceiptState::Rejected, vec![]);
     m
@@ -123,7 +131,10 @@ mod tests {
             true,
             false,
         );
-        assert!(matches!(outcome, RegistrationOutcome::DigestConflict { .. }));
+        assert!(matches!(
+            outcome,
+            RegistrationOutcome::DigestConflict { .. }
+        ));
     }
 
     #[test]

@@ -66,7 +66,10 @@ impl WorktreeIdentity {
     pub fn from_path(path: &Path) -> std::io::Result<Self> {
         let canonical_path = path.canonicalize()?;
         let common_dir = canonical_path.clone(); // simplified; full impl in finalize
-        Ok(Self { canonical_path, common_dir })
+        Ok(Self {
+            canonical_path,
+            common_dir,
+        })
     }
 }
 
@@ -100,7 +103,13 @@ mod tests {
 
     #[test]
     fn checkout_state_round_trip() {
-        for s in [CheckoutState::Prepared, CheckoutState::RefAdvanced, CheckoutState::Materialized, CheckoutState::Superseded, CheckoutState::Blocked] {
+        for s in [
+            CheckoutState::Prepared,
+            CheckoutState::RefAdvanced,
+            CheckoutState::Materialized,
+            CheckoutState::Superseded,
+            CheckoutState::Blocked,
+        ] {
             assert_eq!(CheckoutState::parse(s.as_str()), Some(s));
         }
         assert_eq!(CheckoutState::parse("garbage"), None);

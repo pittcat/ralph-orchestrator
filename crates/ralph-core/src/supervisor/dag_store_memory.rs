@@ -200,14 +200,16 @@ impl DagSchedulerStore for InMemoryDagSchedulerStore {
         Ok(())
     }
 
-    fn get_unit_base(&self, plan_key: &str, unit_key: &str) -> DagStoreResult<Option<UnitBaseRecord>> {
+    fn get_unit_base(
+        &self,
+        plan_key: &str,
+        unit_key: &str,
+    ) -> DagStoreResult<Option<UnitBaseRecord>> {
         let guard = self
             .unit_bases
             .lock()
             .expect("InMemoryDagSchedulerStore unit_bases mutex");
-        Ok(guard
-            .get(&Self::base_key(plan_key, unit_key))
-            .cloned())
+        Ok(guard.get(&Self::base_key(plan_key, unit_key)).cloned())
     }
 
     fn record_stage_evidence(
@@ -242,13 +244,22 @@ impl DagSchedulerStore for InMemoryDagSchedulerStore {
                     })
                 }
             };
-            if let Some(err) = drifted("accepted_commit", &existing.accepted_commit, &evidence.accepted_commit) {
+            if let Some(err) = drifted(
+                "accepted_commit",
+                &existing.accepted_commit,
+                &evidence.accepted_commit,
+            ) {
                 return Err(err);
             }
-            if let Some(err) = drifted("base_commit", &existing.base_commit, &evidence.base_commit) {
+            if let Some(err) = drifted("base_commit", &existing.base_commit, &evidence.base_commit)
+            {
                 return Err(err);
             }
-            if let Some(err) = drifted("evidence_token", &existing.evidence_token, &evidence.evidence_token) {
+            if let Some(err) = drifted(
+                "evidence_token",
+                &existing.evidence_token,
+                &evidence.evidence_token,
+            ) {
                 return Err(err);
             }
             if let Some(err) = drifted(

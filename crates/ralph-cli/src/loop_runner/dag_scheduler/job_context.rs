@@ -37,29 +37,51 @@ impl JobStage {
 pub fn required_fields(stage: JobStage) -> &'static [&'static str] {
     match stage {
         JobStage::Execute => &[
-            "plan_key", "unit_key", "task_id",
-            "worktree_path", "current_base", "expected_head",
-            "verified_execution_plan_path", "verified_execution_plan_digest",
+            "plan_key",
+            "unit_key",
+            "task_id",
+            "worktree_path",
+            "current_base",
+            "expected_head",
+            "verified_execution_plan_path",
+            "verified_execution_plan_digest",
         ],
         JobStage::Review => &[
-            "plan_key", "unit_key", "task_id",
-            "worktree_path", "current_base", "expected_head",
-            "executor_completion_artifact_path", "executor_completion_artifact_digest",
+            "plan_key",
+            "unit_key",
+            "task_id",
+            "worktree_path",
+            "current_base",
+            "expected_head",
+            "executor_completion_artifact_path",
+            "executor_completion_artifact_digest",
         ],
         JobStage::Verify => &[
-            "plan_key", "unit_key", "task_id",
-            "worktree_path", "current_base", "expected_head",
+            "plan_key",
+            "unit_key",
+            "task_id",
+            "worktree_path",
+            "current_base",
+            "expected_head",
             "executor_completion_artifact_path",
             "reviewer_completion_artifact_path",
         ],
         JobStage::Fix => &[
-            "plan_key", "unit_key", "task_id",
-            "worktree_path", "current_base", "expected_head",
-            "fix_failure_fingerprint", "correction_digest",
+            "plan_key",
+            "unit_key",
+            "task_id",
+            "worktree_path",
+            "current_base",
+            "expected_head",
+            "fix_failure_fingerprint",
+            "correction_digest",
         ],
         JobStage::Integrate => &[
-            "plan_key", "unit_key", "task_id",
-            "target_branch", "current_base",
+            "plan_key",
+            "unit_key",
+            "task_id",
+            "target_branch",
+            "current_base",
             "verified_execution_plan_path",
             "verify_accepted_artifact_path",
         ],
@@ -93,8 +115,14 @@ pub struct ArtifactRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextValidation {
     Ok,
-    MissingFields { fields: Vec<String> },
-    DigestMismatch { field: String, expected: String, actual: String },
+    MissingFields {
+        fields: Vec<String>,
+    },
+    DigestMismatch {
+        field: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 /// Pure validation: required fields for the stage are present (have non-empty values).
@@ -112,12 +140,24 @@ pub fn validate_context(ctx: &JobContext) -> ContextValidation {
             "target_branch" => !ctx.artifact_refs.contains_key("target_branch"),
             "fix_failure_fingerprint" => ctx.artifact_refs.contains_key("fix_failure_fingerprint"),
             "correction_digest" => ctx.artifact_refs.contains_key("correction_digest"),
-            "verified_execution_plan_path" => ctx.artifact_refs.contains_key("verified_execution_plan_path"),
-            "verified_execution_plan_digest" => ctx.artifact_refs.contains_key("verified_execution_plan_digest"),
-            "executor_completion_artifact_path" => ctx.artifact_refs.contains_key("executor_completion_artifact_path"),
-            "executor_completion_artifact_digest" => ctx.artifact_refs.contains_key("executor_completion_artifact_digest"),
-            "reviewer_completion_artifact_path" => ctx.artifact_refs.contains_key("reviewer_completion_artifact_path"),
-            "verify_accepted_artifact_path" => ctx.artifact_refs.contains_key("verify_accepted_artifact_path"),
+            "verified_execution_plan_path" => ctx
+                .artifact_refs
+                .contains_key("verified_execution_plan_path"),
+            "verified_execution_plan_digest" => ctx
+                .artifact_refs
+                .contains_key("verified_execution_plan_digest"),
+            "executor_completion_artifact_path" => ctx
+                .artifact_refs
+                .contains_key("executor_completion_artifact_path"),
+            "executor_completion_artifact_digest" => ctx
+                .artifact_refs
+                .contains_key("executor_completion_artifact_digest"),
+            "reviewer_completion_artifact_path" => ctx
+                .artifact_refs
+                .contains_key("reviewer_completion_artifact_path"),
+            "verify_accepted_artifact_path" => ctx
+                .artifact_refs
+                .contains_key("verify_accepted_artifact_path"),
             _ => false,
         };
         if !present {
@@ -142,7 +182,13 @@ mod tests {
 
     #[test]
     fn context_fields_for_each_stage() {
-        let stages = [JobStage::Execute, JobStage::Review, JobStage::Verify, JobStage::Fix, JobStage::Integrate];
+        let stages = [
+            JobStage::Execute,
+            JobStage::Review,
+            JobStage::Verify,
+            JobStage::Fix,
+            JobStage::Integrate,
+        ];
         for stage in stages {
             let fields = required_fields(stage);
             assert!(!fields.is_empty(), "stage {stage:?} has no required fields");

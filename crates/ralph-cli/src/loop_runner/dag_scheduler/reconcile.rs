@@ -108,7 +108,12 @@ mod tests {
         // represents "history list". This test documents the contract:
         // route_recovery is a pure function of declared inputs.
         let d = route_recovery(JobStage::Execute, "succeeded", false, true, true);
-        assert_eq!(d, RecoveryDecision::ReserveNext { stage: JobStage::Review });
+        assert_eq!(
+            d,
+            RecoveryDecision::ReserveNext {
+                stage: JobStage::Review
+            }
+        );
     }
 
     #[test]

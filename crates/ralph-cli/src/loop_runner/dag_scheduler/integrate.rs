@@ -35,13 +35,15 @@ use std::process::Command;
 
 use ralph_core::supervisor::changed_path_guard::parse_name_status_z;
 use ralph_core::supervisor::dag_integration::IntegrationStore;
-use ralph_core::supervisor::integration_lane::{GateCommandSpec, LaneError};
 use ralph_core::supervisor::dag_store_rusqlite::RusqliteIntegrationStore;
+use ralph_core::supervisor::integration_lane::{GateCommandSpec, LaneError};
 use serde_json::Value;
 use sha2::Digest as _;
 use tracing::{debug, warn};
 
-use super::integration::{IntegrationError, IntegrationOutcome, IntegrationRequest, real_orchestrator};
+use super::integration::{
+    IntegrationError, IntegrationOutcome, IntegrationRequest, real_orchestrator,
+};
 use super::spawn::SpawnKind;
 use super::{DagSchedulerRuntime, now_ms};
 use crate::loop_runner::wave::dispatcher::coordination::append_supervisor_coord_event;
@@ -71,7 +73,8 @@ impl DagSchedulerRuntime {
     /// is blocked instead of being acknowledged speculatively.
     #[cfg(feature = "supervisor-db")]
     pub(super) fn reconcile_after_restart(&mut self) {
-        let Some(main_events_file) = self.exec.as_ref().map(|exec| exec.main_events_file.clone()) else {
+        let Some(main_events_file) = self.exec.as_ref().map(|exec| exec.main_events_file.clone())
+        else {
             return;
         };
         let ledger = crate::loop_runner::wave::io::read_worker_events(&main_events_file);
@@ -140,11 +143,9 @@ impl DagSchedulerRuntime {
                     "task_key": task_key,
                     "integrated_commit": record.integrated_commit,
                 });
-                if let Err(err) = append_supervisor_coord_event(
-                    &main_events_file,
-                    UNIT_INTEGRATED,
-                    &payload,
-                ) {
+                if let Err(err) =
+                    append_supervisor_coord_event(&main_events_file, UNIT_INTEGRATED, &payload)
+                {
                     self.block_plan(&plan_key, "integration event re-emission failed");
                     warn!(plan_key, error = %err, "DAG recovery: integrated event re-emit failed");
                 }
@@ -159,8 +160,7 @@ impl DagSchedulerRuntime {
                             .as_deref()
                             .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
                             .and_then(|payload| {
-                                (payload.get("plan_key").and_then(Value::as_str)
-                                    == Some(&plan_key))
+                                (payload.get("plan_key").and_then(Value::as_str) == Some(&plan_key))
                                     .then_some(())
                             })
                             .is_some()
@@ -189,7 +189,10 @@ impl DagSchedulerRuntime {
             .get(plan_key)
             .is_some_and(|plan| plan.integrated.contains(unit_id));
         if already_pending || already_integrated {
-            debug!(plan_key, unit_id, "DAG integration: duplicate queue request ignored");
+            debug!(
+                plan_key,
+                unit_id, "DAG integration: duplicate queue request ignored"
+            );
             return;
         }
         self.pending_integrations.push(PendingIntegration {
@@ -217,9 +220,7 @@ impl DagSchedulerRuntime {
             .pending_integrations
             .iter()
             .enumerate()
-            .min_by(|(_, a), (_, b)| {
-                (order_of(a), &a.unit_id).cmp(&(order_of(b), &b.unit_id))
-            })
+            .min_by(|(_, a), (_, b)| (order_of(a), &a.unit_id).cmp(&(order_of(b), &b.unit_id)))
             .map(|(i, _)| i)
             .expect("non-empty");
         let pending = self.pending_integrations.remove(idx);
@@ -231,7 +232,10 @@ impl DagSchedulerRuntime {
     /// projections before the seam sees the event). Ack the durable
     /// record and admit the unit into the admission input.
     pub(super) fn on_unit_integrated_accepted(&mut self, payload: &Value) {
-        let unit_id = payload.get("unit_id").and_then(Value::as_str).unwrap_or_default();
+        let unit_id = payload
+            .get("unit_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let plan_key = payload
             .get("plan_key")
             .and_then(Value::as_str)
@@ -245,14 +249,20 @@ impl DagSchedulerRuntime {
             return;
         };
         if !plan.units.iter().any(|unit| unit.unit_id == unit_id) {
-            debug!(plan_key, unit_id, "DAG integration: ack for unknown unit; ignored");
+            debug!(
+                plan_key,
+                unit_id, "DAG integration: ack for unknown unit; ignored"
+            );
             return;
         }
         let target_branch = plan.target_branch.clone();
         let Some(store) = self.integration_store() else {
             // Non-durable builds never reach here (spawn refuses
             // without a journal); stay fail-closed anyway.
-            warn!(unit_id, "DAG integration: no durable store; unit stays unacked");
+            warn!(
+                unit_id,
+                "DAG integration: no durable store; unit stays unacked"
+            );
             return;
         };
         if let Err(err) = store.ack(unit_id, &target_branch) {
@@ -342,7 +352,10 @@ impl DagSchedulerRuntime {
                     }
                 }
                 Ok(false) => {
-                    debug!(plan_key, "DAG integration: development.done already fenced; replay is a no-op");
+                    debug!(
+                        plan_key,
+                        "DAG integration: development.done already fenced; replay is a no-op"
+                    );
                 }
                 Err(err) => {
                     warn!(plan_key, error = %err, "DAG integration: terminal-emit fence error");
@@ -356,7 +369,8 @@ impl DagSchedulerRuntime {
     /// launch there too, so no unit can legitimately arrive here).
     #[cfg(feature = "supervisor-db")]
     fn integration_store(&mut self) -> Option<RusqliteIntegrationStore> {
-        self.journal().map(|journal| journal.shared_with_integration())
+        self.journal()
+            .map(|journal| journal.shared_with_integration())
     }
 
     #[cfg(not(feature = "supervisor-db"))]
@@ -556,7 +570,8 @@ impl DagSchedulerRuntime {
             .expect("checked by caller")
             .main_events_file
             .clone();
-        if let Err(err) = append_supervisor_coord_event(&main_events_file, UNIT_INTEGRATED, &payload)
+        if let Err(err) =
+            append_supervisor_coord_event(&main_events_file, UNIT_INTEGRATED, &payload)
         {
             warn!(
                 unit_id,
@@ -1209,12 +1224,7 @@ units:
         runtime
             .journal()
             .expect("durable journal")
-            .try_record_terminal_emit(
-                "pf-test",
-                DEVELOPMENT_DONE,
-                "development-done-key",
-                1,
-            )
+            .try_record_terminal_emit("pf-test", DEVELOPMENT_DONE, "development-done-key", 1)
             .expect("record terminal fence");
 
         runtime.reconcile_after_restart();
@@ -1235,12 +1245,14 @@ units:
             "integrated_commit": "integrated",
         }));
 
-        assert!(!runtime
-            .plans
-            .get("pf-test")
-            .expect("plan")
-            .integrated
-            .contains("U-not-in-plan"));
+        assert!(
+            !runtime
+                .plans
+                .get("pf-test")
+                .expect("plan")
+                .integrated
+                .contains("U-not-in-plan")
+        );
     }
 
     /// S15: development.done waits for every unit's ack, then emits
@@ -1254,7 +1266,10 @@ units:
 
         // U1 unacked (and U2 not integrated): no terminal emit.
         runtime.maybe_emit_development_done();
-        assert_eq!(ledger_contains(tmp.path(), "forge.exec.development.done"), 0);
+        assert_eq!(
+            ledger_contains(tmp.path(), "forge.exec.development.done"),
+            0
+        );
 
         // Ack U1, simulate U2 integrated+acked.
         runtime.on_unit_integrated_accepted(&integrated_payload("U1"));
@@ -1265,7 +1280,10 @@ units:
             .integrated
             .insert("U2".to_string());
         runtime.maybe_emit_development_done();
-        assert_eq!(ledger_contains(tmp.path(), "forge.exec.development.done"), 1);
+        assert_eq!(
+            ledger_contains(tmp.path(), "forge.exec.development.done"),
+            1
+        );
 
         // Replay: the fence row makes every later pass a no-op.
         runtime.maybe_emit_development_done();

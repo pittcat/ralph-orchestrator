@@ -386,9 +386,7 @@ pub(crate) mod contract_tests {
     /// Pinning twice with a DIFFERENT base fails closed (the
     /// first pin is authoritative).
     pub(crate) fn assert_pin_fails_closed_on_base_drift(store: &dyn DagSchedulerStore) {
-        store
-            .pin_unit_base("p", "U1", "base-a", 1)
-            .expect("first");
+        store.pin_unit_base("p", "U1", "base-a", 1).expect("first");
         let err = store
             .pin_unit_base("p", "U1", "base-b", 2)
             .expect_err("drift must fail closed");
@@ -416,14 +414,8 @@ pub(crate) mod contract_tests {
     pub(crate) fn assert_units_are_pinned_independently(store: &dyn DagSchedulerStore) {
         store.pin_unit_base("p", "U1", "base-a", 1).expect("U1");
         store.pin_unit_base("p", "U2", "base-b", 2).expect("U2");
-        let u1 = store
-            .get_unit_base("p", "U1")
-            .expect("u1")
-            .expect("u1 set");
-        let u2 = store
-            .get_unit_base("p", "U2")
-            .expect("u2")
-            .expect("u2 set");
+        let u1 = store.get_unit_base("p", "U1").expect("u1").expect("u1 set");
+        let u2 = store.get_unit_base("p", "U2").expect("u2").expect("u2 set");
         assert_eq!(u1.base_commit, "base-a");
         assert_eq!(u2.base_commit, "base-b");
     }
@@ -573,10 +565,12 @@ pub(crate) mod contract_tests {
             "acc-rev"
         );
         // Unknown stage returns Ok(None), not an error.
-        assert!(store
-            .latest_stage_evidence("p", "U1", "verify")
-            .expect("verify read")
-            .is_none());
+        assert!(
+            store
+                .latest_stage_evidence("p", "U1", "verify")
+                .expect("verify read")
+                .is_none()
+        );
     }
 }
 

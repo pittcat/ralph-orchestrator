@@ -474,23 +474,27 @@ mod tests {
         let mut bus = EventBus::new();
         bus.register_virtual_target("dag_runtime");
 
-        let event = Event::new("forge.concurrency.approved", "approved")
-            .with_target("dag_runtime");
+        let event = Event::new("forge.concurrency.approved", "approved").with_target("dag_runtime");
 
         assert!(bus.validate_delivery(&event).is_ok());
-        assert_eq!(bus.publish_checked(event), Ok(vec![HatId::new("dag_runtime")]));
+        assert_eq!(
+            bus.publish_checked(event),
+            Ok(vec![HatId::new("dag_runtime")])
+        );
         assert!(!bus.has_pending());
     }
 
     #[test]
     fn test_unknown_virtual_target_still_fails_closed() {
         let bus = EventBus::new();
-        let event = Event::new("forge.concurrency.approved", "approved")
-            .with_target("not_registered");
+        let event =
+            Event::new("forge.concurrency.approved", "approved").with_target("not_registered");
 
         assert_eq!(
             bus.validate_delivery(&event),
-            Err(EventDeliveryError::UnknownTarget(HatId::new("not_registered")))
+            Err(EventDeliveryError::UnknownTarget(HatId::new(
+                "not_registered"
+            )))
         );
     }
 

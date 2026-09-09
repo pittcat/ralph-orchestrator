@@ -196,9 +196,7 @@ impl RusqliteDagSchedulerStore {
         // resource permits (or vice versa). `None` skips the
         // claim entirely, preserving the legacy path.
         if let Some((claims, capacities)) = claims_and_caps {
-            Self::claim_resources_in_tx(
-                &tx, identity, claims, capacities, now_ms,
-            )?;
+            Self::claim_resources_in_tx(&tx, identity, claims, capacities, now_ms)?;
         }
         tx.execute("INSERT INTO dag_jobs (job_id,plan_key,unit_key,hat,stage,attempt,token,created_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![identity.job_id,identity.plan_key,unit_key,identity.hat,identity.stage,identity.attempt,identity.token,now_ms]).map_err(plan_io_err)?;
         tx.execute("INSERT INTO dag_units (unit_key,plan_key,state,stage,hat,job_id,attempt,current_token,created_at_ms,updated_at_ms) VALUES (?1,?2,'launch_reserved',?3,?4,?5,?6,?7,?8,?8) ON CONFLICT(unit_key) DO UPDATE SET state='launch_reserved',stage=excluded.stage,hat=excluded.hat,job_id=excluded.job_id,attempt=excluded.attempt,current_token=excluded.current_token,updated_at_ms=excluded.updated_at_ms", params![unit_key,identity.plan_key,identity.stage,identity.hat,identity.job_id,identity.attempt,identity.token,now_ms]).map_err(plan_io_err)?;

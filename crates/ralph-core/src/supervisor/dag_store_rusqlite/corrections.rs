@@ -72,10 +72,14 @@ pub fn classify_reservation(
     existing_request_digest: Option<&str>,
 ) -> ReservationOutcome {
     if !known_unit {
-        return ReservationOutcome::Refused { reason: "unknown unit".to_string() };
+        return ReservationOutcome::Refused {
+            reason: "unknown unit".to_string(),
+        };
     }
     if !token_matches {
-        return ReservationOutcome::Refused { reason: "failed token mismatch".to_string() };
+        return ReservationOutcome::Refused {
+            reason: "failed token mismatch".to_string(),
+        };
     }
     if !worktree_clean {
         return ReservationOutcome::DirtyWorktree;
@@ -106,8 +110,14 @@ pub fn classify_reservation(
 /// Reference table: allowed correction state transitions.
 pub fn legal_correction_transitions() -> BTreeMap<CorrectionState, Vec<CorrectionState>> {
     let mut m = BTreeMap::new();
-    m.insert(CorrectionState::Pending, vec![CorrectionState::Reserved, CorrectionState::Blocked]);
-    m.insert(CorrectionState::Reserved, vec![CorrectionState::Pending, CorrectionState::Blocked]);
+    m.insert(
+        CorrectionState::Pending,
+        vec![CorrectionState::Reserved, CorrectionState::Blocked],
+    );
+    m.insert(
+        CorrectionState::Reserved,
+        vec![CorrectionState::Pending, CorrectionState::Blocked],
+    );
     m.insert(CorrectionState::Blocked, vec![]);
     m
 }
