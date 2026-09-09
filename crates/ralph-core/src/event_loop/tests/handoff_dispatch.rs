@@ -362,7 +362,11 @@ hats:
 #[test]
 fn u7_virtual_supervisor_consumer_predicate_positive() {
     use crate::event_origin::is_virtual_runtime_consumer;
-    for consumer in ["supervisor", "wave_runtime"] {
+    for consumer in [
+        crate::event_origin::VIRTUAL_SUPERVISOR_CONSUMER,
+        crate::event_origin::VIRTUAL_WAVE_RUNTIME_CONSUMER,
+        crate::event_origin::DAG_RUNTIME_CONSUMER,
+    ] {
         assert!(
             is_virtual_runtime_consumer(consumer),
             "`{consumer}` must be recognized as a virtual runtime consumer"
@@ -484,5 +488,61 @@ hats:
             .seen_topics
             .contains("task.resume.misrouted"),
         "an ordinary hat consumer whose triggers lack the topic must still report task.resume.misrouted"
+    );
+}
+
+/// Plan 2026-09-09-0917 (U16 follow-up): in `dag` / `dag_shadow`
+/// scheduler modes the `dag_runtime` virtual node is the unique
+/// consumer of `forge.concurrency.approved` and
+/// `forge.correction.requested`. Before the fix the U16 misrouted
+/// check would treat the missing `HatRegistry` entry as "triggers
+/// do not declare the topic" and emit a spurious
+/// `task.resume.misrouted`, blocking the handoff from being delivered
+/// (and ultimately stalling the loop for 600s). After the fix the
+/// virtual dag_runtime consumer is recognised through
+/// [`crate::event_origin::is_virtual_runtime_consumer`] and the
+/// handoff goes through without a misroute diagnostic.
+#[test]
+fn u16_dag_runtime_concurrency_approved_no_misrouted() {
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  supervisor:
+    enabled: true
+    scheduler_mode: dag
+hats:
+  guardian:
+    name: "Guardian"
+    triggers: ["forge.plan.ready"]
+    publishes: ["forge.concurrency.approved"]
+"#;
+    let config: crate::config::RalphConfig =
+        serde_yaml::from_str(yaml).expect("valid dag runtime config");
+
+    // Sanity: the virtual dag_runtime node really is the unique
+    // consumer of the control topic in this config (the
+    // pre-condition under test).
+    let index = crate::workflow_contract::HandoffIndex::from_config(&config);
+    assert_eq!(
+        index.consumer_of("forge.concurrency.approved"),
+        Some(crate::event_origin::DAG_RUNTIME_CONSUMER),
+        "virtual dag_runtime must be the unique consumer of forge.concurrency.approved"
+    );
+
+    let mut event_loop = crate::EventLoop::new(config);
+    event_loop
+        .apply_contract_committed_side_effects(&[u7_jsonl_event("forge.concurrency.approved")]);
+
+    assert!(
+        !event_loop
+            .state
+            .seen_topics
+            .contains("task.resume.misrouted"),
+        "virtual dag_runtime consuming forge.concurrency.approved must NOT produce task.resume.misrouted"
+    );
+    assert_eq!(
+        event_loop.state.handoff_tracker.pending_count(),
+        0,
+        "virtual dag_runtime must not register an agent handoff"
     );
 }

@@ -238,17 +238,39 @@ pub const VIRTUAL_SUPERVISOR_CONSUMER: &str = "supervisor";
 /// semantics for slot-level fan-in.
 pub const VIRTUAL_WAVE_RUNTIME_CONSUMER: &str = "wave_runtime";
 
+/// 2026-09-08 DAG execution-face cutover: the canonical identifier of
+/// the **virtual DAG runtime** consumer wired by
+/// [`crate::preset_lint::workflow_activation::HandoffGraph::from_config`]
+/// when `event_loop.supervisor.scheduler_mode ∈ {dag, dag_shadow}`.
+///
+/// Like [`VIRTUAL_SUPERVISOR_CONSUMER`] and [`VIRTUAL_WAVE_RUNTIME_CONSUMER`]
+/// this node is NOT an agent hat registered in `HatRegistry` — it is the
+/// runtime DAG scheduler driver that owns per-Unit handoffs (it consumes
+/// `forge.concurrency.approved` / `forge.correction.requested` and publishes
+/// `forge.unit.integrated` / `forge.exec.development.done`). Runtime paths
+/// that resolve a handoff consumer must recognize it through
+/// [`is_virtual_runtime_consumer`] so the U16 handoff misrouted check
+/// (which reads `triggers` from the registry) does not emit a spurious
+/// `task.resume.misrouted` for this legitimate runtime consumer.
+pub const DAG_RUNTIME_CONSUMER: &str = "dag_runtime";
+
 /// `true` when `consumer` is an internal runtime consumer rather than
 /// an agent hat registered in `HatRegistry`.
 ///
 /// The U16 handoff misrouted check must exempt this consumer: it has no
 /// `HatRegistry` entry and therefore no `triggers` list to declare the
-/// slot topic, yet consuming `*.unit.done` is its legitimate role.
-/// Ordinary hats return `false` here and remain subject to U16.
+/// slot topic, yet consuming its topics (slot-level `*.unit.done` /
+/// `*.unit.failed` for the virtual supervisor / wave runtime; or the
+/// dag-mode control topics `forge.concurrency.approved` /
+/// `forge.correction.requested` for the virtual DAG runtime) is its
+/// legitimate role. Ordinary hats return `false` here and remain subject
+/// to U16.
 pub fn is_virtual_runtime_consumer(consumer: &str) -> bool {
     matches!(
         consumer,
-        VIRTUAL_SUPERVISOR_CONSUMER | VIRTUAL_WAVE_RUNTIME_CONSUMER
+        VIRTUAL_SUPERVISOR_CONSUMER
+            | VIRTUAL_WAVE_RUNTIME_CONSUMER
+            | DAG_RUNTIME_CONSUMER
     )
 }
 
