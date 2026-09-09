@@ -46,6 +46,7 @@ pub mod recovery;
 pub mod reconcile;
 pub mod shadow;
 mod spawn;
+pub mod terminal_delivery;
 pub mod worktree;
 
 pub use spawn::DagExecutionContext;
