@@ -41,6 +41,7 @@ pub mod driver;
 mod integrate;
 pub mod integration;
 pub mod integration_worker;
+pub mod job_context;
 pub mod jobs;
 mod admission;
 pub mod recovery;
