@@ -43,6 +43,7 @@ pub mod integration;
 pub mod integration_worker;
 pub mod job_context;
 pub mod jobs;
+pub mod admission_base_pin;
 mod admission;
 pub mod recovery;
 pub mod reconcile;
