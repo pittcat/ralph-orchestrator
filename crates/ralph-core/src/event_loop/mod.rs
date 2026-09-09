@@ -18,6 +18,10 @@ pub mod rejection;
 pub mod rejection_kind;
 pub mod review_step_state;
 pub mod terminal_closed_guard;
+// Plan 2026-09-09-0917 U9: receipt-before-projection skeleton for
+// DAG plan-ready. Writes a candidate receipt before StateProjector.apply;
+// real acceptance is recorded after pending_publish/AcceptedTransition.
+pub mod dag_registration;
 // 2026-06-27 mechanism foundation U1: hard required-fields check at
 // emit time. Pure-logic core; `EmitSchemaGateStage` (U6) wraps it.
 pub mod emit_schema_gate;
