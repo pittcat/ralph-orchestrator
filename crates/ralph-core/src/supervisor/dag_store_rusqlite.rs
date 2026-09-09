@@ -57,6 +57,7 @@ use super::migrations;
 use rusqlite::OptionalExtension;
 
 pub mod admission;
+pub mod corrections;
 pub mod jobs;
 pub mod registration;
 
