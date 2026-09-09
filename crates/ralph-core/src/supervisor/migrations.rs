@@ -66,8 +66,14 @@ mod imp {
     /// v17 (2026-09-03-0959 plan Step E3) adds the `dag_plan_meta`
     /// per-plan metadata table holding the approval-time verified
     /// base commit so crash recovery can re-pin it without guessing.
+    /// v18 (2026-09-09-0917 plan U3) adds the `dag_unit_bases`
+    /// per-Unit base-commit pin and the `dag_stage_evidence`
+    /// per-stage accepted evidence ledger so reviewer / verifier /
+    /// fixer resume from the exact HEAD the prior stage committed
+    /// and accepted, without resetting base. Forward-only CREATE
+    /// TABLE; no ALTERs, no column-probe path.
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 17;
+    pub const CURRENT_VERSION: i64 = 18;
 
     /// PMI-013 / TGP-02: typed error returned when a database's
     /// `user_version` is ABOVE this binary's migration ledger tail
@@ -517,6 +523,23 @@ mod imp {
                 ddl: include_str!("migrations/v17.sql"),
                 column_probe: None,
             },
+            // 2026-09-09-0917 plan U3 (Per-Unit stage evidence and
+            // committed-output handover): adds the
+            // `dag_unit_bases` per-Unit base commit pin and the
+            // `dag_stage_evidence` per-stage accepted commit /
+            // base / token / fingerprint ledger. Forward-only
+            // `CREATE TABLE`; no ALTERs, so no column probe.
+            // `PRIMARY KEY (plan_key, unit_key)` keeps the base
+            // pin idempotent and `PRIMARY KEY (plan_key, unit_key,
+            // stage, attempt)` keeps the evidence idempotent;
+            // semantic checks (wrong commit / dirty / foreign
+            // repo / token drift / fingerprint drift) fail closed
+            // in the store layer.
+            Migration {
+                version: 18,
+                ddl: include_str!("migrations/v18.sql"),
+                column_probe: None,
+            },
         ]
     }
 }
@@ -608,6 +631,12 @@ mod tests {
             // Step E3 (2026-09-03-0959 plan): per-plan metadata for
             // crash recovery (approval-time verified base commit).
             "dag_plan_meta",
+            // U3 (2026-09-09-0917 plan): per-Unit base commit pin
+            // and per-stage accepted evidence ledger for
+            // committed-output hand-off between review/verify/fix
+            // and the prior stage.
+            "dag_unit_bases",
+            "dag_stage_evidence",
         ];
         for table in tables {
             let count: i64 = conn
