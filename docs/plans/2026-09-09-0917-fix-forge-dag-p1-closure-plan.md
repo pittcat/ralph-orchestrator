@@ -3,8 +3,8 @@ title: Parallel Forge DAG P1 Closure - Plan
 type: fix
 date: 2026-09-09
 execution: code
-baseline: c11309acef260f5fa812d0f42771300e847d7fcc
-reviewed_head: e72df6aa7540f35d866986fea12964dff0b4f0f4
+baseline: 7ede210e62f1528a6c6fec5c24885c2a951a13a0
+reviewed_head: 7ede210e62f1528a6c6fec5c24885c2a951a13a0
 deepened: 2026-09-09
 origin: docs/reviews/2026-09-09-parallel-forge-dag-completion-red-team-review.md
 planning_readiness: READY
@@ -15,15 +15,15 @@ artifact_readiness: implementation-ready
 
 ## 0. 计划状态
 
-**READY（实施决策已确定；不是实现验收通过）。** 覆盖报告 F01–F10：报告实际为 P0 0 项、P1 10 项。用户已确认此范围；F11–F13 的独立 P2 改进不纳入。P1 所必需的 preset、schema、注入指南和 operator skill 同步属于本计划。
+**READY（续执行基线；不是实现验收通过）。** 覆盖报告 F01–F10：报告实际为 P0 0 项、P1 10 项。用户已确认此范围；F11–F13 的独立 P2 改进不纳入。P1 所必需的 preset、schema、注入指南和 operator skill 同步属于本计划。
 
-- 基线：`c11309acef260f5fa812d0f42771300e847d7fcc`。调查开始时仅原始 review 文档未跟踪；没有生产文件修改。
-- 写作期间其他会话提交review与本计划初稿，HEAD前进到`e72df6aa7540f35d866986fea12964dff0b4f0f4`；`git diff --name-only c11309ac HEAD`仅包含这两份文档。本轮复核修订保留在工作区，未执行commit。源码基线未变，无需重跑同一组定向测试。
+- 续执行基线：`7ede210e62f1528a6c6fec5c24885c2a951a13a0`。U1/U2、U3 schema/CURRENT_VERSION 与 `dag_runtime` 虚拟消费者修复已在当前分支；U3 runtime evidence/handoff/spawn wiring 仍未完成，U4–U15 尚未执行。
+- 本轮不重复创建 v18 migration；后续新增迁移从 v19 开始。既有提交不是本轮 Unit 验收证据，只是继续执行的事实基线。
 - 调查：CLI 主循环、DAG admission/spawn/recovery/integration、SQLite jobs/receipts/intent、EventLoop 投影顺序、worktree、PTY、preset/schema、skill 注入、测试入口与历史。
 - 已执行：`cargo nextest --version` = 0.9.140；带七项环境清理的 `cargo nextest run -p ralph-cli --bin ralph -- dag_scheduler`：159 passed / 1951 skipped，run ID `7e50f1de-d450-4b4d-8448-9d97175da52a`。
 - 已执行隔离 Git 实验：临时仓库中 update-ref 后文件仍为旧值；read-tree 两树更新使 index/文件一致；冲突的未提交改动被拒绝且保留。临时目录已删除。
 - 未执行：新增测试的 Red/Green、完整 workspace、clippy、mock E2E、正式 CLI 跨进程 crash matrix、真实 AI loop。本计划不将报告的旧 harness 结果冒充本轮实验，也不声称预测 Red 已实际发生。
-- 阻塞项：无实施方向阻塞。执行时出现第 7 节停止条件必须重新调查，不能用本页 READY 覆盖新证据。
+- 阻塞项：无计划基线阻塞。若 U3 runtime acceptance 未能真实进入 EventLoop/SQLite/spawn 链，必须停在 U3，不得把缺口转交 U4。
 
 本文按用户要求采用 0–11 节与每 Unit 20 项结构；不声明 `ce-unified-plan/v1`，避免将不同标题结构冒充该格式。Unit ID 稳定；进度记录在执行证据或 Git 中，不在计划里维护完成勾选。
 
@@ -104,7 +104,7 @@ artifact_readiness: implementation-ready
 | E16 | core tests/scenarios/parallel_forge_dag_resume_runtime.yml；tests/scenarios.rs | 原 fixture 不启用真实 CLI DAG 恢复 | 不把现有同名 BDD 当 crash matrix | 高 |
 | E17 | crates/ralph-cli/Cargo.toml；crates/ralph-core/Cargo.toml；scripts/run-tests.sh | CLI 默认 supervisor-db；core 默认无；nextest 两阶段脚本 | 同时覆盖 feature 开/关；最终不裸跑 workspace nextest | 高 |
 | E18 | 本轮 nextest run ID 7e50f1de-d450-4b4d-8448-9d97175da52a | 159 全绿但未覆盖新 acceptance | 可重复开发基线，不能替代 Red | 高 |
-| E19 | S/migrations.rs::CURRENT_VERSION；S/dag_store_rusqlite.rs::DagConnection | 当前 v17；共享连接；事务/版本拒绝已有模式 | 顺序新增 v18–v23，保持前向迁移 | 高 |
+| E19 | S/migrations.rs::CURRENT_VERSION；S/dag_store_rusqlite.rs::DagConnection | 当前 v18；共享连接；事务/版本拒绝已有模式 | 顺序新增 v19–v23，保持前向迁移 | 高 |
 | E20 | core event_loop/accepted_transition.rs；core file_lock.rs | 已有 durable-before-publish、幂等 replay、try_exclusive 模式 | 复用思路和锁，不把 task projection 冒充已有原子 outbox | 高 |
 | E21 | core skill_registry.rs::{register_builtin,is_hat_eligible}；event_loop/prompt_types.rs | OPAC 注册与 hat 可见性已有实现 | U15 复用 registry，不复制 skill 正文 | 高 |
 | E22 | Git c11309ac、7b05aec4、a84bfce5、a3aba2b6、b842d593 | 已修 path policy、macOS 路径及部分 receipt recovery 测试 | 保留这些负例，不重复列旧风险 | 中（历史） |
@@ -171,7 +171,7 @@ U9的最终accepted证据接入点是legacy.rs的最终pending_publish/AcceptedT
 U14取消与CAS有明确线性化边界：worker在target锁内以短事务将当前generation从running转commit_authorized。取消先赢则禁止CAS并回收；commit_authorized先赢则完成U4的物化/持久化闭环，再停止接纳新工作，不能在CAS后人为制造半交付。completion携带generation，控制面只接受当前generation的结果。测试分别固定两种顺序。
 
 1. **身份与资源域：** 内部 key 统一 `forge:<plan_key>:<unit_id>`；job_id/token 包含 plan_key、stage、attempt，不能跨 plan 冲突。pool cap 是一个 loop runtime 的实际并发 job 数，resource key 在一个 DAG store 内共享；同名 resource 的 capacity 声明冲突阻止 plan 激活。拥有资源但等待后继的 Unit 不占 job pool。未知存活进程的 lease 不释放；只有证实子进程已退出/取消且 Unit 最终 blocked/failed 才释放。
-2. **持久扩展与迁移编号：** U3 新增 v18（Unit base、stage accepted evidence）；U4 v19（target checkout intent/状态）；U8 v20（terminal delivery）；U9 v21（registration candidate/accepted evidence）；U11 v22（correction request/failure/预算）；U12 v23（attempt-scoped integration facts/intents）。U2 使用已有表，无新迁移；U5/U6/U10 消费前置表。迁移 SQL 均为计划新增文件 `S/migrations/v18.sql` … `v23.sql`；每次同步 CURRENT_VERSION、迁移列表、reopen/old-wave-preservation 测试。不得为了方便覆盖旧 migration。
+2. **持久扩展与迁移编号：** U3 的 v18（Unit base、stage accepted evidence）已存在，本轮只接通其 runtime 读写；U4 v19（target checkout intent/状态）；U8 v20（terminal delivery）；U9 v21（registration candidate/accepted evidence）；U11 v22（correction request/failure/预算）；U12 v23（attempt-scoped integration facts/intents）。U2 使用已有表，无新迁移；U5/U6/U10 消费前置表。后续迁移 SQL 从计划新增文件 `S/migrations/v19.sql` … `v23.sql`；每次同步 CURRENT_VERSION、迁移列表、reopen/old-wave-preservation 测试。不得覆盖已有 v18 migration。
 3. **stage evidence：** 以 current JobIdentity 为主键；记录 base、runtime 读取的 clean HEAD、accepted result digest、前阶段 artifact 的相对路径/hash、terminal。路径/哈希有界并复用现有 artifact 校验；不存任意原始 prompt/payload。Evidence 与 terminal 在一个事务写入；写失败不得 release/advance。review/verify 只能确认输入 HEAD，不能偷偷变更代码。execute/fix 可推进 descendant HEAD；失败退出若 worktree 脏，不 reset，correction 标为 blocked 要求人工保全，不声称自动恢复这种未知代码状态。
 4. **目标物化状态机：** verified candidate→durable checkout intent(old SHA,new SHA,old tree,new tree,target identity)→CAS→index/files synchronize→verified materialized→integration record→accepted integrated/task projection→acked。在同一 Git common-dir 的 target 专属 FileLock 下操作；lock busy 进 pending，不阻塞 tick。CAS 后失败绝不发 integrated。恢复允许 index+files 全部对应 old 或全部对应 new；混合/用户 dirty、branch 换绑、foreign repo 均 blocked。不回滚 ref、不使用 reset/clean；fail 后保留 intent 供诊断。
 5. **intent 分类：** 验证 pinned base、unit HEAD、candidate tree、parent、目标身份。target=expected 重试原 tested candidate；target=candidate 补物化/record；target 为已记录并 ack 后续 runtime integration 的可证明 descendant 时只补旧 record，不倒退工作区；其他 SHA blocked。StaleExpected 只有在证明旧 candidate 从未落地时才把该 intent 标 superseded，下一次 gate 创建新 generation。每次 correction 新 attempt，不覆盖旧 intent。
@@ -514,7 +514,7 @@ G；跨 review/verify/pending correction/restart 的持有证据与最终释放�
 
 资源域为同一 DAG store；不同 plan 相同 key 不得各算一份容量。既有活动 jobs 无 lease 时先事务重建并校验总量，不能以0使用量恢复。 检测由第9/11/15项测试负责；剩余风险在Unit Close证据中记录，不以“全部绿”删除边界说明。
 
-### U3. Unit 3：审查接续 executor 已提交成果
+### U3. Unit 3：完成 executor 已提交成果的 runtime 接续
 
 **1. Unit 目标**
 
@@ -538,7 +538,7 @@ R3,R16；S3,S16,S17；D3,D16；E5,E18,E19。
 
 **6. 修改位置**
 
-修改 D/spawn.rs::observe_unit_event_dag/spawn_job 与 jobs terminal API；新增 S/dag_store_rusqlite/evidence.rs、S/migrations/v18.sql；S/migrations.rs 登记；使用 D/worktree/resume.rs，不降低其检查；测试 D/spawn.rs。 新模块只承接上述职责；相邻职责边界：首次 base 暂沿用现有 approval base；per-Unit row 从此可存 base，U5 再改变选取时机；本 Unit 不自动恢复缺失后继。
+修改 D/spawn.rs::observe_unit_event_dag/spawn_job 与 jobs terminal API，接通已存在的 v18 evidence/base 存储；不得新增或覆盖 `S/migrations/v18.sql`。使用 D/worktree/resume.rs，不降低其检查；测试 D/spawn.rs。 新模块只承接上述职责；相邻职责边界：首次 base 暂沿用现有 approval base；per-Unit row 从此可存 base，U5 再改变选取时机；本 Unit 不自动恢复缺失后继。
 
 **7. 可依赖能力**
 
@@ -590,7 +590,7 @@ C1,C2,C3；所有 worktree resume/acquire、forged accepted result、macOS canon
 
 **18. 完成标准**
 
-G；正常 commit 不再挡 reviewer，所有现有 path/identity 负例仍通过；v17→v18 保留 wave rows。
+G；正常 commit 不再挡 reviewer，所有现有 path/identity 负例仍通过；已有 v18 表可在真实 runtime 中写入并读回 Unit base/stage evidence，v17→v18 的 wave rows 保留。
 
 **19. 停止条件**
 
