@@ -43,6 +43,7 @@ pub mod integration;
 pub mod jobs;
 mod admission;
 pub mod recovery;
+pub mod reconcile;
 pub mod shadow;
 mod spawn;
 pub mod worktree;
