@@ -1022,7 +1022,7 @@ impl DagSchedulerRuntime {
             warn!(job_id, "DAG spawn: no durable journal; refusing to launch");
             return;
         };
-        match journal.reserve_job(&identity, now_ms() as i64) {
+        match journal.reserve_job(&identity, now_ms() as i64, None) {
             Ok(false) => {
                 debug!(
                     job_id,
@@ -1950,7 +1950,7 @@ units:
         runtime
             .journal()
             .expect("durable journal")
-            .reserve_job(&identity, 1)
+            .reserve_job(&identity, 1, None)
             .expect("reserve job");
         runtime.awaiting_acceptance.insert(
             identity.unit_key(),
@@ -2048,7 +2048,7 @@ units:
         runtime
             .journal()
             .expect("durable journal")
-            .reserve_job(&identity, 1)
+            .reserve_job(&identity, 1, None)
             .expect("reserve job");
 
         runtime.observe_unit_event_dag(

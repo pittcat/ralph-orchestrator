@@ -1749,7 +1749,7 @@ units:
         runtime
             .journal()
             .expect("durable journal")
-            .reserve_job(&execute_identity(), 1)
+            .reserve_job(&execute_identity(), 1, None)
             .expect("reserve job");
         drop(runtime);
 
@@ -1784,7 +1784,7 @@ units:
         runtime
             .journal()
             .expect("durable journal")
-            .reserve_job(&identity, 1)
+            .reserve_job(&identity, 1, None)
             .expect("reserve job");
         runtime
             .journal()
@@ -1831,7 +1831,7 @@ units:
         runtime
             .journal()
             .expect("durable journal")
-            .reserve_job(&identity, 1)
+            .reserve_job(&identity, 1, None)
             .expect("reserve job");
         runtime
             .journal()
