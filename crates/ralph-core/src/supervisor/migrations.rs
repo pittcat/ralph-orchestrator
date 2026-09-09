@@ -72,8 +72,19 @@ mod imp {
     /// fixer resume from the exact HEAD the prior stage committed
     /// and accepted, without resetting base. Forward-only CREATE
     /// TABLE; no ALTERs, no column-probe path.
+    /// v19 (2026-09-09-0917 plan U4) adds the
+    /// `dag_checkout_intents` durable target-materialization
+    /// ledger so CAS-then-checkout atomicity survives a loop
+    /// process death between the prepared intent and the
+    /// materialized worktree state. Forward-only CREATE TABLE;
+    /// no ALTERs, no column-probe path. `PRIMARY KEY (plan_key,
+    /// unit_key, target_branch, generation)` keeps the intent
+    /// idempotent across generations; the `state` machine
+    /// (`prepared` / `ref_advanced` / `materialized` /
+    /// `superseded` / `blocked`) is enforced by CHECK so the
+    /// store rejects malformed transitions at write time.
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 18;
+    pub const CURRENT_VERSION: i64 = 19;
 
     /// PMI-013 / TGP-02: typed error returned when a database's
     /// `user_version` is ABOVE this binary's migration ledger tail
@@ -540,6 +551,24 @@ mod imp {
                 ddl: include_str!("migrations/v18.sql"),
                 column_probe: None,
             },
+            // 2026-09-09-0917 plan U4 (DAG P1 closure — target
+            // checkout intents): adds the `dag_checkout_intents`
+            // durable target-materialization ledger so
+            // CAS-then-checkout atomicity survives a loop process
+            // death between the prepared intent and the
+            // materialized worktree state. Forward-only CREATE
+            // TABLE; no ALTERs, so no column probe. `PRIMARY KEY
+            // (plan_key, unit_key, target_branch, generation)`
+            // keeps the intent idempotent across generations;
+            // the `state` machine (`prepared` / `ref_advanced` /
+            // `materialized` / `superseded` / `blocked`) is
+            // enforced by CHECK so the store rejects malformed
+            // transitions at write time.
+            Migration {
+                version: 19,
+                ddl: include_str!("migrations/v19.sql"),
+                column_probe: None,
+            },
         ]
     }
 }
@@ -637,6 +666,11 @@ mod tests {
             // and the prior stage.
             "dag_unit_bases",
             "dag_stage_evidence",
+            // U4 (2026-09-09-0917 plan): durable target
+            // materialization ledger for CAS-then-checkout
+            // atomicity (state machine: prepared / ref_advanced /
+            // materialized / superseded / blocked).
+            "dag_checkout_intents",
         ];
         for table in tables {
             let count: i64 = conn

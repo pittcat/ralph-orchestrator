@@ -2188,6 +2188,15 @@ mod redrive_tests;
 mod retry_classifier_tests;
 #[cfg(feature = "supervisor-db")]
 mod rusqlite;
+/// 2026-09-09-0917 plan U4: target worktree materialization for the
+/// parallel-forge DAG. Pure skeleton — FileLock acquire + `git
+/// update-ref` + `git read-tree -m -u` materialization live in
+/// follow-up commits. Classifies outcomes into
+/// `OldTreeRepairable` / `NewTreeAlreadyMaterialized` /
+/// `MixedOrDirty` / `WrongWorktreeIdentity` / `TargetLockBusy`
+/// so the integration lane (U7) can route each result without
+/// re-implementing the Git plumbing.
+pub mod target_checkout;
 #[cfg(test)]
 mod types_tests;
 /// 2026-07-27-004 plan U1 (R1-R4): persistent `WaveId` is the
