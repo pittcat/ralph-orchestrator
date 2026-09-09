@@ -2156,6 +2156,12 @@ pub mod dag_store_rusqlite;
 /// on expected head, RAII guard. Trait split between real
 /// (`RealGitIntegrationPort`) and fake (`FakeGitIntegrationPort`)
 /// ports.
+/// 2026-09-09-0917 plan U13: bounded gate runner skeleton. Pure
+/// ring-tail buffer + outcome classification; real Unix
+/// process-group / deadline / cancel / drain wiring lives behind
+/// the `GateRunner` trait in a follow-up commit. Drives the
+/// short-circuit policy in `integration_lane::run_gate_commands_in`.
+pub mod gate_process;
 pub mod integration_lane;
 /// 2026-09-03-0959 plan U8 (R9; S8, S11; D11, D12; E2, E9, E11):
 /// pure deadline + idle lease logic with injectable clock.
