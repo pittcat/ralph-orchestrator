@@ -623,3 +623,162 @@ mod tests {
         contract_tests::assert_stages_are_tracked_independently(&store);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// 2026-09-09-0917 plan U19: poison-fixture coverage for every
+// `InMemoryDagSchedulerStore` method that touches an internal
+// `Mutex`. The implementation maps `PoisonError` to
+// `DagStoreError::IoError("InMemoryDagSchedulerStore mutex poisoned: ...")`
+// rather than unwinding; these tests lock that contract in
+// place so a future refactor that drops the `.map_err(...)` (e.g.
+// by reverting to `.lock().expect("poisoned")`) fails the build
+// instead of silently letting a poisoned mutex unwind through
+// the runtime.
+//
+// Coverage matrix (9 fixtures):
+//   - register_plan  → 2 (plans poisoned, next_id poisoned)
+//   - activate_plan  → 1 (plans poisoned)
+//   - get_plan       → 1 (plans poisoned)
+//   - list_active_plans → 1 (plans poisoned)
+//   - pin_unit_base  → 1 (unit_bases poisoned)
+//   - get_unit_base  → 1 (unit_bases poisoned)
+//   - record_stage_evidence → 1 (stage_evidence poisoned)
+//   - latest_stage_evidence → 1 (stage_evidence poisoned)
+// ─────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod poison_tests {
+    use std::sync::Mutex;
+    use std::thread;
+
+    use super::*;
+
+    fn plan(key: &str) -> CanonicalPlanRecord {
+        CanonicalPlanRecord {
+            plan_key: key.to_string(),
+            artifact_digest: "d1".to_string(),
+            target_branch: "feat/test".to_string(),
+            unit_ids: vec!["U1".to_string()],
+            created_at_ms: 1_700_000_000_000,
+        }
+    }
+
+    fn evidence(plan_key: &str, unit_key: &str, stage: &str, attempt: u32) -> StageEvidenceRecord {
+        StageEvidenceRecord {
+            plan_key: plan_key.to_string(),
+            unit_key: unit_key.to_string(),
+            stage: stage.to_string(),
+            attempt,
+            accepted_commit: "acc-a".to_string(),
+            base_commit: "base-a".to_string(),
+            evidence_token: format!("tok-{stage}-{attempt}"),
+            evidence_fingerprint: format!("fp-{stage}-{attempt}"),
+            accepted_at_ms: 1_700_000_000_000,
+        }
+    }
+
+    /// Force the given mutex into the poisoned state by acquiring
+    /// it on a child thread and panicking while the guard is held.
+    /// The guard's `Drop` marks the mutex poisoned; after the
+    /// scope returns every subsequent `.lock()` on this mutex
+    /// returns `Err(PoisonError)`. The inner `catch_unwind`
+    /// swallows the panic so the `thread::scope` itself doesn't
+    /// unwind through the test harness — only the guard's drop
+    /// marks the mutex poisoned, which is the behaviour we want.
+    /// `T: Send` is required so the `&Mutex<T>` capture crosses
+    /// the thread boundary — every store field (`HashMap<String,
+    /// ...>`, `i64`) already satisfies that.
+    fn poison<T: Send>(mutex: &Mutex<T>) {
+        thread::scope(|s| {
+            s.spawn(|| {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _guard = mutex.lock().unwrap();
+                    panic!("intentional poison for dag_store_memory poison fixture");
+                }));
+            });
+        });
+    }
+
+    fn assert_io_poisoned<T: std::fmt::Debug>(result: DagStoreResult<T>) {
+        match result {
+            Err(DagStoreError::IoError(msg)) => {
+                assert!(
+                    msg.contains("mutex poisoned"),
+                    "expected IoError message to mention 'mutex poisoned', got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected DagStoreError::IoError, got {other:?}"),
+            Ok(value) => panic!("expected Err on poisoned mutex, got Ok({value:?})"),
+        }
+    }
+
+    #[test]
+    fn register_plan_returns_io_error_when_plans_mutex_poisoned() {
+        // First lock acquisition in `register_plan` is on `plans`;
+        // poisoning it must surface as IoError, not a panic.
+        let store = InMemoryDagSchedulerStore::new();
+        poison(&store.plans);
+        assert_io_poisoned(store.register_plan(&plan("p1")));
+    }
+
+    #[test]
+    fn register_plan_returns_io_error_when_next_id_mutex_poisoned() {
+        // The `next_id` lock is reached only on a fresh `plan_key`
+        // (idempotent re-register of an existing plan_key never
+        // touches it). Poison `next_id` first, then register a
+        // brand-new plan_key to drive into the poisoned lock.
+        let store = InMemoryDagSchedulerStore::new();
+        poison(&store.next_id);
+        assert_io_poisoned(store.register_plan(&plan("fresh")));
+    }
+
+    #[test]
+    fn activate_plan_returns_io_error_when_plans_mutex_poisoned() {
+        let store = InMemoryDagSchedulerStore::new();
+        poison(&store.plans);
+        assert_io_poisoned(store.activate_plan("p1", "feat/test"));
+    }
+
+    #[test]
+    fn get_plan_returns_io_error_when_plans_mutex_poisoned() {
+        let store = InMemoryDagSchedulerStore::new();
+        poison(&store.plans);
+        assert_io_poisoned(store.get_plan("p1"));
+    }
+
+    #[test]
+    fn list_active_plans_returns_io_error_when_plans_mutex_poisoned() {
+        let store = InMemoryDagSchedulerStore::new();
+        poison(&store.plans);
+        assert_io_poisoned(store.list_active_plans());
+    }
+
+    #[test]
+    fn pin_unit_base_returns_io_error_when_unit_bases_mutex_poisoned() {
+        let store = InMemoryDagSchedulerStore::new();
+        poison(&store.unit_bases);
+        assert_io_poisoned(store.pin_unit_base("p1", "U1", "base-a", 1));
+    }
+
+    #[test]
+    fn get_unit_base_returns_io_error_when_unit_bases_mutex_poisoned() {
+        let store = InMemoryDagSchedulerStore::new();
+        poison(&store.unit_bases);
+        assert_io_poisoned(store.get_unit_base("p1", "U1"));
+    }
+
+    #[test]
+    fn record_stage_evidence_returns_io_error_when_stage_evidence_mutex_poisoned() {
+        let store = InMemoryDagSchedulerStore::new();
+        poison(&store.stage_evidence);
+        let ev = evidence("p1", "U1", "execute", 1);
+        assert_io_poisoned(store.record_stage_evidence("p1", "U1", "execute", 1, &ev));
+    }
+
+    #[test]
+    fn latest_stage_evidence_returns_io_error_when_stage_evidence_mutex_poisoned() {
+        let store = InMemoryDagSchedulerStore::new();
+        poison(&store.stage_evidence);
+        assert_io_poisoned(store.latest_stage_evidence("p1", "U1", "execute"));
+    }
+}
