@@ -4,8 +4,11 @@ type: fix
 date: 2026-09-09
 execution: code
 baseline: c11309acef260f5fa812d0f42771300e847d7fcc
+reviewed_head: e72df6aa7540f35d866986fea12964dff0b4f0f4
+deepened: 2026-09-09
 origin: docs/reviews/2026-09-09-parallel-forge-dag-completion-red-team-review.md
 planning_readiness: READY
+artifact_readiness: implementation-ready
 ---
 
 # Parallel Forge DAG P1 Closure - Plan
@@ -15,6 +18,7 @@ planning_readiness: READY
 **READY（实施决策已确定；不是实现验收通过）。** 覆盖报告 F01–F10：报告实际为 P0 0 项、P1 10 项。用户已确认此范围；F11–F13 的独立 P2 改进不纳入。P1 所必需的 preset、schema、注入指南和 operator skill 同步属于本计划。
 
 - 基线：`c11309acef260f5fa812d0f42771300e847d7fcc`。调查开始时仅原始 review 文档未跟踪；没有生产文件修改。
+- 写作期间其他会话提交review与本计划初稿，HEAD前进到`e72df6aa7540f35d866986fea12964dff0b4f0f4`；`git diff --name-only c11309ac HEAD`仅包含这两份文档。本轮复核修订保留在工作区，未执行commit。源码基线未变，无需重跑同一组定向测试。
 - 调查：CLI 主循环、DAG admission/spawn/recovery/integration、SQLite jobs/receipts/intent、EventLoop 投影顺序、worktree、PTY、preset/schema、skill 注入、测试入口与历史。
 - 已执行：`cargo nextest --version` = 0.9.140；带七项环境清理的 `cargo nextest run -p ralph-cli --bin ralph -- dag_scheduler`：159 passed / 1951 skipped，run ID `7e50f1de-d450-4b4d-8448-9d97175da52a`。
 - 已执行隔离 Git 实验：临时仓库中 update-ref 后文件仍为旧值；read-tree 两树更新使 index/文件一致；冲突的未提交改动被拒绝且保留。临时目录已删除。
@@ -107,6 +111,9 @@ planning_readiness: READY
 | E23 | docs/solutions/workflow-orchestration/parallel-forge-preset-integration-gap.md | 历史 wave 契约已变；其跨层同步经验仍相关 | 只借鉴同步检查，不继承旧 topic/task-close 结论 | 中 |
 | E24 | wc -l | inner.rs 4863、legacy.rs 4418、D/spawn.rs 2136、S/dag_store_rusqlite.rs 2198 | inner 只加调用；新增行为按职责独立模块，所有源码 <5000 行 | 高 |
 | E25 | [Git read-tree 文档](https://git-scm.com/docs/git-read-tree)、[Git update-ref 文档](https://git-scm.com/docs/git-update-ref) + E7 | 两树 merge 的 -u 更新 worktree；不用 --reset 覆盖本地变化 | 仅支持 U4 Git 操作选择，不证明整个恢复实现 | 高 |
+| E26 | S/merge_sink.rs::FileEventMergeSink::append_events；CLI commands/emit/command_impl.rs 实际 append；wave/dispatcher/coordination.rs::append_supervisor_coord_event | 三个实际主账本写入口；不能只为新writer加锁便宣称所有写者协调 | U8同步锁协议与消费者回归 | 高 |
+| E27 | core event_loop/parse_and_emit/legacy.rs pending_publish loop；event_loop/state_machine_stage.rs::commit_state_machine_projection | 最终survivor才写AcceptedTransition；activation_id当前含iteration；无compiled contract有direct publish分支 | U9的accepted标记不能在较早accepted_events局部数组处写；测试须加载真实contract | 高 |
+| E28 | CLI loop_runner/{entry,inner,hat_channel}.rs、loop_runner/wave/io.rs、loop_runner/wave/dispatcher/{salvage,dispatch}.rs、wave.rs；core event_loop/dispatch_and_handoff.rs::persist_system_injected_jsonl_event | 除E26外还有启动、guidance、hat归并、wave归并、恢复及系统事件写入主账本；recovery.jsonl/history/scratchpad是不同文件 | U8共享写锁必须覆盖这些真实入口，不以单线程假设替代跨进程协调 | 高 |
 
 ### 2.3 受影响范围
 
@@ -130,7 +137,7 @@ planning_readiness: READY
 | D5 | approval base 或 admission base | 首次 admission 读取当前可信 target，验证全部依赖 ack 的 integrated commit 为 ancestor，事务固定 unit_base；diff/resume 共用它 | E6/E9；仅等待依赖不提供依赖代码 | 0.91 |
 | D6 | 重放所有历史 job 或 current-job 推进 | 只读取 dag_units 当前身份 + terminal/evidence，live/recovery 共用 reconcile，幂等 reserve 缺失后继 | E8/E12/E18；遍历旧 accepted 会复活过期 attempt | 0.91 |
 | D7 | 重建 candidate 或消费原 intent | 核对 identity/tree/current target；expected 时执行原 CAS，candidate 时补物化/record；其他 target 不猜测 | E9/E7；重建会触发 intent drift 并失去已测试身份 | 0.90 |
-| D8 | fence-only 或可重放投递 | 新增 bounded terminal delivery 记录；prepare→append-once+fsync→delivered；主账本按稳定 key 核验，失败保留 pending | E10/E20；SQLite 与 JSONL 无共享事务，需幂等外部写 | 0.87 |
+| D8 | fence-only 或可重放投递 | 新增 bounded terminal delivery 记录；prepare→append-once+fsync→delivered；主账本按稳定 key 核验，失败保留 pending | E10/E20/E26/E28；SQLite与JSONL无共享事务，需幂等外部写；已扩大写者调查并将全部已定位主账本入口纳入锁协议 | 0.87 |
 | D9 | CLI 事后 receipt 或 core 投影前 receipt | 在 DAG plan-ready 的实际 StateProjector.apply 前写 candidate receipt；最终 accepted 后记 accepted evidence。candidate 永不单独授权 approval | E11/E20；不能把仍会被后续 policy 拒绝的事件当 accepted | 0.87 |
 | D10 | 多 helper 串写或一个激活事务 | 在同连接一次事务中校验 accepted receipt、登记 plan/units、pin approval base、激活 receipt/target；已接受 approval receipt 可重放 | E11/E19；SQLite helper 各自原子不等于组合原子 | 0.90 |
 | D11 | 放开 transition 或受授权 correction | execute failed + 当前 failure fingerprint + accepted correction 才 fix；预算事务扣一次；满池 durable pending，耗尽 blocked | E12/E4；任意 execute→fix 绕过失败与预算 | 0.91 |
@@ -142,12 +149,33 @@ planning_readiness: READY
 
 ### 实施协议（各 Unit 不得自行更换）
 
+**新增数据合同（均为计划新增，不是已有表）。** 下列字段组是最低且确定的持久化形状；实现者可选择Rust字段排列，不能改变主键、状态及证据来源。身份/path字段必须使用现有校验，SHA为40/64 hex，hash为64 hex，timestamp为INTEGER毫秒，计数非负。artifact路径上限4096字节、单job最多16个引用、kind白名单；超过即拒绝，不截断身份字段。
+
+| 迁移 / owning Unit | 表与唯一性 | 必须保存的字段 / 状态 | 旧数据处理 |
+|---|---|---|---|
+| v18 / U3 | dag_unit_bases：unit_key主键；dag_stage_evidence：job_id+token主键并关联完整JobIdentity | bases存plan_key/base_commit/created_at_ms；evidence存input_head/output_head/base_commit/terminal/result_digest及有界artifact refs | 新表空；旧current job只凭核验后的可信结果补证据，否则blocked |
+| v19 / U4 | dag_checkout_intents：unit_key+target_branch+generation主键；同Unit/target最多一个非terminal generation | expected_head/candidate_head/candidate_tree/unit_commit/base_commit、worktree canonical identity、state=prepared/ref_advanced/materialized/superseded/blocked | 将旧intent完整内容作为generation=0导入，不修改其candidate；归属不唯一则blocked |
+| v20 / U8 | dag_terminal_deliveries：plan_key+topic主键，delivery_key唯一 | artifact_digest、固定payload字段、固定timestamp、event_file identity、append_offset、serialized_line_digest、state=prepared/appending/delivered/blocked | 旧fence只有all-ack及一致plan证据可导入；绝不delete fence解锁 |
+| v21 / U9 | dag_registration_evidence：plan_key+loop_id主键；dag_approval_evidence：plan_key+loop_id+approval_digest主键 | candidate来源hat/contract revision、artifact path/digest、accepted transition引用、projection_complete；approval存target/base/approved、accepted transition引用 | receipt原状态保留；没有accepted证据不推导approved |
+| v22 / U11 | dag_correction_requests：unit_key+failure_fingerprint主键 | failed_job_id/token/attempt、correction_digest、bounded feedback path/hash、state=pending/reserved/blocked、reserved_job_id、reserved_attempt；budget由已reserve fixer attempts计算 | 不按收到事件次数扣预算；历史attempt只读核验 |
+| v23 / U12 | dag_integration_failures：unit_key+attempt+generation主键；attempt与checkout generation关联 | 原verify identity、failure_class、observation path/hash、candidate引用、consumed correction key；新intent关联当前attempt | 旧intent归属需唯一plan与attempt证据；未知不自动绑定 |
+
+U7的supersede不是覆盖旧candidate：先把原intent完整保留在v19 generation记录，再在同事务内条件替换旧active intent映射；仅允许target仍为expected且证明CAS未落地的generation。所有get_intent/prepare_intent/record/ack消费者同步使用plan-qualified unit_key；API字段名称即使暂沿用unit_id，也不得传裸U-ID。U12在此基础上再加attempt授权，v19历史不可删除。
+
+U7还必须关闭“integrated事件已存在但ack未写”的相邻窗口：用durable integration record生成可信投影输入，核验loop/task_key/commit后对真实StateProjector幂等重放close，再写ack；任务已正确closed时是no-op。不能从未经验证的JSONL声称projection成功；不能因事件存在便直接ack。测试分别覆盖task open与task已closed。
+
+U8固定序列化timestamp及payload以便重建原始行。在目标FileLock下确定append_offset，并保存appending证据后写入；DB事务只用于短元数据写，不持DB mutex等文件锁。重启时仅当文件identity、offset、此前完整前缀以及现有tail字节均与预定行匹配，才追加缺失后缀完成该行；不truncate、不删除其他字节。若已有后续完整行或无法证明tail归属，blocked。完整行存在时直接标delivered，不再append。E26/E28列出的主账本writer均使用相同的FileLock::new(events_path)协议，锁覆盖tail核验、整批写入和flush；先解析为相同的canonical父目录与文件名以避免路径别名生成不同锁。普通writer遇到非空且无换行的tail返回InvalidData并保留原字节，不在未完成行后继续追加；只有delivery writer可凭持久证据补齐自己的tail。DAG控制面使用try_exclusive，忙则pending；原同步writer复用短时exclusive。不改变其他writer的payload/路由及原有错误传播语义，也不为它们增加dedup。其他不遵守协议的writer视为外部改动并拒绝修复。
+
+U9的最终accepted证据接入点是legacy.rs的最终pending_publish/AcceptedTransition成功结果，不是统一policy内部临时accepted_events数组。该证据绑定durable transition_id与原始contract revision；写标记中断时可从已提交AcceptedTransition核验补齐。不存在compiled contract的测试必须先装载builtin真实配置，不能拿direct publish测试替代该边界。
+
+U14取消与CAS有明确线性化边界：worker在target锁内以短事务将当前generation从running转commit_authorized。取消先赢则禁止CAS并回收；commit_authorized先赢则完成U4的物化/持久化闭环，再停止接纳新工作，不能在CAS后人为制造半交付。completion携带generation，控制面只接受当前generation的结果。测试分别固定两种顺序。
+
 1. **身份与资源域：** 内部 key 统一 `forge:<plan_key>:<unit_id>`；job_id/token 包含 plan_key、stage、attempt，不能跨 plan 冲突。pool cap 是一个 loop runtime 的实际并发 job 数，resource key 在一个 DAG store 内共享；同名 resource 的 capacity 声明冲突阻止 plan 激活。拥有资源但等待后继的 Unit 不占 job pool。未知存活进程的 lease 不释放；只有证实子进程已退出/取消且 Unit 最终 blocked/failed 才释放。
 2. **持久扩展与迁移编号：** U3 新增 v18（Unit base、stage accepted evidence）；U4 v19（target checkout intent/状态）；U8 v20（terminal delivery）；U9 v21（registration candidate/accepted evidence）；U11 v22（correction request/failure/预算）；U12 v23（attempt-scoped integration facts/intents）。U2 使用已有表，无新迁移；U5/U6/U10 消费前置表。迁移 SQL 均为计划新增文件 `S/migrations/v18.sql` … `v23.sql`；每次同步 CURRENT_VERSION、迁移列表、reopen/old-wave-preservation 测试。不得为了方便覆盖旧 migration。
 3. **stage evidence：** 以 current JobIdentity 为主键；记录 base、runtime 读取的 clean HEAD、accepted result digest、前阶段 artifact 的相对路径/hash、terminal。路径/哈希有界并复用现有 artifact 校验；不存任意原始 prompt/payload。Evidence 与 terminal 在一个事务写入；写失败不得 release/advance。review/verify 只能确认输入 HEAD，不能偷偷变更代码。execute/fix 可推进 descendant HEAD；失败退出若 worktree 脏，不 reset，correction 标为 blocked 要求人工保全，不声称自动恢复这种未知代码状态。
 4. **目标物化状态机：** verified candidate→durable checkout intent(old SHA,new SHA,old tree,new tree,target identity)→CAS→index/files synchronize→verified materialized→integration record→accepted integrated/task projection→acked。在同一 Git common-dir 的 target 专属 FileLock 下操作；lock busy 进 pending，不阻塞 tick。CAS 后失败绝不发 integrated。恢复允许 index+files 全部对应 old 或全部对应 new；混合/用户 dirty、branch 换绑、foreign repo 均 blocked。不回滚 ref、不使用 reset/clean；fail 后保留 intent 供诊断。
 5. **intent 分类：** 验证 pinned base、unit HEAD、candidate tree、parent、目标身份。target=expected 重试原 tested candidate；target=candidate 补物化/record；target 为已记录并 ack 后续 runtime integration 的可证明 descendant 时只补旧 record，不倒退工作区；其他 SHA blocked。StaleExpected 只有在证明旧 candidate 从未落地时才把该 intent 标 superseded，下一次 gate 创建新 generation。每次 correction 新 attempt，不覆盖旧 intent。
-6. **terminal delivery：** key=plan_key+topic+artifact digest；payload 确定化并限制为现有 done 字段。先 DB prepare，再在 target main-events 专属 FileLock 下扫描完整记录并比 key/payload；已存在则不 append。缺失时一次序列化完整行并 sync_all，之后 delivered。不可读/不一致不当 absent。自己的可确认 torn tail 仅在该锁下隔离并修复；未知 tail 阻断，不能截掉别人的字节。只改 DAG writer；与其共享主账本的 `FileEventMergeSink` 和 coordinator append 使用同一个现有 FileLock 规则，避免读修复与写并发。锁覆盖读查重及写，SQLite 事务不得跨文件锁。at-least-once retry + 幂等写提供逻辑 exactly-once；不声称磁盘故障下一定送达。
+6. **terminal delivery：** key=plan_key+topic+artifact digest；payload 确定化并限制为现有 done 字段。先 DB prepare，再在 target main-events 专属 FileLock 下扫描完整记录并比 key/payload；已存在则不 append。缺失时一次序列化完整行并 sync_all，之后 delivered。不可读/不一致不当 absent。自己的可确认torn tail只按上文补齐缺失后缀；未知tail阻断，不截断文件。共享writer覆盖E26/E28。严禁持SQLite事务等待文件锁；取得文件锁后允许短元数据事务，不能把长时间扫描/fsync放进SQLite事务。at-least-once retry加幂等写提供完整事件记录的逻辑exactly-once；不声称磁盘故障下一定送达，也不承诺消费者进程跨崩溃只启动一次。
 7. **registration：** candidate receipt 只保存 canonical artifact identity、来源身份/loop 与投影所需有界引用；record 失败拒绝该事件的 task projection。最终 accepted 标记在真正 publish/accepted-log 边界记录。恢复扫描 pending 和 active，不只 active plans；仅 candidate 的记录必须重新经过正常 EventLoop 验证/幂等 projection，不能直接激活；拒收不能产生 active plan/job。artifact drift blocked。已接纳 approval 的 bounded receipt 在激活事务前写；恢复只有此证据才能启动激活事务。target/base 在该次 approval 固定，不能 restart 时取新 HEAD 替代。
 8. **correction：** correction identity 使用当前 Unit failure fingerprint + attempt（同一失败重复 accepted 请求为 replay）；已有 3 次 fixer 上限保持。unknown Unit、无 failure、旧 token、不匹配来源请求不改变状态。事务先登记 pending 再扣预算/reserve，容量不足不扣；多个 affected Units 分别可恢复，重复 Unit 去重。integration conflict/gate failure 写独立 failure fact，不能伪装成 verify job failed；U12 不更改业务 topic。
 9. **gate：** core 新 `S/gate_process.rs`；同步接口便于已有 Git port 使用，但内部 deadline/cancel/输出均有界。Unix 为每个 gate 建独立 process group；正常/失败/timeout/cancel 都 drain、wait 并回收后代。总 deadline 覆盖整个 command set；每路 64 KiB ring tail，单行超长也按字节截断；不回显环境。CLI 新 `D/integration_worker.rs`，worker 不持 `&mut DagSchedulerRuntime`、不从内部调用 EventLoop，不持 SQLite mutex 跑命令；通过带 plan/unit/attempt/generation 的消息返回，stale result 无副作用。取消传播给 runner 并 join；不把 drop JoinHandle 当取消。
@@ -924,11 +952,11 @@ done prepare 后发生 I/O/重启仍可补送，且不重复完整主账本事�
 
 **2. 对应需求与 Scenario**
 
-R8,R16；S8,S16；D8,D16；E10,E20。
+R8,R16；S8,S16；D8,D16；E10,E20,E26,E28。
 
 **3. 外部可观察结果**
 
-有效完整 done=1，delivered 最终为真；tester 单次逻辑 activation；同 key 不同 payload 拒绝；未知 corrupt tail 不截断。
+有效完整 done=1，delivered 最终为真；tester正常路由；同 key 不同 payload 拒绝；未知 corrupt tail 不截断。消费者进程跨崩溃的启动次数不属于本Unit承诺。
 
 **4. 当前行为基线**
 
@@ -940,7 +968,7 @@ try_record_terminal_emit 成功即永久消耗许可，append 失败只 warn；�
 
 **6. 修改位置**
 
-新增 D/terminal_delivery.rs、S/migrations/v20.sql；修改 D/integrate.rs done/reconcile、S/dag_store_rusqlite.rs；为 S/merge_sink.rs 与 CLI wave/dispatcher/coordination.rs 的共享写入口加入同一 FileLock；测试新增 delivery 模块及 D/integrate.rs。 新模块只承接上述职责；相邻职责边界：不把所有业务事件改造成新 outbox；仅 DAG done 的投递需要 dedup。共享 writer 锁是必要防并发边界，不改变 wave payload。
+新增 D/terminal_delivery.rs、S/migrations/v20.sql及core src/event_file_append.rs（计划新增共享锁与tail校验helper，core src/lib.rs导出）。修改 D/integrate.rs done/reconcile、S/dag_store_rusqlite.rs。E26/E28列出的全部现有主账本写入位置接入该helper：S/merge_sink.rs；CLI commands/emit/command_impl.rs、loop_runner/{entry,inner,hat_channel}.rs、loop_runner/wave/io.rs、loop_runner/wave/dispatcher/{coordination,salvage,dispatch}.rs、wave.rs；core event_loop/dispatch_and_handoff.rs。这些文件只替换append边界，保持payload构造与路由不变；inner.rs不得内联新逻辑。测试新增delivery/helper模块及D/integrate.rs，保留每个调用者原有错误处理测试。不修改recovery/history/scratchpad等非主账本写入；不把所有业务事件改造成新outbox，仅DAG done需要dedup。
 
 **7. 可依赖能力**
 
@@ -952,7 +980,7 @@ try_record_terminal_emit 成功即永久消耗许可，append 失败只 warn；�
 
 **9. 验收测试**
 
-计划新增 `dag_terminal_delivery_replays_once`。前置：全部 Unit ack；main ledger 写入可控失败，及写完完整行尚未标 delivered 的 durable fixture。 动作：prepare→失败→reopen→retry；第二变体 append 后 reopen；第三变体两个连接同时尝试同 key。 断言与副作用：有效完整 done=1，delivered 最终为真；tester 单次逻辑 activation；同 key 不同 payload 拒绝；未知 corrupt tail 不截断。 层级：真 FileLock、SQLite、main events readback 和 EventLoop tester 路由；注入 fsync/append 故障使用可替换 I/O adapter，不 Mock dedup/DB。 运行：C1 的单测过滤 dag_terminal_delivery_replays_once；filter 匹配数必须大于0。
+计划新增 `dag_terminal_delivery_replays_once`。前置：全部 Unit ack；main ledger 写入可控失败，及写完完整行尚未标 delivered 的 durable fixture。动作：prepare→失败→reopen→retry；第二变体append后reopen；第三变体两个连接同时尝试同key。断言与副作用：有效完整done=1，delivered最终为真；真实EventLoop能路由tester；同key不同payload拒绝；未知corrupt tail不截断。层级：真FileLock、SQLite、main events readback和EventLoop路由；注入fsync/append故障使用可替换I/O adapter，不Mock dedup/DB。运行：C1单测过滤dag_terminal_delivery_replays_once；filter匹配数必须大于0。
 
 **10. Acceptance Red**
 
@@ -980,7 +1008,7 @@ Fault injection/Concurrency：fsync 返回错误可能已写完整行，重试�
 
 **16. 回归范围**
 
-C1,C2,C3；merge_sink、coordination/salvage、OPAC merge-one、现有 done count tests（按新恢复契约更新旧 blocked 专用断言，记录理由）。 每Unit另执行B1/B2/B3/B4（对应受影响crate）；最终Unit执行第10节。失败不得进入下一Unit。
+C1,C2,C3；对E26/E28各调用者运行现有emit、wave、hat_channel、guidance、default_publishes相关测试，及merge_sink、coordination/salvage、OPAC merge-one、现有done count tests（按新恢复契约更新旧blocked专用断言，记录理由）。共享append helper新增多进程writer与torn-tail保护测试，运行core过滤event_file_append；CLI消费者运行`cargo nextest run -p ralph-cli --bin ralph`并带第9节七项清理前缀，core消费者运行C6。同步运行doc drift扫描；命令语法未变，无新增参数文档。每Unit另执行B1/B2/B3/B4；失败不得进入下一Unit。
 
 **17. 预期文件变更**
 
@@ -992,7 +1020,7 @@ C1,C2,C3；merge_sink、coordination/salvage、OPAC merge-one、现有 done coun
 
 **18. 完成标准**
 
-G；所有写入窗口均验证完整行计数及 accepted 消费数；v19→v20 wave rows 保留。
+G；所有写入窗口均验证完整行计数及真实路由；跨进程共享writer不得在torn tail后追加；v19→v20 wave rows保留。
 
 **19. 停止条件**
 
@@ -1476,7 +1504,7 @@ tick→maybe_integrate_one→integrate_unit同步等待gate；Tokio其他线程�
 
 **11. 单元测试拆分**
 
-one_active_integration_per_target；worker_completion_routes_current_generation；stale_completion_ignored；cancel_prevents_cas_after_gate；has_pending_work_includes_worker。 这些名称为计划新增最小测试；输入/输出按括号及D14与本Unit第5项约束。仅时钟、故障注入和AI工作内容可Fake；不得Mock本Unit真实规则与存储判断。
+one_active_integration_per_target；worker_completion_routes_current_generation；stale_completion_ignored；cancel_before_authorization_prevents_cas；authorization_before_cancel_finishes_materialization；has_pending_work_includes_worker。这些名称为计划新增最小测试；输入/输出按D14与本Unit第5项约束。取消两种测试以握手分别固定commit_authorized之前/之后，断言前者ref不变、后者完成物化且无新admission。仅时钟、故障注入和AI工作内容可Fake；不得Mock本Unit真实规则与存储判断。
 
 **12. Red → Green → Refactor 顺序**
 
@@ -1586,7 +1614,7 @@ Contract/State-machine：artifact在worktree不可读会被文本测试漏掉；
 
 **16. 回归范围**
 
-C1–C9、F1–F4；preset_lint三条必跑；现有integration_dag_scheduler inspect仍绿；污染环境CLI测试；最终全量脚本。 每Unit另执行B1/B2/B3/B4（对应受影响crate）；最终Unit执行第10节。失败不得进入下一Unit。
+C1–C8、C9a、C9b、F1–F4；preset_lint三条必跑；现有integration_dag_scheduler inspect仍绿；污染环境CLI测试；最终全量脚本。每Unit另执行B1/B2/B3/B4（对应受影响crate）；最终Unit执行第10节。失败不得进入下一Unit。
 
 **17. 预期文件变更**
 
@@ -1696,7 +1724,7 @@ cp scripts/ralph-zsh-plugin.zsh ~/.oh-my-zsh/plugins/ralph/ralph.plugin.zsh
 zsh -f -c 'autoload -Uz compinit; compinit; source ~/.oh-my-zsh/plugins/ralph/ralph.plugin.zsh; (( $+functions[_ralph] ))'
 ```
 
-补全必须保持builtin带冒号值使用compadd；若实际函数名不是 `_ralph`，停止并核对脚本定义后修正验证命令，不跳过load验证。operator skill references与help逐项核对，用现有 `skills/ralph-preset-review/fixtures/aaf-review-negative-fixture.yml` 按review流程重跑；不引入仅包含某段prompt文案的测试。
+补全必须保持builtin带冒号值使用compadd；已确认脚本入口为`_ralph()`。operator skill references与help逐项核对，用现有 `skills/ralph-preset-review/fixtures/aaf-review-negative-fixture.yml` 按review流程重跑；不引入仅包含某段prompt文案的测试。
 
 所有行为单测从第5/7节给出的入口进入。Contract tests就是typed context→真实文件读取→policy-check/emit；没有单独不存在的contract工具。关键E2E是C7中的S19及真实进程恢复变体；F2只是相邻mock框架回归。
 
@@ -1708,7 +1736,7 @@ zsh -f -c 'autoload -Uz compinit; compinit; source ~/.oh-my-zsh/plugins/ralph/ra
 - 预期Red与实际Red逐条对照；未出现Red时先调查覆盖或基线变化。不能预先写“新测试通过”。已有159条定向测试全绿只算E18基线。
 - Characterization与负例保持：wave/shadow/default-feature、path escape、wrong repo/symlink、token/source、resource、dirty worktree、approval拒绝、旧数据不明状态、migration wave行保留。
 - State-machine/idempotency/双连接concurrency、Git与append故障、gate timeout/cancel后代回收均有结果。精确SQL断点reopen与OS kill/restart区别报告，不混称。
-- C1–C9、B1–B6、F1–F4通过；必要preset/schema parity、静态doc drift、CLI help、补全安装/加载与operator review流程通过。
+- C1–C8、C9a、C9b、B1–B6、F1–F4通过；必要preset/schema parity、静态doc drift、CLI help、补全安装/加载与operator review流程通过。
 - 无新增失败/skip/ignore/.only，无断言弱化、无source-only替代runtime、无无解释Snapshot/Golden更新、无扩大timeout掩盖阻塞。
 - 每次迁移兼容旧wave数据；旧DAG可信字段不能重建时保全并blocked，不自动reset或清库。
 - 新增模块有明确职责且全部源码≤5000行；特别检查inner.rs与legacy.rs；移除废弃实现和实验代码。
@@ -1740,3 +1768,4 @@ zsh -f -c 'autoload -Uz compinit; compinit; source ~/.oh-my-zsh/plugins/ralph/ra
 | 是否把报告评级扩大 | 否 | P0=0，P1 F01–F10；P2仅必要同步交集 |
 | 是否完整声明未验证内容 | 是 | 第0/10节；新Red/Green、完整CLI、全量尚未执行 |
 
+文档复核遵循ce-doc-review的coherence、feasibility、scope、security、adversarial检查，按仓库工具映射在主线程串行完成；没有独立子agent或跨模型复审，不将其称作独立共识。已修订7组约束：持久化数据合同、intent历史与ack恢复、delivery写者/尾部保护、最终accepted证据位置、取消/CAS线性化、测试命令引用、文档基线。未留下待用户选择的实施方案；计划结构检查确认12节、15个Unit、每Unit20项，`git diff --check`通过。
