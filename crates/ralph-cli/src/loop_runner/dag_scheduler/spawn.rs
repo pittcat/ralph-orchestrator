@@ -1,6 +1,8 @@
 //! 2026-09-03-0959 plan, wiring step E1 — the `dag`-mode execution
 //! face of [`DagSchedulerRuntime`].
 //!
+//! Plan: 2026-09-09-0917-fix-forge-dag-p1-closure-plan (U28 anchor).
+//!
 //! The seam stops being observe-only here: for every admitted Unit
 //! the runtime spawns a fenced per-stage job (executor → reviewer →
 //! verifier, with the reviewer-REJECTED → fixer correction leg) and

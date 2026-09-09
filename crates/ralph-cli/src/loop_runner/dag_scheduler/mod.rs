@@ -1,4 +1,6 @@
 //! 2026-09-03-0959 plan U6 — DAG scheduler module root.
+//!
+//! Plan: 2026-09-09-0917-fix-forge-dag-p1-closure-plan (U28 anchor).
 
 // `result_large_err` is allowed at file scope (more granular than
 // crate level) per U2 / F17: keep DagStoreError variants human-readable

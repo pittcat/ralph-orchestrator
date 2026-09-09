@@ -1,5 +1,7 @@
 //! Target worktree materialization for parallel-forge DAG (U4).
 //!
+//! Plan: 2026-09-09-0917-fix-forge-dag-p1-closure-plan (U28 anchor).
+//!
 //! See plan §7-U4 and §3 v19 protocol. This module is the durable bridge between
 //! CAS and integration record: it verifies, atomically materializes, and records
 //! state transitions for target worktree checkout.
