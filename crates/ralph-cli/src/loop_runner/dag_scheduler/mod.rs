@@ -1124,13 +1124,15 @@ impl DagSchedulerRuntime {
         // checked out. Unresolvable git state degrades to `None`,
         // which the admission engine reports as `BlockedNoTargetHead`.
         let target_head = ralph_core::get_head_sha(&self.workspace).ok();
-        // U1 (2026-09-09-0917): capture live pipeline pressure ONCE
-        // per tick and pass it into every admission snapshot so the
-        // engine can seed `global_cap` accounting with live stages and
-        // short-circuit units already holding a live job. Recomputing
-        // per-plan would double-count multi-plan launches.
-        let live_stage_counts = self.pipeline.live_stage_counts();
-        let live_unit_ids = self.pipeline.live_unit_ids();
+        // U1 / U3 (2026-09-09-0917): ownership of the live pipeline
+        // pressure moves into `admission::compute_admission_snapshot`,
+        // which fuses candidate filtering + live counts + target head
+        // into one owned snapshot per plan. The engine seeds
+        // `global_cap` accounting with `live_stage_counts` and uses
+        // `current_job_unit_ids` as defence-in-depth against double-
+        // admission. Re-deriving the snapshot per tick is the
+        // continuous-slot-refill contract: a job completion in tick N
+        // is reflected in the snapshot for tick N+1.
         let mut admitted: Vec<(String, String)> = Vec::new();
         for (plan_key, plan) in &self.plans {
             if self.blocked_plans.contains(plan_key) {
@@ -1143,19 +1145,27 @@ impl DagSchedulerRuntime {
                 // handoff, never from the event payload.
                 resource_capacities: plan.resource_capacities.clone(),
             };
-            // U1: candidates are derived per-plan by `build_candidates`
-            // which filters out (a) units already integrated and (b)
-            // units already holding a live job. The pre-filter ensures
-            // the engine never re-admits a unit already in flight
-            // (which previously caused slot double-booking once U1
-            // completed and U2 should have been admitted next tick).
-            let inputs = self::admission::build_candidates(plan, &self.pipeline);
-            let snapshot = AdmissionSnapshot {
-                units: &inputs,
-                integration_target_head: target_head.as_deref(),
-                live_stage_counts: live_stage_counts.clone(),
-                current_job_unit_ids: live_unit_ids.clone(),
-            };
+            // U3 production path: compute_admission_snapshot returns
+            // owned inputs + live counts + target head; we re-borrow
+            // into the engine-facing AdmissionSnapshot via
+            // `AdmissionSnapshot::from_owned` so the seam stays
+            // uniform with the shadow path (`dag_shadow::compute_shadow_observation`).
+            // The `tick` seam stays pure (no spawn, no worktree, no
+            // emit) — only the shadow sink is updated. In `dag` mode,
+            // the admitted list is forwarded to E1's spawn seam which
+            // performs the actual slot reservation against the durable
+            // launch journal.
+            let snapshot_data = self::admission::compute_admission_snapshot(
+                plan,
+                &self.pipeline,
+                target_head.as_deref(),
+            );
+            let snapshot = AdmissionSnapshot::from_owned(
+                &snapshot_data.inputs,
+                snapshot_data.integration_target_head.as_deref(),
+                snapshot_data.live_stage_counts.clone(),
+                snapshot_data.current_job_unit_ids.clone(),
+            );
             let mut observation = compute_shadow_observation(&snapshot, &caps, &self.sink);
             observation.plan_key = plan_key.clone();
             if self.mode == SchedulerMode::Dag {
