@@ -43,6 +43,8 @@ impl EventLoop {
 
     pub fn attach_dag_runtime(&mut self) {
         self.dag_runtime_attached = true;
+        self.bus
+            .register_virtual_target(crate::event_origin::DAG_RUNTIME_CONSUMER);
     }
 
     pub(super) fn determine_active_hat_ids(&self, events: &[Event]) -> Vec<HatId> {

@@ -23,7 +23,8 @@ artifact_readiness: implementation-ready
 - 已执行：`cargo nextest --version` = 0.9.140；带七项环境清理的 `cargo nextest run -p ralph-cli --bin ralph -- dag_scheduler`：159 passed / 1951 skipped，run ID `7e50f1de-d450-4b4d-8448-9d97175da52a`。
 - 已执行隔离 Git 实验：临时仓库中 update-ref 后文件仍为旧值；read-tree 两树更新使 index/文件一致；冲突的未提交改动被拒绝且保留。临时目录已删除。
 - 未执行：新增测试的 Red/Green、完整 workspace、clippy、mock E2E、正式 CLI 跨进程 crash matrix、真实 AI loop。本计划不将报告的旧 harness 结果冒充本轮实验，也不声称预测 Red 已实际发生。
-- 阻塞项：无计划基线阻塞。若 U3 runtime acceptance 未能真实进入 EventLoop/SQLite/spawn 链，必须停在 U3，不得把缺口转交 U4。
+- 当前进度更新（2026-09-09）：已修复一个实际阻塞 U16 的后续根因。`dag_runtime` 虽已从 misrouted 检查中豁免，但 `EventBus` 仍把它当作未注册 target，导致 `forge.concurrency.approved` durable transition 回滚；现已在 `EventLoop::attach_dag_runtime` 注册显式虚拟投递 target。虚拟 target 只参与 delivery validation/ack，不创建 agent queue；普通未知 target 仍 fail-closed。新增 `ralph-proto` 虚拟 target 正/负例测试，`ralph-proto` 2/2、`ralph-core` handoff 18/18 通过，`cargo check -p ralph-cli --bin ralph` 通过。
+- 当前阻塞项：上述 DAG approval 投递阻塞已解除，但计划仍未完成。U3 runtime evidence/handoff/spawn wiring、U4–U15、v19–v23 migration 及真实 CLI/DAG 恢复验收仍待执行；isolated hat-channel 真正无业务事件时仍按 fail-closed 处理，尚未完成端到端确认。若 U3 runtime acceptance 未能真实进入 EventLoop/SQLite/spawn 链，必须停在 U3，不得把缺口转交 U4。
 
 本文按用户要求采用 0–11 节与每 Unit 20 项结构；不声明 `ce-unified-plan/v1`，避免将不同标题结构冒充该格式。Unit ID 稳定；进度记录在执行证据或 Git 中，不在计划里维护完成勾选。
 

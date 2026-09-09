@@ -40,6 +40,12 @@ pub struct EventBus {
     /// Registered hats indexed by ID.
     hats: BTreeMap<HatId, Hat>,
 
+    /// Runtime-owned targets which participate in delivery validation but do
+    /// not have an agent queue.  A virtual target is acknowledged by
+    /// `publish` so durable transitions can commit, while the runtime that
+    /// owns the target observes the accepted event through its own seam.
+    virtual_targets: std::collections::BTreeSet<HatId>,
+
     /// Pending events for each hat.
     pending: BTreeMap<HatId, Vec<Event>>,
 
@@ -99,6 +105,15 @@ impl EventBus {
         self.pending.entry(id).or_default();
     }
 
+    /// Registers a runtime-owned delivery target without creating an agent
+    /// hat or a pending queue for it.
+    ///
+    /// Virtual targets are intentionally explicit: they are not inferred
+    /// from event names, which keeps ordinary unknown targets fail-closed.
+    pub fn register_virtual_target(&mut self, target: impl Into<HatId>) {
+        self.virtual_targets.insert(target.into());
+    }
+
     /// Publishes an event to all subscribed hats.
     ///
     /// Returns the list of hat IDs that received the event.
@@ -135,6 +150,9 @@ impl EventBus {
                     .entry(target.clone())
                     .or_default()
                     .push(event.clone());
+                return vec![target.clone()];
+            }
+            if self.virtual_targets.contains(target) {
                 return vec![target.clone()];
             }
             // Target set but unregistered: keep the original direct-target
@@ -210,6 +228,7 @@ impl EventBus {
         }
         if let Some(target) = event.target.as_ref()
             && !self.hats.contains_key(target)
+            && !self.virtual_targets.contains(target)
         {
             return Err(EventDeliveryError::UnknownTarget(target.clone()));
         }
@@ -448,6 +467,31 @@ mod tests {
 
         assert_eq!(recipients.len(), 1);
         assert_eq!(recipients[0].as_str(), "reviewer");
+    }
+
+    #[test]
+    fn test_virtual_target_is_delivery_ack_without_agent_queue() {
+        let mut bus = EventBus::new();
+        bus.register_virtual_target("dag_runtime");
+
+        let event = Event::new("forge.concurrency.approved", "approved")
+            .with_target("dag_runtime");
+
+        assert!(bus.validate_delivery(&event).is_ok());
+        assert_eq!(bus.publish_checked(event), Ok(vec![HatId::new("dag_runtime")]));
+        assert!(!bus.has_pending());
+    }
+
+    #[test]
+    fn test_unknown_virtual_target_still_fails_closed() {
+        let bus = EventBus::new();
+        let event = Event::new("forge.concurrency.approved", "approved")
+            .with_target("not_registered");
+
+        assert_eq!(
+            bus.validate_delivery(&event),
+            Err(EventDeliveryError::UnknownTarget(HatId::new("not_registered")))
+        );
     }
 
     #[test]
