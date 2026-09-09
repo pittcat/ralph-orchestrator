@@ -272,6 +272,40 @@ impl DagSchedulerRuntime {
         }
     }
 
+    /// Test-only seam: attach in-memory stores so U3 unit-level
+    /// tests can exercise `resolve_stage_base` /
+    /// `record_accepted_evidence` without spinning up a real
+    /// SQLite database. Production paths always go through
+    /// `ensure_stores` (rusqlite when `supervisor-db` is on,
+    /// in-memory otherwise).
+    #[cfg(test)]
+    pub(crate) fn attach_in_memory_stores(&mut self) {
+        self.stores = Some(Self::in_memory_stores());
+    }
+
+    /// Test-only seam: register a plan topology with the given
+    /// verified base commit so `resolve_stage_base` can fall
+    /// back to the plan-level base when no per-Unit pin exists.
+    #[cfg(test)]
+    pub(crate) fn register_plan_for_test(
+        &mut self,
+        plan_key: &str,
+        verified_base_commit: Option<String>,
+    ) {
+        self.plans.insert(
+            plan_key.to_string(),
+            crate::loop_runner::dag_scheduler::PlanTopology {
+                artifact_path: String::new(),
+                artifact_digest: String::new(),
+                target_branch: "feat/test".to_string(),
+                verified_base_commit,
+                units: Vec::new(),
+                resource_capacities: Vec::new(),
+                integrated: std::collections::HashSet::new(),
+            },
+        );
+    }
+
     /// Rebuild the process-local DAG view from the durable store after a
     /// restart. Ambiguous launches are blocked; they are never respawned.
     /// Result files are fed through the ordinary completion drain so event

@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 use ralph_adapters::CliBackend;
 use ralph_core::EventLoop;
 use ralph_core::config::{EventSchema, HatConfig, RalphConfig, SchedulerMode};
+use ralph_core::supervisor::dag_store::StageEvidenceRecord;
 use ralph_core::supervisor::dag_store_rusqlite::jobs::JobIdentity;
 use ralph_core::supervisor::{EventMergeSink, FileEventMergeSink};
 use serde_json::Value;
@@ -592,6 +593,18 @@ impl DagSchedulerRuntime {
         };
         let serialized = payload.to_string();
         let digest = sha256_hex(&serialized);
+
+        // U3 (2026-09-09-0917): record per-stage accepted evidence
+        // BEFORE queuing the result event so a crash between
+        // the projection and the next-stage admission still leaves
+        // a recoverable next-stage base. Only "accepted" terminals
+        // write evidence — rejected reviews and orphan failures
+        // surface as a no-op so the next stage (Fix on a review
+        // reject, etc.) keeps reading the prior accepted evidence.
+        if terminal == "accepted" {
+            self.record_accepted_evidence(kind, &completion.identity, &digest);
+        }
+
         self.queue_result_event(
             kind.success_topic(),
             completion.identity.hat.clone(),
@@ -1012,6 +1025,245 @@ impl DagSchedulerRuntime {
         }
     }
 
+    /// Resolve the base commit the next stage must build on
+    /// (U3, 2026-09-09-0917 plan). The lookup walks three
+    /// durable surfaces in order:
+    ///
+    /// 1. The just-prior stage's accepted evidence (the
+    ///    `(plan_key, unit_key)` row in `dag_stage_evidence` for
+    ///    the stage immediately preceding `kind` in the
+    ///    execute → review → verify → fix graph). When found,
+    ///    that accepted commit is the new base — the next stage
+    ///    lands its work on top of the just-accepted head
+    ///    instead of plan HEAD.
+    /// 2. The existing per-Unit base pin in `dag_unit_bases`.
+    ///    Already pinned on a prior admission; reuse it so two
+    ///    admissions of the same stage always start from the
+    ///    same commit.
+    /// 3. The plan-level `verified_base_commit` (the legacy
+    ///    surface). When used, also `pin_unit_base` so the next
+    ///    stage finds a per-Unit pin instead of re-reading plan
+    ///    HEAD.
+    ///
+    /// Returns the resolved base commit, or an error string
+    /// suitable for `fail_job` when nothing pins the unit and
+    /// the plan also has no verified base.
+    fn resolve_stage_base(
+        &mut self,
+        plan_key: &str,
+        unit_key: &str,
+        kind: SpawnKind,
+    ) -> std::result::Result<String, String> {
+        let prior_stage = match kind {
+            SpawnKind::Execute => None,
+            SpawnKind::Review => Some("execute"),
+            SpawnKind::Verify => Some("review"),
+            SpawnKind::Fix => Some("execute"),
+        };
+        if let Some(prior) = prior_stage {
+            if let Ok(stores) = self.ensure_stores() {
+                if let Ok(Some(ev)) = stores
+                    .plans
+                    .latest_stage_evidence(plan_key, unit_key, prior)
+                {
+                    // The prior stage's accepted commit is the
+                    // authoritative base for the next stage.
+                    // We deliberately do NOT re-pin
+                    // `dag_unit_bases` here — the next stage's
+                    // worker is expected to start from this
+                    // exact commit and build on top of it; the
+                    // pin stays at the FIRST admission's base
+                    // so a crash between spawn and the worker's
+                    // first commit can recover from the same
+                    // base the spawn chose.
+                    return Ok(ev.accepted_commit);
+                }
+            } else {
+                warn!(
+                    plan_key,
+                    unit_key, prior, "DAG evidence: store open failed; skipping prior-stage lookup"
+                );
+            }
+        }
+        if let Ok(stores) = self.ensure_stores() {
+            if let Ok(Some(pin)) = stores.plans.get_unit_base(plan_key, unit_key) {
+                return Ok(pin.base_commit);
+            }
+        }
+        let plan_base = self
+            .plans
+            .get(plan_key)
+            .and_then(|p| p.verified_base_commit.clone());
+        match plan_base {
+            Some(base) => {
+                if let Ok(stores) = self.ensure_stores() {
+                    let _ = stores
+                        .plans
+                        .pin_unit_base(plan_key, unit_key, &base, now_ms());
+                }
+                Ok(base)
+            }
+            None => Err("no verified base commit recorded at approval".to_string()),
+        }
+    }
+
+    /// Record the per-stage accepted evidence (U3,
+    /// 2026-09-09-0917 plan). Called by `handle_completion`
+    /// immediately before queueing the success result event;
+    /// the unit's branch tip (after the worker committed) is
+    /// the `accepted_commit`, the `base_commit` is what the
+    /// stage actually descended from, and `evidence_token` /
+    /// `evidence_fingerprint` bind the resume identity.
+    ///
+    /// Fail-soft: a store write failure logs a warning and
+    /// continues — the runtime path is the business
+    /// projection; missing evidence surfaces as a
+    /// `dag_inspect` gap but does not block the next stage.
+    /// Production stores surface drift as
+    /// `StageEvidenceDrift`; we log and skip rather than
+    /// crash so a replay with a stale digest (e.g. recovered
+    /// from disk) does not tear down the loop.
+    fn record_stage_evidence_if_accepted(
+        &mut self,
+        plan_key: &str,
+        unit_key: &str,
+        stage: &str,
+        attempt: u32,
+        base_commit: &str,
+        accepted_commit: &str,
+        evidence_token: &str,
+        evidence_fingerprint: &str,
+    ) {
+        let Ok(stores) = self.ensure_stores() else {
+            return;
+        };
+        let store = stores.plans.clone();
+        let ev = StageEvidenceRecord {
+            plan_key: plan_key.to_string(),
+            unit_key: unit_key.to_string(),
+            stage: stage.to_string(),
+            attempt,
+            accepted_commit: accepted_commit.to_string(),
+            base_commit: base_commit.to_string(),
+            evidence_token: evidence_token.to_string(),
+            evidence_fingerprint: evidence_fingerprint.to_string(),
+            accepted_at_ms: now_ms(),
+        };
+        if let Err(err) = store.record_stage_evidence(plan_key, unit_key, stage, attempt, &ev) {
+            warn!(
+                plan_key,
+                unit_key,
+                stage,
+                attempt,
+                error = %err,
+                "DAG evidence: stage evidence write rejected (fail-soft)"
+            );
+        }
+    }
+
+    /// U3 (2026-09-09-0917): wire `handle_completion`'s accepted
+    /// terminal into the per-stage evidence ledger. Resolves
+    /// the base the stage descended from via the same
+    /// `resolve_stage_base` lookup the spawn used (deterministic
+    /// given the stored evidence / pin / plan base), reads the
+    /// unit branch tip as the accepted commit, then forwards
+    /// the bundle to `record_stage_evidence_if_accepted`.
+    ///
+    /// Best-effort: a failed branch-tip read means the worker's
+    /// commit never landed — fall back to the resolved base so
+    /// the evidence row is still written (the next stage then
+    /// resumes from the same commit the spawn chose, NOT from
+    /// a non-existent tip). A failed evidence write logs a
+    /// warning and continues — the next stage's spawn re-tries
+    /// the lookup against plan HEAD as the last-resort fallback.
+    fn record_accepted_evidence(
+        &mut self,
+        kind: SpawnKind,
+        identity: &JobIdentity,
+        digest: &str,
+    ) {
+        let plan_key = identity.plan_key.clone();
+        let unit_key = identity.unit_id.clone();
+        let stage = identity.stage.clone();
+        let attempt = identity.attempt;
+
+        let base = match self.resolve_stage_base(&plan_key, &unit_key, kind) {
+            Ok(base) => base,
+            Err(err) => {
+                warn!(
+                    plan_key,
+                    unit_key,
+                    stage,
+                    attempt,
+                    error = %err,
+                    "DAG evidence: base resolution failed; skipping evidence write"
+                );
+                return;
+            }
+        };
+        let accepted = match self.read_unit_branch_tip(&unit_key) {
+            Ok(tip) => tip,
+            Err(err) => {
+                warn!(
+                    plan_key,
+                    unit_key,
+                    stage,
+                    attempt,
+                    error = %err,
+                    "DAG evidence: branch tip unreadable; falling back to base as accepted_commit"
+                );
+                base.clone()
+            }
+        };
+        self.record_stage_evidence_if_accepted(
+            &plan_key,
+            &unit_key,
+            &stage,
+            attempt,
+            &base,
+            &accepted,
+            &identity.token,
+            digest,
+        );
+    }
+
+    /// Read the unit's branch tip via `git rev-parse`. The
+    /// executor branch is the only trusted source of the
+    /// accepted commit; the agent payload's content_hash is
+    /// advisory. On failure (missing branch, non-git path, git
+    /// error) the helper returns an error string for the
+    /// caller to surface — U3 evidence recording falls back to
+    /// the resolved base in that case so the row still lands.
+    fn read_unit_branch_tip(&self, unit_key: &str) -> Result<String, String> {
+        let exec = self
+            .exec
+            .as_ref()
+            .ok_or_else(|| "DAG evidence: no execution context".to_string())?;
+        let reference = format!(
+            "refs/heads/ralph/{}/{}{}",
+            exec.loop_id,
+            unit_key,
+            "{commit}"
+        );
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.workspace)
+            .arg("rev-parse")
+            .arg("--verify")
+            .arg(&reference)
+            .output()
+            .map_err(|err| format!("git rev-parse spawn: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "unit branch ralph/{}/{} not resolvable: {}",
+                exec.loop_id,
+                unit_key,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
     /// Launch one fenced job. Every failure before `spawn_pty_job`
     /// (journal reserve conflict, missing hat template, unresolvable
     /// base commit, worktree rejection) strands the unit with a
@@ -1103,34 +1355,35 @@ impl DagSchedulerRuntime {
                 }
             };
 
-        // Trusted worktree against the approval-time base commit.
-        let verified_base = self
-            .plans
-            .get(&plan_key)
-            .and_then(|p| p.verified_base_commit.clone());
-        let worktree = match verified_base {
-            Some(base) => {
-                // U1 (2026-09-09-0917): the unit worktree's branch +
-                // path are interpolated from `unit_id`; passing the
-                // plan-namespaced `unit_key` would push a `:` into the
-                // branch name and grow the path component. Use the
-                // bare `unit_id` (already computed above).
-                match UnitWorktree::acquire(
-                    &self.workspace,
-                    &loop_id,
-                    bare_unit_id,
-                    &base,
-                ) {
-                    Ok(wt) => wt,
-                    Err(err) => {
-                        let reason = format!("unit worktree acquire failed: {err}");
-                        self.fail_job(&identity, kind, &reason, "unknown");
-                        return;
-                    }
-                }
+        // Trusted worktree against the per-Unit base pin (U3,
+        // 2026-09-09-0917). The base pin is read first so a
+        // reviewer / verifier / fixer resumes from the prior
+        // stage's accepted commit rather than plan HEAD. The
+        // first-time admission (when no pin exists yet) falls
+        // back to the plan-level verified base and pins it in
+        // the same call so the next stage can find it. If
+        // there's a prior accepted stage for this unit, the
+        // pin is rewritten only when the prior stage is the
+        // immediately-preceding one in the stage graph — this
+        // keeps the first-admission pin authoritative while
+        // letting the next stage slide onto the just-accepted
+        // commit (NOT onto plan HEAD).
+        let verified_base = match self.resolve_stage_base(&plan_key, bare_unit_id, kind) {
+            Ok(base) => base,
+            Err(reason) => {
+                self.fail_job(&identity, kind, &reason, "unknown");
+                return;
             }
-            None => {
-                let reason = "no verified base commit recorded at approval".to_string();
+        };
+        let worktree = match UnitWorktree::acquire(
+            &self.workspace,
+            &loop_id,
+            bare_unit_id,
+            &verified_base,
+        ) {
+            Ok(wt) => wt,
+            Err(err) => {
+                let reason = format!("unit worktree acquire failed: {err}");
                 self.fail_job(&identity, kind, &reason, "unknown");
                 return;
             }
@@ -2187,5 +2440,235 @@ units:
 
         assert!(prompt.contains("Allowed paths for this Unit: `src`, `tests`"));
         assert!(prompt.contains("Forbidden paths for this Unit: `secrets`"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-09-0917 plan U3: per-Unit base pin +
+    // per-stage accepted evidence ledger — runtime driver seam.
+    //
+    // The store-level contract suite (in `dag_store::contract_tests`)
+    // exercises the durable read/write side directly. These tests
+    // exercise the runtime driver's `resolve_stage_base` lookup
+    // path against the same in-memory store so a regression that
+    // silently returns plan HEAD instead of the prior stage's
+    // accepted commit fails fast at the seam.
+    // ─────────────────────────────────────────────────────────────────
+
+    use ralph_core::supervisor::dag_store::StageEvidenceRecord;
+
+    fn u3_runtime() -> DagSchedulerRuntime {
+        let pools = ResolvedDagPools {
+            global: 4,
+            executor: 2,
+            reviewer: 2,
+            verifier: 2,
+            fixer: 1,
+        };
+        let mut runtime = DagSchedulerRuntime::new(
+            ralph_core::config::SchedulerMode::Dag,
+            pools,
+            PathBuf::from("/tmp/dag-u3-test"),
+        );
+        runtime.attach_in_memory_stores();
+        runtime
+    }
+
+    /// U3 S3: the first admission's `resolve_stage_base` returns
+    /// the plan-level verified base AND pins it on the store so
+    /// the next-stage spawn finds a per-Unit pin (not a plan
+    /// fallback). This is the foundation for cross-stage
+    /// hand-off — without it, a re-admission of the same unit
+    /// would always re-read plan HEAD.
+    #[test]
+    fn u3_first_execute_admission_resolves_plan_base_and_pins_it() {
+        let mut runtime = u3_runtime();
+        runtime.register_plan_for_test("pf-u3", Some("plan-base-abc".to_string()));
+
+        // Execute at attempt 1: no prior stage evidence, no
+        // per-Unit pin → falls back to plan-level base and pins.
+        let resolved = runtime
+            .resolve_stage_base("pf-u3", "U1", SpawnKind::Execute)
+            .expect("first admission must resolve");
+        assert_eq!(resolved, "plan-base-abc");
+
+        // Pin must have been written — next Execute at attempt 2
+        // finds the per-Unit pin, NOT plan HEAD again.
+        let stores = runtime.ensure_stores().expect("stores");
+        let pin = stores
+            .plans
+            .get_unit_base("pf-u3", "U1")
+            .expect("pin read")
+            .expect("pin must exist after first admission");
+        assert_eq!(pin.base_commit, "plan-base-abc");
+        // First-pin `pinned_at_ms` wins on re-pin (the per-Unit
+        // pin is authoritative across admissions of the same
+        // stage — never silently rewrites with a different
+        // base).
+        assert_eq!(pin.pinned_at_ms, now_ms());
+    }
+
+    /// U3 S3: a Review admission reads the prior Execute's
+    /// accepted evidence, NOT plan HEAD. This is the
+    /// committed-output hand-off the plan calls out: the
+    /// reviewer resumes from the just-accepted commit.
+    #[test]
+    fn u3_review_admission_reads_prior_execute_evidence() {
+        let mut runtime = u3_runtime();
+        runtime.register_plan_for_test("pf-u3", Some("plan-base-abc".to_string()));
+
+        // Simulate the prior Execute having landed evidence at
+        // attempt 1 with `accepted_commit = acc-exec`.
+        let stores = runtime.ensure_stores().expect("stores");
+        let ev = StageEvidenceRecord {
+            plan_key: "pf-u3".into(),
+            unit_key: "U1".into(),
+            stage: "execute".into(),
+            attempt: 1,
+            accepted_commit: "acc-exec".into(),
+            base_commit: "plan-base-abc".into(),
+            evidence_token: "tok-1".into(),
+            evidence_fingerprint: "fp-1".into(),
+            accepted_at_ms: 1_700_000_000_000,
+        };
+        stores
+            .plans
+            .record_stage_evidence("pf-u3", "U1", "execute", 1, &ev)
+            .expect("seed execute evidence");
+
+        // Review admission: must use the prior accepted commit,
+        // NOT plan HEAD or the per-Unit pin.
+        let resolved = runtime
+            .resolve_stage_base("pf-u3", "U1", SpawnKind::Review)
+            .expect("review admission must resolve");
+        assert_eq!(
+            resolved, "acc-exec",
+            "review must resume from the execute stage's accepted commit"
+        );
+    }
+
+    /// U3: when prior stage evidence exists, it wins over the
+    /// per-Unit pin (the per-Unit pin stays at the FIRST
+    /// admission's base; subsequent stages advance on the
+    /// prior accepted commit). Without this test the order of
+    /// the resolution steps could regress and a stale plan
+    /// HEAD could surface to the next stage.
+    #[test]
+    fn u3_prior_evidence_wins_over_per_unit_pin() {
+        let mut runtime = u3_runtime();
+        runtime.register_plan_for_test("pf-u3", Some("plan-base-abc".to_string()));
+
+        // Pre-pin the per-Unit base to something DIFFERENT from
+        // plan HEAD so the test fails fast on a wrong lookup
+        // order.
+        let stores = runtime.ensure_stores().expect("stores");
+        stores
+            .plans
+            .pin_unit_base("pf-u3", "U1", "stale-pin", 1)
+            .expect("pin");
+
+        // Now seed PRIOR STAGE evidence (Verify looks at review's
+        // evidence, not execute's) pointing at the just-accepted
+        // commit (NOT the stale pin).
+        let ev = StageEvidenceRecord {
+            plan_key: "pf-u3".into(),
+            unit_key: "U1".into(),
+            stage: "review".into(),
+            attempt: 1,
+            accepted_commit: "acc-rev-fresh".into(),
+            base_commit: "stale-pin".into(),
+            evidence_token: "tok-1".into(),
+            evidence_fingerprint: "fp-1".into(),
+            accepted_at_ms: 1_700_000_000_000,
+        };
+        stores
+            .plans
+            .record_stage_evidence("pf-u3", "U1", "review", 1, &ev)
+            .expect("seed evidence");
+
+        // Verify admission: must pick the prior evidence,
+        // ignoring the per-Unit pin.
+        let resolved = runtime
+            .resolve_stage_base("pf-u3", "U1", SpawnKind::Verify)
+            .expect("verify admission must resolve");
+        assert_eq!(
+            resolved, "acc-rev-fresh",
+            "verify must read review's accepted evidence, not the stale per-Unit pin"
+        );
+    }
+
+    /// U3: a Fix admission reads the prior Execute's evidence
+    /// (NOT review's) — the Fix stage re-runs the executor hat
+    /// on the executor's prior accepted commit, picking up the
+    /// reviewer's rejection feedback. This matches the
+    /// `follow_up_kind` routing in the spawn pipeline.
+    #[test]
+    fn u3_fix_admission_reads_prior_execute_evidence() {
+        let mut runtime = u3_runtime();
+        runtime.register_plan_for_test("pf-u3", Some("plan-base-abc".to_string()));
+
+        // Seed BOTH review-rejected evidence (for completeness)
+        // and execute evidence (the one Fix must use).
+        let stores = runtime.ensure_stores().expect("stores");
+        let exec_ev = StageEvidenceRecord {
+            plan_key: "pf-u3".into(),
+            unit_key: "U1".into(),
+            stage: "execute".into(),
+            attempt: 1,
+            accepted_commit: "acc-exec".into(),
+            base_commit: "plan-base-abc".into(),
+            evidence_token: "tok-1".into(),
+            evidence_fingerprint: "fp-1".into(),
+            accepted_at_ms: 1_700_000_000_000,
+        };
+        let rev_ev = StageEvidenceRecord {
+            plan_key: "pf-u3".into(),
+            unit_key: "U1".into(),
+            stage: "review".into(),
+            attempt: 1,
+            accepted_commit: "acc-rev-rejected".into(),
+            base_commit: "acc-exec".into(),
+            evidence_token: "tok-2".into(),
+            evidence_fingerprint: "fp-2".into(),
+            accepted_at_ms: 1_700_000_000_001,
+        };
+        stores
+            .plans
+            .record_stage_evidence("pf-u3", "U1", "execute", 1, &exec_ev)
+            .expect("seed execute");
+        stores
+            .plans
+            .record_stage_evidence("pf-u3", "U1", "review", 1, &rev_ev)
+            .expect("seed review");
+
+        // Fix admission: must read execute's accepted commit,
+        // not review's. Fix is the executor hat re-running on
+        // the executor's prior commit + the rejection feedback.
+        let resolved = runtime
+            .resolve_stage_base("pf-u3", "U1", SpawnKind::Fix)
+            .expect("fix admission must resolve");
+        assert_eq!(
+            resolved, "acc-exec",
+            "fix must resume from execute's accepted commit, never review's"
+        );
+    }
+
+    /// U3 fail-closed: a spawn with no plan-level verified
+    /// base AND no per-Unit pin AND no prior stage evidence
+    /// returns an error string (the caller surfaces it via
+    /// `fail_job`). Without this the runtime would silently
+    /// spawn a job whose worktree acquisition crashes on a
+    /// missing `verified_base_commit`.
+    #[test]
+    fn u3_no_base_anywhere_returns_error() {
+        let mut runtime = u3_runtime();
+        // Plan has no verified base; no pin; no evidence.
+        runtime.register_plan_for_test("pf-u3", None);
+        let err = runtime
+            .resolve_stage_base("pf-u3", "U1", SpawnKind::Execute)
+            .expect_err("no base anywhere must fail closed");
+        assert!(
+            err.contains("no verified base commit"),
+            "error must explain the missing base: {err}"
+        );
     }
 }

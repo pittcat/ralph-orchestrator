@@ -588,6 +588,292 @@ impl DagSchedulerStore for RusqliteDagSchedulerStore {
             Ok(plans)
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-09-0917 plan U3: per-Unit base commit pin +
+    // per-stage accepted evidence ledger. SQLite backing over
+    // the v18 schema (`dag_unit_bases` / `dag_stage_evidence`).
+    // The schema-level PRIMARY KEYs give the idempotency rules
+    // for free; per-field drift is detected by status-guarded
+    // conditional UPDATEs (parallel to `activate_plan`'s pattern)
+    // so a stale replay cannot rewrite history.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn pin_unit_base(
+        &self,
+        plan_key: &str,
+        unit_key: &str,
+        base_commit: &str,
+        pinned_at_ms: u64,
+    ) -> DagStoreResult<()> {
+        #[cfg(not(feature = "supervisor-db"))]
+        {
+            let _ = (plan_key, unit_key, base_commit, pinned_at_ms);
+            Err(DagStoreError::IoError(
+                "supervisor-db cargo feature is off in this build".to_string(),
+            ))
+        }
+        #[cfg(feature = "supervisor-db")]
+        {
+            let mut conn = self
+                .inner
+                .conn
+                .lock()
+                .map_err(|_| DagStoreError::IoError("dag plan store mutex poisoned".into()))?;
+            // Single transaction spanning the write and the
+            // deciding read: the in-process mutex alone cannot
+            // stop a SECOND PROCESS from interleaving its own
+            // INSERT between our SELECT and INSERT (cross-process
+            // TOCTOU). `INSERT ... ON CONFLICT DO NOTHING` makes
+            // the insert atomic against the schema PRIMARY KEY
+            // — a losing racer does nothing instead of surfacing
+            // a raw constraint violation — and the follow-up
+            // SELECT (same transaction snapshot) distinguishes
+            // the two existing-row cases:
+            //   same base → idempotent Ok(())
+            //   other base → UnitBaseDrift (fail closed)
+            let tx = conn.transaction().map_err(plan_io_err)?;
+            tx.execute(
+                "INSERT INTO dag_unit_bases \
+                 (plan_key, unit_key, base_commit, pinned_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(plan_key, unit_key) DO NOTHING",
+                rusqlite::params![plan_key, unit_key, base_commit, pinned_at_ms as i64],
+            )
+            .map_err(plan_io_err)?;
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT base_commit FROM dag_unit_bases \
+                     WHERE plan_key = ?1 AND unit_key = ?2",
+                    rusqlite::params![plan_key, unit_key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(plan_io_err)?;
+            let Some(persisted) = existing else {
+                // Should not happen — the INSERT-or-IGNORE step
+                // always leaves a row when no error fired. Fail
+                // closed rather than guess.
+                return Err(DagStoreError::IoError(format!(
+                    "dag_unit_bases pin for ({plan_key}, {unit_key}) returned no row"
+                )));
+            };
+            if persisted != base_commit {
+                // Base drift: roll back (tx drop) and fail closed.
+                // The losing racer's stale base never lands.
+                return Err(DagStoreError::UnitBaseDrift {
+                    plan_key: plan_key.to_string(),
+                    unit_key: unit_key.to_string(),
+                    persisted,
+                    candidate: base_commit.to_string(),
+                });
+            }
+            tx.commit().map_err(plan_io_err)?;
+            Ok(())
+        }
+    }
+
+    fn get_unit_base(
+        &self,
+        plan_key: &str,
+        unit_key: &str,
+    ) -> DagStoreResult<Option<super::dag_store::UnitBaseRecord>> {
+        #[cfg(not(feature = "supervisor-db"))]
+        {
+            let _ = (plan_key, unit_key);
+            Err(DagStoreError::IoError(
+                "supervisor-db cargo feature is off in this build".to_string(),
+            ))
+        }
+        #[cfg(feature = "supervisor-db")]
+        {
+            let conn = self
+                .inner
+                .conn
+                .lock()
+                .map_err(|_| DagStoreError::IoError("dag plan store mutex poisoned".into()))?;
+            conn.query_row(
+                "SELECT plan_key, unit_key, base_commit, pinned_at_ms \
+                 FROM dag_unit_bases WHERE plan_key = ?1 AND unit_key = ?2",
+                rusqlite::params![plan_key, unit_key],
+                |row| {
+                    let pinned_at: i64 = row.get("pinned_at_ms")?;
+                    Ok(super::dag_store::UnitBaseRecord {
+                        plan_key: row.get("plan_key")?,
+                        unit_key: row.get("unit_key")?,
+                        base_commit: row.get("base_commit")?,
+                        pinned_at_ms: u64::try_from(pinned_at).unwrap_or(0),
+                    })
+                },
+            )
+            .optional()
+            .map_err(plan_io_err)
+        }
+    }
+
+    fn record_stage_evidence(
+        &self,
+        plan_key: &str,
+        unit_key: &str,
+        stage: &str,
+        attempt: u32,
+        evidence: &super::dag_store::StageEvidenceRecord,
+    ) -> DagStoreResult<()> {
+        #[cfg(not(feature = "supervisor-db"))]
+        {
+            let _ = (plan_key, unit_key, stage, attempt, evidence);
+            Err(DagStoreError::IoError(
+                "supervisor-db cargo feature is off in this build".to_string(),
+            ))
+        }
+        #[cfg(feature = "supervisor-db")]
+        {
+            let mut conn = self
+                .inner
+                .conn
+                .lock()
+                .map_err(|_| DagStoreError::IoError("dag plan store mutex poisoned".into()))?;
+            // Single transaction spanning the INSERT-or-IGNORE
+            // and the per-field drift check, mirroring the
+            // `activate_plan` pattern (TOCTOU-safe across
+            // processes). The PRIMARY KEY `(plan_key, unit_key,
+            // stage, attempt)` makes the insert atomic; the
+            // follow-up SELECT (same snapshot) reads the
+            // persisted row to detect drift on each immutable
+            // field.
+            let tx = conn.transaction().map_err(plan_io_err)?;
+            tx.execute(
+                "INSERT INTO dag_stage_evidence \
+                 (plan_key, unit_key, stage, attempt, accepted_commit, base_commit, \
+                  evidence_token, evidence_fingerprint, accepted_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 ON CONFLICT(plan_key, unit_key, stage, attempt) DO NOTHING",
+                rusqlite::params![
+                    plan_key,
+                    unit_key,
+                    stage,
+                    attempt as i64,
+                    evidence.accepted_commit,
+                    evidence.base_commit,
+                    evidence.evidence_token,
+                    evidence.evidence_fingerprint,
+                    evidence.accepted_at_ms as i64,
+                ],
+            )
+            .map_err(plan_io_err)?;
+            let existing: Option<(
+                String,
+                String,
+                String,
+                String,
+            )> = tx
+                .query_row(
+                    "SELECT accepted_commit, base_commit, evidence_token, evidence_fingerprint \
+                     FROM dag_stage_evidence \
+                     WHERE plan_key = ?1 AND unit_key = ?2 AND stage = ?3 AND attempt = ?4",
+                    rusqlite::params![plan_key, unit_key, stage, attempt as i64],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(plan_io_err)?;
+            let Some((acc, base, tok, fp)) = existing else {
+                return Err(DagStoreError::IoError(format!(
+                    "dag_stage_evidence record for ({plan_key}, {unit_key}, {stage}, {attempt}) \
+                     returned no row"
+                )));
+            };
+            // Per-field drift checks — any mismatch fails closed
+            // so a stale replay cannot rewrite history. The
+            // order is fixed (accepted_commit → base_commit →
+            // evidence_token → evidence_fingerprint) so the
+            // typed error's `field` discriminator tells the
+            // caller which immutable field drifted.
+            let drift = |field: &'static str, persisted: &str, candidate: &str| {
+                if persisted == candidate {
+                    None
+                } else {
+                    Some(DagStoreError::StageEvidenceDrift {
+                        plan_key: plan_key.to_string(),
+                        unit_key: unit_key.to_string(),
+                        stage: stage.to_string(),
+                        attempt,
+                        field,
+                        persisted: persisted.to_string(),
+                        candidate: candidate.to_string(),
+                    })
+                }
+            };
+            if let Some(err) = drift("accepted_commit", &acc, &evidence.accepted_commit) {
+                return Err(err);
+            }
+            if let Some(err) = drift("base_commit", &base, &evidence.base_commit) {
+                return Err(err);
+            }
+            if let Some(err) = drift("evidence_token", &tok, &evidence.evidence_token) {
+                return Err(err);
+            }
+            if let Some(err) = drift("evidence_fingerprint", &fp, &evidence.evidence_fingerprint) {
+                return Err(err);
+            }
+            tx.commit().map_err(plan_io_err)?;
+            Ok(())
+        }
+    }
+
+    fn latest_stage_evidence(
+        &self,
+        plan_key: &str,
+        unit_key: &str,
+        stage: &str,
+    ) -> DagStoreResult<Option<super::dag_store::StageEvidenceRecord>> {
+        #[cfg(not(feature = "supervisor-db"))]
+        {
+            let _ = (plan_key, unit_key, stage);
+            Err(DagStoreError::IoError(
+                "supervisor-db cargo feature is off in this build".to_string(),
+            ))
+        }
+        #[cfg(feature = "supervisor-db")]
+        {
+            let conn = self
+                .inner
+                .conn
+                .lock()
+                .map_err(|_| DagStoreError::IoError("dag plan store mutex poisoned".into()))?;
+            conn.query_row(
+                "SELECT plan_key, unit_key, stage, attempt, accepted_commit, base_commit, \
+                 evidence_token, evidence_fingerprint, accepted_at_ms \
+                 FROM dag_stage_evidence \
+                 WHERE plan_key = ?1 AND unit_key = ?2 AND stage = ?3 \
+                 ORDER BY attempt DESC LIMIT 1",
+                rusqlite::params![plan_key, unit_key, stage],
+                |row| {
+                    let attempt: i64 = row.get("attempt")?;
+                    let accepted_at: i64 = row.get("accepted_at_ms")?;
+                    Ok(super::dag_store::StageEvidenceRecord {
+                        plan_key: row.get("plan_key")?,
+                        unit_key: row.get("unit_key")?,
+                        stage: row.get("stage")?,
+                        attempt: u32::try_from(attempt).unwrap_or(0),
+                        accepted_commit: row.get("accepted_commit")?,
+                        base_commit: row.get("base_commit")?,
+                        evidence_token: row.get("evidence_token")?,
+                        evidence_fingerprint: row.get("evidence_fingerprint")?,
+                        accepted_at_ms: u64::try_from(accepted_at).unwrap_or(0),
+                    })
+                },
+            )
+            .optional()
+            .map_err(plan_io_err)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1393,6 +1679,113 @@ mod tests {
         let reopened = RusqliteDagSchedulerStore::open(dir.path().join("dag.db")).unwrap();
         assert_eq!(reopened.verified_base("pf").unwrap(), Some("a".repeat(64)));
         assert_eq!(reopened.verified_base("unknown").unwrap(), None);
+    }
+
+    // -----------------------------------------------------------------
+    // 2026-09-09-0917 plan U3: per-Unit base commit pin +
+    // per-stage accepted evidence ledger contract suite. Runs
+    // the shared `dag_store::contract_tests` helpers against
+    // the rusqlite variant so SQLite backing gets the same
+    // end-to-end coverage as the in-memory variant. A
+    // contract regression on either side surfaces the same
+    // test name.
+    // -----------------------------------------------------------------
+
+    use crate::supervisor::dag_store::contract_tests;
+
+    #[test]
+    fn u3_pin_roundtrip() {
+        let (_dir, store) = fresh_plan_store();
+        contract_tests::assert_pin_roundtrip(&store);
+    }
+
+    #[test]
+    fn u3_pin_is_idempotent_on_same_base() {
+        let (_dir, store) = fresh_plan_store();
+        contract_tests::assert_pin_is_idempotent_on_same_base(&store);
+    }
+
+    #[test]
+    fn u3_pin_fails_closed_on_base_drift() {
+        let (_dir, store) = fresh_plan_store();
+        contract_tests::assert_pin_fails_closed_on_base_drift(&store);
+    }
+
+    #[test]
+    fn u3_get_returns_none_when_unpinned() {
+        let (_dir, store) = fresh_plan_store();
+        contract_tests::assert_get_returns_none_when_unpinned(&store);
+    }
+
+    #[test]
+    fn u3_units_are_pinned_independently() {
+        let (_dir, store) = fresh_plan_store();
+        contract_tests::assert_units_are_pinned_independently(&store);
+    }
+
+    #[test]
+    fn u3_evidence_roundtrip() {
+        let (_dir, store) = fresh_plan_store();
+        contract_tests::assert_evidence_roundtrip(&store);
+    }
+
+    #[test]
+    fn u3_evidence_is_idempotent_on_same_record() {
+        let (_dir, store) = fresh_plan_store();
+        contract_tests::assert_evidence_is_idempotent_on_same_record(&store);
+    }
+
+    #[test]
+    fn u3_latest_stage_evidence_picks_highest_attempt() {
+        let (_dir, store) = fresh_plan_store();
+        contract_tests::assert_latest_stage_evidence_picks_highest_attempt(&store);
+    }
+
+    #[test]
+    fn u3_evidence_fails_closed_on_field_drift() {
+        let (_dir, store) = fresh_plan_store();
+        contract_tests::assert_evidence_fails_closed_on_field_drift(&store);
+    }
+
+    #[test]
+    fn u3_stages_are_tracked_independently() {
+        let (_dir, store) = fresh_plan_store();
+        contract_tests::assert_stages_are_tracked_independently(&store);
+    }
+
+    /// v18 schema-only migration landed in `2bbea7bf`; this
+    /// test pins that a fresh open bumps `user_version` to
+    /// `CURRENT_VERSION` AND the v18 tables exist (regression
+    /// guard — the schema bump must stay paired with the
+    /// CURRENT_VERSION bump).
+    #[test]
+    fn u3_v18_tables_exist_after_run() {
+        use crate::supervisor::migrations;
+        let dir = TempDir::new().expect("tempdir");
+        let store = RusqliteDagSchedulerStore::open(dir.path().join("dag.db")).expect("open");
+        let conn = store
+            .inner
+            .conn
+            .lock()
+            .expect("conn");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user_version");
+        assert_eq!(
+            version,
+            migrations::CURRENT_VERSION,
+            "user_version must equal CURRENT_VERSION after open (v18 schema is additive)"
+        );
+        for table in ["dag_unit_bases", "dag_stage_evidence"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .expect("table count");
+            assert_eq!(count, 1, "table {table} must exist after v18 migration");
+        }
     }
 
     // -----------------------------------------------------------------

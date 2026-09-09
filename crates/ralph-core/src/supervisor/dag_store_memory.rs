@@ -1,13 +1,13 @@
 //! 2026-09-03-0959 plan U3 (R2 / R17 / E5 / E7 / E9 / E16):
 //! in-memory implementation of [`DagSchedulerStore`].
 //!
-//! Backs the DAG persistence contract for tests and for the
-//! future `dag_shadow` runtime mode (U5) which needs a working
-//! store without touching SQLite. The contract suite below is
-//! shared between this module and the future rusqlite
-//! implementation in `dag_store_rusqlite.rs` — every test here
-//! is a contract the rusqlite variant MUST also pass (per U3 §
-//! 9. 验收).
+//! 2026-09-09-0917 plan U3 (per-Unit base commit pin + per-stage
+//! accepted evidence ledger): in-memory backing for
+//! `dag_unit_bases` / `dag_stage_evidence`. The bounded maps
+//! match the schema-level uniqueness rules so the contract
+//! parallels the rusqlite variant byte-for-byte. The full U3
+//! contract suite (defined in `contract_tests`)
+//! runs against this impl below.
 //!
 //! Concurrency: a single `Mutex` covers the registration map.
 //! Registration, activation, and reads all serialize through the
@@ -30,29 +30,55 @@
 //!   `target_branch` does not match the request →
 //!   `Err(TargetMismatch)` and the status is left untouched
 //!   (R10/R17 fail-closed).
+//! - `pin_unit_base` with a fresh `(plan_key, unit_key)` →
+//!   `Ok(())`. Re-pin with the SAME base → `Ok(())` (idempotent,
+//!   first `pinned_at_ms` wins). Re-pin with a DIFFERENT base →
+//!   `Err(UnitBaseDrift)` (fail closed, plan U3 R3/S3).
+//! - `record_stage_evidence` with a fresh `(plan_key, unit_key,
+//!   stage, attempt)` → `Ok(())`. Re-record with the SAME fields
+//!   → `Ok(())` (idempotent). Re-record with any field drift →
+//!   `Err(StageEvidenceDrift)` (fail closed, plan U3 R3/S3).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use super::dag_store::{
     CanonicalPlanRecord, DagSchedulerStore, DagStoreError, DagStoreResult, PlanRegistration,
-    PlanStatus,
+    PlanStatus, StageEvidenceRecord, UnitBaseRecord,
 };
 
 /// In-memory `DagSchedulerStore`. Backed by a single `Mutex`
-/// guarding a `HashMap<plan_key, PlanRegistration>`. Monotonic
-/// `id` allocation is store-private; the rusqlite variant will
-/// use SQLite rowid.
+/// guarding the per-feature maps. Monotonic `id` allocation is
+/// store-private; the rusqlite variant will use SQLite rowid.
 #[derive(Debug, Default)]
 pub struct InMemoryDagSchedulerStore {
     plans: Mutex<HashMap<String, PlanRegistration>>,
     next_id: Mutex<i64>,
+    /// U3 (2026-09-09-0917 plan): per-(plan_key, unit_key) base
+    /// commit pin. Keyed by `"{plan_key}::{unit_key}"` so a single
+    /// map mirrors the schema-level PRIMARY KEY without growing
+    /// nested maps.
+    unit_bases: Mutex<HashMap<String, UnitBaseRecord>>,
+    /// U3 (2026-09-09-0917 plan): per-(plan_key, unit_key, stage,
+    /// attempt) accepted evidence ledger. Keyed by
+    /// `"{plan_key}::{unit_key}::{stage}::{attempt}"`. A
+    /// `latest_stage_evidence` lookup scans the unit's entries
+    /// (in practice O(1)–O(4) — execute/review/verify/fix).
+    stage_evidence: Mutex<HashMap<String, StageEvidenceRecord>>,
 }
 
 impl InMemoryDagSchedulerStore {
     /// Build an empty in-memory DAG store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn base_key(plan_key: &str, unit_key: &str) -> String {
+        format!("{plan_key}::{unit_key}")
+    }
+
+    fn evidence_key(plan_key: &str, unit_key: &str, stage: &str, attempt: u32) -> String {
+        format!("{plan_key}::{unit_key}::{stage}::{attempt}")
     }
 }
 
@@ -131,11 +157,149 @@ impl DagSchedulerStore for InMemoryDagSchedulerStore {
             .cloned()
             .collect())
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-09-0917 plan U3: per-Unit base commit pin +
+    // per-stage accepted evidence ledger.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn pin_unit_base(
+        &self,
+        plan_key: &str,
+        unit_key: &str,
+        base_commit: &str,
+        pinned_at_ms: u64,
+    ) -> DagStoreResult<()> {
+        let key = Self::base_key(plan_key, unit_key);
+        let mut guard = self
+            .unit_bases
+            .lock()
+            .expect("InMemoryDagSchedulerStore unit_bases mutex");
+        if let Some(existing) = guard.get(&key) {
+            if existing.base_commit == base_commit {
+                // Idempotent: first pin's `pinned_at_ms` wins, the
+                // stored row stays exactly as written.
+                return Ok(());
+            }
+            return Err(DagStoreError::UnitBaseDrift {
+                plan_key: plan_key.to_string(),
+                unit_key: unit_key.to_string(),
+                persisted: existing.base_commit.clone(),
+                candidate: base_commit.to_string(),
+            });
+        }
+        guard.insert(
+            key,
+            UnitBaseRecord {
+                plan_key: plan_key.to_string(),
+                unit_key: unit_key.to_string(),
+                base_commit: base_commit.to_string(),
+                pinned_at_ms,
+            },
+        );
+        Ok(())
+    }
+
+    fn get_unit_base(&self, plan_key: &str, unit_key: &str) -> DagStoreResult<Option<UnitBaseRecord>> {
+        let guard = self
+            .unit_bases
+            .lock()
+            .expect("InMemoryDagSchedulerStore unit_bases mutex");
+        Ok(guard
+            .get(&Self::base_key(plan_key, unit_key))
+            .cloned())
+    }
+
+    fn record_stage_evidence(
+        &self,
+        plan_key: &str,
+        unit_key: &str,
+        stage: &str,
+        attempt: u32,
+        evidence: &StageEvidenceRecord,
+    ) -> DagStoreResult<()> {
+        let key = Self::evidence_key(plan_key, unit_key, stage, attempt);
+        let mut guard = self
+            .stage_evidence
+            .lock()
+            .expect("InMemoryDagSchedulerStore stage_evidence mutex");
+        if let Some(existing) = guard.get(&key) {
+            // Compare every immutable field; a single drift fails
+            // closed. Mirrors the rusqlite variant's per-field
+            // UPDATE-guarded-by-WHERE check.
+            let drifted = |field: &'static str, persisted: &str, candidate: &str| {
+                if persisted == candidate {
+                    None
+                } else {
+                    Some(DagStoreError::StageEvidenceDrift {
+                        plan_key: plan_key.to_string(),
+                        unit_key: unit_key.to_string(),
+                        stage: stage.to_string(),
+                        attempt,
+                        field,
+                        persisted: persisted.to_string(),
+                        candidate: candidate.to_string(),
+                    })
+                }
+            };
+            if let Some(err) = drifted("accepted_commit", &existing.accepted_commit, &evidence.accepted_commit) {
+                return Err(err);
+            }
+            if let Some(err) = drifted("base_commit", &existing.base_commit, &evidence.base_commit) {
+                return Err(err);
+            }
+            if let Some(err) = drifted("evidence_token", &existing.evidence_token, &evidence.evidence_token) {
+                return Err(err);
+            }
+            if let Some(err) = drifted(
+                "evidence_fingerprint",
+                &existing.evidence_fingerprint,
+                &evidence.evidence_fingerprint,
+            ) {
+                return Err(err);
+            }
+            // Idempotent on identical fields; first write wins
+            // (the existing row's `accepted_at_ms` is not
+            // rewritten on replay).
+            return Ok(());
+        }
+        guard.insert(key, evidence.clone());
+        Ok(())
+    }
+
+    fn latest_stage_evidence(
+        &self,
+        plan_key: &str,
+        unit_key: &str,
+        stage: &str,
+    ) -> DagStoreResult<Option<StageEvidenceRecord>> {
+        let guard = self
+            .stage_evidence
+            .lock()
+            .expect("InMemoryDagSchedulerStore stage_evidence mutex");
+        let prefix = format!("{plan_key}::{unit_key}::{stage}::");
+        let mut best: Option<&StageEvidenceRecord> = None;
+        for (key, value) in guard.iter() {
+            if !key.starts_with(&prefix) {
+                continue;
+            }
+            let matches = match best {
+                None => true,
+                Some(current) => value.attempt > current.attempt,
+            };
+            if matches {
+                best = Some(value);
+            }
+        }
+        Ok(best.cloned())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::supervisor::dag_store::contract_tests;
 
     fn plan(key: &str, digest: &str) -> CanonicalPlanRecord {
         CanonicalPlanRecord {
@@ -357,5 +521,73 @@ mod tests {
         }
         let fetched = store.get_plan("p1").expect("get").expect("exists");
         assert_eq!(fetched.status, PlanStatus::Closed);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-09-0917 plan U3: per-Unit base commit pin +
+    // per-stage accepted evidence ledger contract suite. The
+    // helpers below are mirrored byte-for-byte against the
+    // rusqlite variant so a contract regression on either side
+    // surfaces the same test name.
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn u3_pin_roundtrip() {
+        let store = InMemoryDagSchedulerStore::new();
+        contract_tests::assert_pin_roundtrip(&store);
+    }
+
+    #[test]
+    fn u3_pin_is_idempotent_on_same_base() {
+        let store = InMemoryDagSchedulerStore::new();
+        contract_tests::assert_pin_is_idempotent_on_same_base(&store);
+    }
+
+    #[test]
+    fn u3_pin_fails_closed_on_base_drift() {
+        let store = InMemoryDagSchedulerStore::new();
+        contract_tests::assert_pin_fails_closed_on_base_drift(&store);
+    }
+
+    #[test]
+    fn u3_get_returns_none_when_unpinned() {
+        let store = InMemoryDagSchedulerStore::new();
+        contract_tests::assert_get_returns_none_when_unpinned(&store);
+    }
+
+    #[test]
+    fn u3_units_are_pinned_independently() {
+        let store = InMemoryDagSchedulerStore::new();
+        contract_tests::assert_units_are_pinned_independently(&store);
+    }
+
+    #[test]
+    fn u3_evidence_roundtrip() {
+        let store = InMemoryDagSchedulerStore::new();
+        contract_tests::assert_evidence_roundtrip(&store);
+    }
+
+    #[test]
+    fn u3_evidence_is_idempotent_on_same_record() {
+        let store = InMemoryDagSchedulerStore::new();
+        contract_tests::assert_evidence_is_idempotent_on_same_record(&store);
+    }
+
+    #[test]
+    fn u3_latest_stage_evidence_picks_highest_attempt() {
+        let store = InMemoryDagSchedulerStore::new();
+        contract_tests::assert_latest_stage_evidence_picks_highest_attempt(&store);
+    }
+
+    #[test]
+    fn u3_evidence_fails_closed_on_field_drift() {
+        let store = InMemoryDagSchedulerStore::new();
+        contract_tests::assert_evidence_fails_closed_on_field_drift(&store);
+    }
+
+    #[test]
+    fn u3_stages_are_tracked_independently() {
+        let store = InMemoryDagSchedulerStore::new();
+        contract_tests::assert_stages_are_tracked_independently(&store);
     }
 }
