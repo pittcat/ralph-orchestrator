@@ -694,11 +694,11 @@ hats:
       - **Hand off to the final full tester** (preferred path when
         the failure is not a dead-end): emit exactly one
         `forge.final.correction.settled` with `correction_round: 3`
-        + `plan_key` + `wave_id` + `verification_log_path`. The
+        + `plan_key` + `unit_key` + `verification_log_path`. The
         `correction_round` field is runtime-validated to be exactly
         `3` (the budget-exhausted final round); emitting it at an
         earlier round is rejected. Use `ralph tools task list` (or
-        the trigger payload) for the live `wave_id` / `plan_key`.
+        the trigger payload) for the live `unit_key` / `plan_key`.
       - **Dead-end escape** (only when the fail-confidence-rubric
         scores confidence ≥90 + coverage ≥75 AND the dead-end
         precheck passes): emit exactly one `work.failed` with
@@ -762,12 +762,12 @@ hats:
       ### Step 1 — Observe (read paths only from the trigger)
 
       Read these required fields from the runtime job context:
-      `unit_id`、`task_id`、`task_key`、`plan_key`、`slot_index`、
-      `plan_key`、`execution_plan_path`、`worktree_map_path`。
+      `unit_id`、`task_id`、`task_key`、`plan_key`、`unit_key`、
+      `plan_key`、`execution_plan_path`、`worktree`。
 
       1. Use `ralph tools task list` to verify the live `task_id` / `task_key`.
       2. Read this Unit's entry from `execution_plan_path`.
-      3. Use `worktree_map_path` to locate the Unit worktree and work there.
+      3. Use `worktree` to locate the Unit worktree and work there.
       4. Read the matching Scenario in `.ralph/forge/<plan_key>/development-plan.md`.
       5. If templates are missing, run `ralph preset materialize-artifacts parallel-forge --plan-key <plan_key>`.
 
@@ -782,7 +782,7 @@ hats:
          ports, databases, or temp directories.
       2. Every test process must derive unique temp directories, test databases/
          schemas, Docker/Compose project names, and configurable cache directories
-         from `plan_key` + `wave_id` + `slot_index`. Prefer dynamic ports; otherwise
+         from `plan_key` + `unit_key`. Prefer dynamic ports; otherwise
          use a preassigned port reserved for this identity and not used by another Unit.
       3. Do not use fixed `/tmp` files, database names, container projects, or service
          ports. If a command cannot be isolated and the plan has no explicit serial
@@ -815,7 +815,7 @@ hats:
       **Never** send the real event without the precheck.
 
       Success: emit `forge.unit.executed`, passing through the job's `task_id`, `task_key`,
-      `slot_index`, `unit_id`, and `plan_key`, plus `unit_report_path` and `content_hash`.
+      `unit_key`, `unit_id`, and `plan_key`, plus `unit_report_path` and `content_hash`.
       Failure: emit `forge.unit.execution_failed` with `reason` and `plan_key`.
 
       **Do not close tasks in this activation.** Do **not** call
@@ -895,7 +895,7 @@ hats:
          stop and record the resource, command, and conflict risk in
          `failures/verifier-failed.md`.
       3. Use temp directories, caches, and test-data namespaces derived from
-         `plan_key` + `wave_id`; never reuse fixed resources from another Unit or loop.
+         `plan_key` + `unit_key`; never reuse fixed resources from another Unit or loop.
       4. Write `.ralph/forge/<plan_key>/incremental-verification.md`.
       5. On success, emit `forge.unit.verified` with the Unit identity,
          `verification_log_path`, and the tested content hash.
@@ -927,7 +927,7 @@ hats:
          `execution_plan_path`; per-wave verification logs, when needed for
          context, live at `.ralph/forge/<plan_key>/waves/*/verification.md` —
          or `forge.final.correction.settled` after three correction rounds,
-         which carries `verification_log_path` and `wave_id` in its schema.
+         which carries `verification_log_path` and `unit_key` in its schema.
       2. This hat owns full verification for the loop. Before starting, check
          whether an equivalent full verification is already running; wait for it
          or report the conflict instead of launching a second gate in parallel.
@@ -1005,7 +1005,7 @@ hats:
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit`
       then run `--policy-check` with the exact finalization payload.
 
-      1. Read `integration_branch`, `target_branch`, `worktree_map_path`,
+      1. Read `integration_branch`, `target_branch`, `worktree`,
          `audit_report_path`, and `plan_key` from the trigger/projection;
          read `target_worktree` from `RALPH_WORKSPACE_ROOT`.
          `target_branch` and `target_worktree` are the runner-injected
@@ -1019,7 +1019,7 @@ hats:
          `forge.plan.blocked`; never reset, force-push, or overwrite the target.
       3. Before cleanup, materialize every required artifact into the main
          repository artifact root: `final-audit.md`, `full-verification.md`,
-         `integration-log.md`, one `waves/<wave_id>/review.md` for every
+         `integration-log.md`, one `waves/<unit_key>/review.md` for every
          settled wave, and one
          `units/<unit_id>-completion.md` for every settled Unit. If an artifact
          exists only in an integration or executor worktree, copy it to the
@@ -1062,7 +1062,7 @@ hats:
 
       ### Trigger and policy
 
-      1. Read `plan_key`, `worktree_map_path`, `integration_branch`, and
+      1. Read `plan_key`, `worktree`, `integration_branch`, and
          `target_branch` from the trigger/projection. Prefer the
          `forge.worktrees.ready` projection for the map; if absent, use
          `.ralph/forge/<plan_key>/worktree-map.yml`.
