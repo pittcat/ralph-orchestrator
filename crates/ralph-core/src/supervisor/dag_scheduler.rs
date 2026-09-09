@@ -69,10 +69,33 @@ pub struct UnitAdmissionInput {
 /// initialised yet — every Ready unit that would otherwise be
 /// admitted is blocked with `BlockedNoTargetHead` until the
 /// runtime publishes the first integration head.
+///
+/// `live_stage_counts` (U1, 2026-09-09) is the per-stage in-flight
+/// headcount the runtime already holds: keys are the stable stage
+/// names (`"execute"` / `"review"` / `"verify"` / `"fix"`),
+/// values are the counts of Units currently occupying the stage. Each
+/// live entry already consumes one slot of `global_cap`, so
+/// `compute_admissions` seeds `admitted_count` with the sum.
+///
+/// `current_job_unit_ids` is the set of Unit IDs that already
+/// hold a live job. The candidate filter in `dag_scheduler::tick`
+/// strips these from the candidate list before calling
+/// `compute_admissions`, but the snapshot still carries the set as
+/// a defence-in-depth: if a Unit with a live job ever reaches
+/// `compute_admissions` it is reported as `BlockedDependencies`
+/// (admission is idempotent for live Units) rather than silently
+/// re-admitted and double-booking the global cap.
+///
+/// Both fields are owned (`String`-keyed maps/sets) for ergonomic
+/// construction at the `tick` seam; the borrowed slice
+/// `units: &'a [UnitAdmissionInput]` keeps the existing
+/// zero-allocation hot path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionSnapshot<'a> {
     pub units: &'a [UnitAdmissionInput],
     pub integration_target_head: Option<&'a str>,
+    pub live_stage_counts: BTreeMap<String, u32>,
+    pub current_job_unit_ids: HashSet<String>,
 }
 
 /// Pool + capacity caps handed to [`compute_admissions`].
@@ -136,11 +159,29 @@ pub fn compute_admissions(
         .collect();
 
     let mut leased: BTreeMap<String, u32> = BTreeMap::new();
-    let mut admitted_count: u32 = 0;
+    // U1 (2026-09-09): live jobs already consume `global_cap`. Seed
+    // the running counter with the sum of live stage counts so the
+    // first gate sees the right "remaining" capacity on entry.
+    let mut admitted_count: u32 = state.live_stage_counts.values().copied().sum();
     let mut executor_count: u32 = 0;
 
     let mut decisions: Vec<AdmissionDecision> = Vec::with_capacity(sorted.len());
     for unit in sorted {
+        // U1 (2026-09-09): defence-in-depth — a Unit whose live
+        // job is already on the books must never be re-admitted
+        // (the candidate filter at the `tick` seam strips these,
+        // but if a Unit reaches this function with a live job we
+        // mark it `BlockedDependencies` rather than letting it
+        // double-book a global slot).
+        if state.current_job_unit_ids.contains(&unit.unit_id) {
+            decisions.push(AdmissionDecision {
+                unit_id: unit.unit_id.clone(),
+                admitted: false,
+                reason: AdmissionReason::BlockedDependencies,
+            });
+            continue;
+        }
+
         let deps_blocked = unit
             .depends_on
             .iter()
@@ -280,6 +321,8 @@ mod tests {
         let snapshot = AdmissionSnapshot {
             units: &units,
             integration_target_head: Some("deadbeef"),
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
         };
         let decisions = compute_admissions(&snapshot, &cap_global(10));
         assert_eq!(decisions.len(), 3);
@@ -300,6 +343,8 @@ mod tests {
         let snapshot = AdmissionSnapshot {
             units: &units,
             integration_target_head: Some("deadbeef"),
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
         };
         let decisions = compute_admissions(&snapshot, &cap_global(10));
         assert_eq!(decision(&decisions, "U1").reason, AdmissionReason::Admitted);
@@ -317,6 +362,8 @@ mod tests {
         let snapshot = AdmissionSnapshot {
             units: &units,
             integration_target_head: Some("cafebabe"),
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
         };
         let decisions = compute_admissions(&snapshot, &cap_global(10));
         assert_eq!(decision(&decisions, "U1").reason, AdmissionReason::Admitted);
@@ -331,6 +378,8 @@ mod tests {
         let snapshot = AdmissionSnapshot {
             units: &units,
             integration_target_head: None,
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
         };
         let decisions = compute_admissions(&snapshot, &cap_global(10));
         assert_eq!(
@@ -352,6 +401,8 @@ mod tests {
         let snapshot = AdmissionSnapshot {
             units: &units,
             integration_target_head: Some("h"),
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
         };
         let decisions = compute_admissions(&snapshot, &cap_global(2));
         assert_eq!(decision(&decisions, "U1").reason, AdmissionReason::Admitted);
@@ -375,6 +426,8 @@ mod tests {
         let snapshot = AdmissionSnapshot {
             units: &units,
             integration_target_head: Some("h"),
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
         };
         let decisions = compute_admissions(&snapshot, &cap_pool(10, 2));
         assert_eq!(decision(&decisions, "U1").reason, AdmissionReason::Admitted);
@@ -397,6 +450,8 @@ mod tests {
         let snapshot = AdmissionSnapshot {
             units: &units,
             integration_target_head: Some("h"),
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
         };
         let caps = cap_resources(10, 10, &[("db", 1)]);
         let decisions = compute_admissions(&snapshot, &caps);
@@ -416,6 +471,8 @@ mod tests {
         let snapshot = AdmissionSnapshot {
             units: &units,
             integration_target_head: Some("h"),
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
         };
         let caps = cap_resources(10, 10, &[("db", 1)]);
         let decisions = compute_admissions(&snapshot, &caps);
@@ -439,6 +496,8 @@ mod tests {
         let snapshot = AdmissionSnapshot {
             units: &units,
             integration_target_head: Some("h"),
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
         };
         let decisions = compute_admissions(&snapshot, &cap_global(10));
         // integration_order tie: U_B < U_C lex.
@@ -462,6 +521,8 @@ mod tests {
         let snapshot = AdmissionSnapshot {
             units: &units,
             integration_target_head: None,
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
         };
         let decisions = compute_admissions(&snapshot, &cap_global(10));
         assert_eq!(
@@ -476,5 +537,91 @@ mod tests {
             decision(&decisions, "U2").reason,
             AdmissionReason::BlockedNoTargetHead
         );
+    }
+
+    // --- U1 boundary tests (2026-09-09-0917) -------------------------------
+
+    /// U1 boundary: `snapshot_subtracts_live_stages`. A live execute
+    /// already consumes one slot of `global_cap`. With cap=2 and one
+    /// live execute, only ONE further unit can be admitted — not
+    /// two. The admission engine must seed `admitted_count` with the
+    /// sum of live stage counts so this subtraction is honoured.
+    #[test]
+    fn snapshot_subtracts_live_stages() {
+        let units = vec![
+            unit("U1", 1, &[], &[]),
+            unit("U2", 2, &[], &[]),
+            unit("U3", 3, &[], &[]),
+        ];
+        let mut live = BTreeMap::new();
+        live.insert("execute".to_string(), 1u32);
+        let snapshot = AdmissionSnapshot {
+            units: &units,
+            integration_target_head: Some("h"),
+            live_stage_counts: live,
+            current_job_unit_ids: HashSet::new(),
+        };
+        let decisions = compute_admissions(&snapshot, &cap_global(2));
+        let admitted: Vec<&str> = decisions
+            .iter()
+            .filter(|d| d.reason == AdmissionReason::Admitted)
+            .map(|d| d.unit_id.as_str())
+            .collect();
+        assert_eq!(
+            admitted.len(),
+            1,
+            "global_cap=2 minus 1 live execute must admit exactly 1"
+        );
+        // The third independent unit must be `BlockedGlobalCap`,
+        // proving the live count was honoured (not silently dropped).
+        assert_eq!(
+            decision(&decisions, "U3").reason,
+            AdmissionReason::BlockedGlobalCap
+        );
+    }
+
+    /// U1 boundary: `blocked_dependency_does_not_consume_capacity`.
+    /// A unit that fails the dependency gate must NOT count against
+    /// `global_cap` — only `Admitted` units consume a slot. Two
+    /// cap-2 scenarios: (a) one dep-blocked unit + one ready unit
+    /// admits exactly one; (b) three dep-blocked units admit zero.
+    #[test]
+    fn blocked_dependency_does_not_consume_capacity() {
+        // Scenario (a): one dep-blocked + one ready.
+        let units = vec![
+            unit("U1", 1, &[], &[]),
+            unit("U2", 2, &["U1"], &[]), // U1 not yet integrated → blocked
+        ];
+        let snapshot = AdmissionSnapshot {
+            units: &units,
+            integration_target_head: Some("h"),
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
+        };
+        let decisions = compute_admissions(&snapshot, &cap_global(1));
+        assert_eq!(decision(&decisions, "U1").reason, AdmissionReason::Admitted);
+        assert_eq!(
+            decision(&decisions, "U2").reason,
+            AdmissionReason::BlockedDependencies
+        );
+        // Scenario (b): all blocked by deps → zero admissions even
+        // though cap is wide open. Proves dep-blocked units are free.
+        let units_b = vec![
+            unit("U1", 1, &["U_MISSING"], &[]),
+            unit("U2", 2, &["U_MISSING"], &[]),
+            unit("U3", 3, &["U_MISSING"], &[]),
+        ];
+        let snapshot_b = AdmissionSnapshot {
+            units: &units_b,
+            integration_target_head: Some("h"),
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
+        };
+        let decisions_b = compute_admissions(&snapshot_b, &cap_global(10));
+        let admitted_b = decisions_b
+            .iter()
+            .filter(|d| d.reason == AdmissionReason::Admitted)
+            .count();
+        assert_eq!(admitted_b, 0, "all dep-blocked → zero admissions");
     }
 }

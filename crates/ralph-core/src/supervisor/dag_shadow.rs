@@ -169,6 +169,8 @@ fn system_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, HashSet};
+
     use crate::parallel_forge_handoff::{ResourceCapacity, ResourceClaim};
     use crate::supervisor::dag_scheduler::UnitAdmissionInput;
 
@@ -217,6 +219,8 @@ mod tests {
         let snap = AdmissionSnapshot {
             units: &units,
             integration_target_head: Some("h"),
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
         };
         sink.record(compute_shadow_observation(&snap, &cap(10, 10, &[]), &sink));
         let latest = sink.record(compute_shadow_observation(&snap, &cap(10, 10, &[]), &sink));
@@ -267,6 +271,8 @@ mod tests {
         let snap = AdmissionSnapshot {
             units: &units,
             integration_target_head: Some("h"),
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
         };
         let obs = compute_shadow_observation(&snap, &cap(1, 1, &[]), &sink);
         assert_eq!(sink.observation_count(), 0);
@@ -274,6 +280,8 @@ mod tests {
         let snap_no_head = AdmissionSnapshot {
             units: &units,
             integration_target_head: None,
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
         };
         let obs2 = compute_shadow_observation(&snap_no_head, &cap(10, 10, &[]), &sink);
         assert_eq!(obs2.admitted_count, 0);
@@ -299,6 +307,8 @@ mod tests {
         let snap = AdmissionSnapshot {
             units: &units,
             integration_target_head: Some("h"),
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
         };
         let obs = compute_shadow_observation(&snap, &cap(2, 10, &[("db", 1)]), &sink);
         assert_eq!(obs.candidate_count, 5);
