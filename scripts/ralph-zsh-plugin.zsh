@@ -166,6 +166,26 @@ _RALPH_WAVE_CMDS=(
 )
 
 # =============================================================================
+# Forge Unit Topic Completions (plan 2026-09-09-0917 U15)
+# =============================================================================
+# DAG 模式（scheduler_mode: dag）下，parallel-forge hat subscribers 看到的
+# 协调 topic 是 forge.unit.* 族；旧的 forge.wave.* 族不再由 hat 订阅。
+# 用 compadd 而非 _describe：值含 : 应保留 compadd 风格（参见 builtin:*）。
+_RALPH_FORGE_UNIT_TOPICS=(
+  "forge.plan.ready:Planner publishes a typed execution plan to the DAG"
+  "forge.unit.ready:DAG runtime admits a Unit and prepares a JobContext"
+  "forge.unit.executed:A Unit's isolated job produced its candidate commit"
+  "forge.unit.failed:A Unit's isolated job failed and is not retrying"
+  "forge.unit.correction:DAG runtime issues a correction reentry for a Unit"
+  "forge.exec.development.done:DAG runtime projects exactly-once close ack"
+)
+(( $+functions[_ralph_forge_unit_topics] )) ||
+_ralph_forge_unit_topics() {
+  # 用 -U 跳过 -、+、~ 等前缀标记；用 -S '' 不补任何后缀（topic 是位置参数）
+  compadd -U -S '' -- "${_RALPH_FORGE_UNIT_TOPICS[@]%%:*}"
+}
+
+# =============================================================================
 # Loops Subcommands
 # =============================================================================
 _RALPH_LOOPS_CMDS=(
@@ -776,7 +796,7 @@ _ralph_clean_args() {
 _ralph_emit_args() {
   local -a emit_opts
   emit_opts=(
-    '1:Topic (e.g. build.done):_default'
+    '1:Topic (e.g. build.done or forge.unit.executed):->emit_topic'
     '2:Payload (optional):_default'
     '-j[Parse payload as JSON]'
     '--file+[Path to events file]:file:_files'
@@ -786,7 +806,19 @@ _ralph_emit_args() {
     '--triggered+[Target hat triggered]:hat:_default'
     '--source+[Source identifier]:source:_default'
   )
-  _arguments $emit_opts
+  _arguments -C $emit_opts
+
+  case $state in
+    emit_topic)
+      # DAG 模式（scheduler_mode: dag）下暴露 typed forge.unit.* 族主题补全
+      # (plan 2026-09-09-0917 U15)；其它主题继续走 _default 自由输入。
+      if [[ ${words[CURRENT]} == forge.* ]]; then
+        _ralph_forge_unit_topics
+      else
+        _default
+      fi
+      ;;
+  esac
 }
 
 # =============================================================================

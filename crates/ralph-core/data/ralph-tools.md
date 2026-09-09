@@ -27,6 +27,12 @@ metadata:
 
 这些变量由 runner 在每次 hat activation 前注入，agent 可直接读取，但**不要**假设某个变量一定非空。
 
+### DAG typed `JobContext`（plan 2026-09-09-0917 U15）
+
+DAG 模式（`event_loop.supervisor.scheduler_mode: dag`，builtin `parallel-forge`）下，runtime 为每个 active job 注入一组 typed `JobContext` 字段（通过 `RALPH_*` 环境变量暴露），hat 不应再依赖旧的 wave/slot 标识。当前暴露字段：`plan_key` / `unit_key` / `task_key` / `task_id` / `job_id` / `job_token` / `stage` / `attempt` / `worktree` / `base` / `verified_execution_plan_path` / `artifact_refs`。**已弃用/移除**：`wave_id` / `slot_index` / `worktree_map`——runtime 不再注入这三个字段，旧 payload 字段被 typed schema 拒收；hat 也不再读取这三个值，job 身份由 `job_id` + `job_token` 锚定。
+
+`task_id` / `task_key` / `step` 三字段必须严格一致（参考 `ralph-tools-tasks` red box）：`task_id` 是当前 loop 的真实 live id（`ralph tools task list` 取得，禁止手写以避免 reuse closed task id），`task_key` 是注册时的稳定 key，`step` 值必须匹配 `task_key` 中 `:step-<n>:` 段；不一致会被 runtime 拒收。
+
 ### `loop.resume` 与 `task.resume` 的区别
 
 - `loop.resume` 只表示 loop 使用 `ralph run --continue` 启动时的 bootstrap 信号；它描述的是整个 loop 的启动/续接，不是一次运行时纠错。
