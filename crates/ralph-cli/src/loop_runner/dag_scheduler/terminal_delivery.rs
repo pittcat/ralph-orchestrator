@@ -6,6 +6,12 @@
 //! Real implementation uses target main-events FileLock and SQLite
 //! v20 schema. This skeleton provides the pure logic for testing.
 
+// SKELETON-ONLY (per fix-plan 2026-09-09-0917-fix-forge-dag-p1-closure-plan U2 / U25):
+// public types stay exposed for downstream unit tests but are not yet wired
+// into production callers; U10 event_file_append helper and U11 production
+// wiring promote this file to `PRODUCTION:` marker.
+#![allow(dead_code)]
+
 use std::collections::BTreeMap;
 
 /// State of a terminal delivery.

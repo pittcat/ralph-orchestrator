@@ -1081,10 +1081,10 @@ impl DagSchedulerRuntime {
                 );
             }
         }
-        if let Ok(stores) = self.ensure_stores() {
-            if let Ok(Some(pin)) = stores.plans.get_unit_base(plan_key, unit_key) {
-                return Ok(pin.base_commit);
-            }
+        if let Ok(stores) = self.ensure_stores()
+            && let Ok(Some(pin)) = stores.plans.get_unit_base(plan_key, unit_key)
+        {
+            return Ok(pin.base_commit);
         }
         let plan_base = self
             .plans

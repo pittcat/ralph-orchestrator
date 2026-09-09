@@ -17,6 +17,13 @@
 //! / digest / target identity only); raw payload never appears
 //! here.
 
+// `result_large_err` is allowed at file scope (more granular than
+// crate level) per U2 / F17: keep DagStoreError variants human-readable
+// for fail-closed evidence while suppressing function-level
+// `result_large_err` errors on every method returning
+// `Result<_, DagStoreError>`.
+#![allow(clippy::result_large_err)]
+
 use std::fmt;
 use thiserror::Error;
 
@@ -30,6 +37,13 @@ use thiserror::Error;
 /// (in BOTH `Pending` and `Active` states — R10/R17 fail-closed).
 /// `InvalidTransition` is returned when `activate_plan` is called
 /// on a `Closed` plan (no valid transition out of `Closed`).
+// `result_large_err` is allowed at item level per the
+// dag_scheduler dead-code policy (`mod.rs:60`): keep variants
+// human-readable; do not box for ergonomic reasons. Suppressed
+// here to keep clippy green while preserving fail-closed error
+// surfaces for dag_store consumers. Per
+// 2026-09-09-0917-fix-forge-dag-p1-closure-plan U2 / F17.
+#[allow(clippy::result_large_err)]
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum DagStoreError {
     #[error("plan key already registered with a different artifact digest: {0}")]

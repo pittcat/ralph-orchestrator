@@ -16,6 +16,12 @@
 //! - Unknown PIDs (process not yet exited) keep lease held; do not
 //!   release lease unless process is confirmed exited/blocked.
 
+// SKELETON-ONLY (per fix-plan 2026-09-09-0917-fix-forge-dag-p1-closure-plan U2 / U25):
+// public types stay exposed for downstream unit tests but are not yet wired
+// into production callers; U6 routing table is operational but the rest of
+// this module is replaced by typed `JobContext` reads in U23.
+#![allow(dead_code)]
+
 use std::collections::BTreeMap;
 
 /// Stages a DAG job can occupy (mirrors accepted Stage enum).

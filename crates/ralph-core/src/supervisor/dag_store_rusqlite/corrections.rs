@@ -5,6 +5,13 @@
 //! Owns the durable ledger for execute-failure correction requests.
 //! v22 schema is the backing. Budget = 3 fixer attempts per Unit.
 
+// `result_large_err` is allowed at file scope (more granular than
+// crate level) per U2 / F17: keep DagStoreError variants human-readable
+// for fail-closed evidence while suppressing function-level
+// `result_large_err` errors on every method returning
+// `Result<_, DagStoreError>`.
+#![allow(clippy::result_large_err)]
+
 use std::collections::BTreeMap;
 
 /// Per-Unit budget for fixer attempts.

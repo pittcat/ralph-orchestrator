@@ -5,6 +5,12 @@
 //! Classifies the durable tested intent's target state at recovery
 //! time. Pure dispatch; real CAS / record handled by caller.
 
+// SKELETON-ONLY (per fix-plan 2026-09-09-0917-fix-forge-dag-p1-closure-plan U2 / U25):
+// public types stay exposed for downstream unit tests but are not yet wired
+// into production callers; U5 / U11 / U23 production replacement promotes
+// this file to `PRODUCTION:` marker.
+#![allow(dead_code)]
+
 use std::collections::BTreeMap;
 
 /// Classification of the relationship between the persisted intent's

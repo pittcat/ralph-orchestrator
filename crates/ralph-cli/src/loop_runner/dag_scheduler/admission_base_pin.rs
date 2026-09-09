@@ -7,6 +7,13 @@
 //! dependencies. Once written, the base is immutable across resume
 //! / diff / spawn. Skeleton captures pure dispatch logic.
 
+// SKELETON-ONLY (per fix-plan 2026-09-09-0917-fix-forge-dag-p1-closure-plan U2 / U25):
+// the public types in this module are exposed for downstream unit tests but
+// are not yet wired into production callers; once U6 ancestry replacement and
+// U11 production wiring land, this file-level allow is replaced by item-level
+// `#[allow(dead_code)]` for genuinely unused symbols.
+#![allow(dead_code)]
+
 use std::collections::BTreeSet;
 
 /// Inputs to base computation.

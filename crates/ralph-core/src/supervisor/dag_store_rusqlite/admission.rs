@@ -38,6 +38,13 @@
 //! `capacity`, so an idempotent replay never trips the
 //! oversubscribe gate on its own prior row.
 
+// `result_large_err` is allowed at file scope (more granular than
+// crate level) per U2 / F17: keep DagStoreError variants human-readable
+// for fail-closed evidence while suppressing function-level
+// `result_large_err` errors on every method returning
+// `Result<_, DagStoreError>`.
+#![allow(clippy::result_large_err)]
+
 use rusqlite::{TransactionBehavior, params};
 
 use super::jobs::JobIdentity;

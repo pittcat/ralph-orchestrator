@@ -2,6 +2,13 @@
 //! returns `false`, never permission to launch a second process. Recovery must
 //! resolve an unfinished reservation before doing any further work on its unit.
 
+// `result_large_err` is allowed at file scope (more granular than
+// crate level) per U2 / F17: keep DagStoreError variants human-readable
+// for fail-closed evidence while suppressing function-level
+// `result_large_err` errors on every method returning
+// `Result<_, DagStoreError>`.
+#![allow(clippy::result_large_err)]
+
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use super::{DagStoreError, DagStoreResult, RusqliteDagSchedulerStore, plan_io_err};

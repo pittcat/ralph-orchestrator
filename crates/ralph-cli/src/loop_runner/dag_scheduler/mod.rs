@@ -1,4 +1,12 @@
 //! 2026-09-03-0959 plan U6 — DAG scheduler module root.
+
+// `result_large_err` is allowed at file scope (more granular than
+// crate level) per U2 / F17: keep DagStoreError variants human-readable
+// for fail-closed evidence while suppressing function-level
+// `result_large_err` errors on every method returning
+// `Result<_, DagStoreError>`.
+#![allow(clippy::result_large_err)]
+
 //!
 //! This module is the **integration layer** that wires the
 //! generic job kernel (`runtime_job`) into the per-Unit

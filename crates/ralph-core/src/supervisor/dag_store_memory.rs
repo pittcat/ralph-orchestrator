@@ -1,6 +1,8 @@
 //! 2026-09-03-0959 plan U3 (R2 / R17 / E5 / E7 / E9 / E16):
 //! in-memory implementation of [`DagSchedulerStore`].
 //!
+//! Plan: 2026-09-09-0917-fix-forge-dag-p1-closure-plan U2 / F17 / U13.
+//!
 //! 2026-09-09-0917 plan U3 (per-Unit base commit pin + per-stage
 //! accepted evidence ledger): in-memory backing for
 //! `dag_unit_bases` / `dag_stage_evidence`. The bounded maps
@@ -38,6 +40,13 @@
 //!   stage, attempt)` → `Ok(())`. Re-record with the SAME fields
 //!   → `Ok(())` (idempotent). Re-record with any field drift →
 //!   `Err(StageEvidenceDrift)` (fail closed, plan U3 R3/S3).
+
+// `result_large_err` is allowed at file scope (more granular than
+// crate level) per U2 / F17: keep DagStoreError variants human-readable
+// for fail-closed evidence while suppressing function-level
+// `result_large_err` errors on every method returning
+// `Result<_, DagStoreError>`.
+#![allow(clippy::result_large_err)]
 
 use std::collections::HashMap;
 use std::sync::Mutex;

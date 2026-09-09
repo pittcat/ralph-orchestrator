@@ -6,6 +6,12 @@
 //! start/poll/cancel; the blocking integration operation runs in the
 //! worker. Stale results (different generation) are no-ops.
 
+// SKELETON-ONLY (per fix-plan 2026-09-09-0917-fix-forge-dag-p1-closure-plan U2 / U25):
+// the public types in this module are exposed for downstream unit tests but
+// are not yet wired into production callers; U23 production replacement
+// promotes this file to `PRODUCTION:` marker.
+#![allow(dead_code)]
+
 use std::collections::BTreeMap;
 
 /// Identity of an integration attempt.

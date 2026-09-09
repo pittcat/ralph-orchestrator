@@ -1,6 +1,8 @@
 //! PMI-006 / 2026-09-03-0959 plan U3 (R2 / R17 / D4 / E5 / E9):
 //! rusqlite implementation of the durable DAG store contract.
 //!
+//! Plan: 2026-09-09-0917-fix-forge-dag-p1-closure-plan U2 / F17.
+//!
 //! The module owns THREE trait implementations over a single SQLite
 //! connection (the v13 schema in `migrations/v13.sql` plus the v14
 //! receipt / unit / lease / job tables in `migrations/v14.sql`):
@@ -35,6 +37,13 @@
 //! DAG tables are additive to the wave tables — the wave store
 //! keeps its single authority; this module only adds the DAG
 //! family.
+
+// `result_large_err` is allowed at file scope (more granular than
+// crate level) per U2 / F17: keep DagStoreError variants human-readable
+// for fail-closed evidence while suppressing the function-level
+// `result_large_err` errors on every method returning
+// `Result<_, DagStoreError>`.
+#![allow(clippy::result_large_err)]
 
 #[cfg(feature = "supervisor-db")]
 use std::path::Path;

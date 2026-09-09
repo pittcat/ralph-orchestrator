@@ -8,6 +8,12 @@
 //! references. Skill visibility is selected via SkillRegistry at
 //! spawn time.
 
+// SKELETON-ONLY (per fix-plan 2026-09-09-0917-fix-forge-dag-p1-closure-plan U2 / U25):
+// public types stay exposed for downstream unit tests but are not yet wired
+// into production callers; U15 typed `JobContext` migration promotes this
+// file to `PRODUCTION:` marker.
+#![allow(dead_code)]
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -251,7 +257,7 @@ mod tests {
     fn skill_visibility_matches_hat() {
         // Skeleton: skill_set is a Vec; caller populates from registry.
         // Document via the type.
-        let mut s = JobContext {
+        let s = JobContext {
             plan_key: "plan-A".to_string(),
             unit_key: "U1".to_string(),
             task_id: "task-1".to_string(),

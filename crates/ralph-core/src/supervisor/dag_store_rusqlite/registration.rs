@@ -8,6 +8,13 @@
 //! accepted approval with the same identity re-activates without
 //! duplication; conflicting approval/target/base refused.
 
+// `result_large_err` is allowed at file scope (more granular than
+// crate level) per U2 / F17: keep DagStoreError variants human-readable
+// for fail-closed evidence while suppressing function-level
+// `result_large_err` errors on every method returning
+// `Result<_, DagStoreError>`.
+#![allow(clippy::result_large_err)]
+
 use std::collections::BTreeMap;
 
 /// Identity for replay detection.
@@ -57,12 +64,12 @@ pub fn classify_activation(
             reason: "empty approval base or zero units".to_string(),
         };
     }
-    if let Some(owner) = existing_target_owner {
-        if owner != input.plan_key {
-            return ActivationOutcome::DuplicateTarget {
-                reason: format!("target already owned by {owner}"),
-            };
-        }
+    if let Some(owner) = existing_target_owner
+        && owner != input.plan_key
+    {
+        return ActivationOutcome::DuplicateTarget {
+            reason: format!("target already owned by {owner}"),
+        };
     }
     match existing_receipt_state {
         None => ActivationOutcome::UnknownReceipt {

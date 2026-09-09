@@ -118,7 +118,10 @@ mod tests {
     #[test]
     fn worktree_identity_from_path() {
         let id = WorktreeIdentity::from_path(Path::new(".")).expect("canonicalize cwd");
-        assert!(id.canonical_path.is_absolute() || true); // best-effort, macOS may give /private/...
+        // best-effort canonicalization: macOS may produce /private/...
+        // (resolved symlink) while Linux yields the original path; either
+        // case is acceptable as long as the path is absolute.
+        assert!(id.canonical_path.is_absolute());
     }
 
     #[test]
