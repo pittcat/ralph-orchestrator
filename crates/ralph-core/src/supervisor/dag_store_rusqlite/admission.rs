@@ -184,25 +184,30 @@ impl RusqliteDagSchedulerStore {
     /// releasing a unit whose leases are already released is a
     /// no-op (the second call updates zero rows). Lease rows
     /// are NOT deleted so recovery / audit reads can still see
-    /// the full held-then-released timeline.
+    /// the full held-then-released timeline. The update is
+    /// wrapped in a `BEGIN IMMEDIATE` transaction so future
+    /// multi-statement release changes remain atomic.
     pub fn release_resources_for_unit(
         &self,
         unit_key: &str,
         now_ms: i64,
     ) -> DagStoreResult<()> {
-        let conn = self
+        let mut conn = self
             .inner
             .conn
             .lock()
             .map_err(|_| DagStoreError::IoError("dag store mutex poisoned".into()))?;
-        conn.execute(
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(plan_io_err)?;
+        tx.execute(
             "UPDATE dag_resource_leases \
              SET status = 'released', released_at_ms = ?1 \
              WHERE unit_key = ?2 AND status = 'held'",
             params![now_ms, unit_key],
         )
         .map_err(plan_io_err)?;
-        Ok(())
+        tx.commit().map_err(plan_io_err)
     }
 
     /// Sum of held permits across all Units for
@@ -425,6 +430,48 @@ mod tests {
         store
             .claim_resources(&id2, &[("gpu".into(), 5u32)], &[("gpu".into(), 10u32)], 5)
             .unwrap_err();
+    }
+
+    #[test]
+    fn release_uses_immediate_transaction_behavior() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store_a, store_b) = open_pair(&dir);
+        let id = register(&store_a, "plan", &["U1"]);
+        store_a
+            .claim_resources(&id, &[("gpu".into(), 3u32)], &[("gpu".into(), 10u32)], 1)
+            .unwrap();
+
+        // Keep the peer's IMMEDIATE transaction open to hold the
+        // SQLite writer lock. A short timeout makes the assertion
+        // deterministic and keeps the test bounded.
+        {
+            let conn = store_a.inner.conn.lock().unwrap();
+            conn.pragma_update(None, "busy_timeout", 100u32).unwrap();
+        }
+        {
+            let conn = store_b.inner.conn.lock().unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        }
+
+        let err = store_a
+            .release_resources_for_unit(&id.unit_key(), 2)
+            .unwrap_err();
+        let message = format!("{err}").to_lowercase();
+        assert!(
+            message.contains("locked") || message.contains("busy"),
+            "expected writer-lock error, got {err:?}"
+        );
+
+        // Once the peer commits, the release can acquire its own
+        // IMMEDIATE transaction and completes normally.
+        {
+            let conn = store_b.inner.conn.lock().unwrap();
+            conn.execute_batch("COMMIT").unwrap();
+        }
+        store_a
+            .release_resources_for_unit(&id.unit_key(), 3)
+            .unwrap();
+        assert_eq!(store_a.held_permits("gpu").unwrap(), 0);
     }
 
     // -----------------------------------------------------------------
