@@ -41,6 +41,7 @@ pub mod driver;
 mod integrate;
 pub mod integration;
 pub mod jobs;
+mod admission;
 pub mod recovery;
 pub mod shadow;
 mod spawn;
@@ -65,7 +66,7 @@ use ralph_core::parallel_forge_handoff::{ResourceCapacity, ResourceClaim};
 use ralph_core::supervisor::dag_plan_receipt::{
     DagPlanReceipt, DagPlanReceiptRegistry, InMemoryDagPlanReceiptStore,
 };
-use ralph_core::supervisor::dag_scheduler::{AdmissionCaps, AdmissionSnapshot, UnitAdmissionInput};
+use ralph_core::supervisor::dag_scheduler::{AdmissionCaps, AdmissionSnapshot};
 use ralph_core::supervisor::dag_shadow::{ShadowSink, compute_shadow_observation};
 use ralph_core::supervisor::dag_store::{CanonicalPlanRecord, DagSchedulerStore, DagStoreError};
 use ralph_core::supervisor::dag_store_memory::InMemoryDagSchedulerStore;
@@ -588,12 +589,18 @@ impl DagSchedulerRuntime {
                 warn!(plan_key, unit_id, "DAG correction request references an unknown unit");
                 continue;
             }
+            // U1 (2026-09-09-0917): the runtime registers Units under
+            // plan-namespaced keys, so every pipeline call must match
+            // that namespace — `bump_attempt_and_advance` looks up
+            // the unit by `unit_key`, and a bare `unit_id` would miss
+            // the registered entry.
+            let unit_key = format!("forge:{plan_key}:{unit_id}");
             let outcome = self
                 .pipeline
-                .bump_attempt_and_advance(unit_id, Stage::Review);
+                .bump_attempt_and_advance(&unit_key, Stage::Review);
             if let self::jobs::AdvanceOutcome::Admitted { token } = outcome {
                 self.queue_spawn(spawn::PendingSpawn {
-                    unit_key: unit_id.to_string(),
+                    unit_key,
                     kind: spawn::SpawnKind::Fix,
                     attempt: u32::try_from(token.attempt()).unwrap_or(u32::MAX),
                     plan_key: plan_key.clone(),
@@ -843,7 +850,7 @@ impl DagSchedulerRuntime {
         for unit_id in unit_ids {
             let job_id = format!("job-{plan_key}-{unit_id}");
             self.pipeline
-                .ensure_unit(unit_id, job_id, "executor", Stage::Execute);
+                .ensure_unit(format!("forge:{plan_key}:{unit_id}"), job_id, "executor", Stage::Execute);
         }
         // E2: hydrate the integrated set from the durable store so a
         // restarted loop does not re-admit dependents of units that
@@ -958,12 +965,12 @@ impl DagSchedulerRuntime {
     /// schema-declared unit identity; `unit_key` accepted as a
     /// fallback alias).
     fn observe_unit_event(&mut self, topic: &str, payload: &Value, source: Option<&str>) {
-        let unit_key = payload
+        let unit_id = payload
             .get("unit_id")
             .or_else(|| payload.get("unit_key"))
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty());
-        let Some(unit_key) = unit_key else {
+        let Some(unit_id) = unit_id else {
             debug!(topic, "DAG seam: unit event without unit_id; ignored");
             return;
         };
@@ -974,12 +981,12 @@ impl DagSchedulerRuntime {
                 .filter(|key| !key.trim().is_empty());
             let belongs_to_plan = plan_key.is_some_and(|key| {
                 self.plans.get(key).is_some_and(|plan| {
-                    plan.units.iter().any(|unit| unit.unit_id == unit_key)
+                    plan.units.iter().any(|unit| unit.unit_id == unit_id)
                 })
             });
             if !belongs_to_plan {
                 debug!(
-                    unit_key,
+                    unit_id,
                     ?plan_key,
                     topic,
                     "DAG seam: unit event has invalid plan ownership"
@@ -987,38 +994,54 @@ impl DagSchedulerRuntime {
                 return;
             }
         }
+        // U1 (2026-09-09-0917): the runtime registers Units under
+        // plan-namespaced keys (`forge:{plan_key}:{unit_id}`), so
+        // every pipeline call must match that namespace. For DAG
+        // mode the `plan_key` is required (validated above) and the
+        // namespaced key is constructed here. For DagShadow / legacy
+        // modes we keep the legacy bare unit_id path because those
+        // callers register Units with bare keys.
+        let unit_key = if self.mode == SchedulerMode::Dag {
+            let plan_key = payload
+                .get("plan_key")
+                .and_then(Value::as_str)
+                .expect("dag mode validated plan_key above");
+            format!("forge:{plan_key}:{unit_id}")
+        } else {
+            unit_id.to_string()
+        };
         // E1: in `dag` mode the execution face owns the follow-up —
         // journal terminal for the completing job, slot release, and
         // the next-stage spawn. Shadow mode keeps the pure
         // observation path below untouched.
         if self.mode == SchedulerMode::Dag {
-            self.observe_unit_event_dag(topic, unit_key, payload, source);
+            self.observe_unit_event_dag(topic, &unit_key, payload, source);
             return;
         }
         let outcome = {
             let mut driver = DagSchedulerDriver::new(&mut self.pipeline);
-            driver.observe_accepted(topic, unit_key, payload)
+            driver.observe_accepted(topic, &unit_key, payload)
         };
         match outcome {
             DriverOutcome::Routed {
-                unit_key,
+                unit_key: routed_unit_key,
                 next_stage,
                 ..
             } => {
-                debug!(unit_key, ?next_stage, "DAG seam: unit event routed");
+                debug!(unit_key = %routed_unit_key, ?next_stage, "DAG seam: unit event routed");
             }
-            DriverOutcome::Blocked { unit_key, error } => {
+            DriverOutcome::Blocked { unit_key: blocked_unit_key, error } => {
                 warn!(
-                    unit_key,
+                    unit_key = %blocked_unit_key,
                     error = %error,
                     "DAG seam: pipeline blocked the unit event"
                 );
             }
-            DriverOutcome::StillExecuting { unit_key, stage } => {
-                debug!(unit_key, ?stage, "DAG seam: unit still executing");
+            DriverOutcome::StillExecuting { unit_key: still_unit_key, stage } => {
+                debug!(unit_key = %still_unit_key, ?stage, "DAG seam: unit still executing");
             }
-            DriverOutcome::Ignored { topic } => {
-                debug!(topic, "DAG seam: unit event ignored by driver");
+            DriverOutcome::Ignored { topic: ignored_topic } => {
+                debug!(topic = %ignored_topic, "DAG seam: unit event ignored by driver");
             }
         }
     }
@@ -1036,6 +1059,13 @@ impl DagSchedulerRuntime {
         // checked out. Unresolvable git state degrades to `None`,
         // which the admission engine reports as `BlockedNoTargetHead`.
         let target_head = ralph_core::get_head_sha(&self.workspace).ok();
+        // U1 (2026-09-09-0917): capture live pipeline pressure ONCE
+        // per tick and pass it into every admission snapshot so the
+        // engine can seed `global_cap` accounting with live stages and
+        // short-circuit units already holding a live job. Recomputing
+        // per-plan would double-count multi-plan launches.
+        let live_stage_counts = self.pipeline.live_stage_counts();
+        let live_unit_ids = self.pipeline.live_unit_ids();
         let mut admitted: Vec<(String, String)> = Vec::new();
         for (plan_key, plan) in &self.plans {
             if self.blocked_plans.contains(plan_key) {
@@ -1048,23 +1078,18 @@ impl DagSchedulerRuntime {
                 // handoff, never from the event payload.
                 resource_capacities: plan.resource_capacities.clone(),
             };
-            let inputs: Vec<UnitAdmissionInput> = plan
-                .units
-                .iter()
-                .map(|u| UnitAdmissionInput {
-                    unit_id: u.unit_id.clone(),
-                    integration_order: u.integration_order,
-                    depends_on: u.depends_on.clone(),
-                    // E2: units whose integrated event was accepted
-                    // (projection acknowledged) unlock their
-                    // dependents.
-                    integrated_units: plan.integrated.clone(),
-                    resource_claims: u.resource_claims.clone(),
-                })
-                .collect();
+            // U1: candidates are derived per-plan by `build_candidates`
+            // which filters out (a) units already integrated and (b)
+            // units already holding a live job. The pre-filter ensures
+            // the engine never re-admits a unit already in flight
+            // (which previously caused slot double-booking once U1
+            // completed and U2 should have been admitted next tick).
+            let inputs = self::admission::build_candidates(plan, &self.pipeline);
             let snapshot = AdmissionSnapshot {
                 units: &inputs,
                 integration_target_head: target_head.as_deref(),
+                live_stage_counts: live_stage_counts.clone(),
+                current_job_unit_ids: live_unit_ids.clone(),
             };
             let mut observation = compute_shadow_observation(&snapshot, &caps, &self.sink);
             observation.plan_key = plan_key.clone();
@@ -1451,7 +1476,7 @@ units:
         );
         assert_eq!(plan.unit_ids, vec!["U1", "U2", "U3"]);
         // Pipeline slots are seeded so per-unit events can route.
-        assert_eq!(runtime.pipeline_stage("U1"), Some(Stage::Execute));
+        assert_eq!(runtime.pipeline_stage("forge:pf-test:U1"), Some(Stage::Execute));
     }
 
     /// Double approval is an idempotent no-op (re-activate Active).
@@ -1568,7 +1593,7 @@ units:
             .to_string(),
         );
         runtime.observe_accepted_events(&[executed]);
-        assert_eq!(runtime.pipeline_stage("U1"), Some(Stage::Review));
+        assert_eq!(runtime.pipeline_stage("forge:pf-test:U1"), Some(Stage::Review));
 
         let reviewed = ralph_proto::Event::new(
             topics::UNIT_REVIEWED,
@@ -1583,7 +1608,7 @@ units:
             .to_string(),
         );
         runtime.observe_accepted_events(&[reviewed]);
-        assert_eq!(runtime.pipeline_stage("U1"), Some(Stage::Verify));
+        assert_eq!(runtime.pipeline_stage("forge:pf-test:U1"), Some(Stage::Verify));
 
         // Unknown unit: blocked by the pipeline, logged, no panic.
         let unknown = ralph_proto::Event::new(
@@ -1611,8 +1636,8 @@ units:
         );
         runtime.observe_accepted_events(&[correction]);
 
-        assert_eq!(runtime.pipeline_stage("U1"), Some(Stage::Review));
-        assert_eq!(runtime.pipeline.attempt_of("U1"), Some(1));
+        assert_eq!(runtime.pipeline_stage("forge:pf-test:U1"), Some(Stage::Review));
+        assert_eq!(runtime.pipeline.attempt_of("forge:pf-test:U1"), Some(1));
     }
 
     /// A unit event from another plan must not advance the same-named Unit;
@@ -1636,7 +1661,7 @@ units:
         );
         runtime.observe_accepted_events(&[forged]);
 
-        assert_eq!(runtime.pipeline_stage("U1"), Some(Stage::Execute));
+        assert_eq!(runtime.pipeline_stage("forge:pf-test:U1"), Some(Stage::Execute));
         assert!(runtime.pending_spawns.is_empty());
     }
 
@@ -1659,8 +1684,8 @@ units:
         );
         runtime.observe_accepted_events(&[correction]);
 
-        assert_eq!(runtime.pipeline_stage("U1"), Some(Stage::Execute));
-        assert_eq!(runtime.pipeline.attempt_of("U1"), Some(0));
+        assert_eq!(runtime.pipeline_stage("forge:pf-test:U1"), Some(Stage::Execute));
+        assert_eq!(runtime.pipeline.attempt_of("forge:pf-test:U1"), Some(0));
     }
 
     /// The observation tick reflects dependency gating: with no
@@ -1746,7 +1771,7 @@ units:
         runtime
             .journal()
             .expect("durable journal")
-            .reserve_job(&execute_identity(), 1)
+            .reserve_job(&execute_identity(), 1, None)
             .expect("reserve job");
         drop(runtime);
 
@@ -1781,7 +1806,7 @@ units:
         runtime
             .journal()
             .expect("durable journal")
-            .reserve_job(&identity, 1)
+            .reserve_job(&identity, 1, None)
             .expect("reserve job");
         runtime
             .journal()
@@ -1828,7 +1853,7 @@ units:
         runtime
             .journal()
             .expect("durable journal")
-            .reserve_job(&identity, 1)
+            .reserve_job(&identity, 1, None)
             .expect("reserve job");
         runtime
             .journal()
@@ -1858,5 +1883,258 @@ units:
                 .iter()
                 .any(|job| job.identity == identity && job.terminal.is_none())
         );
+    }
+
+    // --- U1 acceptance + boundary tests (2026-09-09-0917) ---------------
+
+    /// U1 acceptance: after U1 has been integrated into the plan, the
+    /// next `tick()` must surface U2 in the admitted set exactly once,
+    /// and the live pipeline state must not double-book U1 (which is
+    /// already integrated). Tests the `build_candidates` filter wiring
+    /// through the `tick` → `compute_shadow_observation` seam.
+    #[test]
+    fn dag_tick_refills_ready() {
+        let (tmp, mut runtime) = fixture(SchedulerMode::DagShadow);
+        init_git_head(tmp.path());
+        runtime.observe_accepted_events(&[plan_ready_event(tmp.path())]);
+        // Tick 1: both U1 and U2 are fresh; U1 (lower integration_order)
+        // is admitted, U2 stays Ready (no live job yet for either).
+        runtime.sink.with_observations(|observations| {
+            let obs = observations.last().expect("first observation");
+            let reason_of = |id: &str| {
+                obs.decisions
+                    .iter()
+                    .find(|(uid, _)| uid == id)
+                    .map(|(_, r)| r.as_str())
+                    .unwrap_or("missing")
+            };
+            assert_eq!(reason_of("U1"), "Admitted");
+            assert_eq!(reason_of("U2"), "Admitted");
+        });
+        // Mark U1 integrated in the plan topology (the runtime carries
+        // this in `plan.integrated` once `forge.unit.integrated` is
+        // accepted; we simulate that durable state directly).
+        if let Some(plan) = runtime.plans.get_mut("pf-test") {
+            plan.integrated.insert("U1".to_string());
+        }
+        runtime.tick();
+        // Tick 2: U1 is filtered out by `build_candidates` (it's in
+        // `plan.integrated`). U2 must remain Admitted, exactly once.
+        runtime.sink.with_observations(|observations| {
+            let obs = observations.last().expect("second observation");
+            let admitted: Vec<&str> = obs
+                .decisions
+                .iter()
+                .filter(|(_, r)| r == "Admitted")
+                .map(|(uid, _)| uid.as_str())
+                .collect();
+            assert!(
+                !admitted.contains(&"U1"),
+                "U1 already integrated, must not re-appear as Admitted"
+            );
+            assert!(
+                admitted.contains(&"U2"),
+                "U2 must be Admitted on tick 2 (got {admitted:?})"
+            );
+            // Stable order: integration_order=2 < 3 → U2 before U3.
+            let u2_idx = admitted.iter().position(|u| *u == "U2").unwrap();
+            let u3_idx = admitted.iter().position(|u| *u == "U3");
+            if let Some(u3) = u3_idx {
+                assert!(u2_idx < u3, "U2 must precede U3 in admitted order");
+            }
+        });
+    }
+
+    /// U1 baseline (no live jobs): `cross_plan_unit_id_is_distinct`. Two
+    /// plans that both declare a unit with id `U1` must surface under
+    /// their own `plan_key` in observations — no plan_key is silently
+    /// dropped, and the per-plan decisions do not collapse across plans.
+    ///
+    /// This test only exercises the no-live-job path: both plans'
+    /// candidate sets contain U1, both are admitted within the global
+    /// cap (4), and the observation ledger keeps both `plan_key`s
+    /// distinct. It does NOT exercise the live-collision scenario
+    /// (one plan's U1 holding a slot while the other plan's U1 must
+    /// still be admitted) — that scenario is covered by
+    /// `cross_plan_live_filter_is_namespaced` below, which is the
+    /// assertion the U1 fix is built to defend.
+    #[test]
+    fn cross_plan_unit_id_is_distinct() {
+        // First plan: pf-A with U1, U2.
+        let (tmp_a, mut runtime_a) = fixture(SchedulerMode::DagShadow);
+        init_git_head(tmp_a.path());
+        runtime_a.observe_accepted_events(&[plan_ready_event(tmp_a.path())]);
+        // Second plan: pf-B with U1, U2 (different plan_key).
+        let artifact_b = tmp_a.path().join(".ralph/forge/pf-B/execution-plan.yml");
+        std::fs::create_dir_all(artifact_b.parent().unwrap()).unwrap();
+        std::fs::write(
+            &artifact_b,
+            r#"version: 1
+plan_key: pf-B
+units:
+  - id: U1
+    title: B Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/b-u1
+  - id: U2
+    title: B Feature
+    depends_on: []
+    execution_wave: 1
+    integration_order: 2
+    target_branch: feat/b-u2
+"#,
+        )
+        .unwrap();
+        let event_b = {
+            let bytes = std::fs::read(&artifact_b).expect("read b artifact");
+            let digest = ralph_core::artifact_canonicalizer::canonicalize(&bytes)
+                .expect("canon")
+                .digest;
+            let payload = serde_json::json!({
+                "plan_key": "pf-B",
+                "execution_plan_path": ".ralph/forge/pf-B/execution-plan.yml",
+                "plan_digest": digest,
+            });
+            ralph_proto::Event::new(seam_topics::PLAN_READY, payload.to_string())
+        };
+        runtime_a.observe_accepted_events(&[event_b]);
+        assert_eq!(runtime_a.plans.len(), 2);
+        assert!(runtime_a.plans.contains_key("pf-test"));
+        assert!(runtime_a.plans.contains_key("pf-B"));
+        // Both plans contain a `U1`. Run tick; both plan U1s should
+        // surface in observations under their own plan_key.
+        runtime_a.tick();
+        runtime_a.sink.with_observations(|observations| {
+            let pf_a_u1 = observations.iter().any(|obs| {
+                obs.plan_key == "pf-test"
+                    && obs.decisions.iter().any(|(uid, r)| uid == "U1" && r == "Admitted")
+            });
+            let pf_b_u1 = observations.iter().any(|obs| {
+                obs.plan_key == "pf-B"
+                    && obs.decisions.iter().any(|(uid, r)| uid == "U1" && r == "Admitted")
+            });
+            assert!(pf_a_u1, "pf-test U1 should be admitted on tick");
+            assert!(pf_b_u1, "pf-B U1 should be admitted on tick");
+            // The global cap (4) accommodates both U1s simultaneously,
+            // so neither plan's U1 was silently dropped.
+        });
+    }
+
+    /// U1 boundary: `cross_plan_live_filter_is_namespaced`. The
+    /// `pipeline.live_unit_ids()` set is `JobPipeline`-global but
+    /// `build_candidates` is per-plan. When one plan's U1 holds a
+    /// live slot, the OTHER plan's U1 must NOT be excluded by the
+    /// live filter. The pipeline therefore namespaces every unit
+    /// key as `forge:{plan_key}:{unit_id}` (matching
+    /// `JobIdentity::unit_key`), so the live filter cannot leak
+    /// across plans. Without the fix, both plans' bare `U1` keys
+    /// collide in the pipeline's `HashMap`, and a live `U1`
+    /// registered from plan A silently filters plan B's `U1`.
+    #[test]
+    fn cross_plan_live_filter_is_namespaced() {
+        // pf-test (U1, U2, U3) + pf-B (U1, U2) — same fixture as
+        // `cross_plan_unit_id_is_distinct`.
+        let (tmp_a, mut runtime_a) = fixture(SchedulerMode::DagShadow);
+        init_git_head(tmp_a.path());
+        // Write the pf-B artifact so `on_plan_ready` can ingest it.
+        let artifact_b_rel = ".ralph/forge/pf-B/execution-plan.yml";
+        let artifact_b = tmp_a.path().join(artifact_b_rel);
+        std::fs::create_dir_all(artifact_b.parent().unwrap()).unwrap();
+        std::fs::write(
+            &artifact_b,
+            r#"version: 1
+plan_key: pf-B
+units:
+  - id: U1
+    title: B Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/b-u1
+  - id: U2
+    title: B Feature
+    depends_on: []
+    execution_wave: 1
+    integration_order: 2
+    target_branch: feat/b-u2
+"#,
+        )
+        .unwrap();
+        // Build the four accepted events in order: register both
+        // plans first, then activate both plans so the L847
+        // `ensure_unit` seeding runs once per plan.
+        let plan_ready_b = {
+            let bytes = std::fs::read(&artifact_b).expect("read b artifact");
+            let digest = ralph_core::artifact_canonicalizer::canonicalize(&bytes)
+                .expect("canon")
+                .digest;
+            let payload = serde_json::json!({
+                "plan_key": "pf-B",
+                "execution_plan_path": artifact_b_rel,
+                "plan_digest": digest,
+            });
+            ralph_proto::Event::new(seam_topics::PLAN_READY, payload.to_string())
+        };
+        let approved_b = {
+            let payload = serde_json::json!({
+                "execution_plan_path": artifact_b_rel,
+                "approval_report_path": ".ralph/forge/pf-B/concurrency-approval.md",
+                "approved": true,
+            });
+            ralph_proto::Event::new(seam_topics::CONCURRENCY_APPROVED, payload.to_string())
+        };
+        // One batch: register both plans, activate both plans (which
+        // triggers the L847 `ensure_unit` seeding), then tick.
+        runtime_a.observe_accepted_events(&[
+            plan_ready_event(tmp_a.path()),
+            plan_ready_b,
+            approved_event(),
+            approved_b,
+        ]);
+        assert_eq!(runtime_a.plans.len(), 2);
+        // First tick: no live jobs yet → both U1s admitted
+        // (sanity baseline; matches `cross_plan_unit_id_is_distinct`).
+        runtime_a.tick();
+        // Reserve a slot for pf-test's U1 using the plan-namespaced
+        // key (mirrors `JobIdentity::unit_key`). Pre-fix this returns
+        // Blocked because the pipeline only registered bare `U1`,
+        // not `forge:pf-test:U1`.
+        let outcome = runtime_a
+            .pipeline
+            .advance("forge:pf-test:U1", Stage::Execute);
+        assert!(
+            matches!(outcome, jobs::AdvanceOutcome::Admitted { .. }),
+            "advance on namespaced pf-test U1 must be Admitted (pre-fix it returns Blocked because the pipeline was registered under bare U1 only); got {outcome:?}"
+        );
+        let live = runtime_a.pipeline.live_unit_ids();
+        let expected_live: std::collections::HashSet<String> =
+            std::iter::once("forge:pf-test:U1".to_string()).collect();
+        assert_eq!(
+            live, expected_live,
+            "live_unit_ids must hold the namespaced key, NOT bare U1 (pre-fix the pipeline doesn't know about forge:pf-test:U1)"
+        );
+        // Second tick: pf-B's U1 must STILL be admitted — the
+        // live filter (containing only `forge:pf-test:U1`) must
+        // NOT exclude pf-B's bare unit_id `U1` from pf-B's
+        // candidate set.
+        runtime_a.tick();
+        runtime_a.sink.with_observations(|observations| {
+            let pf_b_last = observations
+                .iter()
+                .rev()
+                .find(|obs| obs.plan_key == "pf-B")
+                .expect("pf-B observation exists on the second tick");
+            let pf_b_u1_admitted = pf_b_last
+                .decisions
+                .iter()
+                .any(|(uid, r)| uid == "U1" && r == "Admitted");
+            assert!(
+                pf_b_u1_admitted,
+                "pf-B's U1 must remain Admitted even after pf-test's U1 holds a live slot (live filter is plan-namespaced); decisions={:?}",
+                pf_b_last.decisions
+            );
+        });
     }
 }

@@ -16,7 +16,7 @@
 //! pipeline stages; the only barrier is the per-Unit dependency
 //! graph (U1 / U4).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::super::runtime_job::{JobToken, RuntimeJobError, Stage};
 
@@ -489,6 +489,44 @@ impl JobPipeline {
     /// tick translates them into `AdmissionCaps`.
     pub fn pools(&self) -> &DagPools {
         &self.pools
+    }
+
+    /// Snapshot of per-stage in-flight counts keyed by stable
+    /// stage name (`"execute"` / `"review"` / `"verify"`). The
+    /// admission engine seeds `global_cap` accounting with the
+    /// sum of these values so a slot freed by `release()` (U1)
+    /// is immediately refillable. Returns owned `String` keys
+    /// because the snapshot crosses the ralph-core admission
+    /// boundary, which takes owned map keys for ergonomics.
+    pub fn live_stage_counts(&self) -> BTreeMap<String, u32> {
+        let mut out: BTreeMap<String, u32> = BTreeMap::new();
+        let inflight = self.state.in_flight;
+        let pairs: [(Stage, u32); 3] = [
+            (Stage::Execute, inflight.execute),
+            (Stage::Review, inflight.review),
+            (Stage::Verify, inflight.verify),
+        ];
+        for (stage, count) in pairs {
+            if count > 0 {
+                out.insert(stage.as_str().to_string(), count);
+            }
+        }
+        out
+    }
+
+    /// Snapshot of `unit_key`s currently holding at least one
+    /// in-flight slot (`in_flight > 0`). The admission engine
+    /// uses this to short-circuit `BlockedDependencies` on units
+    /// already running — without it, a fast unit that already
+    /// passed admission could be re-admitted next tick while it
+    /// is still live, double-booking its executor slot.
+    pub fn live_unit_ids(&self) -> HashSet<String> {
+        self.state
+            .units
+            .iter()
+            .filter(|(_, u)| u.in_flight > 0)
+            .map(|(k, _)| k.clone())
+            .collect()
     }
 
     /// Read-only access to a Unit's current stage. Used by the

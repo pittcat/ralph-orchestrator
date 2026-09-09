@@ -56,6 +56,7 @@ use super::migrations;
 #[cfg(feature = "supervisor-db")]
 use rusqlite::OptionalExtension;
 
+pub mod admission;
 pub mod jobs;
 
 // ---------------------------------------------------------------------------

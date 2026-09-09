@@ -236,6 +236,19 @@ pub(crate) struct PendingAdvance {
     source: Option<String>,
 }
 
+/// Strip the `forge:{plan_key}:` namespace from a runtime-supplied
+/// unit_key back to its bare `unit_id`. The runtime now registers
+/// Units under plan-namespaced keys (U1, 2026-09-09-0917) but the
+/// durable `JobIdentity` still stores `unit_id` bare and computes
+/// the namespaced `unit_key()` on demand. This helper is the
+/// single place that bridges the two views; fall back to the input
+/// when the prefix does not match (legacy callers still pass bare
+/// unit_ids in non-namespaced modes).
+fn strip_plan_namespace<'a>(plan_key: &str, unit_key: &'a str) -> &'a str {
+    let prefix = format!("forge:{plan_key}:");
+    unit_key.strip_prefix(&prefix).unwrap_or(unit_key)
+}
+
 /// A follow-up spawn deferred by the D16 fixer cap.
 #[derive(Debug)]
 pub(crate) struct PendingSpawn {
@@ -883,18 +896,26 @@ impl DagSchedulerRuntime {
                     );
                     // Fix-attempt budget exhausted (or illegal
                     // transition): synthesize the failure record.
+                    let plan_key = payload
+                        .get("plan_key")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    // U1 (2026-09-09-0917): pipeline callers pass
+                    // plan-namespaced `unit_key`s; `JobIdentity.unit_id`
+                    // stays bare and computes `unit_key()` on demand.
+                    // `job_id` / `token` must stay within the bounded
+                    // identity charset (`[A-Za-z0-9_-]` — `:` is
+                    // rejected) so they reuse the bare `unit_id`.
+                    let bare_unit_id = strip_plan_namespace(&plan_key, &unit_key);
                     let identity = JobIdentity {
-                        plan_key: payload
-                            .get("plan_key")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                        unit_id: unit_key.clone(),
-                        job_id: format!("dag-{unit_key}-blocked"),
+                        plan_key: plan_key.clone(),
+                        unit_id: bare_unit_id.to_string(),
+                        job_id: format!("dag-{bare_unit_id}-blocked"),
                         hat: HAT_EXECUTOR.to_string(),
                         stage: "fix".to_string(),
                         attempt: 0,
-                        token: format!("tok-{unit_key}-blocked"),
+                        token: format!("tok-{bare_unit_id}-blocked"),
                     };
                     let reason = format!("unit {unit_key} blocked: {other}");
                     self.fail_job(&identity, SpawnKind::Fix, &reason, "unknown");
@@ -967,14 +988,18 @@ impl DagSchedulerRuntime {
     /// `executors_launched` dedups the pure snapshot (a Ready unit
     /// is re-reported every tick until it integrates).
     pub(super) fn maybe_spawn_executor(&mut self, plan_key: &str, unit_id: &str) {
-        if self.executors_launched.contains(unit_id) {
+        // U1 (2026-09-09-0917): pipeline callers must match the
+        // namespaced `unit_key` the runtime registered Units under,
+        // otherwise `advance` returns `Blocked("unit not registered")`.
+        let unit_key = format!("forge:{plan_key}:{unit_id}");
+        if self.executors_launched.contains(&unit_key) {
             return;
         }
-        match self.pipeline.advance(unit_id, Stage::Execute) {
+        match self.pipeline.advance(&unit_key, Stage::Execute) {
             AdvanceOutcome::Admitted { token } => {
                 let attempt = u32::try_from(token.attempt()).unwrap_or(0);
                 self.spawn_job(PendingSpawn {
-                    unit_key: unit_id.to_string(),
+                    unit_key,
                     kind: SpawnKind::Execute,
                     attempt,
                     plan_key: plan_key.to_string(),
@@ -1003,15 +1028,25 @@ impl DagSchedulerRuntime {
         if self.exec.is_none() {
             return;
         }
-        let job_id = format!("dag-{unit_key}-{}-a{attempt}", kind.stage_str());
+        // U1 (2026-09-09-0917): pipeline callers pass plan-namespaced
+        // unit_keys (`forge:{plan_key}:{unit_id}`); `JobIdentity` is
+        // keyed by the SSOT `unit_key()` so the journal reservation
+        // stays consistent. Strip the `forge:{plan_key}:` prefix back
+        // to the bare `unit_id` so `identity.unit_id` matches the
+        // schema contract. `job_id` and `token` must also stay within
+        // the bounded-identity character set (`[A-Za-z0-9_-]` only —
+        // `:` is rejected), so they reuse the bare `unit_id` rather
+        // than the namespaced `unit_key`.
+        let bare_unit_id = strip_plan_namespace(&plan_key, &unit_key);
+        let job_id = format!("dag-{bare_unit_id}-{}-a{attempt}", kind.stage_str());
         let identity = JobIdentity {
             plan_key: plan_key.clone(),
-            unit_id: unit_key.clone(),
+            unit_id: bare_unit_id.to_string(),
             job_id: job_id.clone(),
             hat: kind.hat().to_string(),
             stage: kind.stage_str().to_string(),
             attempt,
-            token: format!("tok-{unit_key}-{}-a{attempt}", kind.stage_str()),
+            token: format!("tok-{bare_unit_id}-{}-a{attempt}", kind.stage_str()),
         };
 
         // Journal reservation first (D20 fencing): replay → skip.
@@ -1022,7 +1057,8 @@ impl DagSchedulerRuntime {
             warn!(job_id, "DAG spawn: no durable journal; refusing to launch");
             return;
         };
-        match journal.reserve_job(&identity, now_ms() as i64) {
+        let reserve_result = journal.reserve_job(&identity, now_ms() as i64, None);
+        match reserve_result {
             Ok(false) => {
                 debug!(
                     job_id,
@@ -1074,7 +1110,17 @@ impl DagSchedulerRuntime {
             .and_then(|p| p.verified_base_commit.clone());
         let worktree = match verified_base {
             Some(base) => {
-                match UnitWorktree::acquire(&self.workspace, &loop_id, &unit_key, &base) {
+                // U1 (2026-09-09-0917): the unit worktree's branch +
+                // path are interpolated from `unit_id`; passing the
+                // plan-namespaced `unit_key` would push a `:` into the
+                // branch name and grow the path component. Use the
+                // bare `unit_id` (already computed above).
+                match UnitWorktree::acquire(
+                    &self.workspace,
+                    &loop_id,
+                    bare_unit_id,
+                    &base,
+                ) {
                     Ok(wt) => wt,
                     Err(err) => {
                         let reason = format!("unit worktree acquire failed: {err}");
@@ -1095,7 +1141,7 @@ impl DagSchedulerRuntime {
             .join(".ralph")
             .join("dag")
             .join(&plan_key)
-            .join(&unit_key)
+            .join(bare_unit_id)
             .join(format!("{job_id}.events.jsonl"));
         if let Some(parent) = events_file.parent()
             && let Err(err) = std::fs::create_dir_all(parent)
@@ -1109,7 +1155,7 @@ impl DagSchedulerRuntime {
         let (tests, allowed_paths, forbidden_paths) = self
             .plans
             .get(&plan_key)
-            .and_then(|p| p.units.iter().find(|u| u.unit_id == unit_key))
+            .and_then(|p| p.units.iter().find(|u| u.unit_id == bare_unit_id))
             .map(|u| {
                 (
                     u.tests.clone(),
@@ -1841,13 +1887,15 @@ units:
     fn review_rejection_beyond_budget_synthesizes_failure() {
         let (_tmp, mut runtime) = dag_fixture();
 
+        // U1 (2026-09-09-0917): pipeline callers must use the
+        // plan-namespaced `unit_key` registered in `on_concurrency_approved`.
         assert!(matches!(
-            runtime.pipeline.advance("U1", Stage::Execute),
+            runtime.pipeline.advance("forge:pf-test:U1", Stage::Execute),
             AdvanceOutcome::Admitted { .. }
         ));
-        runtime.pipeline.release("U1");
+        runtime.pipeline.release("forge:pf-test:U1");
         assert!(matches!(
-            runtime.pipeline.advance("U1", Stage::Review),
+            runtime.pipeline.advance("forge:pf-test:U1", Stage::Review),
             AdvanceOutcome::Admitted { .. }
         ));
         // Budget arithmetic: the initial Review admission runs at
@@ -1856,23 +1904,30 @@ units:
         // two re-admissions (attempts 1 and 2) succeed; the third
         // rejection is the budget-exhaustion path under test.
         for attempt in 1..=2 {
-            runtime.pipeline.release("U1");
+            runtime.pipeline.release("forge:pf-test:U1");
             let outcome = runtime
                 .pipeline
-                .bump_attempt_and_advance("U1", Stage::Review);
+                .bump_attempt_and_advance("forge:pf-test:U1", Stage::Review);
             assert!(
                 matches!(outcome, AdvanceOutcome::Admitted { .. }),
                 "fix attempt {attempt} stays inside the budget"
             );
         }
-        runtime.pipeline.release("U1");
+        runtime.pipeline.release("forge:pf-test:U1");
 
         let payload = serde_json::json!({
             "unit_id": "U1",
             "plan_key": "pf-test",
             "verdict": "REJECTED",
         });
-        runtime.observe_unit_event_dag(topics::UNIT_REVIEWED, "U1", &payload, None);
+        // U1 (2026-09-09-0917): pipeline callers must use the
+        // plan-namespaced `unit_key` registered in `on_concurrency_approved`.
+        runtime.observe_unit_event_dag(
+            topics::UNIT_REVIEWED,
+            "forge:pf-test:U1",
+            &payload,
+            None,
+        );
 
         assert!(
             runtime.pending_spawns.is_empty(),
@@ -1950,7 +2005,7 @@ units:
         runtime
             .journal()
             .expect("durable journal")
-            .reserve_job(&identity, 1)
+            .reserve_job(&identity, 1, None)
             .expect("reserve job");
         runtime.awaiting_acceptance.insert(
             identity.unit_key(),
@@ -2048,7 +2103,7 @@ units:
         runtime
             .journal()
             .expect("durable journal")
-            .reserve_job(&identity, 1)
+            .reserve_job(&identity, 1, None)
             .expect("reserve job");
 
         runtime.observe_unit_event_dag(

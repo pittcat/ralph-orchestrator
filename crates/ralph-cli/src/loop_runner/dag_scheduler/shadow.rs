@@ -127,6 +127,8 @@ mod tests {
     /// is the consumer.
     #[test]
     fn compute_helper_round_trip() {
+        use std::collections::{BTreeMap, HashSet};
+
         use ralph_core::supervisor::dag_scheduler::{
             AdmissionCaps, AdmissionSnapshot, UnitAdmissionInput,
         };
@@ -135,6 +137,8 @@ mod tests {
         let snapshot = AdmissionSnapshot {
             units: &units,
             integration_target_head: None,
+            live_stage_counts: BTreeMap::new(),
+            current_job_unit_ids: HashSet::new(),
         };
         let caps = AdmissionCaps {
             global_cap: 8,

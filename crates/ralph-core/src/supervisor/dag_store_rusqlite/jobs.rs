@@ -92,7 +92,20 @@ impl RusqliteDagSchedulerStore {
     /// Atomically reserve the current job and its unit identity. Exactly one
     /// competing caller receives `true`. `false` means a matching reservation
     /// exists, including when the process died before its PID was recorded.
-    pub fn reserve_job(&self, identity: &JobIdentity, now_ms: i64) -> DagStoreResult<bool> {
+    ///
+    /// When `claims_and_caps` is `Some`, the lease writes share this
+    /// transaction's atomicity with the `dag_jobs` / `dag_units` INSERTs:
+    /// an oversubscribed claim rolls back both lease rows AND any
+    /// half-applied journal state, so a failed launch never leaks a
+    /// resource permit nor a stale reservation row (R2/S2). `None`
+    /// preserves the legacy zero-capacity path used by every existing
+    /// caller / test until spawn-side capacity plumbing lands.
+    pub fn reserve_job(
+        &self,
+        identity: &JobIdentity,
+        now_ms: i64,
+        claims_and_caps: Option<(&[(String, u32)], &[(String, u32)])>,
+    ) -> DagStoreResult<bool> {
         identity.validate()?;
         let mut conn = self
             .inner
@@ -173,6 +186,19 @@ impl RusqliteDagSchedulerStore {
             return Err(conflict(
                 "previous job is unresolved or transition is invalid",
             ));
+        }
+        // U2 (R2/S2): resource capacity oversubscription
+        // prevention. The lease writes share this transaction's
+        // commit boundary with the dag_jobs / dag_units inserts
+        // below — a failed claim rolls back the whole
+        // reservation, so the durable journal never holds a
+        // reservation row whose unit is missing its declared
+        // resource permits (or vice versa). `None` skips the
+        // claim entirely, preserving the legacy path.
+        if let Some((claims, capacities)) = claims_and_caps {
+            Self::claim_resources_in_tx(
+                &tx, identity, claims, capacities, now_ms,
+            )?;
         }
         tx.execute("INSERT INTO dag_jobs (job_id,plan_key,unit_key,hat,stage,attempt,token,created_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![identity.job_id,identity.plan_key,unit_key,identity.hat,identity.stage,identity.attempt,identity.token,now_ms]).map_err(plan_io_err)?;
         tx.execute("INSERT INTO dag_units (unit_key,plan_key,state,stage,hat,job_id,attempt,current_token,created_at_ms,updated_at_ms) VALUES (?1,?2,'launch_reserved',?3,?4,?5,?6,?7,?8,?8) ON CONFLICT(unit_key) DO UPDATE SET state='launch_reserved',stage=excluded.stage,hat=excluded.hat,job_id=excluded.job_id,attempt=excluded.attempt,current_token=excluded.current_token,updated_at_ms=excluded.updated_at_ms", params![unit_key,identity.plan_key,identity.stage,identity.hat,identity.job_id,identity.attempt,identity.token,now_ms]).map_err(plan_io_err)?;
@@ -312,10 +338,10 @@ mod tests {
     #[test]
     fn launch_intent_survives_reopen_and_never_grants_relaunch() {
         let (dir, store, id) = fixture();
-        assert!(store.reserve_job(&id, 1).unwrap());
+        assert!(store.reserve_job(&id, 1, None).unwrap());
         drop(store);
         let store = RusqliteDagSchedulerStore::open(dir.path().join("dag.db")).unwrap();
-        assert!(!store.reserve_job(&id, 2).unwrap());
+        assert!(!store.reserve_job(&id, 2, None).unwrap());
         let rows = store.unresolved_jobs("plan").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].identity, id);
@@ -331,7 +357,7 @@ mod tests {
     #[test]
     fn accepted_identity_fences_each_field_and_correction_attempt() {
         let (_dir, store, id) = fixture();
-        store.reserve_job(&id, 1).unwrap();
+        store.reserve_job(&id, 1, None).unwrap();
         let digest = "a".repeat(64);
         for field in 0..7 {
             let mut wrong = id.clone();
@@ -355,7 +381,7 @@ mod tests {
         review.token = "nonce2".into();
         review.hat = "reviewer".into();
         review.stage = "review".into();
-        assert!(store.reserve_job(&review, 2).is_err());
+        assert!(store.reserve_job(&review, 2, None).is_err());
         store
             .accept_job_terminal(&id, "accepted", &digest, 3)
             .unwrap();
@@ -367,7 +393,7 @@ mod tests {
                 .accept_job_terminal(&id, "rejected", &digest, 5)
                 .is_err()
         );
-        assert!(store.reserve_job(&review, 6).unwrap());
+        assert!(store.reserve_job(&review, 6, None).unwrap());
         assert!(
             store
                 .accept_job_terminal(&id, "accepted", &digest, 7)
@@ -381,9 +407,9 @@ mod tests {
         fix.hat = "fixer".into();
         fix.job_id = "job3".into();
         fix.token = "nonce3".into();
-        assert!(store.reserve_job(&fix, 9).is_err());
+        assert!(store.reserve_job(&fix, 9, None).is_err());
         fix.attempt = 1;
-        assert!(store.reserve_job(&fix, 10).unwrap());
+        assert!(store.reserve_job(&fix, 10, None).unwrap());
         assert_eq!(store.unresolved_jobs("plan").unwrap()[0].identity, fix);
     }
 
@@ -399,7 +425,7 @@ mod tests {
                 let id = id.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    store.reserve_job(&id, 1).unwrap()
+                    store.reserve_job(&id, 1, None).unwrap()
                 })
             })
             .collect::<Vec<_>>();
@@ -415,7 +441,7 @@ mod tests {
     #[test]
     fn terminal_reopen_keeps_digest_and_requires_fresh_successor_identity() {
         let (dir, store, id) = fixture();
-        store.reserve_job(&id, 1).unwrap();
+        store.reserve_job(&id, 1, None).unwrap();
         let digest = "a".repeat(64);
         store
             .accept_job_terminal(&id, "accepted", &digest, 2)
@@ -423,7 +449,7 @@ mod tests {
         drop(store);
         let store = RusqliteDagSchedulerStore::open(dir.path().join("dag.db")).unwrap();
         assert!(store.unresolved_jobs("plan").unwrap().is_empty());
-        assert!(!store.reserve_job(&id, 3).unwrap());
+        assert!(!store.reserve_job(&id, 3, None).unwrap());
         store
             .accept_job_terminal(&id, "accepted", &digest, 4)
             .unwrap();
@@ -435,11 +461,11 @@ mod tests {
         let mut next = id.clone();
         next.stage = "review".into();
         next.hat = "reviewer".into();
-        assert!(store.reserve_job(&next, 6).is_err());
+        assert!(store.reserve_job(&next, 6, None).is_err());
         next.job_id = "job2".into();
-        assert!(store.reserve_job(&next, 7).is_err());
+        assert!(store.reserve_job(&next, 7, None).is_err());
         next.token = "nonce2".into();
-        assert!(store.reserve_job(&next, 8).unwrap());
+        assert!(store.reserve_job(&next, 8, None).unwrap());
         assert_eq!(store.unresolved_jobs("plan").unwrap().len(), 1);
     }
 }
