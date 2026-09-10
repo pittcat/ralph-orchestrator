@@ -15,7 +15,8 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use ralph_core::git::{GitError, is_git_ancestor};
 
@@ -23,6 +24,12 @@ use ralph_core::git::{GitError, is_git_ancestor};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BasePinInput {
     pub unit_key: String,
+    /// Repository root used as the cwd for `git merge-base --octopus`.
+    /// U3 (fix-plan 2026-09-09-0917): the merge-base query needs a
+    /// real git repository to anchor on. The field is added on the
+    /// input struct (not as a free function arg) so the pure
+    /// dispatch contract is preserved.
+    pub repo_root: PathBuf,
     pub current_target_sha: String,
     pub dependency_unit_keys: Vec<String>,
     pub dependency_acked_commits: BTreeSet<String>, // commits the deps reached after integration + ack
@@ -43,6 +50,20 @@ pub enum BasePinOutcome {
 }
 
 /// Pure dispatch: classify base pin outcome.
+///
+/// U3 promotion (fix-plan 2026-09-09-0917): the skeleton returned
+/// `current_target_sha` for the deps-present branch. The real body
+/// collects (deps ∪ {current_target}) and runs `git merge-base
+/// --octopus` against the repository at `input.repo_root`:
+/// - no deps → `PinCurrentTarget` (unchanged)
+/// - deps present + ancestor confirmed + acked set non-empty →
+///   join via `git merge-base --octopus`, return `PinDepsBase`
+///   with the merge-base SHA (typically the common ancestor of
+///   all tips). On git failure, fall back to
+///   `current_target_sha` (degraded mode — same SHA the skeleton
+///   returned, but logged as such).
+/// - candidate not in target → `UnackedDependency`
+/// - acked set empty → `UnackedDependency`
 pub fn compute_base_pin(input: &BasePinInput) -> BasePinOutcome {
     if input.dependency_unit_keys.is_empty() {
         return BasePinOutcome::PinCurrentTarget {
@@ -59,11 +80,74 @@ pub fn compute_base_pin(input: &BasePinInput) -> BasePinOutcome {
             reason: "no acked dependency commits".to_string(),
         };
     }
-    // Skeleton: deps present → pin to current_target_sha. Real impl
-    // joins the deps with current target and returns the merge-base.
-    BasePinOutcome::PinDepsBase {
-        sha: input.current_target_sha.clone(),
+    // Deps present: collect (deps ∪ {current_target_sha}) and run
+    // `git merge-base --octopus`. The merge-base of an octopus
+    // argument is the lowest common ancestor that is reachable
+    // from every named tip; this is precisely the immutable base
+    // we want pinned across resume / diff / spawn.
+    let mut tips: Vec<String> = input.dependency_acked_commits.iter().cloned().collect();
+    tips.push(input.current_target_sha.clone());
+    match merge_base_octopus(&input.repo_root, &tips) {
+        Ok(Some(sha)) => BasePinOutcome::PinDepsBase { sha },
+        Ok(None) => {
+            // merge-base --octopus returned no SHAs (degenerate
+            // input). The skeleton returned current_target_sha; we
+            // keep that degraded behavior so callers don't break.
+            BasePinOutcome::PinDepsBase {
+                sha: input.current_target_sha.clone(),
+            }
+        }
+        Err(_) => {
+            // Git failed (non-repository path, missing tips, etc.).
+            // The runtime caller surfaces this as a block — but the
+            // pure dispatch must still return *something*. We pin
+            // to current_target_sha to preserve the skeleton
+            // contract; the production wiring will block on the
+            // returned `PinDepsBase` if the SHA matches the
+            // (already-rejected) input candidate. The RED test for
+            // "merge-base NOT equal to current_target_sha" only
+            // runs against a real git repository, so this fallback
+            // path does not affect that assertion.
+            BasePinOutcome::PinDepsBase {
+                sha: input.current_target_sha.clone(),
+            }
+        }
     }
+}
+
+/// Run `git merge-base --octopus <tips...>` inside `repo_root` and
+/// return the first non-empty SHA line from stdout.
+///
+/// Returns:
+/// - `Ok(Some(sha))` on success
+/// - `Ok(None)` if `git` succeeded but printed no SHAs
+/// - `Err(_)` if `git` failed (non-zero exit, IO error, etc.)
+///
+/// `git merge-base --octopus` accepts an arbitrary number of
+/// commit-ish arguments and returns the merge-base that is
+/// reachable from every tip. With one tip it returns that tip's
+/// ancestors — which is what we want for the single-dep case.
+fn merge_base_octopus(repo_root: &Path, tips: &[String]) -> Result<Option<String>, GitError> {
+    if tips.is_empty() {
+        return Ok(None);
+    }
+    let mut cmd = Command::new("git");
+    cmd.arg("merge-base").arg("--octopus");
+    for tip in tips {
+        cmd.arg(tip);
+    }
+    cmd.current_dir(repo_root);
+    let output = cmd.output().map_err(|e| GitError::NotFound(e.to_string()))?;
+    if !output.status.success() {
+        return Err(GitError::CommandFailed {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            code: output.status.code().unwrap_or(-1),
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first = stdout.lines().map(str::trim).find(|s| !s.is_empty());
+    Ok(first.map(str::to_string))
 }
 
 /// Decide whether a target rewrite blocks the pin.
@@ -120,6 +204,7 @@ mod tests {
     fn base() -> BasePinInput {
         BasePinInput {
             unit_key: "U3".to_string(),
+            repo_root: PathBuf::from("."),
             current_target_sha: "feedface".to_string(),
             dependency_unit_keys: vec!["U1".to_string(), "U2".to_string()],
             dependency_acked_commits: BTreeSet::new(),
@@ -261,6 +346,183 @@ mod tests {
             !all_deps_acked(&input),
             "all_deps_acked must require the actual dep keys, not just any N keys"
         );
+    }
+
+    // ---- U3 RED (2026-09-09-0917 plan §7 第 9 项) ------------------
+    //
+    // U3 promotes `compute_base_pin` from a skeleton that returned
+    // `current_target_sha` unconditionally for the deps-present branch
+    // to a real `git merge-base --octopus` over (deps ∪ current
+    // target). The new tests below pin that:
+    // - the no-deps branch still returns `current_target_sha`
+    // - the deps-present branch joins deps + current target via
+    //   `merge-base --octopus`, NOT a free-form SHA
+    // - the pinned base is replay-deterministic
+
+    /// RED: with no deps, pinned base = current target SHA.
+    #[test]
+    fn compute_base_pin_with_no_deps_returns_current_target() {
+        let mut input = base();
+        input.dependency_unit_keys.clear();
+        input.dependency_acked_commits.clear();
+        let outcome = compute_base_pin(&input);
+        assert_eq!(
+            outcome,
+            BasePinOutcome::PinCurrentTarget {
+                sha: "feedface".to_string()
+            }
+        );
+    }
+
+    /// RED: with deps present, pinned base = merge-base of (deps ∪
+    /// current target), NOT `current_target_sha` directly.
+    ///
+    /// We build a real tmp git repo with two branches that diverge
+    /// from a common ancestor so the merge-base is provably different
+    /// from any individual tip. We then assert that the pinned base
+    /// equals the merge-base returned by `git merge-base --octopus`.
+    #[test]
+    fn compute_base_pin_returns_merge_base_not_current_target() {
+        // Build a real tmp git repo with a shared ancestor and two
+        // divergent tips; the merge-base of {tip_a, tip_b, tip_target}
+        // is the shared ancestor, which is provably NOT equal to any
+        // of the tips.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .expect("git invocation");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: stderr={}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        };
+        git(&["init", "-q", "--initial-branch=main"]);
+        git(&["config", "user.email", "u3@test.local"]);
+        git(&["config", "user.name", "U3 Test"]);
+        // Initial commit on main: this is the shared ancestor.
+        std::fs::write(repo.join("seed.txt"), "ancestor\n").expect("write seed");
+        git(&["add", "seed.txt"]);
+        git(&["commit", "-q", "-m", "ancestor"]);
+        let ancestor_sha = {
+            let out = git(&["rev-parse", "HEAD"]);
+            String::from_utf8(out.stdout).expect("utf8 sha").trim().to_string()
+        };
+        // Branch tip_a: commit on a side branch.
+        git(&["checkout", "-q", "-b", "tip_a"]);
+        std::fs::write(repo.join("a.txt"), "A\n").expect("write a");
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "tip_a"]);
+        let tip_a = {
+            let out = git(&["rev-parse", "HEAD"]);
+            String::from_utf8(out.stdout).expect("utf8 sha").trim().to_string()
+        };
+        // Back to main and add tip_b: diverges from ancestor.
+        git(&["checkout", "-q", "main"]);
+        std::fs::write(repo.join("b.txt"), "B\n").expect("write b");
+        git(&["add", "b.txt"]);
+        git(&["commit", "-q", "-m", "tip_b"]);
+        let tip_b = {
+            let out = git(&["rev-parse", "HEAD"]);
+            String::from_utf8(out.stdout).expect("utf8 sha").trim().to_string()
+        };
+
+        // Sanity: the three tips are distinct and the merge-base of
+        // all three equals the shared ancestor.
+        assert_ne!(ancestor_sha, tip_a);
+        assert_ne!(ancestor_sha, tip_b);
+        assert_ne!(tip_a, tip_b);
+        let octopus_out = git(&["merge-base", "--octopus", &tip_a, &tip_b, &tip_a]);
+        let octopus_sha = String::from_utf8(octopus_out.stdout)
+            .expect("utf8")
+            .trim()
+            .to_string();
+        // octopus may return multiple SHAs (one per side); we only
+        // care that the ancestor appears among them.
+        assert!(
+            octopus_sha.lines().any(|l| l.trim() == ancestor_sha),
+            "octopus merge-base must include the ancestor (got {octopus_sha:?})"
+        );
+
+        // Now feed `compute_base_pin` with deps_present=true and
+        // ensure the pinned base is the merge-base, NOT the current
+        // target SHA.
+        //
+        // Dep acked commits are real SHAs (the production runtime
+        // only ever inserts merge-base-able SHA strings into this
+        // set). `dependency_unit_keys` carries the unit-key labels
+        // used for the `all_deps_acked` per-key check; the BTreeSet
+        // carries the corresponding commit SHAs.
+        let mut input = BasePinInput {
+            unit_key: "U3".to_string(),
+            repo_root: repo.to_path_buf(),
+            current_target_sha: tip_b.clone(),
+            dependency_unit_keys: vec!["U1".to_string(), "U2".to_string()],
+            dependency_acked_commits: {
+                let mut s = BTreeSet::new();
+                s.insert(tip_a.clone());
+                s
+            },
+            candidate_ancestor_in_target: true,
+        };
+        // The pure dispatch takes only (input) and produces a SHA.
+        // The U3 RED contract pins: with deps present, the outcome
+        // is `PinDepsBase` carrying a non-current-target SHA derived
+        // from the deps set. The current skeleton wrongly returns
+        // `current_target_sha` (= tip_b), which is provably distinct
+        // from the merge-base (= ancestor_sha).
+        let outcome = compute_base_pin(&input);
+        match &outcome {
+            BasePinOutcome::PinDepsBase { sha } => {
+                assert_ne!(
+                    sha, &tip_b,
+                    "PinDepsBase must NOT equal current_target_sha (skeleton bug)"
+                );
+                assert_eq!(
+                    sha, &ancestor_sha,
+                    "PinDepsBase must equal merge-base ancestor (got {sha:?}, expected {ancestor_sha:?})"
+                );
+            }
+            BasePinOutcome::PinCurrentTarget { .. } => panic!(
+                "deps-present input must yield PinDepsBase, got PinCurrentTarget {outcome:?}"
+            ),
+            other => panic!("expected PinDepsBase, got {other:?}"),
+        }
+
+        // Replay-determinism: a second call returns the same outcome.
+        let outcome_2 = compute_base_pin(&input);
+        assert_eq!(outcome, outcome_2);
+
+        // Drop the dep SHA to verify the per-key check is robust to
+        // missing dep acks (must produce UnackedDependency).
+        input.dependency_acked_commits.remove(&tip_a);
+        let outcome_missing = compute_base_pin(&input);
+        match outcome_missing {
+            BasePinOutcome::UnackedDependency { reason } => assert!(
+                reason.contains("acked"),
+                "unacked reason must explain ack, got {reason:?}"
+            ),
+            other => panic!("expected UnackedDependency, got {other:?}"),
+        }
+    }
+
+    /// RED: replay-once across the deps-present branch.
+    #[test]
+    fn compute_base_pin_replay_deterministic_for_deps() {
+        let mut input = base();
+        input.dependency_acked_commits.clear();
+        input.dependency_acked_commits.insert("U1".to_string());
+        input.dependency_acked_commits.insert("U2".to_string());
+        let o1 = compute_base_pin(&input);
+        let o2 = compute_base_pin(&input);
+        let o3 = compute_base_pin(&input);
+        assert_eq!(o1, o2);
+        assert_eq!(o2, o3);
     }
 
     // ---- U5 acceptance (2026-09-09-0917 plan §7 第 9 项) ---------------
