@@ -169,10 +169,10 @@ fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
 /// (busy / IO / decode).
 #[cfg(feature = "supervisor-db")]
 fn plan_io_err(err: rusqlite::Error) -> DagStoreError {
-    if let rusqlite::Error::FromSqlConversionFailure(_, _, ref boxed) = err {
-        if let Some(dag_err) = boxed.downcast_ref::<DagStoreError>() {
-            return dag_err.clone();
-        }
+    if let rusqlite::Error::FromSqlConversionFailure(_, _, ref boxed) = err
+        && let Some(dag_err) = boxed.downcast_ref::<DagStoreError>()
+    {
+        return dag_err.clone();
     }
     DagStoreError::IoError(err.to_string())
 }

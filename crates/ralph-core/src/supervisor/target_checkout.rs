@@ -168,12 +168,12 @@ pub fn materialize_target(
         .arg(&worktree.canonical_path)
         .args(["rev-parse", "HEAD"])
         .output();
-    if let Ok(out) = head_out {
-        if out.status.success() {
-            let head = String::from_utf8_lossy(&out.stdout);
-            if head.trim() == candidate_head {
-                return CheckoutOutcome::NewTreeAlreadyMaterialized;
-            }
+    if let Ok(out) = head_out
+        && out.status.success()
+    {
+        let head = String::from_utf8_lossy(&out.stdout);
+        if head.trim() == candidate_head {
+            return CheckoutOutcome::NewTreeAlreadyMaterialized;
         }
     }
 
@@ -243,9 +243,7 @@ pub fn classify_worktree_state(
         .args(["rev-parse", "HEAD"])
         .output();
     let head = match head_out {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .trim()
-            .to_string(),
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
         _ => return CheckoutOutcome::WrongWorktreeIdentity,
     };
 
@@ -348,12 +346,10 @@ mod tests {
         std::fs::write(tmp.path().join("seed.txt"), "v1\n").expect("write v1");
         git(&["add", "seed.txt"]);
         git(&["commit", "-q", "-m", "v1"]);
-        let expected_head = String::from_utf8(
-            git(&["rev-parse", "HEAD"]).stdout,
-        )
-        .expect("utf8")
-        .trim()
-        .to_string();
+        let expected_head = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
+            .expect("utf8")
+            .trim()
+            .to_string();
         // candidate_head is some other SHA; doesn't need to exist
         // in the repo — classify doesn't validate SHA provenance.
         let candidate_head = "feedface".to_string();
@@ -410,33 +406,27 @@ mod tests {
         std::fs::write(repo.join("seed.txt"), "v1\n").expect("write v1");
         git(&["add", "seed.txt"]);
         git(&["commit", "-q", "-m", "v1"]);
-        let v1 = String::from_utf8(
-            git(&["rev-parse", "HEAD"]).stdout,
-        )
-        .expect("utf8")
-        .trim()
-        .to_string();
+        let v1 = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
+            .expect("utf8")
+            .trim()
+            .to_string();
         // Second commit (candidate_head) — file content changes so
         // the working tree must reflect this after `git reset --hard`.
         std::fs::write(repo.join("seed.txt"), "v2\n").expect("write v2");
         git(&["add", "seed.txt"]);
         git(&["commit", "-q", "-m", "v2"]);
-        let v2 = String::from_utf8(
-            git(&["rev-parse", "HEAD"]).stdout,
-        )
-        .expect("utf8")
-        .trim()
-        .to_string();
+        let v2 = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
+            .expect("utf8")
+            .trim()
+            .to_string();
         // Reset back to v1 so we can observe the materialize step
         // moving the working tree to v2.
         git(&["reset", "--hard", &v1]);
         // v2's tree SHA: used to identify the materialized tree.
-        let v2_tree = String::from_utf8(
-            git(&["rev-parse", &format!("{v2}^{{tree}}")]).stdout,
-        )
-        .expect("utf8")
-        .trim()
-        .to_string();
+        let v2_tree = String::from_utf8(git(&["rev-parse", &format!("{v2}^{{tree}}")]).stdout)
+            .expect("utf8")
+            .trim()
+            .to_string();
         (v2, v2_tree)
     }
 
@@ -463,16 +453,14 @@ mod tests {
     #[test]
     fn materialize_target_acquires_filelock() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let (candidate_head, candidate_tree) =
-            seed_candidate_worktree(tmp.path());
+        let (candidate_head, candidate_tree) = seed_candidate_worktree(tmp.path());
         // Sanity: the working tree is at v1 (we reset to v1 above).
         let on_disk = std::fs::read_to_string(tmp.path().join("seed.txt"))
             .expect("read seed after reset to v1");
         assert_eq!(on_disk, "v1\n", "precondition: worktree at v1");
 
         let id = WorktreeIdentity::from_path(tmp.path()).expect("canonicalize");
-        let outcome =
-            materialize_target(&id, "expected-v1", &candidate_head, &candidate_tree);
+        let outcome = materialize_target(&id, "expected-v1", &candidate_head, &candidate_tree);
         assert_eq!(
             outcome,
             CheckoutOutcome::NewTreeAlreadyMaterialized,
@@ -480,9 +468,8 @@ mod tests {
         );
 
         // After materialize, working tree must be at v2.
-        let on_disk_after =
-            std::fs::read_to_string(tmp.path().join("seed.txt"))
-                .expect("read seed after materialize");
+        let on_disk_after = std::fs::read_to_string(tmp.path().join("seed.txt"))
+            .expect("read seed after materialize");
         assert_eq!(
             on_disk_after, "v2\n",
             "materialize_target must git reset --hard to candidate_head"
@@ -508,8 +495,7 @@ mod tests {
     #[test]
     fn materialize_target_returns_busy_when_filelock_held() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let (candidate_head, candidate_tree) =
-            seed_candidate_worktree(tmp.path());
+        let (candidate_head, candidate_tree) = seed_candidate_worktree(tmp.path());
         // Acquire an exclusive FileLock on the worktree's git index
         // and hold it for the duration of the call. This simulates
         // another worker mid-materialization.
@@ -517,21 +503,19 @@ mod tests {
         // The production impl is expected to lock this path; create
         // the file so the FileLock constructor finds a target.
         std::fs::write(&index_lock_path, "").expect("write index.lock");
-        let lock = crate::file_lock::FileLock::new(&index_lock_path)
-            .expect("FileLock::new");
+        let lock = crate::file_lock::FileLock::new(&index_lock_path).expect("FileLock::new");
         let _guard = lock.exclusive().expect("acquire exclusive");
 
         let id = WorktreeIdentity::from_path(tmp.path()).expect("canonicalize");
-        let outcome =
-            materialize_target(&id, "expected-v1", &candidate_head, &candidate_tree);
+        let outcome = materialize_target(&id, "expected-v1", &candidate_head, &candidate_tree);
         assert_eq!(
             outcome,
             CheckoutOutcome::TargetLockBusy,
             "materialize_target must return TargetLockBusy when FileLock is held"
         );
         // Working tree must NOT have moved (the v1 file is still there).
-        let on_disk = std::fs::read_to_string(tmp.path().join("seed.txt"))
-            .expect("read seed after busy");
+        let on_disk =
+            std::fs::read_to_string(tmp.path().join("seed.txt")).expect("read seed after busy");
         assert_eq!(
             on_disk, "v1\n",
             "a busy materialize must NOT touch the working tree"
@@ -558,10 +542,8 @@ mod tests {
         // yet materialized). The runtime can safely materialize the
         // recorded candidate tree from there.
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let (candidate_head, candidate_tree) =
-            seed_candidate_worktree(tmp.path());
-        let id = WorktreeIdentity::from_path(tmp.path())
-            .expect("canonicalize worktree");
+        let (candidate_head, candidate_tree) = seed_candidate_worktree(tmp.path());
+        let id = WorktreeIdentity::from_path(tmp.path()).expect("canonicalize worktree");
         // Read the current HEAD as the "expected_head".
         let head_out = std::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
@@ -575,8 +557,7 @@ mod tests {
         // Pre-materialize classification: OldTreeRepairable (the
         // index+files match the pre-reset HEAD; CAS not yet
         // materialized).
-        let pre_classify =
-            classify_worktree_state(&id, &expected_head, &candidate_head);
+        let pre_classify = classify_worktree_state(&id, &expected_head, &candidate_head);
         assert_eq!(
             pre_classify,
             CheckoutOutcome::OldTreeRepairable,
@@ -587,12 +568,7 @@ mod tests {
         // After `materialize_target`, the working tree matches
         // candidate_head, the write-tree SHA equals candidate_tree,
         // and `git status` reports a clean tree.
-        let outcome = materialize_target(
-            &id,
-            &expected_head,
-            &candidate_head,
-            &candidate_tree,
-        );
+        let outcome = materialize_target(&id, &expected_head, &candidate_head, &candidate_tree);
         assert_eq!(
             outcome,
             CheckoutOutcome::NewTreeAlreadyMaterialized,
@@ -607,7 +583,10 @@ mod tests {
                 .current_dir(tmp.path())
                 .output()
                 .expect("git rev-parse HEAD after");
-            String::from_utf8(out.stdout).expect("utf8").trim().to_string()
+            String::from_utf8(out.stdout)
+                .expect("utf8")
+                .trim()
+                .to_string()
         };
         assert_eq!(
             head_after, candidate_head,
@@ -619,7 +598,10 @@ mod tests {
                 .current_dir(tmp.path())
                 .output()
                 .expect("git rev-parse candidate tree");
-            String::from_utf8(out.stdout).expect("utf8").trim().to_string()
+            String::from_utf8(out.stdout)
+                .expect("utf8")
+                .trim()
+                .to_string()
         };
         assert_eq!(
             tree_after, candidate_tree,
@@ -631,8 +613,7 @@ mod tests {
             .current_dir(tmp.path())
             .output()
             .expect("git status");
-        let status_stdout = String::from_utf8(status_out.stdout)
-            .expect("utf8");
+        let status_stdout = String::from_utf8(status_out.stdout).expect("utf8");
         assert!(
             status_stdout.trim().is_empty(),
             "post-materialize git status must be clean, got {status_stdout:?}"
@@ -702,12 +683,9 @@ mod tests {
         let dirty = tempfile::TempDir::new().expect("dirty tempdir");
         let (_v1, _v1_tree) = seed_candidate_worktree(dirty.path());
         // Make seed.txt dirty (modify the v1 file in-place).
-        std::fs::write(dirty.path().join("seed.txt"), "OPERATOR_WIP\n")
-            .expect("write dirty");
-        let dirty_id = WorktreeIdentity::from_path(dirty.path())
-            .expect("canonicalize dirty");
-        let dirty_pre =
-            classify_worktree_state(&dirty_id, &expected_head, &expected_head);
+        std::fs::write(dirty.path().join("seed.txt"), "OPERATOR_WIP\n").expect("write dirty");
+        let dirty_id = WorktreeIdentity::from_path(dirty.path()).expect("canonicalize dirty");
+        let dirty_pre = classify_worktree_state(&dirty_id, &expected_head, &expected_head);
         // The dirty worktree has the working copy not matching HEAD
         // so it must classify as MixedOrDirty.
         assert_eq!(

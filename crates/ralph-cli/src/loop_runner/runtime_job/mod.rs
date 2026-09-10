@@ -499,13 +499,12 @@ impl std::error::Error for RuntimeJobError {}
 ///
 /// Wire-form stability:
 ///   - `Timeout`           -> `"timeout"` (matches the historical
-///                            `completion.timed_out` branch)
+///     `completion.timed_out` branch)
 ///   - `ContractViolation` -> `"orphan_or_empty_result"` (matches the
-///                            historical missing-field / no-verdict
-///                            branches so U2 recovery does not need
-///                            to update its classifier mapping)
+///     historical missing-field / no-verdict branches so U2 recovery
+///     does not need to update its classifier mapping)
 ///   - `UnauthorizedOutput`-> `"path_escape"` (matches the historical
-///                            U26 events-file escape branch)
+///     U26 events-file escape branch)
 ///   - `Panic`, `FilesystemPartial`, `SpawnFailed`, `OomKilled` carry
 ///     new stable wire strings the runtime emits for the first time
 ///     under U5 (they previously fell through to `"unknown"`).

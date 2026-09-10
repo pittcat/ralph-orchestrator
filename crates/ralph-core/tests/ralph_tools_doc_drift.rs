@@ -27,8 +27,12 @@ const RALPH_TOOLS_EMIT_MD: &str = "data/ralph-tools-emit.md";
 /// independent of the test runner's cwd.
 fn read_doc(relative: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("read_doc({relative}): {err} (resolved to {})", path.display()))
+    std::fs::read_to_string(&path).unwrap_or_else(|err| {
+        panic!(
+            "read_doc({relative}): {err} (resolved to {})",
+            path.display()
+        )
+    })
 }
 
 /// The 12 env keys emitted by the typed `JobContext` env injection.

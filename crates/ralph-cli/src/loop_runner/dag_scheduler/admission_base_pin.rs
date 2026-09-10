@@ -137,7 +137,9 @@ fn merge_base_octopus(repo_root: &Path, tips: &[String]) -> Result<Option<String
         cmd.arg(tip);
     }
     cmd.current_dir(repo_root);
-    let output = cmd.output().map_err(|e| GitError::NotFound(e.to_string()))?;
+    let output = cmd
+        .output()
+        .map_err(|e| GitError::NotFound(e.to_string()))?;
     if !output.status.success() {
         return Err(GitError::CommandFailed {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -411,7 +413,10 @@ mod tests {
         git(&["commit", "-q", "-m", "ancestor"]);
         let ancestor_sha = {
             let out = git(&["rev-parse", "HEAD"]);
-            String::from_utf8(out.stdout).expect("utf8 sha").trim().to_string()
+            String::from_utf8(out.stdout)
+                .expect("utf8 sha")
+                .trim()
+                .to_string()
         };
         // Branch tip_a: commit on a side branch.
         git(&["checkout", "-q", "-b", "tip_a"]);
@@ -420,7 +425,10 @@ mod tests {
         git(&["commit", "-q", "-m", "tip_a"]);
         let tip_a = {
             let out = git(&["rev-parse", "HEAD"]);
-            String::from_utf8(out.stdout).expect("utf8 sha").trim().to_string()
+            String::from_utf8(out.stdout)
+                .expect("utf8 sha")
+                .trim()
+                .to_string()
         };
         // Back to main and add tip_b: diverges from ancestor.
         git(&["checkout", "-q", "main"]);
@@ -429,7 +437,10 @@ mod tests {
         git(&["commit", "-q", "-m", "tip_b"]);
         let tip_b = {
             let out = git(&["rev-parse", "HEAD"]);
-            String::from_utf8(out.stdout).expect("utf8 sha").trim().to_string()
+            String::from_utf8(out.stdout)
+                .expect("utf8 sha")
+                .trim()
+                .to_string()
         };
 
         // Sanity: the three tips are distinct and the merge-base of

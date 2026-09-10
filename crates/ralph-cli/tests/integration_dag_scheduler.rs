@@ -573,8 +573,7 @@ fn dag_cli_completes_real_pipeline() {
     // absent under `wave`; presence under `dag` proves the runtime
     // driver is the DAG path U3 promotes.
     write_dag_ralph_yml(ws);
-    let (code, stdout, stderr) =
-        run_ralph(ws, &["inspect", "loop", "--format", "json"], &[]);
+    let (code, stdout, stderr) = run_ralph(ws, &["inspect", "loop", "--format", "json"], &[]);
     assert_eq!(
         code, 0,
         "Unit 3: `ralph inspect loop --format json` must succeed under dag mode (stderr: {stderr})"
@@ -619,8 +618,7 @@ fn dag_cli_completes_real_pipeline() {
     // ---- Re-inspect under dag mode (clean JSON decode) --------
     // The JSON must re-decode; this guards against future changes
     // that would emit malformed JSON for the empty-state path.
-    let (code, stdout, _stderr) =
-        run_ralph(ws, &["inspect", "loop", "--format", "json"], &[]);
+    let (code, stdout, _stderr) = run_ralph(ws, &["inspect", "loop", "--format", "json"], &[]);
     assert_eq!(code, 0);
     let _json: serde_json::Value =
         serde_json::from_str(&stdout).expect("inspect must re-decode as JSON");

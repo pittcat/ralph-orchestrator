@@ -325,7 +325,7 @@ mod tests {
             // evidence key the runtime needs.
             for key in prior_keys {
                 assert!(
-                    fields.contains(&key),
+                    fields.contains(key),
                     "stage {stage:?} required_fields must include prior evidence {key}, got {fields:?}"
                 );
             }

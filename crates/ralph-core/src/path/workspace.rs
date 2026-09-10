@@ -29,32 +29,37 @@ pub fn path_within_workspace(workspace: &Path, candidate: &Path) -> std::io::Res
 /// rejecting `..` so they cannot be used to climb out.
 fn canonicalize_existing_ancestor(path: &Path) -> std::io::Result<PathBuf> {
     match path.canonicalize() {
-        Ok(p) => return Ok(p),
-        Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
-        Err(err) => {
-            let mut tail: Vec<Component<'_>> = Vec::new();
-            let mut cursor = path;
-            loop {
-                let Some(parent) = cursor.parent() else {
-                    return Err(err);
-                };
-                let Some(name) = cursor.file_name() else {
-                    return Err(err);
-                };
-                tail.push(Component::Normal(name));
-                match parent.canonicalize() {
-                    Ok(mut base) => {
-                        for comp in tail.iter().rev() {
-                            base.push(comp.as_os_str());
-                        }
-                        return Ok(base);
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        cursor = parent;
-                    }
-                    Err(e) => return Err(e),
+        Ok(p) => Ok(p),
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
+        Err(err) => canonicalize_with_tail(path, err),
+    }
+}
+
+/// Walk up from `path` until we hit an existing ancestor, canonicalize
+/// that, and re-append the non-existent tail components. The
+/// `original_err` is propagated if we walk past the filesystem root.
+fn canonicalize_with_tail(path: &Path, original_err: std::io::Error) -> std::io::Result<PathBuf> {
+    let mut tail: Vec<Component<'_>> = Vec::new();
+    let mut cursor = path;
+    loop {
+        let Some(parent) = cursor.parent() else {
+            return Err(original_err);
+        };
+        let Some(name) = cursor.file_name() else {
+            return Err(original_err);
+        };
+        tail.push(Component::Normal(name));
+        match parent.canonicalize() {
+            Ok(mut base) => {
+                for comp in tail.iter().rev() {
+                    base.push(comp.as_os_str());
                 }
+                return Ok(base);
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                cursor = parent;
+            }
+            Err(e) => return Err(e),
         }
     }
 }

@@ -49,9 +49,9 @@ use super::driver::{DagSchedulerDriver, DriverOutcome, ReviewVerdict, topics};
 use super::jobs::{AdvanceOutcome, path_within_workspace};
 use super::worktree::UnitWorktree;
 use super::{DagSchedulerRuntime, now_ms};
+use crate::loop_runner::runtime_job::FailureClass;
 use crate::loop_runner::runtime_job::Stage;
 use crate::loop_runner::runtime_job::environment::DagEnvPolicy;
-use crate::loop_runner::runtime_job::FailureClass;
 use crate::loop_runner::runtime_job::pty_kernel::{
     PtyLeaseMode, PtySpawnSpec, drive_pty_lease_loop, finish_pty_job, spawn_pty_job,
 };
@@ -1600,12 +1600,7 @@ impl DagSchedulerRuntime {
         let verified_base = match self.resolve_stage_base(&plan_key, bare_unit_id, kind) {
             Ok(base) => base,
             Err(reason) => {
-                self.fail_job(
-                    &identity,
-                    kind,
-                    &reason,
-                    FailureClass::FilesystemPartial,
-                );
+                self.fail_job(&identity, kind, &reason, FailureClass::FilesystemPartial);
                 return;
             }
         };
@@ -1614,12 +1609,7 @@ impl DagSchedulerRuntime {
                 Ok(wt) => wt,
                 Err(err) => {
                     let reason = format!("unit worktree acquire failed: {err}");
-                    self.fail_job(
-                        &identity,
-                        kind,
-                        &reason,
-                        FailureClass::FilesystemPartial,
-                    );
+                    self.fail_job(&identity, kind, &reason, FailureClass::FilesystemPartial);
                     return;
                 }
             };
@@ -2757,7 +2747,12 @@ units:
             attempt: 0,
             token: "tok-U1-execute-a0".to_string(),
         };
-        runtime.fail_job(&identity, SpawnKind::Execute, "boom", FailureClass::SpawnFailed);
+        runtime.fail_job(
+            &identity,
+            SpawnKind::Execute,
+            "boom",
+            FailureClass::SpawnFailed,
+        );
 
         assert!(
             runtime.has_pending_work(),

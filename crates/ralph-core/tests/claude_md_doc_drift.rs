@@ -200,8 +200,6 @@ fn agents_md_documents_correct_migration_path() {
 #[test]
 fn claude_md_and_agents_md_are_byte_identical() {
     if let Err(diff_output) = diff_repo_files("CLAUDE.md", "AGENTS.md") {
-        panic!(
-            "CLAUDE.md and AGENTS.md drifted apart; `diff -u` output:\n{diff_output}"
-        );
+        panic!("CLAUDE.md and AGENTS.md drifted apart; `diff -u` output:\n{diff_output}");
     }
 }

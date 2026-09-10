@@ -273,7 +273,7 @@ mod tests {
         // before persisting. The dispatcher contract is that
         // `should_short_circuit(Fail) == true`.
         assert!(should_short_circuit(&o_fail));
-        assert_eq!(o_fail.is_pass(), false);
+        assert!(!o_fail.is_pass());
 
         // ---- target SHA 未变 ----
         // The gate failure modes (Timeout / Fail / SpawnError) must
