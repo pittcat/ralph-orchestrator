@@ -288,3 +288,28 @@ Skill doc 不复述 `ralph-tools*.md` 的命令参数表；需要时**引用章�
 <!-- anchor: trigger-context -->
 
 Preset author/review audits now use `ralph inspect prompt --trigger/--payload/--topic` to simulate hat activation without running the loop, and `ralph capability inventory --format json` to discover which runtime capabilities a preset exercises. The four evidence levels (`simulated` / `static` / `runtime` / `unverified`) classify findings by where the proof came from.
+
+## Typed JobContext visibility (U15)
+
+DAG 模式（`event_loop.supervisor.scheduler_mode: dag`，builtin `parallel-forge`）下，runtime 为每个 active job 注入一组 typed `JobContext` 字段。hat 不应再依赖旧的 wave/slot 标识。
+
+12 个 typed 字段（通过 `RALPH_DAG_*` 环境变量暴露，必填可见性）：
+
+- `RALPH_DAG_PLAN_KEY` — 本次执行所属计划的稳定 key
+- `RALPH_DAG_UNIT_KEY` — 当前 Unit 的稳定 key，例如 `U3`
+- `RALPH_DAG_TASK_KEY` — 当前 Unit 对应 task 的注册 key（含 `:step-<n>:` 段）
+- `RALPH_DAG_TASK_ID` — 当前 loop 的真实 live task id
+- `RALPH_DAG_JOB_ID` — 本次 job 的唯一 id
+- `RALPH_DAG_JOB_TOKEN` — 本次 job 的一次性令牌
+- `RALPH_DAG_STAGE` — 本轮所处阶段，例如 `execution` / `review` / `verification`
+- `RALPH_DAG_ATTEMPT` — 本 Unit 的第几次尝试
+- `RALPH_DAG_WORKTREE` — 本 job 应该在其中工作的 worktree 绝对路径
+- `RALPH_DAG_BASE` — 本 job 的基线 commit sha
+- `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH` — 已核验执行计划的 repo-relative 路径
+- `RALPH_DAG_ARTIFACT_REFS` — 上游交付物引用列表（JSON 字符串）
+
+3 个已弃用/移除字段（runtime 不再注入，旧 payload 字段被 typed schema 拒收）：
+
+- `RALPH_WAVE_ID`
+- `RALPH_SLOT_INDEX`
+- `RALPH_WORKTREE_MAP`
