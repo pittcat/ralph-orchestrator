@@ -91,13 +91,26 @@ pub fn target_rewrite_blocks(
 }
 
 /// Verify all dependency unit keys have acked commits.
+///
+/// U2 (fix-plan 2026-09-09-0917): per-key set membership. The pre-U2
+/// length-based check (`acked.len() >= dep_count`) would pass any 2
+/// acked commits for any 2 deps — that's the C2 finding. The tightened
+/// contract requires every dep_key to appear in the acked set; an
+/// unrelated superset of N keys does NOT satisfy the check.
 pub fn all_deps_acked(input: &BasePinInput) -> bool {
-    input.dependency_unit_keys.iter().all(|k| {
-        // skeleton: caller provides dep_acked_commits; we just check
-        // each dep_key appears in some way. Real impl joins with
-        // dependency_acked table.
-        !k.is_empty() && input.dependency_acked_commits.len() >= input.dependency_unit_keys.len()
-    })
+    let needed: BTreeSet<&str> = input
+        .dependency_unit_keys
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let acked: BTreeSet<&str> = input
+        .dependency_acked_commits
+        .iter()
+        .map(String::as_str)
+        .collect();
+    // Per-key subset: every needed dep_key must be present in acked.
+    // Empty needed set means no deps required → trivially satisfied.
+    needed.is_subset(&acked)
 }
 
 #[cfg(test)]
@@ -199,6 +212,57 @@ mod tests {
         }
     }
 
+    // ---- U2 typed all_deps_acked (2026-09-09-0917 plan §7 U2) ----------
+    //
+    // U2 tightens `all_deps_acked` from a length-based check
+    // (`acked.len() >= dep_count`) to per-key set membership. The
+    // pre-U2 contract would pass any 2 acked commits for any 2 deps,
+    // which is the C2 finding. The RED tests below pin the new
+    // per-key membership contract.
+
+    #[test]
+    fn all_deps_acked_requires_per_key_set_membership() {
+        let mut input = base();
+        input.unit_key = "U3".to_string();
+        input.dependency_unit_keys = vec!["U1".to_string(), "U2".to_string()];
+        input.dependency_acked_commits.clear();
+        input.dependency_acked_commits.insert("U1".to_string());
+        input
+            .dependency_acked_commits
+            .insert("WRONG_KEY".to_string());
+        assert!(
+            !all_deps_acked(&input),
+            "all_deps_acked must be false when 'WRONG_KEY' is in acked set but U2 is missing"
+        );
+    }
+
+    #[test]
+    fn all_deps_acked_passes_with_exact_set_membership() {
+        let mut input = base();
+        input.unit_key = "U3".to_string();
+        input.dependency_unit_keys = vec!["U1".to_string(), "U2".to_string()];
+        input.dependency_acked_commits.clear();
+        input.dependency_acked_commits.insert("U1".to_string());
+        input.dependency_acked_commits.insert("U2".to_string());
+        assert!(all_deps_acked(&input));
+    }
+
+    #[test]
+    fn all_deps_acked_rejects_superset_of_unrelated_keys() {
+        // Pre-U2 contract: len(acked) >= 2 → true, even if neither key
+        // matches a real dep. This pins the C2 finding contract.
+        let mut input = base();
+        input.unit_key = "U3".to_string();
+        input.dependency_unit_keys = vec!["U1".to_string(), "U2".to_string()];
+        input.dependency_acked_commits.clear();
+        input.dependency_acked_commits.insert("U9".to_string());
+        input.dependency_acked_commits.insert("U11".to_string());
+        assert!(
+            !all_deps_acked(&input),
+            "all_deps_acked must require the actual dep keys, not just any N keys"
+        );
+    }
+
     // ---- U5 acceptance (2026-09-09-0917 plan §7 第 9 项) ---------------
     //
     // Plan contract:
@@ -213,16 +277,20 @@ mod tests {
     #[test]
     fn dag_dependency_base_is_pinned() {
         // ---- U3 base 包含所有依赖 commit ----
-        // U3 has two dependencies (U1, U2) with two acked commits;
+        // U3 has two dependencies (U1, U2) that are both acked;
         // the pinned base must include both. We model that the
         // current target SHA is the merge-base that already contains
-        // those commits (per plan: "U3 base 包含所有依赖 commit").
+        // those deps (per plan: "U3 base 包含所有依赖 commit").
+        //
+        // U2: `all_deps_acked` is now per-key set membership — the
+        // acked set must contain the actual dep unit keys, not just
+        // any N commit strings.
         let mut input = base();
         input.unit_key = "U3".to_string();
         input.dependency_unit_keys = vec!["U1".to_string(), "U2".to_string()];
         input.dependency_acked_commits.clear();
-        input.dependency_acked_commits.insert("u1-commit".to_string());
-        input.dependency_acked_commits.insert("u2-commit".to_string());
+        input.dependency_acked_commits.insert("U1".to_string());
+        input.dependency_acked_commits.insert("U2".to_string());
         input.candidate_ancestor_in_target = true;
         let outcome_with_deps = compute_base_pin(&input);
         match &outcome_with_deps {
@@ -235,7 +303,7 @@ mod tests {
         // is fully represented in `dependency_acked_commits`.
         assert!(
             all_deps_acked(&input),
-            "all_deps_acked must report true when both deps have acked commits"
+            "all_deps_acked must report true when both deps are in the acked set"
         );
 
         // ---- 重启仍同 SHA (immutable across resume / diff / spawn) ----

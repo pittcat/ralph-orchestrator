@@ -17,27 +17,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// Stage of a DAG job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum JobStage {
-    Execute,
-    Review,
-    Verify,
-    Fix,
-    Integrate,
-}
-
-impl JobStage {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Execute => "execute",
-            Self::Review => "review",
-            Self::Verify => "verify",
-            Self::Fix => "fix",
-            Self::Integrate => "integrate",
-        }
-    }
-}
+// Single source of truth: `reconcile::JobStage`. Re-exported so all
+// `JobStage::Variant` references in this module still resolve without
+// forcing every call site to switch to the `reconcile::` path.
+pub use super::reconcile::JobStage;
 
 /// Required context fields per stage (pure dispatch).
 pub fn required_fields(stage: JobStage) -> &'static [&'static str] {
@@ -462,9 +445,9 @@ mod tests {
                     "missing fields must name verified_execution_plan_digest, got {fields:?}"
                 );
             }
-            other => panic!(
-                "Execute with empty artifact_refs must surface MissingFields, got {other:?}"
-            ),
+            other => {
+                panic!("Execute with empty artifact_refs must surface MissingFields, got {other:?}")
+            }
         }
 
         // Empty plan_key / unit_key / task_id surfaces MissingFields
@@ -490,9 +473,7 @@ mod tests {
                 assert!(fields.iter().any(|f| f == "unit_key"));
                 assert!(fields.iter().any(|f| f == "task_id"));
             }
-            other => panic!(
-                "blank-identity JobContext must surface MissingFields, got {other:?}"
-            ),
+            other => panic!("blank-identity JobContext must surface MissingFields, got {other:?}"),
         }
 
         // ---- 每 stage 都满足 → Ok ----

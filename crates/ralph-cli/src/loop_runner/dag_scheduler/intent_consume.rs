@@ -39,10 +39,7 @@ pub enum GitError {
     /// One of the commit OIDs failed character-set / length
     /// validation. The classifier refuses to proceed without a
     /// well-formed OID — F10 root cause.
-    InvalidSha {
-        field: &'static str,
-        value: String,
-    },
+    InvalidSha { field: &'static str, value: String },
 }
 
 impl std::fmt::Display for GitError {
@@ -562,8 +559,8 @@ mod tests {
         let mut input_cas_no_record = base_input(&repo, &c0, &c1);
         input_cas_no_record.current_target_head = input_cas_no_record.candidate_head.clone();
         input_cas_no_record.cas_applied = true;
-        let outcome_cas_no_record = classify_intent_recovery(&input_cas_no_record)
-            .expect("cas-no-record classify");
+        let outcome_cas_no_record =
+            classify_intent_recovery(&input_cas_no_record).expect("cas-no-record classify");
         match &outcome_cas_no_record {
             IntentRecoveryOutcome::ConsumeCasAndRecord { reason } => {
                 assert!(
@@ -578,8 +575,8 @@ mod tests {
             other => panic!("expected ConsumeCasAndRecord at CAS-后无 record, got {other:?}"),
         }
         // CAS 后分支不再次推进: replay must yield the same outcome (idempotent).
-        let outcome_cas_replay = classify_intent_recovery(&input_cas_no_record)
-            .expect("cas-no-record replay");
+        let outcome_cas_replay =
+            classify_intent_recovery(&input_cas_no_record).expect("cas-no-record replay");
         assert_eq!(
             outcome_cas_no_record, outcome_cas_replay,
             "CAS-后分支 must not re-advance (record/ack 各一次)"
@@ -591,8 +588,8 @@ mod tests {
         // (do NOT re-CAS).
         let mut input_descendant = base_input(&repo, &c0, &c0);
         input_descendant.current_target_head = c1.clone();
-        let outcome_descendant = classify_intent_recovery(&input_descendant)
-            .expect("descendant classify");
+        let outcome_descendant =
+            classify_intent_recovery(&input_descendant).expect("descendant classify");
         match &outcome_descendant {
             IntentRecoveryOutcome::JustRecordDescendant { reason } => {
                 assert!(
@@ -613,10 +610,12 @@ mod tests {
         // (the runtime refuses to recover into a foreign worktree).
         let mut input_foreign = base_input(&repo, &c0, &c0);
         input_foreign.worktree_canonical_identity.clear();
-        let outcome_foreign = classify_intent_recovery(&input_foreign)
-            .expect("foreign classify");
+        let outcome_foreign = classify_intent_recovery(&input_foreign).expect("foreign classify");
         assert!(
-            matches!(outcome_foreign, IntentRecoveryOutcome::RefusedForeign { .. }),
+            matches!(
+                outcome_foreign,
+                IntentRecoveryOutcome::RefusedForeign { .. }
+            ),
             "foreign worktree identity must be RefusedForeign, got {outcome_foreign:?}"
         );
 

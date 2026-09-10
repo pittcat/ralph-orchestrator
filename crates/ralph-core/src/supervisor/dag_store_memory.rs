@@ -93,10 +93,9 @@ impl InMemoryDagSchedulerStore {
 
 impl DagSchedulerStore for InMemoryDagSchedulerStore {
     fn register_plan(&self, plan: &CanonicalPlanRecord) -> DagStoreResult<PlanRegistration> {
-        let mut guard = self
-            .plans
-            .lock()
-            .map_err(|e| DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}")))?;
+        let mut guard = self.plans.lock().map_err(|e| {
+            DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}"))
+        })?;
         if let Some(existing) = guard.get(&plan.plan_key) {
             // Same plan_key: idempotent on identical digest,
             // fail-closed on digest drift.
@@ -109,10 +108,9 @@ impl DagSchedulerStore for InMemoryDagSchedulerStore {
                 actual: plan.artifact_digest.clone(),
             });
         }
-        let mut id_guard = self
-            .next_id
-            .lock()
-            .map_err(|e| DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}")))?;
+        let mut id_guard = self.next_id.lock().map_err(|e| {
+            DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}"))
+        })?;
         *id_guard += 1;
         let id = *id_guard;
         let registration = PlanRegistration {
@@ -129,10 +127,9 @@ impl DagSchedulerStore for InMemoryDagSchedulerStore {
     }
 
     fn activate_plan(&self, plan_key: &str, target_branch: &str) -> DagStoreResult<()> {
-        let mut guard = self
-            .plans
-            .lock()
-            .map_err(|e| DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}")))?;
+        let mut guard = self.plans.lock().map_err(|e| {
+            DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}"))
+        })?;
         let entry = guard
             .get_mut(plan_key)
             .ok_or_else(|| DagStoreError::UnknownPlan(plan_key.to_string()))?;
@@ -160,18 +157,16 @@ impl DagSchedulerStore for InMemoryDagSchedulerStore {
     }
 
     fn get_plan(&self, plan_key: &str) -> DagStoreResult<Option<PlanRegistration>> {
-        let guard = self
-            .plans
-            .lock()
-            .map_err(|e| DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}")))?;
+        let guard = self.plans.lock().map_err(|e| {
+            DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}"))
+        })?;
         Ok(guard.get(plan_key).cloned())
     }
 
     fn list_active_plans(&self) -> DagStoreResult<Vec<PlanRegistration>> {
-        let guard = self
-            .plans
-            .lock()
-            .map_err(|e| DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}")))?;
+        let guard = self.plans.lock().map_err(|e| {
+            DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}"))
+        })?;
         Ok(guard
             .values()
             .filter(|p| p.status == PlanStatus::Active)
@@ -192,10 +187,9 @@ impl DagSchedulerStore for InMemoryDagSchedulerStore {
         pinned_at_ms: u64,
     ) -> DagStoreResult<()> {
         let key = Self::base_key(plan_key, unit_key);
-        let mut guard = self
-            .unit_bases
-            .lock()
-            .map_err(|e| DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}")))?;
+        let mut guard = self.unit_bases.lock().map_err(|e| {
+            DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}"))
+        })?;
         if let Some(existing) = guard.get(&key) {
             if existing.base_commit == base_commit {
                 // Idempotent: first pin's `pinned_at_ms` wins, the
@@ -226,10 +220,9 @@ impl DagSchedulerStore for InMemoryDagSchedulerStore {
         plan_key: &str,
         unit_key: &str,
     ) -> DagStoreResult<Option<UnitBaseRecord>> {
-        let guard = self
-            .unit_bases
-            .lock()
-            .map_err(|e| DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}")))?;
+        let guard = self.unit_bases.lock().map_err(|e| {
+            DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}"))
+        })?;
         Ok(guard.get(&Self::base_key(plan_key, unit_key)).cloned())
     }
 
@@ -242,10 +235,9 @@ impl DagSchedulerStore for InMemoryDagSchedulerStore {
         evidence: &StageEvidenceRecord,
     ) -> DagStoreResult<()> {
         let key = Self::evidence_key(plan_key, unit_key, stage, attempt);
-        let mut guard = self
-            .stage_evidence
-            .lock()
-            .map_err(|e| DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}")))?;
+        let mut guard = self.stage_evidence.lock().map_err(|e| {
+            DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}"))
+        })?;
         if let Some(existing) = guard.get(&key) {
             // Compare every immutable field; a single drift fails
             // closed. Mirrors the rusqlite variant's per-field
@@ -305,10 +297,9 @@ impl DagSchedulerStore for InMemoryDagSchedulerStore {
         unit_key: &str,
         stage: &str,
     ) -> DagStoreResult<Option<StageEvidenceRecord>> {
-        let guard = self
-            .stage_evidence
-            .lock()
-            .map_err(|e| DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}")))?;
+        let guard = self.stage_evidence.lock().map_err(|e| {
+            DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}"))
+        })?;
         let prefix = format!("{plan_key}::{unit_key}::{stage}::");
         let mut best: Option<&StageEvidenceRecord> = None;
         for (key, value) in guard.iter() {

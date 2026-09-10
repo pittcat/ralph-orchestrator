@@ -346,8 +346,7 @@ mod tests {
             &[],
         );
         // 无依赖 unit 的 base = 当前 target head。
-        let snapshot =
-            compute_admission_snapshot(&plan, &empty_pipeline(), Some("target-SHA"));
+        let snapshot = compute_admission_snapshot(&plan, &empty_pipeline(), Some("target-SHA"));
 
         // 两个无依赖 unit 的 input 都应在 candidates 里,且 depends_on
         // 为空(由 build_candidates / PlanTopology 派生)。
@@ -395,7 +394,10 @@ mod tests {
         // base 透传:diff 用 target head + deps acked commits 派生
         // unit_base(plan §U5 base_pin)。snapshot 暴露的
         // integration_target_head 必须与调用方传入的一致。
-        assert_eq!(snapshot.integration_target_head.as_deref(), Some("target-SHA"));
+        assert_eq!(
+            snapshot.integration_target_head.as_deref(),
+            Some("target-SHA")
+        );
 
         // 无依赖的 U1 仍出现在 candidates(filter 只排除 integrated
         // 自身,U1 不在 candidate filter 排除集合的 unit_id 列里)。

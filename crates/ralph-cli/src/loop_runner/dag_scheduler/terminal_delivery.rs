@@ -245,7 +245,10 @@ mod tests {
         // EventLoop only routes a single canonical done=1 event.
         let key = DeliveryKey::derive("plan-A", "forge.exec.development.done", "digest-1");
         let key_again = DeliveryKey::derive("plan-A", "forge.exec.development.done", "digest-1");
-        assert_eq!(key, key_again, "DeliveryKey must be stable for the same input");
+        assert_eq!(
+            key, key_again,
+            "DeliveryKey must be stable for the same input"
+        );
         let o_conflict = advance_delivery(DeliveryState::Prepared, false, true, false);
         match &o_conflict {
             DeliveryOutcome::Conflict { reason } => {

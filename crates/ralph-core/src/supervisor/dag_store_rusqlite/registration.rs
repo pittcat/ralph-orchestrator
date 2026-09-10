@@ -193,8 +193,7 @@ mod tests {
         // status, unit rows, or base pin may show partial updates.
         let mut bad_base = base_input();
         bad_base.approval_base = "".to_string();
-        let outcome_empty_base =
-            classify_activation(&bad_base, Some("accepted"), None, None);
+        let outcome_empty_base = classify_activation(&bad_base, Some("accepted"), None, None);
         match &outcome_empty_base {
             ActivationOutcome::UnknownReceipt { reason } => {
                 assert!(
@@ -208,8 +207,7 @@ mod tests {
         // ---- 写点 2: zero units → UnknownReceipt (no writes) ----
         let mut bad_units = base_input();
         bad_units.unit_count = 0;
-        let outcome_zero_units =
-            classify_activation(&bad_units, Some("accepted"), None, None);
+        let outcome_zero_units = classify_activation(&bad_units, Some("accepted"), None, None);
         assert!(
             matches!(outcome_zero_units, ActivationOutcome::UnknownReceipt { .. }),
             "zero units must abort atomically (no partial writes), got {outcome_zero_units:?}"
@@ -220,8 +218,7 @@ mod tests {
         // rows / base pin. If no receipt exists, the activation
         // must abort; the plan must NOT have been inserted without
         // a corresponding receipt row.
-        let outcome_no_receipt =
-            classify_activation(&base_input(), None, None, None);
+        let outcome_no_receipt = classify_activation(&base_input(), None, None, None);
         match &outcome_no_receipt {
             ActivationOutcome::UnknownReceipt { reason } => {
                 assert!(
@@ -233,8 +230,7 @@ mod tests {
         }
 
         // ---- 写点 4: rejected receipt → UnknownReceipt (no writes) ----
-        let outcome_rejected =
-            classify_activation(&base_input(), Some("rejected"), None, None);
+        let outcome_rejected = classify_activation(&base_input(), Some("rejected"), None, None);
         assert!(
             matches!(outcome_rejected, ActivationOutcome::UnknownReceipt { .. }),
             "rejected receipt must not activate, got {outcome_rejected:?}"
@@ -244,12 +240,8 @@ mod tests {
         // Atomicity: a duplicate target is refused BEFORE any
         // receipt status / plan status / unit rows / base pin write
         // happens. The new activation must abort cleanly.
-        let outcome_dup_target = classify_activation(
-            &base_input(),
-            Some("accepted"),
-            None,
-            Some("other-plan"),
-        );
+        let outcome_dup_target =
+            classify_activation(&base_input(), Some("accepted"), None, Some("other-plan"));
         match &outcome_dup_target {
             ActivationOutcome::DuplicateTarget { reason } => {
                 assert!(
@@ -264,8 +256,7 @@ mod tests {
         // First-time activation: the SQLite IMMEDIATE transaction
         // commits receipt status, plan status, all unit rows, and
         // the base pin together.
-        let outcome_first =
-            classify_activation(&base_input(), Some("accepted"), None, None);
+        let outcome_first = classify_activation(&base_input(), Some("accepted"), None, None);
         assert_eq!(
             outcome_first,
             ActivationOutcome::Activated,

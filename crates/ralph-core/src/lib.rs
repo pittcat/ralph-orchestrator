@@ -52,6 +52,7 @@ mod event_reader;
 pub mod execution_contract;
 pub mod file_lock;
 pub mod flow_lifecycle;
+pub mod git;
 mod git_ops;
 mod handoff;
 pub mod handoff_envelope;
@@ -59,15 +60,14 @@ pub mod hat_identity;
 pub mod hat_lifecycle;
 mod hat_registry;
 mod hatless_ralph;
-pub mod git;
 pub mod hooks;
-pub mod path;
 pub mod parallel_forge_handoff;
 /// U1 (plan 2026-08-03-004): `parallel-forge-resume-manifest.v1` —
 /// structured resume evidence captured from the old live runtime before
 /// a `--reuse-worktree` cleanup destroys it, validated fail-closed
 /// before the new loop starts.
 pub mod parallel_forge_resume;
+pub mod path;
 /// U1 (plan 2026-09-01-2102): typed, read-only checkpoint assessment
 /// for the combined `--continue --worktree --reuse-worktree` workflow.
 /// Pure function: no writes, no rotations, no archive creation.

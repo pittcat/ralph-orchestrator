@@ -509,11 +509,7 @@ fn dag_cli_completes_real_pipeline() {
     // ---- 2. `ralph inspect loop --format json` reports dag ----
     // The runtime must surface `scheduler_mode: dag` so the
     // operator can confirm the runtime driver mode is wired.
-    let (code, stdout, stderr) = run_ralph(
-        ws,
-        &["inspect", "loop", "--format", "json"],
-        &[],
-    );
+    let (code, stdout, stderr) = run_ralph(ws, &["inspect", "loop", "--format", "json"], &[]);
     assert_eq!(
         code, 0,
         "ralph inspect loop must succeed under dag mode (stderr: {stderr})"
@@ -563,7 +559,13 @@ fn dag_cli_completes_real_pipeline() {
     // smoke-test coordinator hat).
     let (code, stdout, stderr) = run_ralph(
         ws,
-        &["hats", "validate", "--strict", "-H", "builtin:parallel-forge"],
+        &[
+            "hats",
+            "validate",
+            "--strict",
+            "-H",
+            "builtin:parallel-forge",
+        ],
         &[],
     );
     assert_eq!(
@@ -605,11 +607,7 @@ fn dag_cli_completes_real_pipeline() {
     // and must produce a structured JSON output. This is the
     // "CLI 启动完整 builtin DAG 语义" gate: the binary is
     // operational end-to-end even without an active loop.
-    let (code, stdout, _stderr) = run_ralph(
-        ws,
-        &["inspect", "loop", "--format", "json"],
-        &[],
-    );
+    let (code, stdout, _stderr) = run_ralph(ws, &["inspect", "loop", "--format", "json"], &[]);
     assert_eq!(code, 0);
     // The JSON must re-decode; this guards against future changes
     // that would emit malformed JSON for the empty-state path.

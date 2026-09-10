@@ -211,9 +211,9 @@ mod tests {
         );
         match &outcome_replay {
             RegistrationOutcome::CandidateIdempotent => {}
-            other => panic!(
-                "expected CandidateIdempotent at projection-pre interrupt, got {other:?}"
-            ),
+            other => {
+                panic!("expected CandidateIdempotent at projection-pre interrupt, got {other:?}")
+            }
         }
         // Receipt is preserved across the replay — the same artifact
         // digest still corresponds to the same receipt state. The

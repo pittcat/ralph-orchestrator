@@ -275,8 +275,7 @@ fn ensure_events_file_in_workspace(
         .join(bare_unit_id)
         .join(format!("{job_id}.events.jsonl"));
     if let Some(parent) = events_file.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create dag events dir: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("create dag events dir: {e}"))?;
         // Delegate to the path-prefix allowlist in
         // `super::jobs::path_within_workspace`. It canonicalizes
         // both the workspace and the target path (or, when the
@@ -377,7 +376,10 @@ impl SpawnKind {
 /// keeps the `-D warnings` gate green without weakening the
 /// runtime contract that downstream consumers depend on.
 #[derive(Debug)]
-#[allow(dead_code, reason = "SKELETON-ONLY per plan U2/U25 §3 第 11 项; wired in by follow-up")]
+#[allow(
+    dead_code,
+    reason = "SKELETON-ONLY per plan U2/U25 §3 第 11 项; wired in by follow-up"
+)]
 pub(crate) enum SpawnError {
     /// Runtime is missing an attached `DagExecutionContext`.
     NoExecContext,
@@ -426,7 +428,10 @@ impl SpawnError {
     /// only through `fail_job_spawn`. STAB-CORR-002 keeps the
     /// `-D warnings` gate green without weakening the runtime
     /// contract.
-    #[allow(dead_code, reason = "SKELETON-ONLY per plan U2/U25 §3 第 11 项; reachable through fail_job_spawn")]
+    #[allow(
+        dead_code,
+        reason = "SKELETON-ONLY per plan U2/U25 §3 第 11 项; reachable through fail_job_spawn"
+    )]
     fn failure_class(&self) -> &'static str {
         match self {
             Self::EventsFilePathEscape { .. } => "path_escape",
@@ -441,7 +446,10 @@ impl SpawnError {
     /// only through `fail_job_spawn`. STAB-CORR-002 keeps the
     /// `-D warnings` gate green without weakening the runtime
     /// contract.
-    #[allow(dead_code, reason = "SKELETON-ONLY per plan U2/U25 §3 第 11 项; reachable through fail_job_spawn")]
+    #[allow(
+        dead_code,
+        reason = "SKELETON-ONLY per plan U2/U25 §3 第 11 项; reachable through fail_job_spawn"
+    )]
     fn reason(&self) -> String {
         match self {
             Self::NoExecContext => "DAG spawn: no execution context attached".to_string(),
@@ -461,10 +469,9 @@ impl SpawnError {
                 "unit worktree acquire failed at {}: {reason}",
                 path.display()
             ),
-            Self::EventsDirCreateFailed { path, reason } => format!(
-                "create dag events dir {}: {reason}",
-                path.display()
-            ),
+            Self::EventsDirCreateFailed { path, reason } => {
+                format!("create dag events dir {}: {reason}", path.display())
+            }
             Self::EventsFilePathEscape { path, reason } => format!(
                 "events_file parent {} escapes workspace: {reason}",
                 path.display()
@@ -472,9 +479,9 @@ impl SpawnError {
             Self::PtySpawnFailed { code, reason } => {
                 format!("pty spawn failed (code={code}): {reason}")
             }
-            Self::ReservationRollbackFailed { job_id, reason } => format!(
-                "journal reservation rollback failed for {job_id}: {reason}"
-            ),
+            Self::ReservationRollbackFailed { job_id, reason } => {
+                format!("journal reservation rollback failed for {job_id}: {reason}")
+            }
         }
     }
 }
@@ -886,7 +893,10 @@ impl DagSchedulerRuntime {
     /// STAB-CORR-002 keeps the `-D warnings` gate green without
     /// weakening the runtime contract that downstream consumers
     /// depend on.
-    #[allow(dead_code, reason = "SKELETON-ONLY per plan U2/U25 §3 第 11 项; wired in by follow-up")]
+    #[allow(
+        dead_code,
+        reason = "SKELETON-ONLY per plan U2/U25 §3 第 11 项; wired in by follow-up"
+    )]
     fn fail_job_spawn(&mut self, identity: &JobIdentity, kind: SpawnKind, error: &SpawnError) {
         let reason = error.reason();
         let failure_class = error.failure_class();
@@ -2343,13 +2353,9 @@ units:
         // `…/.ralph/dag/{plan}/{unit}/{job}.events.jsonl` layout.
         let tmp = TempDir::new().expect("temp workspace");
         let workspace = tmp.path().canonicalize().expect("canonical workspace");
-        let events_file = ensure_events_file_in_workspace(
-            &workspace,
-            "pf-test",
-            "U1",
-            "dag-execute-U1-a0",
-        )
-        .expect("happy path stays inside workspace");
+        let events_file =
+            ensure_events_file_in_workspace(&workspace, "pf-test", "U1", "dag-execute-U1-a0")
+                .expect("happy path stays inside workspace");
         assert!(
             events_file.starts_with(&workspace),
             "events_file {} must start with workspace {}",
@@ -2361,13 +2367,9 @@ units:
         // Subdirectory: a deeper plan/branch tree under `.ralph/dag/`
         // still resolves inside the workspace — the prefix check
         // only rejects escapes, not legitimate sub-paths.
-        let sub_events_file = ensure_events_file_in_workspace(
-            &workspace,
-            "pf-subdir",
-            "U2",
-            "dag-review-U2-a1",
-        )
-        .expect("subdirectory stays inside workspace");
+        let sub_events_file =
+            ensure_events_file_in_workspace(&workspace, "pf-subdir", "U2", "dag-review-U2-a1")
+                .expect("subdirectory stays inside workspace");
         assert!(sub_events_file.starts_with(&workspace));
 
         // Adversarial: symlink `.ralph` to a sibling TempDir so that

@@ -262,8 +262,7 @@ mod tests {
         // ---- 旧 token/unknown unit 无改变 ----
         // Token mismatch on a previously-reserved correction must
         // NOT touch budget or attempt count; it just refuses.
-        let o_bad_token =
-            classify_reservation(&base(), 0, true, true, true, false, None);
+        let o_bad_token = classify_reservation(&base(), 0, true, true, true, false, None);
         match &o_bad_token {
             ReservationOutcome::Refused { reason } => {
                 assert!(
@@ -274,8 +273,7 @@ mod tests {
             other => panic!("expected Refused on bad token, got {other:?}"),
         }
         // Unknown unit must also be refused without touching state.
-        let o_unknown_unit =
-            classify_reservation(&base(), 0, true, true, false, true, None);
+        let o_unknown_unit = classify_reservation(&base(), 0, true, true, false, true, None);
         match &o_unknown_unit {
             ReservationOutcome::Refused { reason } => {
                 assert!(
@@ -366,8 +364,7 @@ mod tests {
         // "corr-1") MUST NOT create a new attempt — the old verify
         // stays accepted and the same intent is preserved. The
         // dispatcher classifies as Replayed.
-        let o_replay_old =
-            classify_reservation(&base(), 1, true, true, true, true, Some("corr-1"));
+        let o_replay_old = classify_reservation(&base(), 1, true, true, true, true, Some("corr-1"));
         assert_eq!(
             o_replay_old,
             ReservationOutcome::Replayed,
@@ -404,19 +401,15 @@ mod tests {
         // (existing_request_digest is None) AND pool capacity is
         // not available, the dispatcher must NOT spawn a new job;
         // the correction stays Pending in the v22 ledger.
-        let o_no_capacity =
-            classify_reservation(&base(), 0, false, true, true, true, None);
+        let o_no_capacity = classify_reservation(&base(), 0, false, true, true, true, None);
         match &o_no_capacity {
             ReservationOutcome::PoolFull { .. } => {}
-            other => panic!(
-                "expected PoolFull when no capacity is available, got {other:?}"
-            ),
+            other => panic!("expected PoolFull when no capacity is available, got {other:?}"),
         }
         // Same input with the pool freed must succeed as
         // Reserved{attempt=1}; this is the durability contract
         // that a PoolFull state does not consume budget.
-        let o_capacity_freed =
-            classify_reservation(&base(), 0, true, true, true, true, None);
+        let o_capacity_freed = classify_reservation(&base(), 0, true, true, true, true, None);
         assert_eq!(
             o_capacity_freed,
             ReservationOutcome::Reserved { attempt: 1 },
@@ -453,8 +446,7 @@ mod tests {
         // failure" branch: a stale job_token cannot authorize a
         // new correction. The dispatcher refuses without touching
         // the budget.
-        let o_bad_token =
-            classify_reservation(&base(), 0, true, true, true, false, None);
+        let o_bad_token = classify_reservation(&base(), 0, true, true, true, false, None);
         assert!(
             matches!(o_bad_token, ReservationOutcome::Refused { .. }),
             "stale job_token must be refused (no new job), got {o_bad_token:?}"
@@ -464,8 +456,7 @@ mod tests {
         // Even at FIXER_BUDGET, the dispatcher must not silently
         // continue past the budget — BudgetExhausted is the
         // terminal state.
-        let o_exhausted =
-            classify_reservation(&new_correction, 3, true, true, true, true, None);
+        let o_exhausted = classify_reservation(&new_correction, 3, true, true, true, true, None);
         assert_eq!(
             o_exhausted,
             ReservationOutcome::BudgetExhausted,

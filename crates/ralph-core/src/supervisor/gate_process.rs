@@ -98,10 +98,18 @@ impl GateOutcome {
 
 /// Short-circuit decision: when one command fails non-zero, should we
 /// continue with subsequent commands in the same gate?
+///
+/// U2 (fix-plan 2026-09-09-0917): `Canceled` is now a short-circuit.
+/// The gate halted mid-flight via cancel — no failure to propagate,
+/// but remaining commands in the same gate MUST be skipped (C5
+/// finding).
 pub fn should_short_circuit(outcome: &GateOutcome) -> bool {
     matches!(
         outcome,
-        GateOutcome::Fail { .. } | GateOutcome::Timeout | GateOutcome::SpawnError { .. }
+        GateOutcome::Fail { .. }
+            | GateOutcome::Timeout
+            | GateOutcome::SpawnError { .. }
+            | GateOutcome::Canceled
     )
 }
 
@@ -135,7 +143,8 @@ mod tests {
         // We assert the outcome enum carries Timeout and should_short_circuit.
         assert!(should_short_circuit(&GateOutcome::Timeout));
         assert!(!should_short_circuit(&GateOutcome::Pass));
-        assert!(!should_short_circuit(&GateOutcome::Canceled));
+        // U2: Canceled IS a short-circuit (gate halted by cancel mid-flight).
+        assert!(should_short_circuit(&GateOutcome::Canceled));
     }
 
     #[test]
@@ -149,9 +158,15 @@ mod tests {
 
     #[test]
     fn cancel_reaps_group() {
-        // Skeleton contract: Canceled is NOT short-circuit (gate ended
-        // cleanly via cancel, not via failure).
-        assert!(!should_short_circuit(&GateOutcome::Canceled));
+        // Skeleton contract: Canceled IS a short-circuit (gate halted
+        // by cancel mid-flight — no subsequent commands should run).
+        assert!(should_short_circuit(&GateOutcome::Canceled));
+    }
+
+    #[test]
+    fn canceled_short_circuits_remaining_commands() {
+        // U2 explicit contract pin.
+        assert!(should_short_circuit(&GateOutcome::Canceled));
     }
 
     #[test]
@@ -236,9 +251,10 @@ mod tests {
         );
         // Pass does NOT short-circuit (subsequent commands may run).
         assert!(!should_short_circuit(&GateOutcome::Pass));
-        // Canceled is NOT a short-circuit (gate ended cleanly via
-        // cancel, no failure to propagate).
-        assert!(!should_short_circuit(&GateOutcome::Canceled));
+        // U2: Canceled IS a short-circuit (gate halted by cancel
+        // mid-flight — no failure to propagate, but remaining
+        // commands must be skipped).
+        assert!(should_short_circuit(&GateOutcome::Canceled));
 
         // ---- reason ≤ 既有格式允许上限 ----
         // The plan caps `reason` so it doesn't itself blow past the
@@ -266,10 +282,12 @@ mod tests {
         // never silently advances the target SHA.
         assert!(!GateOutcome::Timeout.is_pass());
         assert!(!GateOutcome::Canceled.is_pass());
-        assert!(!GateOutcome::SpawnError {
-            reason: "ENOENT".into()
-        }
-        .is_pass());
+        assert!(
+            !GateOutcome::SpawnError {
+                reason: "ENOENT".into()
+            }
+            .is_pass()
+        );
         assert!(GateOutcome::Pass.is_pass());
 
         // ---- is_pass sanity ----
@@ -286,10 +304,7 @@ mod tests {
                 reason: "ENOENT".into(),
             },
         ] {
-            assert!(
-                !outcome.is_pass(),
-                "{outcome:?} must NOT be Pass"
-            );
+            assert!(!outcome.is_pass(), "{outcome:?} must NOT be Pass");
         }
 
         // ---- as_bytes / is_empty contract ----

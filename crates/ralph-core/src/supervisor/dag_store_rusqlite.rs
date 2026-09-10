@@ -238,9 +238,7 @@ fn plan_status_to_str(status: PlanStatus) -> &'static str {
 /// `query_row` closure signature; `plan_io_err` at the caller
 /// unwraps it back into a `DagStoreError::IntegerOverflow`.
 #[cfg(feature = "supervisor-db")]
-fn row_to_plan_registration(
-    row: &rusqlite::Row<'_>,
-) -> Result<PlanRegistration, rusqlite::Error> {
+fn row_to_plan_registration(row: &rusqlite::Row<'_>) -> Result<PlanRegistration, rusqlite::Error> {
     let unit_ids_raw: String = row.get("unit_ids")?;
     let status_raw: String = row.get("status")?;
     let status = parse_plan_status(&status_raw).map_err(|err| {
