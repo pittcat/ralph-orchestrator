@@ -3107,19 +3107,19 @@ units:
             exec_resolved, "plan-base-abc",
             "first execute admission pins plan-base-abc"
         );
-        let stores = runtime.ensure_stores().expect("stores");
-        // The per-Unit pin records `plan-base-abc` so a re-pin
-        // cannot silently rewrite to a different base.
-        let pin = stores
-            .plans
-            .get_unit_base("pf-u3", "U1")
-            .expect("pin read")
-            .expect("pin must exist after first admission");
-        assert_eq!(pin.base_commit, "plan-base-abc");
-        // Drop the stores borrow before re-borrowing `runtime`
-        // mutably for the next admission (Rust's NLL requires
-        // explicit drop for the non-lexical lifetime here).
-        drop(stores);
+        {
+            let stores = runtime.ensure_stores().expect("stores");
+            // The per-Unit pin records `plan-base-abc` so a re-pin
+            // cannot silently rewrite to a different base.
+            let pin = stores
+                .plans
+                .get_unit_base("pf-u3", "U1")
+                .expect("pin read")
+                .expect("pin must exist after first admission");
+            assert_eq!(pin.base_commit, "plan-base-abc");
+        }
+        // Stores borrow released by scoped block — runtime can be
+        // re-borrowed mutably below.
 
         // Review stage at attempt 1: must resume from the
         // executor's accepted commit `acc-exec`, NOT plan HEAD or
@@ -3152,17 +3152,18 @@ units:
         );
         // The per-Unit pin must stay at plan-base-abc; review
         // admission does NOT rewrite it.
-        let stores = runtime.ensure_stores().expect("stores");
-        let pin_after_review = stores
-            .plans
-            .get_unit_base("pf-u3", "U1")
-            .expect("pin read")
-            .expect("pin must still exist");
-        assert_eq!(
-            pin_after_review.base_commit, "plan-base-abc",
-            "review admission must not rewrite the per-Unit pin"
-        );
-        drop(stores);
+        {
+            let stores = runtime.ensure_stores().expect("stores");
+            let pin_after_review = stores
+                .plans
+                .get_unit_base("pf-u3", "U1")
+                .expect("pin read")
+                .expect("pin must still exist");
+            assert_eq!(
+                pin_after_review.base_commit, "plan-base-abc",
+                "review admission must not rewrite the per-Unit pin"
+            );
+        }
 
         // Verify stage at attempt 1: must resume from the
         // reviewer's accepted commit `acc-rev`, NOT the
@@ -3247,17 +3248,18 @@ units:
                 .record_stage_evidence("pf-u3", "U1", "execute", 2, &ev)
                 .expect("seed execute evidence attempt 2");
         }
-        let stores = runtime.ensure_stores().expect("stores");
-        let pin_after_artifact = stores
-            .plans
-            .get_unit_base("pf-u3", "U1")
-            .expect("pin read")
-            .expect("pin must still exist");
-        assert_eq!(
-            pin_after_artifact.base_commit, "plan-base-abc",
-            "artifact output (evidence fingerprint) must NOT rewrite the per-Unit pin"
-        );
-        drop(stores);
+        {
+            let stores = runtime.ensure_stores().expect("stores");
+            let pin_after_artifact = stores
+                .plans
+                .get_unit_base("pf-u3", "U1")
+                .expect("pin read")
+                .expect("pin must still exist");
+            assert_eq!(
+                pin_after_artifact.base_commit, "plan-base-abc",
+                "artifact output (evidence fingerprint) must NOT rewrite the per-Unit pin"
+            );
+        }
         // The next-stage admission reads the latest execute
         // evidence (attempt 2), not the prior attempt 1.
         let resolved_attempt_2 = runtime
