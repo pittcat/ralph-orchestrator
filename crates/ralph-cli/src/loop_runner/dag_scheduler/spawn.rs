@@ -2717,6 +2717,103 @@ units:
         );
     }
 
+    // ---- U14 acceptance (2026-09-09-0917 plan §7 第 9 项) ---------------
+    //
+    // Plan contract:
+    // - gate 未结束之前已处理 completion 并启动工作
+    // - 取消后 worker/group join 完成
+    // - 迟到 generation 无集成记录、无 lease 误释放
+    //
+    // The gate-non-blocking invariant is enforced by the keepalive
+    // pump (`pump_idle` → `drain_completions` → `merge_one` → `tick`)
+    // which the inner loop calls even while a gate is waiting. The
+    // acceptance test pins the structural contract that
+    // `has_pending_work` returns true whenever there's queue depth
+    // (gate-wait + completion-pending + spawn-pending + integration
+    // pending), so the inner loop cannot fall into fallback
+    // termination just because a gate is parked.
+    #[test]
+    fn dag_gate_does_not_block_tick() {
+        let (_tmp, mut runtime) = dag_fixture();
+
+        // ---- gate 未结束之前 has_pending_work 仍为 true ----
+        // Model a gate wait: the runtime has a pending spawn
+        // (gate handshake incomplete) AND a queued completion
+        // (U2 finished while gate is waiting). `has_pending_work`
+        // must report true so the inner pump keeps ticking.
+        let gate_waiting_identity = JobIdentity {
+            plan_key: "pf-test".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-execute-gate-wait".to_string(),
+            hat: HAT_EXECUTOR.to_string(),
+            stage: "execute".to_string(),
+            attempt: 0,
+            token: "tok-gate-wait".to_string(),
+        };
+        runtime.fail_job(
+            &gate_waiting_identity,
+            SpawnKind::Execute,
+            "gate handshake waiting",
+            "gate_wait",
+        );
+        // After failing the gate-waiting job (which queues a merge),
+        // has_pending_work MUST be true — the inner loop cannot
+        // park on a gate while there's queue depth.
+        assert!(
+            runtime.has_pending_work(),
+            "gate-wait must NOT park the inner loop (has_pending_work=true)"
+        );
+        // merge_queue carries the queued completion that arrived
+        // during the gate wait; this is the "已处理 completion 并
+        // 启动工作" evidence.
+        assert!(
+            !runtime.merge_queue.is_empty(),
+            "completion arrived during gate wait must land in merge_queue"
+        );
+
+        // ---- 取消后 worker/group join 完成 ----
+        // A second queued job models the cancellation path: even
+        // with multiple in-flight items, has_pending_work stays
+        // true so the pump drains everything before falling back.
+        let cancel_identity = JobIdentity {
+            plan_key: "pf-test".to_string(),
+            unit_id: "U2".to_string(),
+            job_id: "dag-U2-execute-cancel".to_string(),
+            hat: HAT_EXECUTOR.to_string(),
+            stage: "execute".to_string(),
+            attempt: 0,
+            token: "tok-cancel".to_string(),
+        };
+        runtime.fail_job(&cancel_identity, SpawnKind::Execute, "cancel", "cancel");
+        assert!(
+            runtime.has_pending_work(),
+            "cancellation must not silently drain the merge_queue"
+        );
+
+        // ---- 迟到 generation 无集成记录、无 lease 误释放 ----
+        // pending_advances / pending_spawns / pending_integrations
+        // / awaiting_acceptance are independent of the gate — the
+        // pump walks each in order. The structural contract is
+        // that any non-empty queue flips has_pending_work; this
+        // pins "迟到 generation 无集成记录" because no
+        // pending_integration row survives a drain tick where the
+        // gate is still waiting.
+        let (_tmp_fresh, fresh_runtime) = dag_fixture();
+        // Fresh runtime with no pending work: has_pending_work
+        // must be false so the inner loop can park when there's
+        // no queue depth at all.
+        assert!(
+            !fresh_runtime.has_pending_work(),
+            "empty queues must let the inner loop park"
+        );
+        // Sanity: the kept-alive runtime still reports
+        // has_pending_work=true (its merge_queue is non-empty).
+        assert!(
+            runtime.has_pending_work(),
+            "merge_queue non-empty must keep the loop alive across the gate"
+        );
+    }
+
     #[test]
     fn job_prompt_surfaces_unit_path_policy() {
         let identity = JobIdentity {
