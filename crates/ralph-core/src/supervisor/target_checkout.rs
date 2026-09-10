@@ -65,6 +65,14 @@ pub struct WorktreeIdentity {
 
 impl WorktreeIdentity {
     /// Compute canonical identity for a target checkout directory.
+    ///
+    /// U26 sync (fix-plan 2026-09-09-0917): the workspace path is
+    /// canonicalized here so downstream path-prefix checks (the
+    /// `path_within_workspace` allowlist in
+    /// `crates/ralph-cli/src/loop_runner/dag_scheduler/jobs.rs` and
+    /// the `events_file` guard in `dag_scheduler/spawn.rs`) compare
+    /// resolved paths against a non-symlinked worktree root, not
+    /// the attacker-supplied prefix.
     pub fn from_path(path: &Path) -> std::io::Result<Self> {
         let canonical_path = path.canonicalize()?;
         let common_dir = canonical_path.clone(); // simplified; full impl in finalize
@@ -124,6 +132,34 @@ mod tests {
         // (resolved symlink) while Linux yields the original path; either
         // case is acceptable as long as the path is absolute.
         assert!(id.canonical_path.is_absolute());
+    }
+
+    /// U26 sync (fix-plan 2026-09-09-0917): `WorktreeIdentity` is
+    /// the worktree root that downstream path-prefix checks
+    /// (`dag_scheduler::jobs::path_within_workspace`) compare
+    /// against. Verify it resolves a symlinked prefix to the real
+    /// target so the allowlist sees a non-spoofable root.
+    #[cfg(unix)]
+    #[test]
+    fn worktree_identity_canonicalizes_through_symlink_chain() {
+        use std::os::unix::fs::symlink;
+
+        let real = tempfile::TempDir::new().expect("real dir");
+        let real_path = real.path().canonicalize().expect("canonical real");
+        // Point a symlink at the real dir; the runtime's workspace
+        // argument will arrive through this alias.
+        let alias_dir = tempfile::TempDir::new().expect("alias parent");
+        let alias = alias_dir.path().join("alias");
+        if symlink(&real_path, &alias).is_err() {
+            // Symlink not permitted in this sandbox — happy path
+            // already exercised by `worktree_identity_from_path`.
+            return;
+        }
+        let id = WorktreeIdentity::from_path(&alias).expect("canonicalize alias");
+        assert_eq!(
+            id.canonical_path, real_path,
+            "symlinked workspace prefix must be canonicalized to the real target"
+        );
     }
 
     #[test]
