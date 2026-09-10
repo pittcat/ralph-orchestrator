@@ -465,3 +465,104 @@ impl std::fmt::Display for RuntimeJobError {
 }
 
 impl std::error::Error for RuntimeJobError {}
+
+// =============================================================================
+// Typed `failure_class` (U5, fix-plan 2026-09-09-0917).
+// =============================================================================
+//
+// `DagSchedulerRuntime::fail_job` (and its `fail_job_spawn` wrapper)
+// historically took `failure_class: &str`. The 9 live call sites
+// drifted toward `"unknown"` whenever a typed mapping was uncertain,
+// which made the journal digest bind to a literal that downstream
+// recovery / telemetry could not pin. `FailureClass` replaces the
+// free-form string with a closed enum so:
+//   - the compiler rejects new untyped additions,
+//   - each variant carries a stable wire string via `Display` /
+//     `From<FailureClass> for &'static str`, and
+//   - the wire forms for `ContractViolation` ("orphan_or_empty_result")
+//     and `UnauthorizedOutput` ("path_escape") are preserved so
+//     downstream recovery / U26 telemetry do not need a parallel
+//     classifier mapping.
+//
+// SKELETON-ONLY promotion note: this enum is intentionally defined
+// here (the typed contract module) and exported for the DAG runtime
+// to consume. Each variant maps to a class of failures the runtime
+// already distinguishes in its control flow; the 9 sites in
+// `spawn.rs` route through this typed enum after U5 lands.
+
+/// Typed `failure_class` for every early-return branch in
+/// `spawn_job` (U5, fix-plan 2026-09-09-0917). Each variant binds a
+/// stable wire string via `From<FailureClass> for &'static str` so
+/// the journal's terminal digest and the synthesised failure event
+/// payload both reflect what actually went wrong, rather than a
+/// literal `"unknown"`.
+///
+/// Wire-form stability:
+///   - `Timeout`           -> `"timeout"` (matches the historical
+///     `completion.timed_out` branch)
+///   - `ContractViolation` -> `"orphan_or_empty_result"` (matches the
+///     historical missing-field / no-verdict branches so U2 recovery
+///     does not need to update its classifier mapping)
+///   - `UnauthorizedOutput`-> `"path_escape"` (matches the historical
+///     U26 events-file escape branch)
+///   - `Panic`, `FilesystemPartial`, `SpawnFailed`, `OomKilled` carry
+///     new stable wire strings the runtime emits for the first time
+///     under U5 (they previously fell through to `"unknown"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureClass {
+    /// Lease / hard-cap reached before the job emitted its success
+    /// topic (e.g. `completion.timed_out`).
+    Timeout,
+    /// Worker process crashed or produced a panic-style stack trace.
+    Panic,
+    /// Agent emitted an event that failed the runtime's structural
+    /// contract (missing required fields, malformed verdict, etc).
+    /// Wire form kept as `"orphan_or_empty_result"` for downstream
+    /// recovery.
+    ContractViolation,
+    /// Agent emitted output that violates a workspace / path
+    /// boundary (e.g. the events file resolves outside the worktree).
+    /// Wire form kept as `"path_escape"` for U26 telemetry.
+    UnauthorizedOutput,
+    /// Worktree / events-file / base-pin resource was partially
+    /// created but the runtime could not finish the reservation
+    /// before bailing out (e.g. `acquire` returned mid-state).
+    FilesystemPartial,
+    /// `spawn_pty_job` / `journal.reserve_job` returned `Err`
+    /// after partial setup. The job never reached the worker; the
+    /// reservation row may exist with pid=NULL.
+    SpawnFailed,
+    /// Kernel killed the worker for exceeding its memory cgroup.
+    OomKilled,
+}
+
+impl FailureClass {
+    /// Wire-stable string form. Useful when callers need to embed
+    /// the class into a `serde_json::json!` macro (where `Display`
+    /// would allocate). `From<FailureClass> for &'static str` and
+    /// `Display` route through this method so there is exactly one
+    /// source of truth.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Panic => "panic",
+            Self::ContractViolation => "orphan_or_empty_result",
+            Self::UnauthorizedOutput => "path_escape",
+            Self::FilesystemPartial => "filesystem_partial",
+            Self::SpawnFailed => "spawn_failed",
+            Self::OomKilled => "oom_killed",
+        }
+    }
+}
+
+impl From<FailureClass> for &'static str {
+    fn from(class: FailureClass) -> Self {
+        class.as_str()
+    }
+}
+
+impl std::fmt::Display for FailureClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}

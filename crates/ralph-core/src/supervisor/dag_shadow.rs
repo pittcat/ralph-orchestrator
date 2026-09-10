@@ -92,6 +92,13 @@ impl ShadowSink {
 
 /// Pure decision fn: reuse U4 [`compute_admissions`]; never touch
 /// store / worktree / task / event channel (R11). Caller records.
+///
+/// 2026-09-09-0917 plan U3: production `DagSchedulerRuntime::tick`
+/// builds the `AdmissionSnapshot` via `AdmissionSnapshot::from_owned`
+/// after calling `dag_scheduler::admission::compute_admission_snapshot`
+/// (ralph-cli). The shadow path accepts the same borrowed snapshot so
+/// `dag_shadow` stays a passive observer (R11 — no execution side
+/// effects).
 pub fn compute_shadow_observation(
     snapshot: &AdmissionSnapshot<'_>,
     caps: &AdmissionCaps,

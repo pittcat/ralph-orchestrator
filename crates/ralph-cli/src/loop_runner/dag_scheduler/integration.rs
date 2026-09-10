@@ -547,7 +547,10 @@ mod tests {
             .expect("intent persisted before CAS");
         assert_eq!(intent.unit_commit, "UNIT_OID");
         assert_eq!(intent.input.integrated_commit, record.integrated_commit);
-        assert_eq!(intent.input.expected_head_before, record.expected_head_before);
+        assert_eq!(
+            intent.input.expected_head_before,
+            record.expected_head_before
+        );
     }
 
     /// U7 contract: a forbidden top-level prefix is rejected

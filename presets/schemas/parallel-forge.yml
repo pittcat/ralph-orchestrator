@@ -118,7 +118,6 @@ schemas:
   forge.final.correction.settled:
     required_fields:
       - plan_key
-      - wave_id
       - correction_round
       - verification_log_path
     payload: json_object
@@ -138,10 +137,6 @@ schemas:
         meaning: Forge plan key basename.
         source: forge.correction.done.plan_key.
         fill_rule: Must match .ralph/forge/<plan-key>/.
-      wave_id:
-        meaning: Final wave that exhausted the 3-round correction budget.
-        source: Last correction done event for this plan.
-        fill_rule: Stable id from forge.wave.worktrees.ready.
       correction_round:
         meaning: The final round number that exhausted the budget.
         source: forge-failure-handler correction counter.
@@ -662,21 +657,15 @@ schemas:
   # Supervisor slot topics (worker publishes; schema parity with ce-executor-supervisor)
   exec.wave.complete:
     required_fields:
-      - wave_id
       - completed_slots
       - merge_root_event_id
 
   exec.wave.failed:
     required_fields:
-      - wave_id
       - blocking_slots
       - reason
     payload: json_object
     field_docs:
-      wave_id:
-        meaning: Execution wave that failed fan-in.
-        source: Supervisor fan-in (runtime-injected).
-        fill_rule: Read-only for hats; never emitted by an agent.
       blocking_slots:
         meaning: >-
           Slot indices in Failed or Cancelled state. Every listed slot has
@@ -695,7 +684,7 @@ schemas:
       slot_failures:
         meaning: >-
           Per-slot detail, one entry per blocking slot, each with
-          slot_index / reason / duration_ms / failure_class. The
+          unit_key / reason / duration_ms / failure_class. The
           failure_class labels (timeout / orphan_or_empty_result /
           identity_mismatch / cancel / required_slot_failure /
           unknown) are what the failure handler triages on.

@@ -210,10 +210,8 @@ pub fn is_dag_runtime_unit_topic(topic: &str) -> bool {
 /// Control-plane topics consumed by the DAG runtime rather than an agent hat.
 /// These exact topics are exempt from static subscriber checks only when the
 /// preset also selects the DAG scheduler mode.
-pub const DAG_RUNTIME_CONTROL_TOPICS: &[&str] = &[
-    "forge.concurrency.approved",
-    "forge.correction.requested",
-];
+pub const DAG_RUNTIME_CONTROL_TOPICS: &[&str] =
+    &["forge.concurrency.approved", "forge.correction.requested"];
 
 pub fn is_dag_runtime_control_topic(topic: &str) -> bool {
     DAG_RUNTIME_CONTROL_TOPICS.contains(&topic)
@@ -268,9 +266,7 @@ pub const DAG_RUNTIME_CONSUMER: &str = "dag_runtime";
 pub fn is_virtual_runtime_consumer(consumer: &str) -> bool {
     matches!(
         consumer,
-        VIRTUAL_SUPERVISOR_CONSUMER
-            | VIRTUAL_WAVE_RUNTIME_CONSUMER
-            | DAG_RUNTIME_CONSUMER
+        VIRTUAL_SUPERVISOR_CONSUMER | VIRTUAL_WAVE_RUNTIME_CONSUMER | DAG_RUNTIME_CONSUMER
     )
 }
 

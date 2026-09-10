@@ -232,3 +232,11 @@ ralph emit --schema <scope-topic> -H <path|builtin:name>
 **Threshold gate**：`overall_confidence >= 90` 且 `critical_unknown_count == 0` 且 `proceed == true` 时 scope 才能标记为 resolved。
 
 **边界**：author 在起草涉及 scope topic 的 hat 时，必须在 `instructions` 中明确要求 agent 先写 manifest、再 policy-check、再真实 emit。
+
+## Typed JobContext visibility (U15)
+
+DAG 模式下，runtime 为每个 active job 注入一组 typed `JobContext` 字段（通过 `RALPH_DAG_*` 环境变量暴露）。hat 不应再依赖旧的 wave/slot 标识。
+
+12 个 typed 字段： `RALPH_DAG_PLAN_KEY`, `RALPH_DAG_UNIT_KEY`, `RALPH_DAG_TASK_KEY`, `RALPH_DAG_TASK_ID`, `RALPH_DAG_JOB_ID`, `RALPH_DAG_JOB_TOKEN`, `RALPH_DAG_STAGE`, `RALPH_DAG_ATTEMPT`, `RALPH_DAG_WORKTREE`, `RALPH_DAG_BASE`, `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH`, `RALPH_DAG_ARTIFACT_REFS`.
+
+3 个已弃用/移除字段： `RALPH_WAVE_ID`, `RALPH_SLOT_INDEX`, `RALPH_WORKTREE_MAP`. runtime 不再注入这三个值；带这三个字段的 payload 会被 typed schema 拒收。

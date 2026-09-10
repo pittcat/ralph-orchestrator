@@ -1203,15 +1203,13 @@ pub(super) async fn run_loop_impl_inner(
     // spawning still only starts once forge seam events arrive.
     if let Some(dag) = dag_scheduler.as_mut() {
         event_loop.attach_dag_runtime();
-        dag.attach_execution_context(
-            crate::loop_runner::dag_scheduler::DagExecutionContext::new(
-                &config,
-                &backend,
-                &loop_id,
-                crate::loop_runner::paths::resolve_current_events_path(&ctx),
-                hats_source_label.clone(),
-            ),
-        );
+        dag.attach_execution_context(crate::loop_runner::dag_scheduler::DagExecutionContext::new(
+            &config,
+            &backend,
+            &loop_id,
+            crate::loop_runner::paths::resolve_current_events_path(&ctx),
+            hats_source_label.clone(),
+        ));
         if resume {
             dag.recover_after_restart();
         }

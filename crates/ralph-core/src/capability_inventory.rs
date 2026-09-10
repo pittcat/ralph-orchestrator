@@ -346,4 +346,68 @@ mod tests {
             );
         }
     }
+
+    // 2026-09-09-0917 U10: author/review skill references must document the
+    // typed 12-field DAG JobContext injected via RALPH_DAG_* env vars, plus
+    // the deprecation note for wave_id / slot_index / worktree_map.
+    //
+    // This is a structural test, not a content test: it asserts each .md
+    // reference contains the section header, the 12 field env-var tokens,
+    // and the 3 deprecated env-var tokens. Drift in prose wording is fine;
+    // drift in coverage is not.
+    #[test]
+    fn preset_skill_docs_document_typed_jobcontext() {
+        // Section header the U10 doc changes promise to add.
+        const SECTION_HEADER: &str = "Typed JobContext visibility (U15)";
+
+        // The 12 typed RALPH_DAG_* env-var tokens from
+        // `crates/ralph-core/data/ralph-tools.md` §"DAG 模式下" / U15.
+        const TYPED_FIELDS: &[&str] = &[
+            "RALPH_DAG_PLAN_KEY",
+            "RALPH_DAG_UNIT_KEY",
+            "RALPH_DAG_TASK_KEY",
+            "RALPH_DAG_TASK_ID",
+            "RALPH_DAG_JOB_ID",
+            "RALPH_DAG_JOB_TOKEN",
+            "RALPH_DAG_STAGE",
+            "RALPH_DAG_ATTEMPT",
+            "RALPH_DAG_WORKTREE",
+            "RALPH_DAG_BASE",
+            "RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH",
+            "RALPH_DAG_ARTIFACT_REFS",
+        ];
+
+        // Deprecated env vars per U15 — runtime no longer injects these.
+        const DEPRECATED_FIELDS: &[&str] =
+            &["RALPH_WAVE_ID", "RALPH_SLOT_INDEX", "RALPH_WORKTREE_MAP"];
+
+        // Author-side + review-side documents that must each carry the
+        // section, every typed field, and every deprecated field.
+        let docs: &[&str] = &[
+            AGENT_NATIVE_MODEL,
+            COMMANDS_DOC,
+            REVIEW_AGENT_NATIVE_MODEL,
+            REVIEW_COMMANDS_DOC,
+            REVIEW_FINDING_RUBRIC,
+        ];
+
+        for doc in docs {
+            assert!(
+                doc_has_anchor(doc, SECTION_HEADER),
+                "missing Typed JobContext section header: {SECTION_HEADER}"
+            );
+            for field in TYPED_FIELDS {
+                assert!(
+                    doc_has_anchor(doc, field),
+                    "missing typed JobContext env-var token: {field}"
+                );
+            }
+            for field in DEPRECATED_FIELDS {
+                assert!(
+                    doc_has_anchor(doc, field),
+                    "missing deprecation marker for legacy env var: {field}"
+                );
+            }
+        }
+    }
 }

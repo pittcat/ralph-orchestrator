@@ -72,8 +72,53 @@ mod imp {
     /// fixer resume from the exact HEAD the prior stage committed
     /// and accepted, without resetting base. Forward-only CREATE
     /// TABLE; no ALTERs, no column-probe path.
+    /// v19 (2026-09-09-0917 plan U4) adds the
+    /// `dag_checkout_intents` durable target-materialization
+    /// ledger so CAS-then-checkout atomicity survives a loop
+    /// process death between the prepared intent and the
+    /// materialized worktree state. Forward-only CREATE TABLE;
+    /// no ALTERs, no column-probe path. `PRIMARY KEY (plan_key,
+    /// unit_key, target_branch, generation)` keeps the intent
+    /// idempotent across generations; the `state` machine
+    /// (`prepared` / `ref_advanced` / `materialized` /
+    /// `superseded` / `blocked`) is enforced by CHECK so the
+    /// store rejects malformed transitions at write time.
+    /// v20 (2026-09-09-0917 plan U8) adds the
+    /// `dag_terminal_deliveries` durable replay-once terminal
+    /// delivery state machine so a terminal coordination event
+    /// (e.g. `forge.exec.development.done`) survives a loop
+    /// death between prepare and append-once+fsync. Forward-only
+    /// CREATE TABLE; no ALTERs, no column-probe path. `PRIMARY
+    /// KEY (plan_key, topic)` keeps the delivery idempotent.
+    /// v21 (2026-09-09-0917 plan U9) adds the
+    /// `dag_registration_evidence` + `dag_approval_evidence`
+    /// durable candidate-receipt / approved-by-identity ledgers
+    /// so the registration and approval accept boundaries survive
+    /// a loop process death. Forward-only CREATE TABLE; no
+    /// ALTERs, no column-probe path. `PRIMARY KEY (plan_key,
+    /// loop_id)` keeps the receipt idempotent; the
+    /// `receipt_state` machine (`candidate` / `accepted` /
+    /// `rejected`) is enforced by CHECK.
+    /// v22 (2026-09-09-0917 plan U11) adds the
+    /// `dag_correction_requests` durable execute-failure
+    /// correction ledger with bounded feedback path and per-Unit
+    /// attempt budget. Forward-only CREATE TABLE; no ALTERs, no
+    /// column-probe path. `PRIMARY KEY (unit_key,
+    /// failure_fingerprint)` keeps the request idempotent; the
+    /// `state` machine (`pending` / `reserved` / `blocked`) is
+    /// enforced by CHECK so the store rejects malformed
+    /// transitions at write time.
+    /// v23 (2026-09-09-0917 plan U12) adds the
+    /// `dag_integration_failures` durable integration-failure
+    /// facts ledger tied to verify attempt + checkout generation
+    /// for fail-closed replay. Forward-only CREATE TABLE; no
+    /// ALTERs, no column-probe path. `PRIMARY KEY (unit_key,
+    /// attempt, generation)` keeps the fact idempotent; the
+    /// `failure_class` is enforced by CHECK
+    /// (`merge_conflict` / `gate_failure` / `foreign_target` /
+    /// `unknown`).
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 18;
+    pub const CURRENT_VERSION: i64 = 23;
 
     /// PMI-013 / TGP-02: typed error returned when a database's
     /// `user_version` is ABOVE this binary's migration ledger tail
@@ -540,6 +585,94 @@ mod imp {
                 ddl: include_str!("migrations/v18.sql"),
                 column_probe: None,
             },
+            // 2026-09-09-0917 plan U4 (DAG P1 closure — target
+            // checkout intents): adds the `dag_checkout_intents`
+            // durable target-materialization ledger so
+            // CAS-then-checkout atomicity survives a loop process
+            // death between the prepared intent and the
+            // materialized worktree state. Forward-only CREATE
+            // TABLE; no ALTERs, so no column probe. `PRIMARY KEY
+            // (plan_key, unit_key, target_branch, generation)`
+            // keeps the intent idempotent across generations;
+            // the `state` machine (`prepared` / `ref_advanced` /
+            // `materialized` / `superseded` / `blocked`) is
+            // enforced by CHECK so the store rejects malformed
+            // transitions at write time.
+            Migration {
+                version: 19,
+                ddl: include_str!("migrations/v19.sql"),
+                column_probe: None,
+            },
+            // 2026-09-09-0917 plan U8 (DAG P1 closure — terminal
+            // delivery state): adds the `dag_terminal_deliveries`
+            // durable replay-once terminal delivery state
+            // machine so a terminal coordination event
+            // (e.g. `forge.exec.development.done`) survives a
+            // loop death between prepare and append-once+fsync.
+            // Forward-only CREATE TABLE; no ALTERs, so no column
+            // probe. `PRIMARY KEY (plan_key, topic)` keeps the
+            // delivery idempotent; the `state` machine
+            // (`prepared` / `appending` / `delivered` /
+            // `blocked`) is enforced by CHECK so the store
+            // rejects malformed transitions at write time.
+            Migration {
+                version: 20,
+                ddl: include_str!("migrations/v20.sql"),
+                column_probe: None,
+            },
+            // 2026-09-09-0917 plan U9 (DAG P1 closure —
+            // registration/approval evidence): adds the
+            // `dag_registration_evidence` candidate-receipt
+            // ledger plus the `dag_approval_evidence`
+            // approved-by-identity ledger so the registration
+            // and approval accept boundaries survive a loop
+            // process death. Forward-only CREATE TABLE; no
+            // ALTERs, so no column probe. `PRIMARY KEY
+            // (plan_key, loop_id)` keeps the registration
+            // evidence idempotent; the `receipt_state` machine
+            // (`candidate` / `accepted` / `rejected`) is
+            // enforced by CHECK so the store rejects malformed
+            // transitions at write time. `dag_approval_evidence`
+            // is keyed by `(plan_key, loop_id, approval_digest)`
+            // so an approved identity is recorded once and
+            // replays are idempotent.
+            Migration {
+                version: 21,
+                ddl: include_str!("migrations/v21.sql"),
+                column_probe: None,
+            },
+            // 2026-09-09-0917 plan U11 (DAG P1 closure —
+            // correction requests): adds the
+            // `dag_correction_requests` durable execute-failure
+            // correction ledger with bounded feedback path and
+            // per-Unit attempt budget. Forward-only CREATE
+            // TABLE; no ALTERs, so no column probe. `PRIMARY
+            // KEY (unit_key, failure_fingerprint)` keeps the
+            // request idempotent; the `state` machine
+            // (`pending` / `reserved` / `blocked`) is enforced
+            // by CHECK so the store rejects malformed
+            // transitions at write time.
+            Migration {
+                version: 22,
+                ddl: include_str!("migrations/v22.sql"),
+                column_probe: None,
+            },
+            // 2026-09-09-0917 plan U12 (DAG P1 closure —
+            // integration failure facts): adds the
+            // `dag_integration_failures` durable
+            // integration-failure facts ledger tied to verify
+            // attempt + checkout generation for fail-closed
+            // replay. Forward-only CREATE TABLE; no ALTERs, so
+            // no column probe. `PRIMARY KEY (unit_key, attempt,
+            // generation)` keeps the fact idempotent; the
+            // `failure_class` is enforced by CHECK
+            // (`merge_conflict` / `gate_failure` /
+            // `foreign_target` / `unknown`).
+            Migration {
+                version: 23,
+                ddl: include_str!("migrations/v23.sql"),
+                column_probe: None,
+            },
         ]
     }
 }
@@ -568,6 +701,62 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         run(&conn).unwrap();
         assert_eq!(user_version(&conn).unwrap(), CURRENT_VERSION);
+    }
+
+    /// 2026-09-09-0917 fix-plan U6: a fresh supervisor DB must
+    /// run migrations v20-v23 and land on `CURRENT_VERSION` (23)
+    /// with all 5 new tables created. The test pins four
+    /// migrations worth of durable DAG store evidence:
+    /// - v20 → `dag_terminal_deliveries` (U8)
+    /// - v21 → `dag_registration_evidence` + `dag_approval_evidence` (U9)
+    /// - v22 → `dag_correction_requests` (U11)
+    /// - v23 → `dag_integration_failures` (U12)
+    #[test]
+    fn migrations_apply_v20_v23_creates_4_new_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        run(&conn).unwrap();
+        assert_eq!(
+            user_version(&conn).unwrap(),
+            CURRENT_VERSION,
+            "user_version must reach CURRENT_VERSION (=23) after v20-v23 migrations"
+        );
+        assert_eq!(
+            CURRENT_VERSION, 23,
+            "CURRENT_VERSION must be 23 after v20-v23 are registered"
+        );
+        let new_tables = [
+            // v20: terminal delivery state for U8 (replay-once terminal
+            // event delivery state machine: prepared/appending/
+            // delivered/blocked).
+            "dag_terminal_deliveries",
+            // v21: registration evidence (U9) — durable candidate
+            // receipt ledger for DAG plan-ready.
+            "dag_registration_evidence",
+            // v21: approval evidence (U9) — durable approved-by-identity
+            // receipt ledger keyed by approval_digest.
+            "dag_approval_evidence",
+            // v22: correction request ledger (U11) — durable
+            // execute-failure correction requests with bounded
+            // feedback path and per-Unit attempt budget.
+            "dag_correction_requests",
+            // v23: integration failure facts (U12) — durable
+            // integration-failure facts tied to verify attempt +
+            // checkout generation for fail-closed replay.
+            "dag_integration_failures",
+        ];
+        for table in new_tables {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "table `{table}` must exist after run() (got {count})"
+            );
+        }
     }
 
     #[test]
@@ -637,6 +826,11 @@ mod tests {
             // and the prior stage.
             "dag_unit_bases",
             "dag_stage_evidence",
+            // U4 (2026-09-09-0917 plan): durable target
+            // materialization ledger for CAS-then-checkout
+            // atomicity (state machine: prepared / ref_advanced /
+            // materialized / superseded / blocked).
+            "dag_checkout_intents",
         ];
         for table in tables {
             let count: i64 = conn

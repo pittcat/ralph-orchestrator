@@ -1446,7 +1446,10 @@ mod tests {
             .as_ref()
             .expect("parallel-forge declares event_policy");
         assert!(config.hats.keys().all(|id| {
-            !matches!(id.as_str(), "worktree" | "forge-dispatcher" | "integrator" | "wave-fixer")
+            !matches!(
+                id.as_str(),
+                "worktree" | "forge-dispatcher" | "integrator" | "wave-fixer"
+            )
         }));
         assert!(policy.schemas.keys().all(|topic| {
             !topic.starts_with("forge.wave.")
@@ -3171,7 +3174,10 @@ mod tests {
             ]
         );
         assert!(
-            !schema.required_fields.iter().any(|field| field == "wave_id"),
+            !schema
+                .required_fields
+                .iter()
+                .any(|field| field == "wave_id"),
             "DAG correction must not require retired wave identity"
         );
     }
@@ -3372,10 +3378,7 @@ mod tests {
             .rules;
         // DAG mode keeps only the terminal evidence gates that still require
         // an LLM judgment; runtime-owned per-Unit handoffs are deterministic.
-        for topic in [
-            "work.failed",
-            "forge.audit.done",
-        ] {
+        for topic in ["work.failed", "forge.audit.done"] {
             assert!(
                 precheck.contains_key(topic),
                 "missing precheck rule for {topic}"

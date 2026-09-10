@@ -98,6 +98,31 @@ pub struct AdmissionSnapshot<'a> {
     pub current_job_unit_ids: HashSet<String>,
 }
 
+impl<'a> AdmissionSnapshot<'a> {
+    /// 2026-09-09-0917 plan U3 (production path): build the borrowed
+    /// snapshot from owned runtime data captured at the `tick` seam.
+    ///
+    /// The runtime pipeline hands `live_stage_counts` /
+    /// `current_job_unit_ids` in owned form (BTreeMap / HashSet) so
+    /// the borrow-based `units: &'a [_]` stays the only lifetime the
+    /// caller must thread through. `target_head` is borrowed for the
+    /// lifetime of the candidate slice (the integration lane tip
+    /// lives at least as long as the per-tick plan borrow).
+    pub fn from_owned(
+        units: &'a [UnitAdmissionInput],
+        target_head: Option<&'a str>,
+        live_stage_counts: BTreeMap<String, u32>,
+        current_job_unit_ids: HashSet<String>,
+    ) -> Self {
+        Self {
+            units,
+            integration_target_head: target_head,
+            live_stage_counts,
+            current_job_unit_ids,
+        }
+    }
+}
+
 /// Pool + capacity caps handed to [`compute_admissions`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionCaps {

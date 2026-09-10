@@ -27,6 +27,29 @@ metadata:
 
 这些变量由 runner 在每次 hat activation 前注入，agent 可直接读取，但**不要**假设某个变量一定非空。
 
+### DAG typed `JobContext`
+
+DAG 模式（`event_loop.supervisor.scheduler_mode: dag`）下，runtime 为每个 job 额外注入以下 12 个环境变量，构成本轮 activation 的 typed `JobContext`。构造事件 payload 时**直接读这些变量**，不要自己推断或复用上一轮的值：
+
+| 变量 | 含义 | 何时为空 |
+|------|------|----------|
+| `RALPH_DAG_PLAN_KEY` | 本次执行所属计划的稳定 key | 非 DAG 模式 |
+| `RALPH_DAG_UNIT_KEY` | 当前 Unit 的稳定 key，例如 `U3` | 同上 |
+| `RALPH_DAG_TASK_KEY` | 当前 Unit 对应 task 的注册 key（含 `:step-<n>:` 段） | 同上 |
+| `RALPH_DAG_TASK_ID` | 当前 loop 的真实 live task id | 同上 |
+| `RALPH_DAG_JOB_ID` | 本次 job 的唯一 id；与 `job_token` 一起锚定 job 身份 | 同上 |
+| `RALPH_DAG_JOB_TOKEN` | 本次 job 的一次性令牌；发终态事件时必须原样带上 | 同上 |
+| `RALPH_DAG_STAGE` | 本轮所处阶段，例如 `execution` / `review` / `verification` | 同上 |
+| `RALPH_DAG_ATTEMPT` | 本 Unit 的第几次尝试（从 1 开始的整数） | 同上 |
+| `RALPH_DAG_WORKTREE` | 本 job 应该在其中工作的 worktree 绝对路径 | 同上 |
+| `RALPH_DAG_BASE` | 本 job 的基线 commit sha；据此判断你的改动范围 | 同上 |
+| `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH` | 已核验执行计划的 repo-relative 路径 | 尚未产出该 artifact 时 |
+| `RALPH_DAG_ARTIFACT_REFS` | 上游交付物引用列表（JSON 字符串） | 无上游交付物时 |
+
+**已弃用/移除**：`wave_id` / `slot_index` / `worktree_map`——runtime 不再注入这三个值，带这三个字段的 payload 会被拒收；job 身份一律由 `RALPH_DAG_JOB_ID` + `RALPH_DAG_JOB_TOKEN` 锚定。
+
+`task_id` / `task_key` / `step` 三字段必须严格一致（参考 `ralph-tools-tasks` red box）：`task_id` 是当前 loop 的真实 live id（`ralph tools task list` 取得，禁止手写以避免 reuse closed task id），`task_key` 是注册时的稳定 key，`step` 值必须匹配 `task_key` 中 `:step-<n>:` 段；不一致会被 runtime 拒收。
+
 ### `loop.resume` 与 `task.resume` 的区别
 
 - `loop.resume` 只表示 loop 使用 `ralph run --continue` 启动时的 bootstrap 信号；它描述的是整个 loop 的启动/续接，不是一次运行时纠错。

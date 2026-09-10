@@ -491,3 +491,11 @@ review 报告必须在 Executive Summary 标 `source_mode: builtin | external`�
 
 - `source_mode = builtin` 时：可附 Ralph 仓库源码 / BDD / replay 作为**补充**证据；仍要求 actual verify report。
 - `source_mode = external` 时：禁止要求 author 跑 Rust 工具链 / Cargo / 读源码；只读公开 CLI / preset / schema / scenario / verify report。
+
+## Typed JobContext visibility (U15)
+
+DAG 模式下，runtime 为每个 active job 注入一组 typed `JobContext` 字段（通过 `RALPH_DAG_*` 环境变量暴露）。hat 不应再依赖旧的 wave/slot 标识。
+
+12 个 typed 字段： `RALPH_DAG_PLAN_KEY`, `RALPH_DAG_UNIT_KEY`, `RALPH_DAG_TASK_KEY`, `RALPH_DAG_TASK_ID`, `RALPH_DAG_JOB_ID`, `RALPH_DAG_JOB_TOKEN`, `RALPH_DAG_STAGE`, `RALPH_DAG_ATTEMPT`, `RALPH_DAG_WORKTREE`, `RALPH_DAG_BASE`, `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH`, `RALPH_DAG_ARTIFACT_REFS`.
+
+3 个已弃用/移除字段： `RALPH_WAVE_ID`, `RALPH_SLOT_INDEX`, `RALPH_WORKTREE_MAP`. runtime 不再注入这三个值；带这三个字段的 payload 会被 typed schema 拒收。

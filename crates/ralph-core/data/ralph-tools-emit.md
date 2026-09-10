@@ -657,14 +657,13 @@ policy-check 拒收:
 
 `ralph emit --policy-check` 与 loop 内的统一校验管线行为一致。
 
-### `forge.wave.verified` 的幂等约束
+### `forge.unit.executed` 的幂等约束
 
-在 parallel-forge 中，`forge.wave.verified` 表示某个具体 wave 的某个候选
-commit 已完成验证。发送前从当前 trigger 读取 `plan_key`、`wave_id` 和
-`candidate_commit_sha`，三者必须对应同一个已整合候选；同一三元组只能成功
-发送一次。若返回 `duplicate_work_done` / `duplicate_forge_wave_verified`，
-停止重复发送，先等待后续纠正或新的 candidate commit；不要修改时间戳等无关
-字段来绕过去重。
+在 DAG runtime（`scheduler_mode: dag`）下，"某个 Unit 完成执行"由 `forge.unit.executed` 主题承载（**取代**旧的 `forge.wave.verified`）。payload 的 `plan_key` / `unit_key` / `task_key` / `task_id` / `job_id` / `job_token` / `stage` / `attempt` / `verified_execution_plan_path` / `artifact_refs` 一律从本轮注入的 `RALPH_DAG_*` 环境变量原样读取（对照表见 `ralph-tools` §Runner 注入的环境变量 → DAG typed `JobContext`），不要自己拼造；连同 `candidate_commit_sha` 必须对应同一个已整合候选。同一 `unit_key` + `job_id` + `job_token` 三元组只能成功发送一次（重复发送由 runtime 持久去重表 `dag_terminal_deliveries` 拦截）。
+
+**已弃用/移除**：`wave_id` / `slot_index` / `worktree_map` 不再出现在该主题的 `required_fields` 中（typed schema 拒收）。若返回 `duplicate_forge_unit_executed` / `duplicate_work_done`，停止重复发送，先等待后续纠正或新的 candidate commit；不要修改时间戳等无关字段来绕过去重。
+
+**过渡期提醒**：`forge.wave.verified` 在 `dag` 模式下已不再由 hat 订阅（仅 dispatcher 内部 seam 保留），所以 `ralph emit forge.wave.verified` 在 hat context 下会被 `event_policy` 拒收；改用 `forge.unit.executed` 并按上段字段约束构造 payload。
 
 ### 进程崩溃后恢复
 

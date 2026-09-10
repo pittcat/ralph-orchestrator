@@ -1,5 +1,15 @@
 //! 2026-09-03-0959 plan U6 — DAG scheduler module root.
 //!
+//! Plan: 2026-09-09-0917-fix-forge-dag-p1-closure-plan (U28 anchor).
+
+// `result_large_err` is allowed at file scope (more granular than
+// crate level) per U2 / F17: keep DagStoreError variants human-readable
+// for fail-closed evidence while suppressing function-level
+// `result_large_err` errors on every method returning
+// `Result<_, DagStoreError>`.
+#![allow(clippy::result_large_err)]
+
+//!
 //! This module is the **integration layer** that wires the
 //! generic job kernel (`runtime_job`) into the per-Unit
 //! pipeline. Files:
@@ -37,14 +47,20 @@
 //! the durable launch journal, with results merged back into the
 //! main ledger at most one business event per tick (OPAC).
 
+mod admission;
+pub mod admission_base_pin;
 pub mod driver;
 mod integrate;
 pub mod integration;
+pub mod integration_worker;
+pub mod intent_consume;
+pub mod job_context;
 pub mod jobs;
-mod admission;
+pub mod reconcile;
 pub mod recovery;
 pub mod shadow;
 mod spawn;
+pub mod terminal_delivery;
 pub mod worktree;
 
 pub use spawn::DagExecutionContext;
@@ -270,6 +286,40 @@ impl DagSchedulerRuntime {
         if self.mode == SchedulerMode::Dag {
             self.exec = Some(ctx);
         }
+    }
+
+    /// Test-only seam: attach in-memory stores so U3 unit-level
+    /// tests can exercise `resolve_stage_base` /
+    /// `record_accepted_evidence` without spinning up a real
+    /// SQLite database. Production paths always go through
+    /// `ensure_stores` (rusqlite when `supervisor-db` is on,
+    /// in-memory otherwise).
+    #[cfg(test)]
+    pub(crate) fn attach_in_memory_stores(&mut self) {
+        self.stores = Some(Self::in_memory_stores());
+    }
+
+    /// Test-only seam: register a plan topology with the given
+    /// verified base commit so `resolve_stage_base` can fall
+    /// back to the plan-level base when no per-Unit pin exists.
+    #[cfg(test)]
+    pub(crate) fn register_plan_for_test(
+        &mut self,
+        plan_key: &str,
+        verified_base_commit: Option<String>,
+    ) {
+        self.plans.insert(
+            plan_key.to_string(),
+            crate::loop_runner::dag_scheduler::PlanTopology {
+                artifact_path: String::new(),
+                artifact_digest: String::new(),
+                target_branch: "feat/test".to_string(),
+                verified_base_commit,
+                units: Vec::new(),
+                resource_capacities: Vec::new(),
+                integrated: std::collections::HashSet::new(),
+            },
+        );
     }
 
     /// Rebuild the process-local DAG view from the durable store after a
@@ -576,17 +626,20 @@ impl DagSchedulerRuntime {
             return;
         };
         let Some(plan) = self.plans.get(&plan_key) else {
-            warn!(plan_key, "DAG correction request references an unknown plan");
+            warn!(
+                plan_key,
+                "DAG correction request references an unknown plan"
+            );
             return;
         };
-        let known_units: HashSet<String> = plan
-            .units
-            .iter()
-            .map(|unit| unit.unit_id.clone())
-            .collect();
+        let known_units: HashSet<String> =
+            plan.units.iter().map(|unit| unit.unit_id.clone()).collect();
         for unit_id in unit_ids.iter().filter_map(Value::as_str) {
             if !known_units.contains(unit_id) {
-                warn!(plan_key, unit_id, "DAG correction request references an unknown unit");
+                warn!(
+                    plan_key,
+                    unit_id, "DAG correction request references an unknown unit"
+                );
                 continue;
             }
             // U1 (2026-09-09-0917): the runtime registers Units under
@@ -849,8 +902,12 @@ impl DagSchedulerRuntime {
             .collect();
         for unit_id in unit_ids {
             let job_id = format!("job-{plan_key}-{unit_id}");
-            self.pipeline
-                .ensure_unit(format!("forge:{plan_key}:{unit_id}"), job_id, "executor", Stage::Execute);
+            self.pipeline.ensure_unit(
+                format!("forge:{plan_key}:{unit_id}"),
+                job_id,
+                "executor",
+                Stage::Execute,
+            );
         }
         // E2: hydrate the integrated set from the durable store so a
         // restarted loop does not re-admit dependents of units that
@@ -980,9 +1037,9 @@ impl DagSchedulerRuntime {
                 .and_then(Value::as_str)
                 .filter(|key| !key.trim().is_empty());
             let belongs_to_plan = plan_key.is_some_and(|key| {
-                self.plans.get(key).is_some_and(|plan| {
-                    plan.units.iter().any(|unit| unit.unit_id == unit_id)
-                })
+                self.plans
+                    .get(key)
+                    .is_some_and(|plan| plan.units.iter().any(|unit| unit.unit_id == unit_id))
             });
             if !belongs_to_plan {
                 debug!(
@@ -1030,17 +1087,25 @@ impl DagSchedulerRuntime {
             } => {
                 debug!(unit_key = %routed_unit_key, ?next_stage, "DAG seam: unit event routed");
             }
-            DriverOutcome::Blocked { unit_key: blocked_unit_key, error } => {
+            DriverOutcome::Blocked {
+                unit_key: blocked_unit_key,
+                error,
+            } => {
                 warn!(
                     unit_key = %blocked_unit_key,
                     error = %error,
                     "DAG seam: pipeline blocked the unit event"
                 );
             }
-            DriverOutcome::StillExecuting { unit_key: still_unit_key, stage } => {
+            DriverOutcome::StillExecuting {
+                unit_key: still_unit_key,
+                stage,
+            } => {
                 debug!(unit_key = %still_unit_key, ?stage, "DAG seam: unit still executing");
             }
-            DriverOutcome::Ignored { topic: ignored_topic } => {
+            DriverOutcome::Ignored {
+                topic: ignored_topic,
+            } => {
                 debug!(topic = %ignored_topic, "DAG seam: unit event ignored by driver");
             }
         }
@@ -1059,13 +1124,15 @@ impl DagSchedulerRuntime {
         // checked out. Unresolvable git state degrades to `None`,
         // which the admission engine reports as `BlockedNoTargetHead`.
         let target_head = ralph_core::get_head_sha(&self.workspace).ok();
-        // U1 (2026-09-09-0917): capture live pipeline pressure ONCE
-        // per tick and pass it into every admission snapshot so the
-        // engine can seed `global_cap` accounting with live stages and
-        // short-circuit units already holding a live job. Recomputing
-        // per-plan would double-count multi-plan launches.
-        let live_stage_counts = self.pipeline.live_stage_counts();
-        let live_unit_ids = self.pipeline.live_unit_ids();
+        // U1 / U3 (2026-09-09-0917): ownership of the live pipeline
+        // pressure moves into `admission::compute_admission_snapshot`,
+        // which fuses candidate filtering + live counts + target head
+        // into one owned snapshot per plan. The engine seeds
+        // `global_cap` accounting with `live_stage_counts` and uses
+        // `current_job_unit_ids` as defence-in-depth against double-
+        // admission. Re-deriving the snapshot per tick is the
+        // continuous-slot-refill contract: a job completion in tick N
+        // is reflected in the snapshot for tick N+1.
         let mut admitted: Vec<(String, String)> = Vec::new();
         for (plan_key, plan) in &self.plans {
             if self.blocked_plans.contains(plan_key) {
@@ -1078,19 +1145,27 @@ impl DagSchedulerRuntime {
                 // handoff, never from the event payload.
                 resource_capacities: plan.resource_capacities.clone(),
             };
-            // U1: candidates are derived per-plan by `build_candidates`
-            // which filters out (a) units already integrated and (b)
-            // units already holding a live job. The pre-filter ensures
-            // the engine never re-admits a unit already in flight
-            // (which previously caused slot double-booking once U1
-            // completed and U2 should have been admitted next tick).
-            let inputs = self::admission::build_candidates(plan, &self.pipeline);
-            let snapshot = AdmissionSnapshot {
-                units: &inputs,
-                integration_target_head: target_head.as_deref(),
-                live_stage_counts: live_stage_counts.clone(),
-                current_job_unit_ids: live_unit_ids.clone(),
-            };
+            // U3 production path: compute_admission_snapshot returns
+            // owned inputs + live counts + target head; we re-borrow
+            // into the engine-facing AdmissionSnapshot via
+            // `AdmissionSnapshot::from_owned` so the seam stays
+            // uniform with the shadow path (`dag_shadow::compute_shadow_observation`).
+            // The `tick` seam stays pure (no spawn, no worktree, no
+            // emit) — only the shadow sink is updated. In `dag` mode,
+            // the admitted list is forwarded to E1's spawn seam which
+            // performs the actual slot reservation against the durable
+            // launch journal.
+            let snapshot_data = self::admission::compute_admission_snapshot(
+                plan,
+                &self.pipeline,
+                target_head.as_deref(),
+            );
+            let snapshot = AdmissionSnapshot::from_owned(
+                &snapshot_data.inputs,
+                snapshot_data.integration_target_head.as_deref(),
+                snapshot_data.live_stage_counts.clone(),
+                snapshot_data.current_job_unit_ids.clone(),
+            );
             let mut observation = compute_shadow_observation(&snapshot, &caps, &self.sink);
             observation.plan_key = plan_key.clone();
             if self.mode == SchedulerMode::Dag {
@@ -1476,7 +1551,10 @@ units:
         );
         assert_eq!(plan.unit_ids, vec!["U1", "U2", "U3"]);
         // Pipeline slots are seeded so per-unit events can route.
-        assert_eq!(runtime.pipeline_stage("forge:pf-test:U1"), Some(Stage::Execute));
+        assert_eq!(
+            runtime.pipeline_stage("forge:pf-test:U1"),
+            Some(Stage::Execute)
+        );
     }
 
     /// Double approval is an idempotent no-op (re-activate Active).
@@ -1593,7 +1671,10 @@ units:
             .to_string(),
         );
         runtime.observe_accepted_events(&[executed]);
-        assert_eq!(runtime.pipeline_stage("forge:pf-test:U1"), Some(Stage::Review));
+        assert_eq!(
+            runtime.pipeline_stage("forge:pf-test:U1"),
+            Some(Stage::Review)
+        );
 
         let reviewed = ralph_proto::Event::new(
             topics::UNIT_REVIEWED,
@@ -1608,7 +1689,10 @@ units:
             .to_string(),
         );
         runtime.observe_accepted_events(&[reviewed]);
-        assert_eq!(runtime.pipeline_stage("forge:pf-test:U1"), Some(Stage::Verify));
+        assert_eq!(
+            runtime.pipeline_stage("forge:pf-test:U1"),
+            Some(Stage::Verify)
+        );
 
         // Unknown unit: blocked by the pipeline, logged, no panic.
         let unknown = ralph_proto::Event::new(
@@ -1636,7 +1720,10 @@ units:
         );
         runtime.observe_accepted_events(&[correction]);
 
-        assert_eq!(runtime.pipeline_stage("forge:pf-test:U1"), Some(Stage::Review));
+        assert_eq!(
+            runtime.pipeline_stage("forge:pf-test:U1"),
+            Some(Stage::Review)
+        );
         assert_eq!(runtime.pipeline.attempt_of("forge:pf-test:U1"), Some(1));
     }
 
@@ -1661,7 +1748,10 @@ units:
         );
         runtime.observe_accepted_events(&[forged]);
 
-        assert_eq!(runtime.pipeline_stage("forge:pf-test:U1"), Some(Stage::Execute));
+        assert_eq!(
+            runtime.pipeline_stage("forge:pf-test:U1"),
+            Some(Stage::Execute)
+        );
         assert!(runtime.pending_spawns.is_empty());
     }
 
@@ -1684,7 +1774,10 @@ units:
         );
         runtime.observe_accepted_events(&[correction]);
 
-        assert_eq!(runtime.pipeline_stage("forge:pf-test:U1"), Some(Stage::Execute));
+        assert_eq!(
+            runtime.pipeline_stage("forge:pf-test:U1"),
+            Some(Stage::Execute)
+        );
         assert_eq!(runtime.pipeline.attempt_of("forge:pf-test:U1"), Some(0));
     }
 
@@ -2009,11 +2102,17 @@ units:
         runtime_a.sink.with_observations(|observations| {
             let pf_a_u1 = observations.iter().any(|obs| {
                 obs.plan_key == "pf-test"
-                    && obs.decisions.iter().any(|(uid, r)| uid == "U1" && r == "Admitted")
+                    && obs
+                        .decisions
+                        .iter()
+                        .any(|(uid, r)| uid == "U1" && r == "Admitted")
             });
             let pf_b_u1 = observations.iter().any(|obs| {
                 obs.plan_key == "pf-B"
-                    && obs.decisions.iter().any(|(uid, r)| uid == "U1" && r == "Admitted")
+                    && obs
+                        .decisions
+                        .iter()
+                        .any(|(uid, r)| uid == "U1" && r == "Admitted")
             });
             assert!(pf_a_u1, "pf-test U1 should be admitted on tick");
             assert!(pf_b_u1, "pf-B U1 should be admitted on tick");

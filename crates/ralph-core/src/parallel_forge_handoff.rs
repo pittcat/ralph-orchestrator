@@ -819,9 +819,9 @@ fn normalize_path_policy(
             && !path.starts_with('/')
             && !path.contains('*')
             && !path.contains('?')
-            && !path.split('/').any(|component| {
-                component.is_empty() || component == "." || component == ".."
-            });
+            && !path
+                .split('/')
+                .any(|component| component.is_empty() || component == "." || component == "..");
         if !valid {
             return Err(HandoffError::ParseError {
                 source: format!(
