@@ -158,8 +158,22 @@ fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
 }
 
 /// Bridge a `rusqlite::Error` into the plan-store error enum.
+///
+/// 2026-09-09-0917 plan F2 / U17: a row-mapper closure that
+/// returned a `DagStoreError::IntegerOverflow` (or any other
+/// structured `DagStoreError`) wrapped it in
+/// `rusqlite::Error::FromSqlConversionFailure` to satisfy the
+/// `query_row` closure signature. Detect that case and surface
+/// the structured variant; otherwise fall back to the legacy
+/// `IoError` so callers can still see non-DAG rusqlite failures
+/// (busy / IO / decode).
 #[cfg(feature = "supervisor-db")]
 fn plan_io_err(err: rusqlite::Error) -> DagStoreError {
+    if let rusqlite::Error::FromSqlConversionFailure(_, _, ref boxed) = err {
+        if let Some(dag_err) = boxed.downcast_ref::<DagStoreError>() {
+            return dag_err.clone();
+        }
+    }
     DagStoreError::IoError(err.to_string())
 }
 
@@ -214,8 +228,19 @@ fn plan_status_to_str(status: PlanStatus) -> &'static str {
 /// corrupt `status` or `unit_ids` column surfaces as a storage
 /// IO error via the FromSqlConversionFailure path — fail closed
 /// rather than guessing a status.
+///
+/// 2026-09-09-0917 plan F2 / U17: the `created_at_ms` column is
+/// decoded via `u64::try_from(raw).map_err(|_| IntegerOverflow)?
+/// instead of the previous silent `as u64` (which would corrupt
+/// a negative / overflowing column into a wildly large
+/// epoch-ms). The structured `DagStoreError::IntegerOverflow`
+/// is wrapped in `FromSqlConversionFailure` to satisfy the
+/// `query_row` closure signature; `plan_io_err` at the caller
+/// unwraps it back into a `DagStoreError::IntegerOverflow`.
 #[cfg(feature = "supervisor-db")]
-fn row_to_plan_registration(row: &rusqlite::Row<'_>) -> Result<PlanRegistration, rusqlite::Error> {
+fn row_to_plan_registration(
+    row: &rusqlite::Row<'_>,
+) -> Result<PlanRegistration, rusqlite::Error> {
     let unit_ids_raw: String = row.get("unit_ids")?;
     let status_raw: String = row.get("status")?;
     let status = parse_plan_status(&status_raw).map_err(|err| {
@@ -224,6 +249,18 @@ fn row_to_plan_registration(row: &rusqlite::Row<'_>) -> Result<PlanRegistration,
     let unit_ids = unit_ids_from_json(&unit_ids_raw).map_err(|err| {
         rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(err))
     })?;
+    let created_at_ms_raw: i64 = row.get("created_at_ms")?;
+    let created_at_ms = u64::try_from(created_at_ms_raw).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Integer,
+            Box::new(DagStoreError::IntegerOverflow {
+                field: "dag_plans.created_at_ms".to_string(),
+                expected: "u64".to_string(),
+                actual: created_at_ms_raw,
+            }),
+        )
+    })?;
     Ok(PlanRegistration {
         id: row.get("id")?,
         plan_key: row.get("plan_key")?,
@@ -231,7 +268,7 @@ fn row_to_plan_registration(row: &rusqlite::Row<'_>) -> Result<PlanRegistration,
         target_branch: row.get("target_branch")?,
         status,
         unit_ids,
-        created_at_ms: row.get::<_, i64>("created_at_ms")? as u64,
+        created_at_ms,
     })
 }
 
@@ -709,11 +746,22 @@ impl DagSchedulerStore for RusqliteDagSchedulerStore {
                 rusqlite::params![plan_key, unit_key],
                 |row| {
                     let pinned_at: i64 = row.get("pinned_at_ms")?;
+                    let pinned_at_ms = u64::try_from(pinned_at).map_err(|_| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            20,
+                            rusqlite::types::Type::Integer,
+                            Box::new(DagStoreError::IntegerOverflow {
+                                field: "dag_unit_bases.pinned_at_ms".to_string(),
+                                expected: "u64".to_string(),
+                                actual: pinned_at,
+                            }),
+                        )
+                    })?;
                     Ok(super::dag_store::UnitBaseRecord {
                         plan_key: row.get("plan_key")?,
                         unit_key: row.get("unit_key")?,
                         base_commit: row.get("base_commit")?,
-                        pinned_at_ms: u64::try_from(pinned_at).unwrap_or(0),
+                        pinned_at_ms,
                     })
                 },
             )
@@ -855,17 +903,39 @@ impl DagSchedulerStore for RusqliteDagSchedulerStore {
                 rusqlite::params![plan_key, unit_key, stage],
                 |row| {
                     let attempt: i64 = row.get("attempt")?;
+                    let attempt_u32 = u32::try_from(attempt).map_err(|_| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            21,
+                            rusqlite::types::Type::Integer,
+                            Box::new(DagStoreError::IntegerOverflow {
+                                field: "dag_stage_evidence.attempt".to_string(),
+                                expected: "u32".to_string(),
+                                actual: attempt,
+                            }),
+                        )
+                    })?;
                     let accepted_at: i64 = row.get("accepted_at_ms")?;
+                    let accepted_at_ms = u64::try_from(accepted_at).map_err(|_| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            22,
+                            rusqlite::types::Type::Integer,
+                            Box::new(DagStoreError::IntegerOverflow {
+                                field: "dag_stage_evidence.accepted_at_ms".to_string(),
+                                expected: "u64".to_string(),
+                                actual: accepted_at,
+                            }),
+                        )
+                    })?;
                     Ok(super::dag_store::StageEvidenceRecord {
                         plan_key: row.get("plan_key")?,
                         unit_key: row.get("unit_key")?,
                         stage: row.get("stage")?,
-                        attempt: u32::try_from(attempt).unwrap_or(0),
+                        attempt: attempt_u32,
                         accepted_commit: row.get("accepted_commit")?,
                         base_commit: row.get("base_commit")?,
                         evidence_token: row.get("evidence_token")?,
                         evidence_fingerprint: row.get("evidence_fingerprint")?,
-                        accepted_at_ms: u64::try_from(accepted_at).unwrap_or(0),
+                        accepted_at_ms,
                     })
                 },
             )
@@ -883,25 +953,73 @@ impl DagSchedulerStore for RusqliteDagSchedulerStore {
 /// corrupt `status` column surfaces as a storage error via the
 /// FromSqlConversionFailure path — fail closed rather than
 /// guessing a status.
+///
+/// 2026-09-09-0917 plan F2 / U17: the `created_at_ms`,
+/// `activated_at_ms`, and `consumed_at_ms` columns are decoded
+/// via `u64::try_from(raw).map_err(|_| IntegerOverflow)?`
+/// instead of the previous silent `as u64` casts (which would
+/// silently flip a negative / overflowing column into a wildly
+/// large epoch-ms and let a poisoned receipt pass through
+/// activation / consumption). The structured
+/// `DagStoreError::IntegerOverflow` is wrapped in
+/// `FromSqlConversionFailure` to satisfy the row mapper closure
+/// signature; `plan_io_err` at the caller unwraps it back into
+/// a `DagStoreError::IntegerOverflow` for the store caller.
 #[cfg(feature = "supervisor-db")]
 fn row_to_receipt(row: &rusqlite::Row<'_>) -> Result<DagPlanReceipt, rusqlite::Error> {
     let status_raw: String = row.get("status")?;
     let status = parse_receipt_status(&status_raw).map_err(|err| {
         rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(err))
     })?;
+    let created_at_ms_raw: i64 = row.get("created_at_ms")?;
+    let created_at_ms = u64::try_from(created_at_ms_raw).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            10,
+            rusqlite::types::Type::Integer,
+            Box::new(DagStoreError::IntegerOverflow {
+                field: "dag_plan_receipts.created_at_ms".to_string(),
+                expected: "u64".to_string(),
+                actual: created_at_ms_raw,
+            }),
+        )
+    })?;
+    let activated_at_ms = match row.get::<_, Option<i64>>("activated_at_ms")? {
+        Some(raw) => Some(u64::try_from(raw).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                11,
+                rusqlite::types::Type::Integer,
+                Box::new(DagStoreError::IntegerOverflow {
+                    field: "dag_plan_receipts.activated_at_ms".to_string(),
+                    expected: "Option<u64>".to_string(),
+                    actual: raw,
+                }),
+            )
+        })?),
+        None => None,
+    };
+    let consumed_at_ms = match row.get::<_, Option<i64>>("consumed_at_ms")? {
+        Some(raw) => Some(u64::try_from(raw).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                12,
+                rusqlite::types::Type::Integer,
+                Box::new(DagStoreError::IntegerOverflow {
+                    field: "dag_plan_receipts.consumed_at_ms".to_string(),
+                    expected: "Option<u64>".to_string(),
+                    actual: raw,
+                }),
+            )
+        })?),
+        None => None,
+    };
     Ok(DagPlanReceipt {
         plan_key: row.get("plan_key")?,
         artifact_path: row.get("artifact_path")?,
         artifact_digest: row.get("artifact_digest")?,
         target_branch: row.get("target_branch")?,
         status,
-        created_at_ms: row.get::<_, i64>("created_at_ms")? as u64,
-        activated_at_ms: row
-            .get::<_, Option<i64>>("activated_at_ms")?
-            .map(|v| v as u64),
-        consumed_at_ms: row
-            .get::<_, Option<i64>>("consumed_at_ms")?
-            .map(|v| v as u64),
+        created_at_ms,
+        activated_at_ms,
+        consumed_at_ms,
     })
 }
 
@@ -1974,6 +2092,201 @@ mod tests {
         let store = RusqliteDagPlanReceiptStore::open(dir.path().join("dag.db"))
             .expect("open fresh receipt store");
         (dir, store)
+    }
+
+    /// 2026-09-09-0917 plan F2 / U17: corrupt timestamp / counter
+    /// columns must surface as `DagStoreError::IntegerOverflow` —
+    /// never silently zero / wrap. `u64` columns (plan + receipt
+    /// timestamps) reject negative `i64` (`-1`); `u32` columns
+    /// (`dag_stage_evidence.attempt`) additionally reject
+    /// `i64::MAX` (above u32::MAX). A valid `i64` round-trips
+    /// losslessly through every row mapper.
+    #[test]
+    fn integer_overflow() {
+        let (dir, plan_store) = fresh_plan_store();
+        let receipt_store = plan_store.shared_with_receipts();
+
+        // Baseline: a valid `i64` round-trips losslessly through
+        // both row mappers (plan + receipt).
+        plan_store.register_plan(&plan("p1", "d1")).expect("plan");
+        receipt_store
+            .record_receipt(&receipt("p1", "d1"))
+            .expect("receipt");
+        let fetched_plan = plan_store.get_plan("p1").expect("get").expect("exists");
+        assert_eq!(fetched_plan.created_at_ms, 1_700_000_000_000);
+        let fetched_receipt = receipt_store
+            .get_receipt("p1")
+            .expect("get")
+            .expect("exists");
+        assert_eq!(fetched_receipt.created_at_ms, 1_700_000_000_000);
+        assert_eq!(fetched_receipt.activated_at_ms, None);
+        assert_eq!(fetched_receipt.consumed_at_ms, None);
+
+        // Corrupt plan.created_at_ms with -1 — `u64::try_from`
+        // rejects negative values (the only failing input class
+        // for `u64::try_from(i64)`, since `u64::MAX > i64::MAX`).
+        {
+            let conn = plan_store.inner.conn.lock().expect("conn");
+            conn.execute(
+                "UPDATE dag_plans SET created_at_ms = ?1 WHERE plan_key = 'p1'",
+                rusqlite::params![-1_i64],
+            )
+            .expect("corrupt plan ts (neg)");
+        }
+        match plan_store.get_plan("p1").expect_err("negative must error") {
+            DagStoreError::IntegerOverflow {
+                field,
+                expected,
+                actual,
+            } => {
+                assert_eq!(field, "dag_plans.created_at_ms");
+                assert_eq!(expected, "u64");
+                assert_eq!(actual, -1);
+            }
+            other => panic!("expected IntegerOverflow, got {other:?}"),
+        }
+
+        // Restore the plan row before testing the receipt store
+        // (plan + receipt share the same DB file via
+        // shared_with_receipts).
+        {
+            let conn = plan_store.inner.conn.lock().expect("conn");
+            conn.execute(
+                "UPDATE dag_plans SET created_at_ms = ?1 WHERE plan_key = 'p1'",
+                rusqlite::params![1_700_000_000_000_i64],
+            )
+            .expect("restore plan ts");
+        }
+
+        // Corrupt receipt.created_at_ms with -1.
+        {
+            let conn = receipt_store.inner.conn.lock().expect("conn");
+            conn.execute(
+                "UPDATE dag_plan_receipts SET created_at_ms = ?1 WHERE plan_key = 'p1'",
+                rusqlite::params![-1_i64],
+            )
+            .expect("corrupt receipt created");
+        }
+        match receipt_store
+            .get_receipt("p1")
+            .expect_err("negative created must error")
+        {
+            DagStoreError::IntegerOverflow {
+                field,
+                expected,
+                actual,
+            } => {
+                assert_eq!(field, "dag_plan_receipts.created_at_ms");
+                assert_eq!(expected, "u64");
+                assert_eq!(actual, -1);
+            }
+            other => panic!("expected IntegerOverflow, got {other:?}"),
+        }
+
+        // Restore and corrupt receipt.activated_at_ms with -1.
+        {
+            let conn = receipt_store.inner.conn.lock().expect("conn");
+            conn.execute(
+                "UPDATE dag_plan_receipts \
+                 SET created_at_ms = ?1, activated_at_ms = ?2 \
+                 WHERE plan_key = 'p1'",
+                rusqlite::params![1_700_000_000_000_i64, -1_i64],
+            )
+            .expect("corrupt receipt activated");
+        }
+        match receipt_store
+            .get_receipt("p1")
+            .expect_err("negative activated must error")
+        {
+            DagStoreError::IntegerOverflow {
+                field,
+                expected,
+                actual,
+            } => {
+                assert_eq!(field, "dag_plan_receipts.activated_at_ms");
+                assert_eq!(expected, "Option<u64>");
+                assert_eq!(actual, -1);
+            }
+            other => panic!("expected IntegerOverflow, got {other:?}"),
+        }
+
+        // Restore and corrupt receipt.consumed_at_ms with -1.
+        {
+            let conn = receipt_store.inner.conn.lock().expect("conn");
+            conn.execute(
+                "UPDATE dag_plan_receipts \
+                 SET activated_at_ms = NULL, consumed_at_ms = ?1 \
+                 WHERE plan_key = 'p1'",
+                rusqlite::params![-1_i64],
+            )
+            .expect("corrupt receipt consumed");
+        }
+        match receipt_store
+            .get_receipt("p1")
+            .expect_err("negative consumed must error")
+        {
+            DagStoreError::IntegerOverflow {
+                field,
+                expected,
+                actual,
+            } => {
+                assert_eq!(field, "dag_plan_receipts.consumed_at_ms");
+                assert_eq!(expected, "Option<u64>");
+                assert_eq!(actual, -1);
+            }
+            other => panic!("expected IntegerOverflow, got {other:?}"),
+        }
+
+        // u32 path: `dag_stage_evidence.attempt` is `u32`, so
+        // `i64::MAX` (above u32::MAX) AND any negative value must
+        // fail closed. Seed a row first, then poison `attempt`.
+        {
+            let conn = receipt_store.inner.conn.lock().expect("conn");
+            conn.execute(
+                "INSERT INTO dag_stage_evidence \
+                 (plan_key, unit_key, stage, attempt, accepted_commit, base_commit, \
+                  evidence_token, evidence_fingerprint, accepted_at_ms) \
+                 VALUES ('p1', 'U1', 'execute', 1, 'acc', 'base', 'tok', 'fp', 1700000000000)",
+                [],
+            )
+            .expect("seed stage evidence");
+        }
+        let ok = plan_store
+            .latest_stage_evidence("p1", "U1", "execute")
+            .expect("baseline read")
+            .expect("exists");
+        assert_eq!(ok.attempt, 1);
+
+        {
+            let conn = receipt_store.inner.conn.lock().expect("conn");
+            conn.execute(
+                "UPDATE dag_stage_evidence SET attempt = ?1 \
+                 WHERE plan_key = 'p1' AND unit_key = 'U1' AND stage = 'execute'",
+                rusqlite::params![i64::MAX],
+            )
+            .expect("corrupt attempt (overflow)");
+        }
+        match plan_store
+            .latest_stage_evidence("p1", "U1", "execute")
+            .expect_err("overflow attempt must error")
+        {
+            DagStoreError::IntegerOverflow {
+                field,
+                expected,
+                actual,
+            } => {
+                assert_eq!(field, "dag_stage_evidence.attempt");
+                assert_eq!(expected, "u32");
+                assert_eq!(actual, i64::MAX);
+            }
+            other => panic!("expected IntegerOverflow, got {other:?}"),
+        }
+
+        // Plan + receipt + stage_evidence all live in one DB file —
+        // keep `dir` alive until the test exits so on-disk rows we
+        // corrupted above stay reachable through close().
+        drop((plan_store, receipt_store));
+        let _ = dir;
     }
 
     #[test]

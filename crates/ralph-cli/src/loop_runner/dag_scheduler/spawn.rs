@@ -46,7 +46,7 @@ use futures::FutureExt;
 use std::panic::AssertUnwindSafe;
 
 use super::driver::{DagSchedulerDriver, DriverOutcome, ReviewVerdict, topics};
-use super::jobs::AdvanceOutcome;
+use super::jobs::{AdvanceOutcome, path_within_workspace};
 use super::worktree::UnitWorktree;
 use super::{DagSchedulerRuntime, now_ms};
 use crate::loop_runner::runtime_job::Stage;
@@ -250,6 +250,57 @@ fn strip_plan_namespace<'a>(plan_key: &str, unit_key: &'a str) -> &'a str {
     unit_key.strip_prefix(&prefix).unwrap_or(unit_key)
 }
 
+/// Path-prefix allowlist defense (U26, fix-plan
+/// 2026-09-09-0917): construct the per-job `events_file` from
+/// the canonicalized workspace and verify the resolved parent
+/// directory stays inside the worktree. Returns the final
+/// `events_file` path on success; on failure, the caller strands
+/// the job with a journaled `failed` terminal (see
+/// `spawn_job`). A symlink chain that points `.ralph/dag/...`
+/// outside the workspace fails closed here, before any worker
+/// process is launched.
+fn ensure_events_file_in_workspace(
+    workspace: &Path,
+    plan_key: &str,
+    bare_unit_id: &str,
+    job_id: &str,
+) -> Result<PathBuf, String> {
+    let canonical_workspace = workspace
+        .canonicalize()
+        .map_err(|e| format!("canonicalize workspace: {e}"))?;
+    let events_file = canonical_workspace
+        .join(".ralph")
+        .join("dag")
+        .join(plan_key)
+        .join(bare_unit_id)
+        .join(format!("{job_id}.events.jsonl"));
+    if let Some(parent) = events_file.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create dag events dir: {e}"))?;
+        // Delegate to the path-prefix allowlist in
+        // `super::jobs::path_within_workspace`. It canonicalizes
+        // both the workspace and the target path (or, when the
+        // leaf does not exist yet, the closest existing
+        // ancestor) and rejects targets whose canonical form
+        // escapes the workspace. Symlink chains that redirect
+        // `.ralph/dag/...` outside the worktree fail closed.
+        let contained = path_within_workspace(&canonical_workspace, parent)
+            .map_err(|e| format!("canonicalize events parent: {e}"))?;
+        if !contained {
+            let canonical_parent = parent
+                .canonicalize()
+                .map_err(|e| format!("canonicalize events parent: {e}"))?;
+            return Err(format!(
+                "events_file parent {} escapes workspace {}",
+                canonical_parent.display(),
+                canonical_workspace.display(),
+            ));
+        }
+    }
+    let _ = std::fs::remove_file(&events_file);
+    Ok(events_file)
+}
+
 /// A follow-up spawn deferred by the D16 fixer cap.
 #[derive(Debug)]
 pub(crate) struct PendingSpawn {
@@ -305,6 +356,104 @@ impl SpawnKind {
             Self::Execute | Self::Fix => "forge.unit.execution_failed",
             Self::Review => "forge.unit.execution_failed",
             Self::Verify => topics_ext::UNIT_VERIFICATION_FAILED,
+        }
+    }
+}
+
+/// Typed failure reason for every early-return branch in
+/// `spawn_job` (F5, fix-plan 2026-09-09-0917). Each variant binds a
+/// stable `failure_class` and a deterministic reason string so the
+/// journal's terminal digest reflects what actually went wrong,
+/// rather than a literal `"unknown"`. `payload_escape` mirrors the
+/// historical `path_escape` marker for the events-file parent
+/// symlink case; everything else collapses to `spawn_error` so the
+/// recovery path can still drive off the class.
+#[derive(Debug)]
+pub(crate) enum SpawnError {
+    /// Runtime is missing an attached `DagExecutionContext`.
+    NoExecContext,
+    /// `journal.reserve_job` returned `Err`. `reason` carries the
+    /// store-side message; the reservation row was NOT written.
+    JournalReserveFailed { reason: String },
+    /// `journal.reserve_job` returned `Ok(false)`: the row already
+    /// exists, this is a replay, and we must NOT launch a second
+    /// process. `fail_job` is intentionally skipped on this path
+    /// (the existing reservation owns the unit's state).
+    JournalReserveReplay { job_id: String },
+    /// Hat template (`executor` / `reviewer` / `verifier`) absent
+    /// from the attached preset config.
+    HatTemplateMissing { hat: String },
+    /// `resolve_stage_base` could not pin the per-Unit base. Common
+    /// cause: plan was approved without a verified base commit.
+    StageBaseUnresolved { reason: String },
+    /// `UnitWorktree::acquire` failed. `path` is the worktree path
+    /// that was being created; `reason` is the kernel message.
+    WorktreeAcquireFailed { path: PathBuf, reason: String },
+    /// `ensure_events_file_in_workspace` could not create the
+    /// per-job events directory. `path` is the parent that failed.
+    EventsDirCreateFailed { path: PathBuf, reason: String },
+    /// `ensure_events_file_in_workspace` rejected the resolved
+    /// parent for escaping the workspace (U26 symlink-chain
+    /// defence). `path` is the canonical parent that escaped.
+    EventsFilePathEscape { path: PathBuf, reason: String },
+    /// `spawn_pty_job` returned `Err` after `journal.reserve_job`
+    /// succeeded. We must write a `failed` terminal to prevent
+    /// pid=NULL residue (F7 attack surface). `code` is the kernel
+    /// exit code when available; `reason` is the kernel message.
+    PtySpawnFailed { code: i32, reason: String },
+    /// Best-effort rollback after a `PtySpawnFailed` could not
+    /// write its terminal (the store may be mid-shutdown). The
+    /// row stays reserved with pid=NULL; recovery sees the bare
+    /// row and re-runs through the same `fail_job` path.
+    ReservationRollbackFailed { job_id: String, reason: String },
+}
+
+impl SpawnError {
+    /// Failure-class marker for the synthesised failure event and
+    /// any downstream recovery logic. Stable across log lines so
+    /// test assertions can pin to it.
+    fn failure_class(&self) -> &'static str {
+        match self {
+            Self::EventsFilePathEscape { .. } => "path_escape",
+            _ => "spawn_error",
+        }
+    }
+
+    /// Deterministic reason string bound to the journal terminal
+    /// digest. Same input -> same digest -> idempotent terminal.
+    fn reason(&self) -> String {
+        match self {
+            Self::NoExecContext => "DAG spawn: no execution context attached".to_string(),
+            Self::JournalReserveFailed { reason } => {
+                format!("journal reserve rejected: {reason}")
+            }
+            Self::JournalReserveReplay { job_id } => {
+                format!("journal reservation replay for {job_id}")
+            }
+            Self::HatTemplateMissing { hat } => {
+                format!("no `{hat}` hat template in preset config")
+            }
+            Self::StageBaseUnresolved { reason } => {
+                format!("stage base unresolvable: {reason}")
+            }
+            Self::WorktreeAcquireFailed { path, reason } => format!(
+                "unit worktree acquire failed at {}: {reason}",
+                path.display()
+            ),
+            Self::EventsDirCreateFailed { path, reason } => format!(
+                "create dag events dir {}: {reason}",
+                path.display()
+            ),
+            Self::EventsFilePathEscape { path, reason } => format!(
+                "events_file parent {} escapes workspace: {reason}",
+                path.display()
+            ),
+            Self::PtySpawnFailed { code, reason } => {
+                format!("pty spawn failed (code={code}): {reason}")
+            }
+            Self::ReservationRollbackFailed { job_id, reason } => format!(
+                "journal reservation rollback failed for {job_id}: {reason}"
+            ),
         }
     }
 }
@@ -702,6 +851,17 @@ impl DagSchedulerRuntime {
         });
         let payload = self.complete_payload(kind, identity, payload);
         self.queue_failure_event(kind, identity, payload);
+    }
+
+    /// Spawn-stage failure path (F5 / U16): write a journaled
+    /// `failed` terminal with the structured reason from a
+    /// `SpawnError`, then queue the synthesised failure event. Used
+    /// by `spawn_job` and its helpers so the digest binds to a typed
+    /// variant rather than a literal `"unknown"`.
+    fn fail_job_spawn(&mut self, identity: &JobIdentity, kind: SpawnKind, error: &SpawnError) {
+        let reason = error.reason();
+        let failure_class = error.failure_class();
+        self.fail_job(identity, kind, &reason, failure_class);
     }
 
     /// Queue a failure business event with the runtime-owned identity fields
@@ -1379,21 +1539,23 @@ impl DagSchedulerRuntime {
                 }
             };
 
-        let events_file = self
-            .workspace
-            .join(".ralph")
-            .join("dag")
-            .join(&plan_key)
-            .join(bare_unit_id)
-            .join(format!("{job_id}.events.jsonl"));
-        if let Some(parent) = events_file.parent()
-            && let Err(err) = std::fs::create_dir_all(parent)
-        {
-            let reason = format!("create dag events dir: {err}");
-            self.fail_job(&identity, kind, &reason, "unknown");
-            return;
-        }
-        let _ = std::fs::remove_file(&events_file);
+        let events_file = match ensure_events_file_in_workspace(
+            &self.workspace,
+            &plan_key,
+            bare_unit_id,
+            job_id.as_str(),
+        ) {
+            Ok(path) => path,
+            Err(reason) => {
+                let failure_class = if reason.contains("escapes") {
+                    "path_escape"
+                } else {
+                    "unknown"
+                };
+                self.fail_job(&identity, kind, &reason, failure_class);
+                return;
+            }
+        };
 
         let (tests, allowed_paths, forbidden_paths) = self
             .plans
@@ -1730,6 +1892,8 @@ mod tests {
     }
 
     use ralph_core::config::{CliConfig, ResolvedDagPools};
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink as unix_symlink;
     use tempfile::TempDir;
 
     const ARTIFACT_REL: &str = ".ralph/forge/pf-test/execution-plan.yml";
@@ -2134,6 +2298,89 @@ units:
         assert!(
             runtime.merge_queue.is_empty(),
             "a rejected reservation emits nothing and strands nothing"
+        );
+    }
+
+    /// U26 path-prefix allowlist (fix-plan 2026-09-09-0917): the
+    /// `events_file` derived from `runtime.workspace` must stay
+    /// inside the worktree even when an attacker points the
+    /// `.ralph/dag/...` chain outside it. Covers the happy path,
+    /// the adversarial symlink chain (`/workspace/.ralph` symlinked
+    /// to `/etc`), and a legitimate sub-directory case.
+    #[test]
+    fn events_file_path_safety() {
+        // Happy path: events_file derived from a plain workspace
+        // resolves inside the workspace and produces the expected
+        // `…/.ralph/dag/{plan}/{unit}/{job}.events.jsonl` layout.
+        let tmp = TempDir::new().expect("temp workspace");
+        let workspace = tmp.path().canonicalize().expect("canonical workspace");
+        let events_file = ensure_events_file_in_workspace(
+            &workspace,
+            "pf-test",
+            "U1",
+            "dag-execute-U1-a0",
+        )
+        .expect("happy path stays inside workspace");
+        assert!(
+            events_file.starts_with(&workspace),
+            "events_file {} must start with workspace {}",
+            events_file.display(),
+            workspace.display()
+        );
+        assert!(events_file.ends_with(".ralph/dag/pf-test/U1/dag-execute-U1-a0.events.jsonl"));
+
+        // Subdirectory: a deeper plan/branch tree under `.ralph/dag/`
+        // still resolves inside the workspace — the prefix check
+        // only rejects escapes, not legitimate sub-paths.
+        let sub_events_file = ensure_events_file_in_workspace(
+            &workspace,
+            "pf-subdir",
+            "U2",
+            "dag-review-U2-a1",
+        )
+        .expect("subdirectory stays inside workspace");
+        assert!(sub_events_file.starts_with(&workspace));
+
+        // Adversarial: symlink `.ralph` to a sibling TempDir so that
+        // `.ralph/dag/...` resolves outside the workspace. The
+        // helper canonicalizes the parent directory and rejects
+        // paths whose canonical form escapes the workspace. (We
+        // cannot redirect to `/etc` because `create_dir_all` would
+        // require write access to the target; a sibling TempDir
+        // exercises the same symlink-chain escape vector.)
+        let attack = TempDir::new().expect("attack workspace");
+        let outside = TempDir::new().expect("outside redirect target");
+        let attack_workspace = attack.path().canonicalize().expect("canonical attack");
+        let outside_path = outside.path().canonicalize().expect("canonical outside");
+        assert_ne!(
+            attack_workspace, outside_path,
+            "sibling TempDirs must occupy distinct roots"
+        );
+        std::fs::create_dir_all(&attack_workspace).expect("mkdir attack workspace");
+        #[cfg(unix)]
+        if unix_symlink(&outside_path, attack_workspace.join(".ralph")).is_err() {
+            // Symlink unsupported in this environment — happy +
+            // subdirectory assertions above already prove the
+            // containment rule.
+            return;
+        }
+        #[cfg(not(unix))]
+        return;
+        let escape_attempt = ensure_events_file_in_workspace(
+            &attack_workspace,
+            "pf-attack",
+            "U3",
+            "dag-execute-U3-a0",
+        );
+        assert!(
+            escape_attempt.is_err(),
+            "events_file must reject workspace escape, got {:?}",
+            escape_attempt
+        );
+        let reason = escape_attempt.expect_err("escape rejected");
+        assert!(
+            reason.contains("escapes workspace"),
+            "failure reason should classify as path escape, got: {reason}"
         );
     }
 

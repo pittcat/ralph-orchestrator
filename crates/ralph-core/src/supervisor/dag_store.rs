@@ -107,6 +107,20 @@ pub enum DagStoreError {
     },
     #[error("DAG store IO error: {0}")]
     IoError(String),
+    /// 2026-09-09-0917 plan F2 / U17 (fail-closed integer decode):
+    /// a SQLite column read returned an `i64` that cannot be
+    /// losslessly narrowed to its target type (`u64` /
+    /// `u32`) — either negative or above the target's `MAX`.
+    /// Silent `unwrap_or(0)` / `as u64` would corrupt persisted
+    /// timestamps or attempt counters; the rusqlite stores must
+    /// surface this so the caller can refuse to resume from a
+    /// poisoned row.
+    #[error("integer overflow in {field}: expected {expected}, got {actual}")]
+    IntegerOverflow {
+        field: String,
+        expected: String,
+        actual: i64,
+    },
 }
 
 /// Lifecycle status of a registered canonical plan. The

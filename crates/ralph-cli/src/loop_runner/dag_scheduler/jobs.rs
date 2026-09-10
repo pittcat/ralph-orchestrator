@@ -17,8 +17,70 @@
 //! graph (U1 / U4).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::Path;
 
 use super::super::runtime_job::{JobToken, RuntimeJobError, Stage};
+
+// ---------------------------------------------------------------------------
+// Path-prefix allowlist (U26, fix-plan 2026-09-09-0917).
+// ---------------------------------------------------------------------------
+
+/// Canonical-path-prefix containment check used to defend the
+/// per-job `events_file` against symlink-chain escapes
+/// (`/workspace/.ralph/dag/...` redirected outside the worktree).
+///
+/// Returns `Ok(true)` when `target` resolves to a path strictly
+/// inside `workspace` after canonicalization, `Ok(false)` when
+/// `target` escapes the workspace, and an error when
+/// canonicalization itself fails (treated as fail-closed). For
+/// non-existent targets (e.g. the events file before it is
+/// created), the parent directory is canonicalized instead, which
+/// still resolves any symlink-chain attack against the workspace
+/// prefix because intermediate components of the path are walked
+/// through `canonicalize`.
+pub fn path_within_workspace(workspace: &Path, target: &Path) -> std::io::Result<bool> {
+    let canonical_workspace = workspace.canonicalize()?;
+    let resolved_target = match target.canonicalize() {
+        Ok(p) => p,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = target.parent() {
+                parent.canonicalize()?
+            } else {
+                return Err(err);
+            }
+        }
+        Err(err) => return Err(err),
+    };
+    Ok(resolved_target.starts_with(&canonical_workspace))
+}
+
+// ---------------------------------------------------------------------------
+// SHA validator (U5, fix-plan 2026-09-09-0917 F10/R5).
+// ---------------------------------------------------------------------------
+
+/// Lower-level SHA character-set + length check. Returns `true` for
+/// 40-char SHA-1 or 64-char SHA-256 lowercase hex; rejects empty,
+/// single-character, `0x`-prefixed, uppercase, or any other length.
+///
+/// U5 sync note: this is the single validator the runtime
+/// persists on for OID character-set / length. The CLI-side
+/// `JobIdentity` struct lives in
+/// `crates/ralph-core/src/supervisor/dag_store_rusqlite/jobs.rs`;
+/// any field it exposes that carries a commit OID (planned for
+/// future `evidence` / `forge.exec.*` payload extensions) MUST
+/// route through this helper to keep the F10 fail-closed
+/// invariant intact across both crates. Mirror the regex here if
+/// the validator moves to a shared location.
+#[allow(dead_code)] // sync target for core's `JobIdentity::validate()`
+pub fn is_valid_sha(value: &str) -> bool {
+    let len = value.len();
+    if len != 40 && len != 64 {
+        return false;
+    }
+    value
+        .bytes()
+        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
 
 // ---------------------------------------------------------------------------
 // Pool caps.
@@ -885,5 +947,36 @@ mod tests {
         // override.
         assert_eq!(explicit.cap_for(Stage::Review), 3);
         assert_eq!(default, DagPools::new(4, 2, 3, 2).with_fixer(3));
+    }
+
+    // ---- U5 SHA validator (F10 fail-closed) ----
+
+    /// U5/R5: 40-char SHA-1 and 64-char SHA-256 lowercase hex
+    /// both accepted; uppercase / non-hex / wrong length rejected.
+    /// The validator is the F10 fail-closed backbone: any field
+    /// that could carry an OID must route through it.
+    #[test]
+    fn is_valid_sha_accepts_40_and_64_lowercase_hex() {
+        assert!(is_valid_sha(&"a".repeat(40)));
+        assert!(is_valid_sha(&"0".repeat(40)));
+        assert!(is_valid_sha(&"f".repeat(40)));
+        assert!(is_valid_sha(&"0123456789abcdef".repeat(4)));
+        assert!(is_valid_sha(&"f".repeat(64)));
+        assert!(is_valid_sha(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ));
+    }
+
+    #[test]
+    fn is_valid_sha_rejects_invalid_lengths_and_chars() {
+        assert!(!is_valid_sha(""));
+        assert!(!is_valid_sha("a"));
+        assert!(!is_valid_sha(&"a".repeat(39)));
+        assert!(!is_valid_sha(&"a".repeat(41)));
+        assert!(!is_valid_sha(&"a".repeat(63)));
+        assert!(!is_valid_sha(&"a".repeat(65)));
+        assert!(!is_valid_sha(&"A".repeat(40)), "uppercase rejected");
+        assert!(!is_valid_sha(&"g".repeat(40)), "non-hex rejected");
+        assert!(!is_valid_sha("0x1234"), "0x prefix rejected");
     }
 }
