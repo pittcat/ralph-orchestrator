@@ -163,9 +163,9 @@ schemas:
         source: "executor extracts from plan_path Implementation Units section"
         fill_rule: "array of U-ID strings; preserve order; settlement invariant: planned_units = disjoint union(completed_units, failed_units, blocked_units, skipped_units)"
       completed_units:
-        meaning: "ordered array of U-IDs that reached a commit this run"
-        source: "executor derives from git log over the executor range"
-        fill_rule: "subset of planned_units; alignment will flag any U missing here as residual; emit work.done (not work.failed) whenever this set is non-empty"
+        meaning: "ordered array of U-IDs whose implementation commit and Unit-level acceptance evidence were independently settled"
+        source: "executor's per-Unit settlement in decisions_file, verified by precheck-work.done"
+        fill_rule: "subset of planned_units; never derive from commit-subject text alone; every entry requires an exact commit SHA, non-skeleton implementation diff, and Unit acceptance evidence"
       baseline_verification_status:
         meaning: "result of the Step 1.75 baseline-snapshot verifier (green / red / unknown / skipped)"
         source: "executor runs the baseline-verifier subagent"
@@ -221,9 +221,9 @@ schemas:
         source: "executor runs `git diff --shortstat <DIFF_BASE>..HEAD`"
         fill_rule: "integer >= 0; recompute on every emit attempt"
       commit_count:
-        meaning: "commits in DIFF_BASE..HEAD attributable to executor; one per passed Unit"
+        meaning: "total commits in DIFF_BASE..HEAD attributable to executor; an auxiliary consistency count, not Unit completion proof"
         source: "executor runs `git rev-list --count <DIFF_BASE>..HEAD`"
-        fill_rule: "integer; must be >= the number of completed_units"
+        fill_rule: "integer; must be >= the number of completed_units, while each Unit still needs its own exact commit/evidence mapping"
       attempted_units:
         meaning: "ordered U-IDs for which a Unit subagent was actually dispatched and returned an outcome"
         source: "executor's per-Unit dispatch log in decisions_file"
@@ -241,13 +241,13 @@ schemas:
         source: "flow-audit and git-log evidence"
         fill_rule: "array of U-ID strings; remaining work, context pressure, or elapsed time are not skip reasons; emit only after full walk of remaining independent Units"
       decisions_file:
-        meaning: "execution ledger containing dispatch, acceptance, commit, failure, and dependency evidence"
+        meaning: "execution ledger containing per-Unit dispatch, acceptance command/result, exact commit SHA, failure, and dependency evidence"
         source: "executor writes .ralph/agent/decisions.md"
-        fill_rule: "literal .ralph/agent/decisions.md after recording every planned Unit's disposition"
+        fill_rule: "literal .ralph/agent/decisions.md after recording every planned Unit's disposition; each completed Unit must have inspectable implementation and acceptance evidence"
       execution_status:
-        meaning: "overall execution outcome: complete when every planned Unit reached a commit; partial when any Unit failed, was blocked, or was skipped, or when all Units were blocked off a prior dependency failure (zero failed and zero completed but the dependency chain broke); partial is a settlement bill, not a failure — it carries the residual Unit classification for downstream processing"
+        meaning: "overall execution outcome: complete only when every planned Unit has passed implementation and Unit-level acceptance; partial records residual work but is rejected by this preset's precheck and cannot activate downstream hats"
         source: "executor settlement audit"
-        fill_rule: "one of complete, partial; complete only when completed_units == planned_units; partial when failed_units / blocked_units / skipped_units is non-empty or completed_units is a proper subset of planned_units"
+        fill_rule: "one of complete, partial; this preset forwards work.done only for complete with completed_units == planned_units and failed_units / blocked_units / skipped_units all empty"
     examples:
       - plan_name: "2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan"
         plan_path: "docs/plans/2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan.md"

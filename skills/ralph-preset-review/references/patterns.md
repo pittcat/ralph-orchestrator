@@ -53,6 +53,9 @@ plan-gate / work.start
   进对应 bill 字段，下游按 residual 处理）；`work.failed` 只保留给零交付
   dead-end（`completed_units` 为空，`reason` 以 `unreachable` /
   `no_deliverable_commits` / `cannot_produce_handoff` 开头）。
+  例外：`ce-executor-pipeline` 的 `precheck-work.done` 是 complete-only
+  收口；partial `work.done` 只能作为 executor recovery candidate，必须被
+  gate 拒绝并 resume，不能进入 test/review 下游。
   `new_business_regressions_count` / `flaky_or_environmental_count` 是
   report-only：诚实写进 `verification_delta_file` 与
   `post_verification_status`，非零不得强制 `work.failed` 或
