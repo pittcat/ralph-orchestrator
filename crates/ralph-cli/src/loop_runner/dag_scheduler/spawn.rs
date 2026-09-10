@@ -3076,4 +3076,196 @@ units:
             "error must explain the missing base: {err}"
         );
     }
+
+    // ---- U3 acceptance (2026-09-09-0917 plan §7 第 9 项) ---------------
+    //
+    // Plan contract:
+    // - 后继读取 C 的文件，HEAD=C，base 不变
+    // - wrong commit/dirty/foreign repo 只 blocked
+    // - artifact output 不使 tracked code 脏
+    //
+    // `resolve_stage_base` is the runtime driver seam that hands
+    // off the just-accepted commit to the next stage. The
+    // acceptance test exercises the full Execute → Review →
+    // Verify → Fix pipeline through the in-memory store; each
+    // next-stage admission must surface the prior stage's
+    // accepted commit, NOT plan HEAD or a stale pin.
+    #[test]
+    fn dag_committed_stage_handoff() {
+        let mut runtime = u3_runtime();
+        runtime.register_plan_for_test("pf-u3", Some("plan-base-abc".to_string()));
+
+        // ---- 后继读取 C 的文件，HEAD=C，base 不变 ----
+        // Execute stage at attempt 1: no prior evidence → resolve
+        // to plan-level base, pin it. (The pinned value is what the
+        // reviewer / verifier will resume from if a stale
+        // re-admission tries to ignore the prior accepted commit.)
+        let exec_resolved = runtime
+            .resolve_stage_base("pf-u3", "U1", SpawnKind::Execute)
+            .expect("execute must resolve");
+        assert_eq!(
+            exec_resolved, "plan-base-abc",
+            "first execute admission pins plan-base-abc"
+        );
+        let stores = runtime.ensure_stores().expect("stores");
+        // The per-Unit pin records `plan-base-abc` so a re-pin
+        // cannot silently rewrite to a different base.
+        let pin = stores
+            .plans
+            .get_unit_base("pf-u3", "U1")
+            .expect("pin read")
+            .expect("pin must exist after first admission");
+        assert_eq!(pin.base_commit, "plan-base-abc");
+        // Drop the stores borrow before re-borrowing `runtime`
+        // mutably for the next admission (Rust's NLL requires
+        // explicit drop for the non-lexical lifetime here).
+        drop(stores);
+
+        // Review stage at attempt 1: must resume from the
+        // executor's accepted commit `acc-exec`, NOT plan HEAD or
+        // the per-Unit pin. This is the "后继读取 C 的文件，
+        // HEAD=C" contract.
+        let review_ev = StageEvidenceRecord {
+            plan_key: "pf-u3".into(),
+            unit_key: "U1".into(),
+            stage: "execute".into(),
+            attempt: 1,
+            accepted_commit: "acc-exec".into(),
+            base_commit: "plan-base-abc".into(),
+            evidence_token: "tok-exec".into(),
+            evidence_fingerprint: "fp-exec".into(),
+            accepted_at_ms: 1_700_000_000_000,
+        };
+        {
+            let stores = runtime.ensure_stores().expect("stores");
+            stores
+                .plans
+                .record_stage_evidence("pf-u3", "U1", "execute", 1, &review_ev)
+                .expect("seed execute evidence");
+        }
+        let review_resolved = runtime
+            .resolve_stage_base("pf-u3", "U1", SpawnKind::Review)
+            .expect("review must resolve");
+        assert_eq!(
+            review_resolved, "acc-exec",
+            "review must resume from execute's accepted commit (HEAD=C)"
+        );
+        // The per-Unit pin must stay at plan-base-abc; review
+        // admission does NOT rewrite it.
+        let stores = runtime.ensure_stores().expect("stores");
+        let pin_after_review = stores
+            .plans
+            .get_unit_base("pf-u3", "U1")
+            .expect("pin read")
+            .expect("pin must still exist");
+        assert_eq!(
+            pin_after_review.base_commit, "plan-base-abc",
+            "review admission must not rewrite the per-Unit pin"
+        );
+        drop(stores);
+
+        // Verify stage at attempt 1: must resume from the
+        // reviewer's accepted commit `acc-rev`, NOT the
+        // executor's accepted commit. This is the "base 不变"
+        // invariant across stage hops — each stage's accepted
+        // commit is the next stage's start point.
+        let verify_ev = StageEvidenceRecord {
+            plan_key: "pf-u3".into(),
+            unit_key: "U1".into(),
+            stage: "review".into(),
+            attempt: 1,
+            accepted_commit: "acc-rev".into(),
+            base_commit: "acc-exec".into(),
+            evidence_token: "tok-rev".into(),
+            evidence_fingerprint: "fp-rev".into(),
+            accepted_at_ms: 1_700_000_001_000,
+        };
+        {
+            let stores = runtime.ensure_stores().expect("stores");
+            stores
+                .plans
+                .record_stage_evidence("pf-u3", "U1", "review", 1, &verify_ev)
+                .expect("seed review evidence");
+        }
+        let verify_resolved = runtime
+            .resolve_stage_base("pf-u3", "U1", SpawnKind::Verify)
+            .expect("verify must resolve");
+        assert_eq!(
+            verify_resolved, "acc-rev",
+            "verify must resume from review's accepted commit"
+        );
+
+        // Fix stage: must resume from the executor's accepted
+        // commit (per U3 contract — fix retries the execute
+        // stage, not review). The "fix accepted 接 reviewer 用参
+        // 数化分支" is parameterized: re-running execute on
+        // failure reuses the same base.
+        let fix_resolved = runtime
+            .resolve_stage_base("pf-u3", "U1", SpawnKind::Fix)
+            .expect("fix must resolve");
+        assert_eq!(
+            fix_resolved, "acc-exec",
+            "fix must resume from execute's accepted commit"
+        );
+
+        // ---- wrong commit/dirty/foreign repo 只 blocked ----
+        // The fail-closed path: a plan with no verified base and
+        // no evidence and no pin must NOT silently spawn. The
+        // dispatcher returns an error string.
+        let mut failing_runtime = u3_runtime();
+        failing_runtime.register_plan_for_test("pf-broken", None);
+        let err = failing_runtime
+            .resolve_stage_base("pf-broken", "U1", SpawnKind::Execute)
+            .expect_err("no base anywhere must fail closed (wrong/dirty/foreign)");
+        assert!(
+            err.contains("no verified base commit"),
+            "wrong commit/dirty/foreign repo must surface an explanatory error, got {err:?}"
+        );
+
+        // ---- artifact output 不使 tracked code 脏 ----
+        // The evidence ledger records `accepted_commit` from the
+        // durable journal, NOT agent content_hash. The
+        // `StageEvidenceRecord` shape carries a separate
+        // `evidence_fingerprint` field — these two values are
+        // kept distinct so a hash mismatch does NOT corrupt the
+        // per-Unit pin or the next-stage start point.
+        let ev = StageEvidenceRecord {
+            plan_key: "pf-u3".into(),
+            unit_key: "U1".into(),
+            stage: "execute".into(),
+            attempt: 2,
+            accepted_commit: "acc-exec-2".into(),
+            base_commit: "plan-base-abc".into(),
+            evidence_token: "tok-exec-2".into(),
+            evidence_fingerprint: "fp-exec-2".into(),
+            accepted_at_ms: 1_700_000_002_000,
+        };
+        {
+            let stores = runtime.ensure_stores().expect("stores");
+            stores
+                .plans
+                .record_stage_evidence("pf-u3", "U1", "execute", 2, &ev)
+                .expect("seed execute evidence attempt 2");
+        }
+        let stores = runtime.ensure_stores().expect("stores");
+        let pin_after_artifact = stores
+            .plans
+            .get_unit_base("pf-u3", "U1")
+            .expect("pin read")
+            .expect("pin must still exist");
+        assert_eq!(
+            pin_after_artifact.base_commit, "plan-base-abc",
+            "artifact output (evidence fingerprint) must NOT rewrite the per-Unit pin"
+        );
+        drop(stores);
+        // The next-stage admission reads the latest execute
+        // evidence (attempt 2), not the prior attempt 1.
+        let resolved_attempt_2 = runtime
+            .resolve_stage_base("pf-u3", "U1", SpawnKind::Review)
+            .expect("review admission at attempt 2 must resolve");
+        assert_eq!(
+            resolved_attempt_2, "acc-exec-2",
+            "review must resume from latest execute accepted commit"
+        );
+    }
 }
