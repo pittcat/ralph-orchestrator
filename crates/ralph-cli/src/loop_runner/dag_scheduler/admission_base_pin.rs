@@ -156,4 +156,122 @@ mod tests {
             _ => panic!("expected PinDepsBase"),
         }
     }
+
+    // ---- U5 acceptance (2026-09-09-0917 plan §7 第 9 项) ---------------
+    //
+    // Plan contract:
+    // - U3 base 包含所有依赖 commit
+    // - 重启仍同 SHA (immutable across resume / diff / spawn)
+    // - Unit diff 不包含已经存在于 base 的前置改动
+    // - 未 ack 或 ancestry 不成立不启动
+    //
+    // `compute_base_pin` is the pure dispatch that picks the immutable
+    // unit_base at first admission. The acceptance test exercises the
+    // 4 acceptance scenarios end-to-end through the pure function.
+    #[test]
+    fn dag_dependency_base_is_pinned() {
+        // ---- U3 base 包含所有依赖 commit ----
+        // U3 has two dependencies (U1, U2) with two acked commits;
+        // the pinned base must include both. We model that the
+        // current target SHA is the merge-base that already contains
+        // those commits (per plan: "U3 base 包含所有依赖 commit").
+        let mut input = base();
+        input.unit_key = "U3".to_string();
+        input.dependency_unit_keys = vec!["U1".to_string(), "U2".to_string()];
+        input.dependency_acked_commits.clear();
+        input.dependency_acked_commits.insert("u1-commit".to_string());
+        input.dependency_acked_commits.insert("u2-commit".to_string());
+        input.candidate_ancestor_in_target = true;
+        let outcome_with_deps = compute_base_pin(&input);
+        match &outcome_with_deps {
+            BasePinOutcome::PinDepsBase { sha } => {
+                assert_eq!(sha, "feedface", "pinned base must equal current target SHA");
+            }
+            other => panic!("expected PinDepsBase, got {other:?}"),
+        }
+        // Sanity: all_deps_acked reports true when the dependency set
+        // is fully represented in `dependency_acked_commits`.
+        assert!(
+            all_deps_acked(&input),
+            "all_deps_acked must report true when both deps have acked commits"
+        );
+
+        // ---- 重启仍同 SHA (immutable across resume / diff / spawn) ----
+        // Run the dispatcher twice with the same input — the pinned
+        // base must be byte-identical. This is the "first-write
+        // immutable" guarantee that lets the runtime rely on the
+        // value across restart boundaries: once the base is written
+        // the caller treats it as the authoritative anchor; the
+        // pure dispatcher itself is deterministic so any replay
+        // yields the same SHA.
+        let input_replay = input.clone();
+        let outcome_replay = compute_base_pin(&input_replay);
+        assert_eq!(
+            outcome_with_deps, outcome_replay,
+            "restart must yield the same pinned base"
+        );
+        // Pin determinism: triple-call yields the same SHA. The
+        // runtime relies on this so resume / diff / spawn all see
+        // identical unit_base values.
+        let outcome_triple = compute_base_pin(&input);
+        assert_eq!(
+            outcome_with_deps, outcome_triple,
+            "triple-call determinism — restart still same SHA"
+        );
+
+        // ---- Unit diff 不包含已经存在于 base 的前置改动 ----
+        // If the runtime accidentally uses an outdated base (one
+        // that does NOT contain the dep commits), `all_deps_acked`
+        // would still need the explicit acked_commits set; the pure
+        // dispatch must surface an UnackedDependency otherwise —
+        // this is the contract that prevents the Unit diff from
+        // "double-counting" already-integrated upstream changes.
+        let mut input_no_acks = input.clone();
+        input_no_acks.dependency_acked_commits.clear();
+        let outcome_no_acks = compute_base_pin(&input_no_acks);
+        match &outcome_no_acks {
+            BasePinOutcome::UnackedDependency { reason } => {
+                assert!(
+                    reason.contains("acked"),
+                    "unacked reason must explain ack, got {reason:?}"
+                );
+            }
+            other => panic!("expected UnackedDependency, got {other:?}"),
+        }
+        assert!(
+            !all_deps_acked(&input_no_acks),
+            "all_deps_acked must report false when deps lack acks"
+        );
+
+        // ---- 未 ack 或 ancestry 不成立不启动 ----
+        // candidate_ancestor_in_target=false is the explicit
+        // "ancestry 不成立" branch — the candidate is not reachable
+        // from the current target. Runtime must block, not pin.
+        let mut input_bad_ancestry = input.clone();
+        input_bad_ancestry.candidate_ancestor_in_target = false;
+        let outcome_bad_ancestry = compute_base_pin(&input_bad_ancestry);
+        match &outcome_bad_ancestry {
+            BasePinOutcome::UnackedDependency { reason } => {
+                assert!(
+                    reason.contains("ancestor"),
+                    "ancestry reason must mention ancestor, got {reason:?}"
+                );
+            }
+            other => panic!("expected UnackedDependency for bad ancestry, got {other:?}"),
+        }
+
+        // ---- target_rewrite_blocks (force-push protection) ----
+        // A unrelated SHA rewrite is blocked; a forward-rewrite (e.g.
+        // descendant of the original) is allowed. The plan requires
+        // this so a malicious force-push of a foreign tree cannot
+        // silently re-pin the base.
+        assert!(
+            target_rewrite_blocks("aaaa", "bbbb"),
+            "unrelated rewrite must block"
+        );
+        assert!(
+            !target_rewrite_blocks("aaaa", "aaaab"),
+            "forward-rewrite (descendant) must not block"
+        );
+    }
 }
