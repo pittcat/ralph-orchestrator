@@ -59,7 +59,9 @@ pub mod hat_identity;
 pub mod hat_lifecycle;
 mod hat_registry;
 mod hatless_ralph;
+pub mod git;
 pub mod hooks;
+pub mod path;
 pub mod parallel_forge_handoff;
 /// U1 (plan 2026-08-03-004): `parallel-forge-resume-manifest.v1` —
 /// structured resume evidence captured from the old live runtime before

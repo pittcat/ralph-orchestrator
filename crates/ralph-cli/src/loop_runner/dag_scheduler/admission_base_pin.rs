@@ -15,6 +15,9 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
+use std::path::Path;
+
+use ralph_core::git::{GitError, is_git_ancestor};
 
 /// Inputs to base computation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,8 +67,27 @@ pub fn compute_base_pin(input: &BasePinInput) -> BasePinOutcome {
 }
 
 /// Decide whether a target rewrite blocks the pin.
-pub fn target_rewrite_blocks(prev_target_sha: &str, current_target_sha: &str) -> bool {
-    prev_target_sha != current_target_sha && !current_target_sha.starts_with(prev_target_sha)
+///
+/// U1 (fix-plan 2026-09-09-0917): the previous implementation used
+/// `current_target_sha.starts_with(prev_target_sha)` to decide that a
+/// rewrite was a "forward" rewrite. That is unsound — any SHA whose
+/// text happens to begin with the previous SHA's text is not an
+/// ancestor of anything. Ancestry is now answered by
+/// `git merge-base --is-ancestor` via the shared
+/// `ralph_core::git::is_git_ancestor` helper, so only a real
+/// descendant of the previous target is allowed through. Errors are
+/// propagated so callers fail closed rather than silently allowing
+/// the rewrite.
+pub fn target_rewrite_blocks(
+    repo_root: &Path,
+    prev_target_sha: &str,
+    current_target_sha: &str,
+) -> Result<bool, GitError> {
+    if prev_target_sha == current_target_sha {
+        return Ok(false);
+    }
+    let is_descendant = is_git_ancestor(repo_root, prev_target_sha, current_target_sha)?;
+    Ok(!is_descendant)
 }
 
 /// Verify all dependency unit keys have acked commits.
@@ -136,10 +158,30 @@ mod tests {
 
     #[test]
     fn target_rewrite_blocks_predicate() {
-        let blocks = super::target_rewrite_blocks("aaaa", "bbbb");
-        assert!(blocks);
-        let blocks = super::target_rewrite_blocks("aaaa", "aaaab");
-        assert!(!blocks); // forward-rewrite (e.g. force-push of descendent) is allowed
+        // U1 (fix-plan 2026-09-09-0917): the previous shape was
+        // `target_rewrite_blocks(prev, current) -> bool` and used
+        // `current.starts_with(prev)` to decide that a rewrite was a
+        // forward (descendant) rewrite. That is unsound: any string
+        // whose text happens to begin with the previous SHA's text is
+        // not an ancestor of anything. Ancestry is now answered by
+        // `git merge-base --is-ancestor` via the shared
+        // `ralph_core::git::is_git_ancestor` helper.
+        //
+        // The contract under test is "fail-closed on unrelated /
+        // unverifiable rewrites". The pre-U1 test pinned the unsafe
+        // `starts_with` semantics by asserting that an unrelated
+        // rewrite blocks AND that a string-prefix rewrite is allowed.
+        // The "allowed" half is the unsafe-semantic half and is
+        // removed: we now exercise only the fail-closed contract
+        // against a non-repository path, where `merge-base` cannot
+        // answer the question and the helper must propagate the
+        // error rather than silently allow the rewrite.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let blocks = super::target_rewrite_blocks(tmp.path(), "aaaa", "bbbb");
+        assert!(
+            blocks.is_err(),
+            "unrelated rewrite against a non-repository must surface the merge-base failure (fail-closed), got {blocks:?}"
+        );
     }
 
     #[test]
@@ -261,17 +303,23 @@ mod tests {
         }
 
         // ---- target_rewrite_blocks (force-push protection) ----
-        // A unrelated SHA rewrite is blocked; a forward-rewrite (e.g.
-        // descendant of the original) is allowed. The plan requires
-        // this so a malicious force-push of a foreign tree cannot
-        // silently re-pin the base.
+        // U1 (fix-plan 2026-09-09-0917): ancestry is now answered by
+        // `git merge-base --is-ancestor`. The pre-U1 shape was
+        // `target_rewrite_blocks(prev, current) -> bool` and used
+        // `current.starts_with(prev)` to decide that a forward
+        // rewrite was a descendant rewrite. That is unsound and has
+        // been removed.
+        //
+        // The remaining plan contract is: an unrelated rewrite must
+        // be blocked (fail-closed). We exercise it against a
+        // non-repository path so `merge-base` cannot answer the
+        // question — the helper must surface the failure rather than
+        // silently allow the rewrite.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let blocks = target_rewrite_blocks(tmp.path(), "aaaa", "bbbb");
         assert!(
-            target_rewrite_blocks("aaaa", "bbbb"),
-            "unrelated rewrite must block"
-        );
-        assert!(
-            !target_rewrite_blocks("aaaa", "aaaab"),
-            "forward-rewrite (descendant) must not block"
+            blocks.is_err(),
+            "unrelated rewrite against a non-repository must surface the merge-base failure (fail-closed), got {blocks:?}"
         );
     }
 }
