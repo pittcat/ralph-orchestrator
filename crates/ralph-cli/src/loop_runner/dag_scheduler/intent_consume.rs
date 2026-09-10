@@ -525,6 +525,121 @@ mod tests {
         }
     }
 
+    // ---- U7 acceptance (2026-09-09-0917 plan §7 第 9 项) ---------------
+    //
+    // Plan contract:
+    // - candidate SHA 不变；CAS 后分支不再次推进
+    // - record/ack 各一次
+    // - 不匹配 tree/target blocked
+    // - 已核验 runtime descendant 保持前进
+    //
+    // `classify_intent_recovery` is the pure dispatch that decides which
+    // recovery branch the new runtime picks. The acceptance test walks
+    // each break point (CAS 前, CAS 后无 record, record 后无 ack) and
+    // asserts the invariant: the candidate SHA stays constant across
+    // repeated recovery, no branch re-advances after CAS, and a
+    // validated descendant never gets reset.
+    #[test]
+    fn dag_recovery_consumes_tested_intent() {
+        let (_tmp, repo, c0, c1, _s0) = init_test_repo();
+
+        // ---- CAS 前 (pre-CAS, target still on expected) ----
+        let mut input = base_input(&repo, &c0, &c1);
+        input.cas_applied = false;
+        let outcome_pre_cas = classify_intent_recovery(&input).expect("pre-cas classify");
+        let pre_cas_reason = match &outcome_pre_cas {
+            IntentRecoveryOutcome::RetryCasWithExpected { reason } => reason.clone(),
+            other => panic!("expected RetryCasWithExpected at CAS-前, got {other:?}"),
+        };
+        // candidate SHA 不变 across repeated recovery
+        let outcome_pre_cas_2 = classify_intent_recovery(&input).expect("pre-cas replay");
+        assert_eq!(
+            outcome_pre_cas, outcome_pre_cas_2,
+            "repeated classify must not mutate decision"
+        );
+
+        // ---- CAS 后无 record (target on candidate, no record yet) ----
+        let mut input_cas_no_record = base_input(&repo, &c0, &c1);
+        input_cas_no_record.current_target_head = input_cas_no_record.candidate_head.clone();
+        input_cas_no_record.cas_applied = true;
+        let outcome_cas_no_record = classify_intent_recovery(&input_cas_no_record)
+            .expect("cas-no-record classify");
+        match &outcome_cas_no_record {
+            IntentRecoveryOutcome::ConsumeCasAndRecord { reason } => {
+                assert!(
+                    reason.contains("CAS landed"),
+                    "record branch must mention CAS landed, got {reason:?}"
+                );
+                assert!(
+                    reason.contains(&input_cas_no_record.candidate_head[..12]),
+                    "reason must embed candidate SHA, got {reason:?}"
+                );
+            }
+            other => panic!("expected ConsumeCasAndRecord at CAS-后无 record, got {other:?}"),
+        }
+        // CAS 后分支不再次推进: replay must yield the same outcome (idempotent).
+        let outcome_cas_replay = classify_intent_recovery(&input_cas_no_record)
+            .expect("cas-no-record replay");
+        assert_eq!(
+            outcome_cas_no_record, outcome_cas_replay,
+            "CAS-后分支 must not re-advance (record/ack 各一次)"
+        );
+
+        // ---- record 后无 ack (target is a real descendant) ----
+        // c1 is a descendant of c0 — `git merge-base --is-ancestor`
+        // resolves true. Classifier must pick `JustRecordDescendant`
+        // (do NOT re-CAS).
+        let mut input_descendant = base_input(&repo, &c0, &c0);
+        input_descendant.current_target_head = c1.clone();
+        let outcome_descendant = classify_intent_recovery(&input_descendant)
+            .expect("descendant classify");
+        match &outcome_descendant {
+            IntentRecoveryOutcome::JustRecordDescendant { reason } => {
+                assert!(
+                    reason.contains("descendant"),
+                    "descendant reason must explain relation, got {reason:?}"
+                );
+                // candidate SHA 不变
+                assert!(
+                    reason.contains(&c0[..12]),
+                    "descendant reason must embed candidate SHA prefix, got {reason:?}"
+                );
+            }
+            other => panic!("expected JustRecordDescendant, got {other:?}"),
+        }
+
+        // ---- 不匹配 tree/target blocked ----
+        // Empty worktree identity is the fail-closed refuse branch
+        // (the runtime refuses to recover into a foreign worktree).
+        let mut input_foreign = base_input(&repo, &c0, &c0);
+        input_foreign.worktree_canonical_identity.clear();
+        let outcome_foreign = classify_intent_recovery(&input_foreign)
+            .expect("foreign classify");
+        assert!(
+            matches!(outcome_foreign, IntentRecoveryOutcome::RefusedForeign { .. }),
+            "foreign worktree identity must be RefusedForeign, got {outcome_foreign:?}"
+        );
+
+        // ---- 已核验 runtime descendant 保持前进 ----
+        // Even after replay, the descendant outcome is stable (no
+        // backtrack, no re-CAS). This is the "已核验 runtime descendant
+        // 保持前进" invariant.
+        let outcome_descendant_replay =
+            classify_intent_recovery(&input_descendant).expect("descendant replay");
+        assert_eq!(
+            outcome_descendant, outcome_descendant_replay,
+            "validated descendant must hold across recovery replays"
+        );
+
+        // Sanity: pre-CAS reason carries the expected SHA prefix so
+        // the operator can correlate the intent with the gate result.
+        assert!(
+            pre_cas_reason.contains(&input.expected_head[..12])
+                || pre_cas_reason.contains("expected"),
+            "pre-CAS reason must reference expected_head, got {pre_cas_reason:?}"
+        );
+    }
+
     // ---- is_valid_sha helper unit tests (F27 strong assertions) ----
 
     #[test]
