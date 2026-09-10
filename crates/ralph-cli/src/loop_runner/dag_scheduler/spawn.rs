@@ -46,6 +46,7 @@ use futures::FutureExt;
 use std::panic::AssertUnwindSafe;
 
 use super::driver::{DagSchedulerDriver, DriverOutcome, ReviewVerdict, topics};
+use super::job_context::{ArtifactRef, ContextValidation, JobContext, JobStage};
 use super::jobs::{AdvanceOutcome, path_within_workspace};
 use super::worktree::UnitWorktree;
 use super::{DagSchedulerRuntime, now_ms};
@@ -227,6 +228,12 @@ fn has_worker_identity(payload: &Value, source: Option<&str>) -> bool {
         || ["job_id", "job_token", "stage", "attempt"]
             .iter()
             .any(|field| payload.get(*field).is_some())
+}
+
+fn has_legacy_dag_context(payload: &Value) -> bool {
+    ["wave_id", "slot_index", "worktree_map"]
+        .iter()
+        .any(|field| payload.get(*field).is_some())
 }
 
 /// A driver advance deferred by a transient pool cap.
@@ -742,6 +749,19 @@ impl DagSchedulerRuntime {
             .as_deref()
             .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
             .unwrap_or(Value::Null);
+        if has_legacy_dag_context(&payload) {
+            let reason = format!(
+                "dag job {} emitted deprecated wave context fields; use typed RALPH_DAG_* context",
+                completion.identity.job_id
+            );
+            self.fail_job(
+                &completion.identity,
+                kind,
+                &reason,
+                FailureClass::ContractViolation,
+            );
+            return;
+        }
         // The agent must supply every required field the runtime does
         // not own; a thin payload is a job failure, not a merge.
         let missing = self.missing_agent_fields(kind.success_topic(), &payload);
@@ -1530,15 +1550,37 @@ impl DagSchedulerRuntime {
             token: format!("tok-{bare_unit_id}-{}-a{attempt}", kind.stage_str()),
         };
 
-        // Journal reservation first (D20 fencing): replay → skip.
-        if kind == SpawnKind::Execute {
-            self.executors_launched.insert(unit_key.clone());
-        }
+        // Journal reservation first (D20 fencing): replay → skip.  Resource
+        // claims are part of the same SQLite transaction as the reservation;
+        // passing None here made the durable capacity guard decorative and
+        // allowed concurrent DAG jobs to oversubscribe a resource.
+        let (claims, capacities) = self
+            .plans
+            .get(&plan_key)
+            .and_then(|plan| {
+                plan.units
+                    .iter()
+                    .find(|unit| unit.unit_id == bare_unit_id)
+                    .map(|unit| {
+                        (
+                            unit.resource_claims
+                                .iter()
+                                .map(|claim| (claim.key.clone(), claim.permits))
+                                .collect::<Vec<_>>(),
+                            plan.resource_capacities
+                                .iter()
+                                .map(|capacity| (capacity.key.clone(), capacity.capacity))
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+            })
+            .unwrap_or_default();
         let Some(journal) = self.journal() else {
             warn!(job_id, "DAG spawn: no durable journal; refusing to launch");
             return;
         };
-        let reserve_result = journal.reserve_job(&identity, now_ms() as i64, None);
+        let reserve_result =
+            journal.reserve_job(&identity, now_ms() as i64, Some((&claims, &capacities)));
         match reserve_result {
             Ok(false) => {
                 debug!(
@@ -1552,6 +1594,9 @@ impl DagSchedulerRuntime {
                 return;
             }
             Ok(true) => {}
+        }
+        if kind == SpawnKind::Execute {
+            self.executors_launched.insert(unit_key.clone());
         }
         if kind == SpawnKind::Fix {
             self.fixer_in_flight += 1;
@@ -1644,6 +1689,95 @@ impl DagSchedulerRuntime {
                 )
             })
             .unwrap_or_default();
+        // Build and validate the typed context at the actual spawn boundary.
+        // This keeps the env contract and the prompt inputs on the same
+        // trusted values, and makes missing identity/evidence fail closed
+        // before a child process is launched.
+        let context_stage = match kind {
+            SpawnKind::Execute => JobStage::Execute,
+            SpawnKind::Review => JobStage::Review,
+            SpawnKind::Verify => JobStage::Verify,
+            SpawnKind::Fix => JobStage::Fix,
+        };
+        let mut artifact_refs = std::collections::BTreeMap::new();
+        if let Some(plan) = self.plans.get(&plan_key) {
+            artifact_refs.insert(
+                "verified_execution_plan_path".to_string(),
+                ArtifactRef {
+                    path: plan.artifact_path.clone(),
+                    digest: plan.artifact_digest.clone(),
+                },
+            );
+            artifact_refs.insert(
+                "verified_execution_plan_digest".to_string(),
+                ArtifactRef {
+                    path: plan.artifact_path.clone(),
+                    digest: plan.artifact_digest.clone(),
+                },
+            );
+        }
+        let prior_event_ref =
+            |stage: &str| events_file.with_file_name(format!("{}.events.jsonl", stage));
+        match kind {
+            SpawnKind::Review => {
+                let r = ArtifactRef {
+                    path: prior_event_ref("execute").display().to_string(),
+                    digest: "runtime-accepted".to_string(),
+                };
+                artifact_refs.insert("executor_completion_artifact_path".to_string(), r.clone());
+                artifact_refs.insert("executor_completion_artifact_digest".to_string(), r);
+            }
+            SpawnKind::Verify => {
+                for (name, stage) in [
+                    ("executor_completion_artifact_path", "execute"),
+                    ("reviewer_completion_artifact_path", "review"),
+                ] {
+                    artifact_refs.insert(
+                        name.to_string(),
+                        ArtifactRef {
+                            path: prior_event_ref(stage).display().to_string(),
+                            digest: "runtime-accepted".to_string(),
+                        },
+                    );
+                }
+            }
+            SpawnKind::Fix => {
+                let r = ArtifactRef {
+                    path: feedback
+                        .clone()
+                        .unwrap_or_else(|| events_file.display().to_string()),
+                    digest: "runtime-correction".to_string(),
+                };
+                artifact_refs.insert("fix_failure_fingerprint".to_string(), r.clone());
+                artifact_refs.insert("correction_digest".to_string(), r);
+            }
+            SpawnKind::Execute => {}
+        }
+        let context = JobContext {
+            plan_key: identity.plan_key.clone(),
+            unit_key: identity.unit_key(),
+            task_id: self.resolve_task_id(&identity.unit_key()),
+            stage: context_stage,
+            attempt: i64::from(attempt),
+            worktree_path: worktree.path.clone(),
+            current_base: verified_base.clone(),
+            expected_head: verified_base.clone(),
+            artifact_refs,
+            resource_namespace: super::job_context::resource_namespace(
+                &identity.plan_key,
+                &identity.unit_key(),
+                context_stage,
+                i64::from(attempt),
+            ),
+            skill_set: vec!["ralph-tools".to_string()],
+        };
+        if let ContextValidation::MissingFields { fields } =
+            super::job_context::validate_context(&context)
+        {
+            let reason = format!("DAG job context is incomplete: {}", fields.join(","));
+            self.fail_job(&identity, kind, &reason, FailureClass::ContractViolation);
+            return;
+        }
         let prompt = build_job_prompt(
             &identity,
             kind,
@@ -1687,11 +1821,45 @@ impl DagSchedulerRuntime {
             .into_iter()
             .collect();
         env.extend(backend.env_vars.iter().cloned());
+        let artifact_refs = self
+            .plans
+            .get(&plan_key)
+            .map(|plan| {
+                serde_json::json!({
+                    "verified_execution_plan_path": {
+                        "path": plan.artifact_path,
+                        "digest": plan.artifact_digest,
+                    }
+                })
+                .to_string()
+            })
+            .unwrap_or_else(|| "{}".to_string());
         env.extend([
+            ("RALPH_DAG_PLAN_KEY".to_string(), identity.plan_key.clone()),
             ("RALPH_DAG_UNIT_KEY".to_string(), identity.unit_key()),
+            ("RALPH_DAG_TASK_KEY".to_string(), identity.unit_key()),
+            (
+                "RALPH_DAG_TASK_ID".to_string(),
+                self.resolve_task_id(&identity.unit_key()),
+            ),
             ("RALPH_DAG_JOB_ID".to_string(), job_id.clone()),
-            ("RALPH_DAG_ATTEMPT".to_string(), attempt.to_string()),
             ("RALPH_DAG_JOB_TOKEN".to_string(), identity.token.clone()),
+            ("RALPH_DAG_STAGE".to_string(), identity.stage.clone()),
+            ("RALPH_DAG_ATTEMPT".to_string(), attempt.to_string()),
+            (
+                "RALPH_DAG_WORKTREE".to_string(),
+                worktree.path.display().to_string(),
+            ),
+            ("RALPH_DAG_BASE".to_string(), verified_base.clone()),
+            ("RALPH_DAG_EXPECTED_HEAD".to_string(), verified_base.clone()),
+            (
+                "RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH".to_string(),
+                self.plans
+                    .get(&plan_key)
+                    .map(|plan| plan.artifact_path.clone())
+                    .unwrap_or_default(),
+            ),
+            ("RALPH_DAG_ARTIFACT_REFS".to_string(), artifact_refs),
         ]);
 
         let (cmd, args, stdin_input, _temp_file_guard) = backend.build_command(&prompt, false);

@@ -29,7 +29,7 @@ metadata:
 
 ### DAG typed `JobContext`
 
-DAG 模式（`event_loop.supervisor.scheduler_mode: dag`）下，runtime 为每个 job 额外注入以下 12 个环境变量，构成本轮 activation 的 typed `JobContext`。构造事件 payload 时**直接读这些变量**，不要自己推断或复用上一轮的值：
+DAG 模式（`event_loop.supervisor.scheduler_mode: dag`）下，runtime 为每个 job 额外注入以下 13 个环境变量，构成本轮 activation 的 typed `JobContext`。构造事件 payload 时**直接读这些变量**，不要自己推断或复用上一轮的值：
 
 | 变量 | 含义 | 何时为空 |
 |------|------|----------|
@@ -43,6 +43,7 @@ DAG 模式（`event_loop.supervisor.scheduler_mode: dag`）下，runtime 为每�
 | `RALPH_DAG_ATTEMPT` | 本 Unit 的第几次尝试（从 1 开始的整数） | 同上 |
 | `RALPH_DAG_WORKTREE` | 本 job 应该在其中工作的 worktree 绝对路径 | 同上 |
 | `RALPH_DAG_BASE` | 本 job 的基线 commit sha；据此判断你的改动范围 | 同上 |
+| `RALPH_DAG_EXPECTED_HEAD` | 本 job 启动时用于校验工作树的期望 HEAD；与 `RALPH_DAG_BASE` 一起核对 | 同上 |
 | `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH` | 已核验执行计划的 repo-relative 路径 | 尚未产出该 artifact 时 |
 | `RALPH_DAG_ARTIFACT_REFS` | 上游交付物引用列表（JSON 字符串） | 无上游交付物时 |
 

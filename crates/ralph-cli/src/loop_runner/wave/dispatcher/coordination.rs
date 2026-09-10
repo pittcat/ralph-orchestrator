@@ -914,12 +914,18 @@ pub(crate) fn append_supervisor_coord_event(
         {
             std::fs::create_dir_all(parent)?;
         }
+        // All runtime coordination writers use the same sidecar lock. The
+        // lock is on a separate path so append/truncate recovery cannot
+        // invalidate the advisory lock by replacing the event file.
+        let lock = ralph_core::file_lock::FileLock::new(main_events_file)?;
+        let _guard = lock.exclusive().map_err(std::io::Error::other)?;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(main_events_file)?;
         writeln!(file, "{}", serialised)?;
         file.flush()?;
+        file.sync_all()?;
         Ok(())
     })();
     if let Err(err) = write_result {

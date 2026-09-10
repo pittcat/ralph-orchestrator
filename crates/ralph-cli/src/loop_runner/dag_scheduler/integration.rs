@@ -222,6 +222,24 @@ where
         // for the CAS check below.
         let expected_head_before = self.lane.port.current_target_oid(&req.target_branch)?;
 
+        // Crash recovery arm: CAS may have advanced the ref before the
+        // integration record was committed. If the durable intent names the
+        // current target tip, complete the record from that intent instead
+        // of rebuilding/applying the unit diff a second time.
+        if let Some(intent) = self.store.get_intent(&req.unit_id, &req.target_branch)?
+            && intent.input.base_commit == req.base_commit
+            && intent.unit_commit == req.unit_commit
+            && intent.input.integrated_commit == expected_head_before
+        {
+            let record = self.store.record_integrated(&intent.input)?;
+            guard.release();
+            return Ok(IntegrationOutcome::Integrated {
+                record,
+                target_branch: req.target_branch,
+                new_head: expected_head_before,
+            });
+        }
+
         // Step 5: build the squash candidate on top of the
         // LANE-TIME head (`expected_head_before`), not the
         // admission-time verified base (D19/S19). The port applies

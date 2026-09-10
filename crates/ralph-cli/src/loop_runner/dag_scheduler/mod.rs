@@ -448,9 +448,6 @@ impl DagSchedulerRuntime {
                 if job.identity.stage == "execute" {
                     self.executors_launched.insert(job.identity.unit_id.clone());
                 }
-                if job.terminal.is_some() {
-                    continue;
-                }
                 let events_file = self
                     .workspace
                     .join(".ralph")
@@ -458,6 +455,62 @@ impl DagSchedulerRuntime {
                     .join(&plan_key)
                     .join(&job.identity.unit_id)
                     .join(format!("{}.events.jsonl", job.identity.job_id));
+                // A terminal row is not proof that its business event made
+                // it through the main EventLoop.  A crash can occur after
+                // the worker wrote its terminal but before the merge/accept
+                // boundary.  Re-drive an available worker result through
+                // the ordinary completion path; its journal write is
+                // idempotent and EventLoop acceptance remains authoritative.
+                if job.terminal.is_some() {
+                    let worker_events =
+                        crate::loop_runner::wave::io::read_worker_events(&events_file);
+                    let kind = match job.identity.stage.as_str() {
+                        "execute" => spawn::SpawnKind::Execute,
+                        "review" => spawn::SpawnKind::Review,
+                        "verify" => spawn::SpawnKind::Verify,
+                        "fix" => spawn::SpawnKind::Fix,
+                        _ => {
+                            self.block_plan(
+                                &plan_key,
+                                "DAG recovery encountered an unknown terminal stage",
+                            );
+                            continue;
+                        }
+                    };
+                    let expected_topic = if job.terminal.as_deref() == Some("accepted") {
+                        kind.success_topic()
+                    } else {
+                        kind.failure_topic()
+                    };
+                    let event_already_accepted = crate::loop_runner::wave::io::read_worker_events(
+                        &self
+                            .exec
+                            .as_ref()
+                            .expect("recovery requires execution context")
+                            .main_events_file,
+                    )
+                    .iter()
+                    .any(|event| {
+                        event.topic == expected_topic
+                            && event
+                                .payload
+                                .as_deref()
+                                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                                .is_some_and(|payload| {
+                                    payload.get("job_id").and_then(Value::as_str)
+                                        == Some(job.identity.job_id.as_str())
+                                        && payload.get("job_token").and_then(Value::as_str)
+                                            == Some(job.identity.token.as_str())
+                                })
+                    });
+                    if !event_already_accepted && !worker_events.is_empty() {
+                        self.active_jobs.insert(job.identity.job_id.clone());
+                        let _ = self
+                            .completion_tx
+                            .send(spawn::JobCompletion::recovered(job.identity, events_file));
+                    }
+                    continue;
+                }
                 if events_file.exists()
                     && !crate::loop_runner::wave::io::read_worker_events(&events_file).is_empty()
                 {

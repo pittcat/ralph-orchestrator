@@ -319,6 +319,46 @@ impl DagSchedulerRuntime {
             let Some(journal) = self.journal() else {
                 return;
             };
+            let main_events_file = self
+                .exec
+                .as_ref()
+                .expect("checked")
+                .main_events_file
+                .clone();
+            let already_in_ledger =
+                crate::loop_runner::wave::io::read_worker_events(&main_events_file)
+                    .iter()
+                    .any(|event| {
+                        event.topic == DEVELOPMENT_DONE
+                            && event
+                                .payload
+                                .as_deref()
+                                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                                .is_some_and(|payload| {
+                                    payload.get("plan_key").and_then(Value::as_str)
+                                        == Some(&plan_key)
+                                })
+                    });
+            if !already_in_ledger {
+                let payload = serde_json::json!({
+                    "execution_plan_path": artifact_path,
+                    "completed_unit_count": unit_count,
+                    "failed_unit_count": 0,
+                    "plan_key": plan_key,
+                });
+                if let Err(err) =
+                    append_supervisor_coord_event(&main_events_file, DEVELOPMENT_DONE, &payload)
+                {
+                    // Do not win the fence until the event is durable. A
+                    // retry can therefore recover an append failure.
+                    warn!(
+                        plan_key,
+                        error = %err,
+                        "DAG integration: development.done append failed; delivery remains pending"
+                    );
+                    continue;
+                }
+            }
             match journal.try_record_terminal_emit(
                 &plan_key,
                 DEVELOPMENT_DONE,
@@ -326,30 +366,10 @@ impl DagSchedulerRuntime {
                 now_ms() as i64,
             ) {
                 Ok(true) => {
-                    let payload = serde_json::json!({
-                        "execution_plan_path": artifact_path,
-                        "completed_unit_count": unit_count,
-                        "failed_unit_count": 0,
-                        "plan_key": plan_key,
-                    });
-                    let main_events_file = self
-                        .exec
-                        .as_ref()
-                        .expect("checked")
-                        .main_events_file
-                        .clone();
-                    if let Err(err) =
-                        append_supervisor_coord_event(&main_events_file, DEVELOPMENT_DONE, &payload)
-                    {
-                        // The fence row already records the emit
-                        // permit; a lost append is a recovery (E3)
-                        // concern, not a re-emit license.
-                        warn!(
-                            plan_key,
-                            error = %err,
-                            "DAG integration: development.done append failed after fence win"
-                        );
-                    }
+                    debug!(
+                        plan_key,
+                        "DAG integration: development.done delivery fenced"
+                    );
                 }
                 Ok(false) => {
                     debug!(

@@ -1,4 +1,4 @@
-//! U15 job_context — typed DAG job context (skeleton).
+//! U15 job_context — typed DAG job context.
 //!
 //! Plan: docs/plans/2026-09-09-0917-fix-forge-dag-p1-closure-plan.md §7 U15.
 //!
@@ -7,12 +7,6 @@
 //! verified execution-plan artifact path + previous-stage evidence
 //! references. Skill visibility is selected via SkillRegistry at
 //! spawn time.
-
-// SKELETON-ONLY (per fix-plan 2026-09-09-0917-fix-forge-dag-p1-closure-plan U2 / U25):
-// public types stay exposed for downstream unit tests but are not yet wired
-// into production callers; U15 typed `JobContext` migration promotes this
-// file to `PRODUCTION:` marker.
-#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -116,6 +110,10 @@ pub enum ContextValidation {
 
 /// Pure validation: required fields for the stage are present (have non-empty values).
 pub fn validate_context(ctx: &JobContext) -> ContextValidation {
+    // These fields are consumed by the spawn boundary / child env. Keep
+    // them in the typed contract even though required_fields is stage-data
+    // focused.
+    let _ = (&ctx.attempt, &ctx.resource_namespace, &ctx.skill_set);
     let required = required_fields(ctx.stage);
     let mut missing: Vec<String> = Vec::new();
     for &field in required.iter() {
@@ -151,6 +149,18 @@ pub fn validate_context(ctx: &JobContext) -> ContextValidation {
         };
         if !present {
             missing.push(field.to_string());
+        }
+    }
+    for field in required.iter().filter(|field| field.ends_with("digest")) {
+        let Some(reference) = ctx.artifact_refs.get(*field) else {
+            continue;
+        };
+        if reference.digest.is_empty() {
+            return ContextValidation::DigestMismatch {
+                field: (*field).to_string(),
+                expected: "non-empty digest".to_string(),
+                actual: reference.digest.clone(),
+            };
         }
     }
     if missing.is_empty() {

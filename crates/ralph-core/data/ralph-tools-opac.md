@@ -35,7 +35,7 @@ metadata:
 4. **上一操作产生了什么状态**：先检查该操作的公开成功反馈；需要进一步确认时，按对应 skill 使用公开只读接口，不读取内部 ledger
 5. **supervisor / wave 账本在做什么（仅当 inspect JSON 含 `supervisor` 键）**：`ralph inspect loop --format json` 的 `supervisor` 键；**先** `jq 'has("supervisor")'`，为 false 则跳过，不要读内部 ledger 文件
 6. **loop 锚定的 plan 是哪个**：`ralph inspect loop --format json` 的 `loop_anchor` 键
-7. **当前 job 的 typed `JobContext` 是什么（仅 DAG 模式）**：DAG 模式（`scheduler_mode: dag`，builtin `parallel-forge`）下，`ralph inspect loop --format json` 在 `mode != wave` 时输出 `scheduler` 块；agent 通过该块读取 typed `JobContext` 字段（`plan_key` / `unit_key` / `task_id` / `job_id` / `stage` / `attempt` 等），**不要**再通过旧的 `wave_id` / `slot_index` / `worktree_map` 推断身份。
+7. **当前 job 的 typed `JobContext` 是什么（仅 DAG 模式）**：DAG job 直接从本次 activation 的 `RALPH_DAG_*` 环境变量读取 `plan_key` / `unit_key` / `task_id` / `job_id` / `stage` / `attempt` 等字段；`ralph inspect loop --format json` 的 `scheduler` 块只提供公开的计划级计数，不提供 per-job context。**不要**再通过旧的 `wave_id` / `slot_index` / `worktree_map` 推断身份。
 
 ## loop_anchor 摘要
 

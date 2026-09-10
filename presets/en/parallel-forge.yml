@@ -853,7 +853,7 @@ hats:
          The runtime has already isolated this Unit's worktree and selected the
          current attempt; review only the Unit named by the trigger.
       2. List Units from the execution plan and `ralph tools task list`.
-      3. For each Unit, read its completion report and inspect its worktree diff via the map.
+      3. Read the named Unit's completion report and inspect the isolated worktree diff at the path from the job context.
       4. Write `.ralph/forge/<plan_key>/units/<unit_id>-review.md` and record
          the reviewed commit as the worktree HEAD at review time (`git rev-parse`).
       5. Emit `forge.unit.reviewed` with the Unit identity, `verdict` (`ACCEPTED` or

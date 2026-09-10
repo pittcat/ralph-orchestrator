@@ -39,6 +39,10 @@ use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 /// Marker for the live, real-world git-backed lane.
 #[derive(Debug, Default, Clone, Copy)]
@@ -370,6 +374,7 @@ impl RealGitIntegrationPort {
     /// (short-circuit). Stdout/stderr of the failing command is
     /// truncated into the Fail reason (bounded, no env echo).
     fn run_gate_commands_in(&self, worktree_path: &str, unit_id: &str) -> LaneResult<GateOutcome> {
+        const GATE_TIMEOUT: Duration = Duration::from_secs(30);
         for spec in &self.gate_commands {
             let mut cmd = std::process::Command::new(&spec.program);
             cmd.args(&spec.args);
@@ -381,9 +386,51 @@ impl RealGitIntegrationPort {
             // so the gate commands resolve their programs.
             cmd.env_clear();
             cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
-            let out = cmd
-                .output()
+            #[cfg(unix)]
+            cmd.process_group(0);
+            let mut child = cmd
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
                 .map_err(|e| LaneError::StateError(format!("gate {}: spawn: {e}", spec.program)))?;
+            let started = Instant::now();
+            let mut timed_out = false;
+            loop {
+                if child
+                    .try_wait()
+                    .map_err(|e| {
+                        LaneError::StateError(format!("gate {}: wait: {e}", spec.program))
+                    })?
+                    .is_some()
+                {
+                    break;
+                }
+                if started.elapsed() >= GATE_TIMEOUT {
+                    timed_out = true;
+                    #[cfg(unix)]
+                    {
+                        use nix::sys::signal::{Signal, killpg};
+                        use nix::unistd::Pid;
+                        let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
+                    }
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let out = child.wait_with_output().map_err(|e| {
+                LaneError::StateError(format!("gate {}: collect output: {e}", spec.program))
+            })?;
+            if timed_out {
+                return Ok(GateOutcome::Fail {
+                    reason: format!(
+                        "targeted gate command {:?} (unit {}) timed out after {}s",
+                        spec.program,
+                        unit_id,
+                        GATE_TIMEOUT.as_secs()
+                    ),
+                });
+            }
             if !out.status.success() {
                 let stderr_tail = {
                     let s = String::from_utf8_lossy(&out.stderr);
