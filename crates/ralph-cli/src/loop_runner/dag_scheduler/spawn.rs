@@ -368,7 +368,16 @@ impl SpawnKind {
 /// historical `path_escape` marker for the events-file parent
 /// symlink case; everything else collapses to `spawn_error` so the
 /// recovery path can still drive off the class.
+///
+/// SKELETON-ONLY: variants are intentionally scaffolded for U2
+/// (cross-phase capacity oversell) and U25 (U2/U25 §3 第 11 项);
+/// the live call sites are still using `fail_job(.., "unknown")`.
+/// These symbols stay reachable to preserve the typed variant
+/// surface for the wiring that U2 / U25 will land. STAB-CORR-002
+/// keeps the `-D warnings` gate green without weakening the
+/// runtime contract that downstream consumers depend on.
 #[derive(Debug)]
+#[allow(dead_code, reason = "SKELETON-ONLY per plan U2/U25 §3 第 11 项; wired in by follow-up")]
 pub(crate) enum SpawnError {
     /// Runtime is missing an attached `DagExecutionContext`.
     NoExecContext,
@@ -412,6 +421,12 @@ impl SpawnError {
     /// Failure-class marker for the synthesised failure event and
     /// any downstream recovery logic. Stable across log lines so
     /// test assertions can pin to it.
+    ///
+    /// SKELETON-ONLY: paired with `SpawnError` variants; reachable
+    /// only through `fail_job_spawn`. STAB-CORR-002 keeps the
+    /// `-D warnings` gate green without weakening the runtime
+    /// contract.
+    #[allow(dead_code, reason = "SKELETON-ONLY per plan U2/U25 §3 第 11 项; reachable through fail_job_spawn")]
     fn failure_class(&self) -> &'static str {
         match self {
             Self::EventsFilePathEscape { .. } => "path_escape",
@@ -421,6 +436,12 @@ impl SpawnError {
 
     /// Deterministic reason string bound to the journal terminal
     /// digest. Same input -> same digest -> idempotent terminal.
+    ///
+    /// SKELETON-ONLY: paired with `SpawnError` variants; reachable
+    /// only through `fail_job_spawn`. STAB-CORR-002 keeps the
+    /// `-D warnings` gate green without weakening the runtime
+    /// contract.
+    #[allow(dead_code, reason = "SKELETON-ONLY per plan U2/U25 §3 第 11 项; reachable through fail_job_spawn")]
     fn reason(&self) -> String {
         match self {
             Self::NoExecContext => "DAG spawn: no execution context attached".to_string(),
@@ -858,6 +879,14 @@ impl DagSchedulerRuntime {
     /// `SpawnError`, then queue the synthesised failure event. Used
     /// by `spawn_job` and its helpers so the digest binds to a typed
     /// variant rather than a literal `"unknown"`.
+    ///
+    /// SKELETON-ONLY: wired in by U2 (cross-phase capacity
+    /// oversell) per plan §3 第 11 项; the current call sites in
+    /// `spawn_job` still take the `fail_job(.., "unknown")` shortcut.
+    /// STAB-CORR-002 keeps the `-D warnings` gate green without
+    /// weakening the runtime contract that downstream consumers
+    /// depend on.
+    #[allow(dead_code, reason = "SKELETON-ONLY per plan U2/U25 §3 第 11 项; wired in by follow-up")]
     fn fail_job_spawn(&mut self, identity: &JobIdentity, kind: SpawnKind, error: &SpawnError) {
         let reason = error.reason();
         let failure_class = error.failure_class();
