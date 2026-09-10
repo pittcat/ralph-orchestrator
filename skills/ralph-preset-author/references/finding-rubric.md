@@ -458,7 +458,7 @@ fixture README §8、fixture 顶部注释与本表 ID 一一对应；review 命�
 | `evidence_bound_missing_invariant` | P1 | 85 | Q4 | payload-content | review-only；semantic rejection 的 `correction` payload 缺少 `violated_invariant` 字段，agent 无法定位哪个不变量被违反 |
 | `evidence_bound_replacement_payload` | P0 | 90 | Q4 | payload-content | review-only；semantic rejection 的 `correction` payload 含 `replacement` / `suggested_payload` 等替代语义字段，违反「语义拒绝不得含修复建议」契约 |
 | `evidence_bound_no_target` | P1 | 85 | Q4 | topology | review-only；semantic rejection 缺少 `target_hat` 字段，bounded retry 机制无法路由到正确的重试目标 |
-| `evidence_bound_unbounded_retry` | P1 | 85 | Q4 | feasibility | review-only；preset 的 correction / retry 循环没有 evidence progression check（每次重试都应提供新的 `violated_invariant` / `observed`），构成无界重试循环 |
+| `evidence_bound_unbounded_retry` | P1 | 85 | Q4 | feasibility | review-only；preset 的 correction / retry 循环没有 evidence progression check（每次重试都应提供新的 `violated_invariant` / `observed`），构成无界重试循环；终态 blocked 还必须有 Goal、剩余缺口和至少一条已执行替代路线的证据 |
 
 ### Scope contract finding_id（review-only，plan 2026-08-08-004 U7）
 

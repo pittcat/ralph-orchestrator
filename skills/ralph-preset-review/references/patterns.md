@@ -240,6 +240,7 @@ work.done / fix.done
 - `evidence_bound_replacement_payload`：semantic rejection **禁止**携带 `replacement` / `suggested_payload` / `fix_suggestion` 等替代语义字段——此类字段属于 `correction.replacement` 而非 `correction.evidence`，会混淆 semantic vs mechanical rejection 语义
 - `evidence_bound_no_target`：semantic rejection 的 `correction` payload 必须包含 `target_hat` 字段，使 bounded retry 机制能路由到正确的重试目标；缺失则 retry 无法定位
 - `evidence_bound_unbounded_retry`：preset 的 correction / retry 循环必须包含 evidence progression check（每次重试的 `violated_invariant` / `observed` 必须与前一次不同），否则构成无界重试循环
+- 终态 `blocked` 还必须有 Goal-level evidence：从源 plan 复核 Goal 与成功标准，列出剩余缺口，并记录至少一条实际尝试过的替代路线；预算耗尽本身不能证明 Goal 不可达。
 
 四条 finding 均 review-only，不进 `ralph preset check` JSON；触发条件是 `correction` payload 形状 + 语义，不是 preset 名称。fixture 顶部注释与 `skills/ralph-preset-review/fixtures/README.md` §8 标注 anti-pattern 轴、expected finding id 与本表对照命中。
 

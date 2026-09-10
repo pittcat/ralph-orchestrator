@@ -332,7 +332,7 @@ schemas:
         source: "executor reads the Implementation Units section"
         fill_rule: "include every planned U-ID, including failed or blocked Units"
       reason:
-        meaning: "dead-end execution failure: no deliverable commits, cannot produce verification handoff, or external unreachable blocker; plan size, Unit count, file count, predicted context pressure, or predicted duration are not failures"
+        meaning: "dead-end execution failure only after per-Unit evidence and Goal-level reachability evidence show no viable recovery route: no deliverable commits, cannot produce verification handoff, or external unreachable blocker; plan size, Unit count, file count, predicted context pressure, or predicted duration are not failures"
         source: "executor"
         fill_rule: "starts with unreachable / no_deliverable_commits / cannot_produce_handoff and names the observed blocker; work.failed is forbidden when completed_units is non-empty — use work.done with execution_status=partial instead"
       attempted_units:

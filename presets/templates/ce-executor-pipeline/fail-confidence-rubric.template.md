@@ -1,6 +1,6 @@
 # Fail-Confidence Rubric (executor / fixer 共用评分对照表)
 
-本模板是 `ce-executor-pipeline` 中 executor 与 fixer 在声明 **fail / partial / blocked** 结算前唯一的自评 + 他评标准。precheck gate 也按本文件审核——**自评与他评使用同一份 rubric**，消除两处标准漂移。
+本模板是 `ce-executor-pipeline` 中 executor 与 fixer 在声明 **fail / partial / blocked** 结算前唯一的自评 + 他评标准。precheck gate 也按本文件审核——**自评与他评使用同一份 rubric**，消除两处标准漂移。`blocked` 只能表示当前 Goal 在现有约束下经过多路径验证仍不可达；恢复预算耗尽本身不是 Goal 不可达证据。
 
 适用字段命名：
 
@@ -42,7 +42,21 @@
 
 最终单 Unit 置信度 = min(100, 1.1, 1.2, 1.3, 1.4 各维度得分)。
 
-整体 `confidence` 字段 = 所有 failed/blocked Unit 单 Unit 置信度的**算术平均**，向下取整。
+### 1.5 Goal 可达性（Goal Reachability）
+
+在每个 failed / blocked Unit 的证据之后，必须单独记录：
+
+- 原始 Goal 与可观察成功标准（从 `plan_path` 原文复制，不得自行改写）
+- 当前尚未满足的 Goal 缺口，以及该 Unit 如何阻断这些缺口
+- 至少一条不同于当前方案的替代路线（实现、验证、依赖拆解或缩小非核心范围）
+- 每条替代路线的实际动作、结果和放弃理由
+- 结论分类：`plan_flaw` / `external_dependency` / `environment_failure` / `goal_infeasible`
+
+仅证明“当前 Unit 或当前 fix plan 失败”，不能推出 `goal_infeasible`。存在尚未尝试且可行的替代路线时，必须继续恢复并触发 `alternative_route_untried`。Goal 信息缺失时，必须触发 `goal_unverified`。
+
+最终单 Unit 置信度 = min(100, 1.1, 1.2, 1.3, 1.4 各维度得分)。
+
+整体 `confidence` 字段取所有 failed/blocked Unit 单 Unit 置信度的**最低值**，向下取整；禁止用算术平均掩盖单个证据不足的 Unit。所有 Unit 均达到 90 且 Goal 可达性检查通过，才允许声明终态 blocked / failed。
 
 ---
 
@@ -50,7 +64,7 @@
 
 | 置信度区间 | 允许动作 |
 |---|---|
-| **≥ 90** | 允许 emit `work.failed` / `fix.done{fix_status: partial\|blocked}` |
+| **≥ 90 且 Goal 检查通过** | 允许 emit `work.failed` / `fix.done{fix_status: partial\|blocked}` |
 | **75 – 89** | 必须先验证 1-2 个关键假设，再重评；仍 < 90 则继续 retry |
 | **60 – 74** | 禁止 fail；继续 retry 并换角度 |
 | **< 60** | 禁止 fail；视为严重证据不足，必须按 corrected course 继续干活 |
@@ -88,6 +102,8 @@ precheck gate 拒收时，`failed_checks` 字段必须使用下列命名（每�
 | `unverifiable_evidence` | claim 无可复核来源（违反 §3），或声称的来源经 spot-check 不存在 / 不支撑该 claim |
 | `confidence_inflated` | 自报 confidence ≥90 但按 §1 四维度独立重评应 < 90 |
 | `uneliminated_alternatives` | 未排除常见假因（环境 / 依赖 / flake / baseline / 残留），违反 §1.4 |
+| `goal_unverified` | 未从 `plan_path` 复核 Goal、成功标准或当前 Goal 缺口 |
+| `alternative_route_untried` | 存在可行的替代实现、验证、依赖拆解或范围调整路线但未尝试 |
 
 gate 在 `failed_checks` 中列出触发的命名（可多个），并在 `reason` 字段补一句可执行的整改指引（"U2 缺第 3 次 retry 记录"这种粒度）。
 
