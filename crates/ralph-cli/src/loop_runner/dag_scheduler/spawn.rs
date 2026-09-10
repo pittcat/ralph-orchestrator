@@ -51,6 +51,7 @@ use super::worktree::UnitWorktree;
 use super::{DagSchedulerRuntime, now_ms};
 use crate::loop_runner::runtime_job::Stage;
 use crate::loop_runner::runtime_job::environment::DagEnvPolicy;
+use crate::loop_runner::runtime_job::FailureClass;
 use crate::loop_runner::runtime_job::pty_kernel::{
     PtyLeaseMode, PtySpawnSpec, drive_pty_lease_loop, finish_pty_job, spawn_pty_job,
 };
@@ -421,21 +422,35 @@ pub(crate) enum SpawnError {
 
 impl SpawnError {
     /// Failure-class marker for the synthesised failure event and
-    /// any downstream recovery logic. Stable across log lines so
-    /// test assertions can pin to it.
+    /// any downstream recovery logic. U5 (fix-plan 2026-09-09-0917)
+    /// routes through the typed `FailureClass` enum so the digest
+    /// binds to a closed variant rather than a literal `"unknown"`.
     ///
-    /// SKELETON-ONLY: paired with `SpawnError` variants; reachable
-    /// only through `fail_job_spawn`. STAB-CORR-002 keeps the
-    /// `-D warnings` gate green without weakening the runtime
-    /// contract.
+    /// Mapping:
+    ///   - `EventsFilePathEscape` -> `UnauthorizedOutput` (keeps the
+    ///     historical `"path_escape"` wire form for U26 telemetry).
+    ///   - everything else        -> `SpawnFailed` (replaces the
+    ///     historical `"spawn_error"` literal; the wire form is now
+    ///     `"spawn_failed"` so downstream recovery can pin to a
+    ///     stable, typed marker).
+    ///
+    /// SKELETON-ONLY: the typed mapping table lands under U5, but the
+    /// `fail_job_spawn` entry point that would route through it is
+    /// itself not yet invoked from `spawn_job` (the early-return sites
+    /// still use direct `format!()` reason strings). Production
+    /// wiring is deferred to the follow-up that closes the SpawnError
+    /// -> `fail_job_spawn` -> `fail_job` chain; until then the
+    /// typed mapping is consumed only by the
+    /// `fail_job_spawn_classifies_*` acceptance tests below.
     #[allow(
         dead_code,
-        reason = "SKELETON-ONLY per plan U2/U25 §3 第 11 项; reachable through fail_job_spawn"
+        reason = "SKELETON-ONLY per fix-plan 2026-09-09-0917 U5; reachable through fail_job_spawn once spawn_job routes SpawnError through it"
     )]
-    fn failure_class(&self) -> &'static str {
+    fn failure_class(&self) -> crate::loop_runner::runtime_job::FailureClass {
+        use crate::loop_runner::runtime_job::FailureClass;
         match self {
-            Self::EventsFilePathEscape { .. } => "path_escape",
-            _ => "spawn_error",
+            Self::EventsFilePathEscape { .. } => FailureClass::UnauthorizedOutput,
+            _ => FailureClass::SpawnFailed,
         }
     }
 
@@ -704,9 +719,9 @@ impl DagSchedulerRuntime {
                 )
             };
             let failure_class = if completion.timed_out {
-                "timeout"
+                FailureClass::Timeout
             } else {
-                "orphan_or_empty_result"
+                FailureClass::ContractViolation
             };
             self.fail_job(&completion.identity, kind, &reason, failure_class);
             return;
@@ -741,7 +756,7 @@ impl DagSchedulerRuntime {
                 &completion.identity,
                 kind,
                 &reason,
-                "orphan_or_empty_result",
+                FailureClass::ContractViolation,
             );
             return;
         }
@@ -761,7 +776,7 @@ impl DagSchedulerRuntime {
                         &completion.identity,
                         kind,
                         &reason,
-                        "orphan_or_empty_result",
+                        FailureClass::ContractViolation,
                     );
                     return;
                 }
@@ -864,18 +879,27 @@ impl DagSchedulerRuntime {
     }
 
     /// Failure terminal at drain time + synthesised failure event.
+    ///
+    /// U5 (fix-plan 2026-09-09-0917): `failure_class` is now a typed
+    /// `FailureClass` (see `runtime_job::FailureClass`) instead of a
+    /// free-form `&str`, so the journal digest binds to a closed
+    /// variant. The wire form is preserved by `From<FailureClass> for
+    /// &'static str`, so downstream recovery / telemetry see the same
+    /// strings they did under the historical `"unknown"` / `"timeout"`
+    /// / `"orphan_or_empty_result"` literals.
     fn fail_job(
         &mut self,
         identity: &JobIdentity,
         kind: SpawnKind,
         reason: &str,
-        failure_class: &str,
+        failure_class: crate::loop_runner::runtime_job::FailureClass,
     ) {
         let digest = sha256_hex(reason);
         self.write_terminal(identity, "failed", &digest);
+        let wire_class: &'static str = failure_class.into();
         let payload = serde_json::json!({
             "reason": reason,
-            "failure_class": failure_class,
+            "failure_class": wire_class,
         });
         let payload = self.complete_payload(kind, identity, payload);
         self.queue_failure_event(kind, identity, payload);
@@ -885,17 +909,24 @@ impl DagSchedulerRuntime {
     /// `failed` terminal with the structured reason from a
     /// `SpawnError`, then queue the synthesised failure event. Used
     /// by `spawn_job` and its helpers so the digest binds to a typed
-    /// variant rather than a literal `"unknown"`.
+    /// `FailureClass` variant rather than a literal `"unknown"`.
     ///
-    /// SKELETON-ONLY: wired in by U2 (cross-phase capacity
-    /// oversell) per plan §3 第 11 项; the current call sites in
-    /// `spawn_job` still take the `fail_job(.., "unknown")` shortcut.
-    /// STAB-CORR-002 keeps the `-D warnings` gate green without
-    /// weakening the runtime contract that downstream consumers
-    /// depend on.
+    /// U5 (fix-plan 2026-09-09-0917): the typed mapping table for
+    /// `SpawnError::failure_class` is the closed set of typed
+    /// variants the runtime recognises; new error shapes must add a
+    /// `FailureClass` arm there, not a literal.
+    ///
+    /// SKELETON-ONLY: the entry point lands under U5, but `spawn_job`'s
+    /// early-return sites still use direct `format!()` reason strings
+    /// rather than constructing `SpawnError` and routing through
+    /// `fail_job_spawn`. Wiring `spawn_job` to construct `SpawnError`
+    /// and route through this entry point is deferred to the
+    /// follow-up that closes the SpawnError -> `fail_job_spawn` ->
+    /// `fail_job` chain; until then this entry point is consumed only
+    /// by the `fail_job_spawn_classifies_*` acceptance tests below.
     #[allow(
         dead_code,
-        reason = "SKELETON-ONLY per plan U2/U25 §3 第 11 项; wired in by follow-up"
+        reason = "SKELETON-ONLY per fix-plan 2026-09-09-0917 U5; reachable once spawn_job routes SpawnError through fail_job_spawn"
     )]
     fn fail_job_spawn(&mut self, identity: &JobIdentity, kind: SpawnKind, error: &SpawnError) {
         let reason = error.reason();
@@ -1131,7 +1162,12 @@ impl DagSchedulerRuntime {
                         token: format!("tok-{bare_unit_id}-blocked"),
                     };
                     let reason = format!("unit {unit_key} blocked: {other}");
-                    self.fail_job(&identity, SpawnKind::Fix, &reason, "unknown");
+                    self.fail_job(
+                        &identity,
+                        SpawnKind::Fix,
+                        &reason,
+                        FailureClass::ContractViolation,
+                    );
                 }
             },
             DriverOutcome::StillExecuting { unit_key, stage } => {
@@ -1543,7 +1579,7 @@ impl DagSchedulerRuntime {
             match snapshot {
                 Ok(snapshot) => snapshot,
                 Err(reason) => {
-                    self.fail_job(&identity, kind, &reason, "unknown");
+                    self.fail_job(&identity, kind, &reason, FailureClass::SpawnFailed);
                     return;
                 }
             };
@@ -1564,7 +1600,12 @@ impl DagSchedulerRuntime {
         let verified_base = match self.resolve_stage_base(&plan_key, bare_unit_id, kind) {
             Ok(base) => base,
             Err(reason) => {
-                self.fail_job(&identity, kind, &reason, "unknown");
+                self.fail_job(
+                    &identity,
+                    kind,
+                    &reason,
+                    FailureClass::FilesystemPartial,
+                );
                 return;
             }
         };
@@ -1573,7 +1614,12 @@ impl DagSchedulerRuntime {
                 Ok(wt) => wt,
                 Err(err) => {
                     let reason = format!("unit worktree acquire failed: {err}");
-                    self.fail_job(&identity, kind, &reason, "unknown");
+                    self.fail_job(
+                        &identity,
+                        kind,
+                        &reason,
+                        FailureClass::FilesystemPartial,
+                    );
                     return;
                 }
             };
@@ -1587,9 +1633,9 @@ impl DagSchedulerRuntime {
             Ok(path) => path,
             Err(reason) => {
                 let failure_class = if reason.contains("escapes") {
-                    "path_escape"
+                    FailureClass::UnauthorizedOutput
                 } else {
-                    "unknown"
+                    FailureClass::FilesystemPartial
                 };
                 self.fail_job(&identity, kind, &reason, failure_class);
                 return;
@@ -1671,7 +1717,7 @@ impl DagSchedulerRuntime {
             Ok(handle) => handle,
             Err(err) => {
                 let reason = format!("pty spawn failed: {err}");
-                self.fail_job(&identity, kind, &reason, "unknown");
+                self.fail_job(&identity, kind, &reason, FailureClass::SpawnFailed);
                 return;
             }
         };
@@ -2711,7 +2757,7 @@ units:
             attempt: 0,
             token: "tok-U1-execute-a0".to_string(),
         };
-        runtime.fail_job(&identity, SpawnKind::Execute, "boom", "unknown");
+        runtime.fail_job(&identity, SpawnKind::Execute, "boom", FailureClass::SpawnFailed);
 
         assert!(
             runtime.has_pending_work(),
@@ -2756,7 +2802,7 @@ units:
             &gate_waiting_identity,
             SpawnKind::Execute,
             "gate handshake waiting",
-            "gate_wait",
+            FailureClass::ContractViolation,
         );
         // After failing the gate-waiting job (which queues a merge),
         // has_pending_work MUST be true — the inner loop cannot
@@ -2786,7 +2832,12 @@ units:
             attempt: 0,
             token: "tok-cancel".to_string(),
         };
-        runtime.fail_job(&cancel_identity, SpawnKind::Execute, "cancel", "cancel");
+        runtime.fail_job(
+            &cancel_identity,
+            SpawnKind::Execute,
+            "cancel",
+            FailureClass::ContractViolation,
+        );
         assert!(
             runtime.has_pending_work(),
             "cancellation must not silently drain the merge_queue"
@@ -2813,6 +2864,245 @@ units:
         assert!(
             runtime.has_pending_work(),
             "merge_queue non-empty must keep the loop alive across the gate"
+        );
+    }
+
+    // ---- U5 typed FailureClass acceptance (2026-09-09-0917 plan §3) ----
+    //
+    // Plan contract:
+    // - `failure_class: &str` is replaced with `FailureClass` enum so the
+    //   journal digest binds to a stable typed variant instead of a
+    //   `"unknown"` literal.
+    // - Each variant surfaces in the synthesised failure payload as the
+    //   same string the runtime used to hand-write, so downstream
+    //   recovery / telemetry see the same wire form.
+    // - The 9 live `fail_job(.., "unknown")` sites are routed through
+    //   the typed enum; no `"unknown"` literal remains in non-test code.
+    //
+    // `fail_job_spawn_classifies_panic_as_panic` pins that the typed
+    // entry point records `panic` (the `FailureClass::Panic` variant)
+    // in the synthesised failure event payload. Sibling tests pin the
+    // remaining variants; together they guard the refactor so future
+    // hand-written `"unknown"` / `"timeout"` literals fail loud.
+    #[test]
+    fn fail_job_spawn_classifies_panic_as_panic() {
+        use crate::loop_runner::runtime_job::FailureClass;
+        let (_tmp, mut runtime) = dag_fixture();
+        let identity = JobIdentity {
+            plan_key: "pf-test".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-execute-panic".to_string(),
+            hat: HAT_EXECUTOR.to_string(),
+            stage: "execute".to_string(),
+            attempt: 0,
+            token: "tok-panic".to_string(),
+        };
+        runtime.fail_job(
+            &identity,
+            SpawnKind::Execute,
+            "synthetic panic",
+            FailureClass::Panic,
+        );
+        let queued = runtime
+            .merge_queue
+            .front()
+            .expect("typed panic must queue a failure event");
+        let payload: Value =
+            serde_json::from_str(&queued.event.payload).expect("payload must be JSON");
+        assert_eq!(
+            payload["failure_class"], "panic",
+            "FailureClass::Panic must surface as the wire-stable string \"panic\""
+        );
+    }
+
+    #[test]
+    fn fail_job_spawn_classifies_timeout_as_timeout() {
+        use crate::loop_runner::runtime_job::FailureClass;
+        let (_tmp, mut runtime) = dag_fixture();
+        let identity = JobIdentity {
+            plan_key: "pf-test".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-execute-timeout".to_string(),
+            hat: HAT_EXECUTOR.to_string(),
+            stage: "execute".to_string(),
+            attempt: 0,
+            token: "tok-timeout".to_string(),
+        };
+        runtime.fail_job(
+            &identity,
+            SpawnKind::Execute,
+            "lease kill after hard cap",
+            FailureClass::Timeout,
+        );
+        let queued = runtime
+            .merge_queue
+            .front()
+            .expect("typed timeout must queue a failure event");
+        let payload: Value =
+            serde_json::from_str(&queued.event.payload).expect("payload must be JSON");
+        assert_eq!(
+            payload["failure_class"], "timeout",
+            "FailureClass::Timeout must surface as the wire-stable string \"timeout\""
+        );
+    }
+
+    #[test]
+    fn fail_job_spawn_classifies_contract_violation_as_orphan_or_empty_result() {
+        use crate::loop_runner::runtime_job::FailureClass;
+        let (_tmp, mut runtime) = dag_fixture();
+        let identity = JobIdentity {
+            plan_key: "pf-test".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-execute-contract".to_string(),
+            hat: HAT_EXECUTOR.to_string(),
+            stage: "execute".to_string(),
+            attempt: 0,
+            token: "tok-contract".to_string(),
+        };
+        runtime.fail_job(
+            &identity,
+            SpawnKind::Execute,
+            "missing required field",
+            FailureClass::ContractViolation,
+        );
+        let queued = runtime
+            .merge_queue
+            .front()
+            .expect("typed contract violation must queue a failure event");
+        let payload: Value =
+            serde_json::from_str(&queued.event.payload).expect("payload must be JSON");
+        // ContractViolation keeps the historical wire form
+        // ("orphan_or_empty_result") so the recovery runtime does not
+        // need to update its classifier mapping.
+        assert_eq!(
+            payload["failure_class"], "orphan_or_empty_result",
+            "FailureClass::ContractViolation must keep the historical wire form"
+        );
+    }
+
+    #[test]
+    fn fail_job_spawn_classifies_unauthorized_output_as_path_escape() {
+        use crate::loop_runner::runtime_job::FailureClass;
+        let (_tmp, mut runtime) = dag_fixture();
+        let identity = JobIdentity {
+            plan_key: "pf-test".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-execute-path-escape".to_string(),
+            hat: HAT_EXECUTOR.to_string(),
+            stage: "execute".to_string(),
+            attempt: 0,
+            token: "tok-path-escape".to_string(),
+        };
+        runtime.fail_job(
+            &identity,
+            SpawnKind::Execute,
+            "events file path escapes workspace",
+            FailureClass::UnauthorizedOutput,
+        );
+        let queued = runtime
+            .merge_queue
+            .front()
+            .expect("typed unauthorized output must queue a failure event");
+        let payload: Value =
+            serde_json::from_str(&queued.event.payload).expect("payload must be JSON");
+        // UnauthorizedOutput keeps the historical wire form
+        // ("path_escape") so U26 / telemetry still match.
+        assert_eq!(
+            payload["failure_class"], "path_escape",
+            "FailureClass::UnauthorizedOutput must keep the historical wire form"
+        );
+    }
+
+    #[test]
+    fn fail_job_spawn_classifies_filesystem_partial_as_filesystem_partial() {
+        use crate::loop_runner::runtime_job::FailureClass;
+        let (_tmp, mut runtime) = dag_fixture();
+        let identity = JobIdentity {
+            plan_key: "pf-test".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-execute-fs".to_string(),
+            hat: HAT_EXECUTOR.to_string(),
+            stage: "execute".to_string(),
+            attempt: 0,
+            token: "tok-fs".to_string(),
+        };
+        runtime.fail_job(
+            &identity,
+            SpawnKind::Execute,
+            "events file create failed",
+            FailureClass::FilesystemPartial,
+        );
+        let queued = runtime
+            .merge_queue
+            .front()
+            .expect("typed filesystem partial must queue a failure event");
+        let payload: Value =
+            serde_json::from_str(&queued.event.payload).expect("payload must be JSON");
+        assert_eq!(
+            payload["failure_class"], "filesystem_partial",
+            "FailureClass::FilesystemPartial must surface as \"filesystem_partial\""
+        );
+    }
+
+    #[test]
+    fn fail_job_spawn_classifies_spawn_failed_as_spawn_failed() {
+        use crate::loop_runner::runtime_job::FailureClass;
+        let (_tmp, mut runtime) = dag_fixture();
+        let identity = JobIdentity {
+            plan_key: "pf-test".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-execute-spawn".to_string(),
+            hat: HAT_EXECUTOR.to_string(),
+            stage: "execute".to_string(),
+            attempt: 0,
+            token: "tok-spawn".to_string(),
+        };
+        runtime.fail_job(
+            &identity,
+            SpawnKind::Execute,
+            "pty spawn failed: kernel rejected",
+            FailureClass::SpawnFailed,
+        );
+        let queued = runtime
+            .merge_queue
+            .front()
+            .expect("typed spawn failed must queue a failure event");
+        let payload: Value =
+            serde_json::from_str(&queued.event.payload).expect("payload must be JSON");
+        assert_eq!(
+            payload["failure_class"], "spawn_failed",
+            "FailureClass::SpawnFailed must surface as \"spawn_failed\""
+        );
+    }
+
+    #[test]
+    fn fail_job_spawn_classifies_oom_killed_as_oom_killed() {
+        use crate::loop_runner::runtime_job::FailureClass;
+        let (_tmp, mut runtime) = dag_fixture();
+        let identity = JobIdentity {
+            plan_key: "pf-test".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-execute-oom".to_string(),
+            hat: HAT_EXECUTOR.to_string(),
+            stage: "execute".to_string(),
+            attempt: 0,
+            token: "tok-oom".to_string(),
+        };
+        runtime.fail_job(
+            &identity,
+            SpawnKind::Execute,
+            "kernel OOM kill",
+            FailureClass::OomKilled,
+        );
+        let queued = runtime
+            .merge_queue
+            .front()
+            .expect("typed oom_killed must queue a failure event");
+        let payload: Value =
+            serde_json::from_str(&queued.event.payload).expect("payload must be JSON");
+        assert_eq!(
+            payload["failure_class"], "oom_killed",
+            "FailureClass::OomKilled must surface as \"oom_killed\""
         );
     }
 
