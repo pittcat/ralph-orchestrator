@@ -16,12 +16,15 @@ metadata:
 
 This skill covers **runtime tasks**. For code tasks, see `/code-task-generator`.
 
-> **Supervisor-spawned rows** — when a preset enables `supervisor`, every slot's
-> lifecycle is projected onto a stable row in `.ralph/agent/tasks.jsonl` under
-> key `supervisor:<loop_id>:wave-<wave_id>:slot-<index>`. The dispatcher is the
-> SOLE writer of these rows; workers must NEVER touch `tasks.jsonl` directly.
-> Repeated projections (re-reports, restart replay) are idempotent — the same
-> task_key always resolves to the same row.
+> **Supervisor-spawned rows** — when a preset enables `supervisor`, the runtime
+> may project each managed job or Unit lifecycle onto a stable row in
+> `.ralph/agent/tasks.jsonl`. The stable key is mode-specific: legacy wave
+> execution may use `supervisor:<loop_id>:wave-<wave_id>:slot-<index>`, while
+> DAG execution uses the task key registered by the plan handoff. Do not infer
+> a DAG task key from wave or slot fields. The dispatcher/projector is the
+> **SOLE writer** of these rows; workers must NEVER touch `tasks.jsonl`
+> directly. Repeated projections (re-reports, restart replay) are idempotent —
+> the same task key always resolves to the same row.
 
 ## Task Commands
 
@@ -68,8 +71,8 @@ ralph tools task confirm <task-id> --reference <ref> --digest <digest> [--format
 - **NEVER pass an empty `task_id`**: `ralph tools task start/close/fail/reopen/show` and any `ralph emit` payload containing `task_id` must use a real, non-empty id like `task-{timestamp}-{hex}`. Empty `task_id` is rejected by the CLI and will break step handoff.
 - **`task_id` / `task_key` / `step` 必须同源**: 在 `ralph emit` payload 中，如果同时出现 `task_id`、`task_key` 和 `step`：
   - `task_id` 必须来自当前 loop 的 live record（`ralph tools task list` / `show` / `ensure` 返回），不要复用已 closed 的 id。
-  - `task_key` 是稳定匹配键（`loop_id` + `task_key` + `step` 构成 live identity）；同一 identity 重复 ensure 返回同一 `task_id`，不得手写第二套 id。
-  - `task_key` 中的 step 段（例如 `:fix-02:`）必须与 `step` 字段完全一致。
+  - `task_key` 是当前 loop 内的稳定匹配键；TaskStore 按 `loop_id` + `task_key` 识别和去重任务，同一 identity 重复 ensure 返回同一 `task_id`，不得手写第二套 id。
+  - 只有当前 topic/schema 声明 `step` 时，才额外校验 `step` 与 `task_key` 中声明的 step 语义一致。DAG 或其他 runtime-managed task 的 key 格式由当前 trigger、prompt context 或 task list 提供，不要自行推断。
   - 不要手写 `task_id`；从 trigger payload、`ralph tools task list` / `show`，或 prompt 里的 `## ORCHESTRATOR CONTEXT` 取得 live id。
   - **`work.done` 等 execution contract topic**：必须先 `ralph tools task close <task_id>`，再 emit（close-before-done 顺序固定）。
   - **例外：emit 即自动关闭 task**：当 hat instructions 明确说明「emit 该事件即原子关闭 task、禁止手工 close」时，跳过 `ralph tools task close`，直接 emit；`task_id`/`task_key` 仍需与 trigger payload 同源。

@@ -49,7 +49,7 @@ DAG 模式（`event_loop.supervisor.scheduler_mode: dag`）下，runtime 为每�
 
 **已弃用/移除**：`wave_id` / `slot_index` / `worktree_map`——runtime 不再注入这三个值，带这三个字段的 payload 会被拒收；job 身份一律由 `RALPH_DAG_JOB_ID` + `RALPH_DAG_JOB_TOKEN` 锚定。
 
-`task_id` / `task_key` / `step` 三字段必须严格一致（参考 `ralph-tools-tasks` red box）：`task_id` 是当前 loop 的真实 live id（`ralph tools task list` 取得，禁止手写以避免 reuse closed task id），`task_key` 是注册时的稳定 key，`step` 值必须匹配 `task_key` 中 `:step-<n>:` 段；不一致会被 runtime 拒收。
+`task_id` / `task_key` / `step` 三字段必须同源（参考 `ralph-tools-tasks` red box）。`task_id` 是当前 loop 的真实 live id（用 `ralph tools task list` / `show` 取得，禁止手写以避免复用已关闭 task id）；`task_key` 是当前 loop 内注册的稳定 key。只有当前 topic/schema 同时要求 `step` 时，才额外校验 `step` 与 `task_key` 中声明的 step 语义一致；不要自行推断 runtime-managed task 的 key 格式。不一致会被 runtime 拒收。
 
 ### `loop.resume` 与 `task.resume` 的区别
 
