@@ -487,7 +487,7 @@ preset 作者**不需要**手动把 `aggregate_timeout_secs` 乘以尝试次数�
 
 ## Multi-wave concurrency pattern（supervisor+wave）
 
-适用于 `execution_model: supervisor+wave` 且执行计划中存在多个互不依赖 wave 的 preset。runtime 支持同一批次接收多个独立 wave、并行执行 worker，同时串行保护 fan-in 合并与主账本提交（参考 `presets/en/parallel-forge.yml` 的当前实现，但不复制其拓扑）。
+适用于 `execution_model: supervisor+wave` 且执行计划中存在多个互不依赖 wave 的 preset。该段只描述 legacy wave fan-out；DAG scheduler preset 使用下方 scheduler mode pattern，不应套用本段的 `wave_id` / `slot_index` 约束。
 
 **核心语义：**
 

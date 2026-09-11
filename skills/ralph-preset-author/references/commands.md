@@ -165,7 +165,7 @@ JSON 输出结构：
   "capabilities": [
     {
       "id": "wave-emit",
-      "trigger_signal": "execution_model == wave | supervisor+wave",
+      "trigger_signal": "execution_model == wave | supervisor+wave | supervisor+dag",
       "applies_when": "preset uses ralph wave emit / ralph wave verify",
       "evidence_sources": ["skills/.../finding-rubric.md", "crates/.../ralph-tools-wave.md"],
       "recommended_evidence_level": "runtime",
@@ -237,6 +237,6 @@ ralph emit --schema <scope-topic> -H <path|builtin:name>
 
 DAG 模式下，runtime 为每个 active job 注入一组 typed `JobContext` 字段（通过 `RALPH_DAG_*` 环境变量暴露）。hat 不应再依赖旧的 wave/slot 标识。
 
-12 个 typed 字段： `RALPH_DAG_PLAN_KEY`, `RALPH_DAG_UNIT_KEY`, `RALPH_DAG_TASK_KEY`, `RALPH_DAG_TASK_ID`, `RALPH_DAG_JOB_ID`, `RALPH_DAG_JOB_TOKEN`, `RALPH_DAG_STAGE`, `RALPH_DAG_ATTEMPT`, `RALPH_DAG_WORKTREE`, `RALPH_DAG_BASE`, `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH`, `RALPH_DAG_ARTIFACT_REFS`.
+13 个 typed 字段： `RALPH_DAG_PLAN_KEY`, `RALPH_DAG_UNIT_KEY`, `RALPH_DAG_TASK_KEY`, `RALPH_DAG_TASK_ID`, `RALPH_DAG_JOB_ID`, `RALPH_DAG_JOB_TOKEN`, `RALPH_DAG_STAGE`, `RALPH_DAG_ATTEMPT`, `RALPH_DAG_WORKTREE`, `RALPH_DAG_BASE`, `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH`, `RALPH_DAG_ARTIFACT_REFS`, `RALPH_DAG_EXPECTED_HEAD`.
 
 3 个已弃用/移除字段： `RALPH_WAVE_ID`, `RALPH_SLOT_INDEX`, `RALPH_WORKTREE_MAP`. runtime 不再注入这三个值；带这三个字段的 payload 会被 typed schema 拒收。

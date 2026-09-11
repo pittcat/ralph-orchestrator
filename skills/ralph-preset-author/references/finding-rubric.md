@@ -220,7 +220,7 @@ review 命中时按上表 `finding_id` + `default_severity` + 默认 confidence 
 
 ### Supervisor capability audit (2026-07-22-002 plan U4)
 
-> **触发条件**：`event_loop.supervisor.enabled: true`；或 `execution_model ∈ {supervisor, supervisor+wave}`；或 hat `instructions` 含 supervisor 协调 topic / 引用 `supervisor.db`。**capability-triggered**，**禁止**按 preset 名称点名门控。
+> **触发条件**：`event_loop.supervisor.enabled: true`；或 `execution_model ∈ {supervisor, supervisor+wave, supervisor+dag}`；或 hat `instructions` 含 supervisor 协调 topic / 引用 supervisor ledger。**capability-triggered**，**禁止**按 preset 名称点名门控。
 > **未触发**：review 把本段记为 N/A。
 
 | 缺口 | Severity | category | aaf_question | finding_id |

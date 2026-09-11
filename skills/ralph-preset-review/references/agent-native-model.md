@@ -227,15 +227,16 @@ Skill doc 不复述 `ralph-tools*.md` 的命令参数表；需要时**引用章�
 | `wave` | 主链上某步对多份同构工作做同 topic 批并行 fan-out | hat 依赖 `## WAVE CONTEXT`；dispatcher 调 `ralph wave emit` + `ralph wave verify` |
 | `supervisor` | runtime 管理多 slot / worktree / 排队与 fan-in | `event_loop.supervisor.enabled: true`；存在 `.ralph/supervisor.db`；协调 topic 由 runtime 管 |
 | `supervisor+wave` | supervisor 且 dispatcher 使用 wave fan-out | 上述两类信号同时出现 |
+| `supervisor+dag` | supervisor 且 runtime 以 DAG scheduler 管理 job / Unit 生命周期 | `event_loop.supervisor.enabled: true` 且 `event_loop.supervisor.scheduler_mode: dag` 或 `dag_shadow`；协调 topic 与 terminal receipt 由 runtime 管理 |
 
 **能力检测信号（冻结，供 review / diagnose 共用）**：
 
 | 信号来源 | 触发字段 / 关键字 |
 |---|---|
-| Intent 字段 | `execution_model` ∈ {`wave`, `supervisor`, `supervisor+wave`} |
+| Intent 字段 | `execution_model` ∈ {`wave`, `supervisor`, `supervisor+wave`, `supervisor+dag`} |
 | YAML 拓扑 | `event_loop.supervisor.enabled: true` |
 | YAML / instructions | 出现 `ralph wave emit` / `ralph wave verify`，或 hat 依赖 `## WAVE CONTEXT` |
-| 产物（diagnose） | 存在 `.ralph/supervisor.db`，或 events 含 `wave_id`，或日志出现 wave fan-out |
+| 产物（diagnose） | 存在 supervisor ledger；wave 模式再看 `wave_id`，DAG 模式看 scheduler 观测或 `forge.unit.*` 业务事件 |
 
 **默认推荐**：菜单第一项永远是 `single-chain`。用户否认 wave / supervisor → 锁定 `execution_model: single-chain`，后续拓扑不得引入 `event_loop.supervisor.enabled`、dispatcher 不得调用 `ralph wave emit`。
 
@@ -293,6 +294,6 @@ Preset author/review audits now use `ralph inspect prompt --trigger/--payload/--
 
 DAG 模式下，runtime 为每个 active job 注入一组 typed `JobContext` 字段（通过 `RALPH_DAG_*` 环境变量暴露）。hat 不应再依赖旧的 wave/slot 标识。
 
-12 个 typed 字段： `RALPH_DAG_PLAN_KEY`, `RALPH_DAG_UNIT_KEY`, `RALPH_DAG_TASK_KEY`, `RALPH_DAG_TASK_ID`, `RALPH_DAG_JOB_ID`, `RALPH_DAG_JOB_TOKEN`, `RALPH_DAG_STAGE`, `RALPH_DAG_ATTEMPT`, `RALPH_DAG_WORKTREE`, `RALPH_DAG_BASE`, `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH`, `RALPH_DAG_ARTIFACT_REFS`.
+13 个 typed 字段： `RALPH_DAG_PLAN_KEY`, `RALPH_DAG_UNIT_KEY`, `RALPH_DAG_TASK_KEY`, `RALPH_DAG_TASK_ID`, `RALPH_DAG_JOB_ID`, `RALPH_DAG_JOB_TOKEN`, `RALPH_DAG_STAGE`, `RALPH_DAG_ATTEMPT`, `RALPH_DAG_WORKTREE`, `RALPH_DAG_BASE`, `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH`, `RALPH_DAG_ARTIFACT_REFS`, `RALPH_DAG_EXPECTED_HEAD`.
 
 3 个已弃用/移除字段： `RALPH_WAVE_ID`, `RALPH_SLOT_INDEX`, `RALPH_WORKTREE_MAP`. runtime 不再注入这三个值；带这三个字段的 payload 会被 typed schema 拒收。

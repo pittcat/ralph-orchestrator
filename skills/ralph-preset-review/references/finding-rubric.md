@@ -219,7 +219,7 @@ review 命中时按上表 `finding_id` + `default_severity` + 默认 confidence 
 
 ### Supervisor capability audit (2026-07-22-002 plan U4)
 
-> **触发条件**：`event_loop.supervisor.enabled: true`；或 `execution_model ∈ {supervisor, supervisor+wave}`；或 hat `instructions` 含 supervisor 协调 topic / 引用 `supervisor.db`。**capability-triggered**，**禁止**按 preset 名称点名门控。
+> **触发条件**：`event_loop.supervisor.enabled: true`；或 `execution_model ∈ {supervisor, supervisor+wave, supervisor+dag}`；或 hat `instructions` 含 supervisor 协调 topic / 引用 supervisor ledger。**capability-triggered**，**禁止**按 preset 名称点名门控。
 > **未触发**：review 把本段记为 N/A。
 
 | 缺口 | Severity | category | aaf_question | finding_id |
@@ -269,7 +269,7 @@ review 命中时按上表 `finding_id` + `default_severity` + 默认 confidence 
 | preset 注释 / notes 声称 `scheduler_mode: dag` 已接管调度，却缺少对应 runtime-driven contract | P1 | payload-content | Q4 | review-only（`scheduler_mode_overstates_cutover`） |
 | `dag_shadow` / `dag` 模式下 preset 未在 author notes 说明 side-effect boundary 与 runtime ownership | P1 | feasibility | Q3 | review-only（`scheduler_mode_transitional_state_undocumented`） |
 
-命中按上表 `finding_id` + default severity + 默认 confidence 起点 60 入主表。builtin `parallel-forge` 的 `scheduler_mode: dag` 已使用 runtime-owned DAG execution face；`ralph inspect loop --format json` 在非 `wave` 模式输出只读 `scheduler` 块。
+命中按上表 `finding_id` + default severity + 默认 confidence 起点 60 入主表。任何 `scheduler_mode: dag_shadow | dag` 的 supervisor preset 都适用本段；`ralph inspect loop --format json` 在非 `wave` 模式输出只读 `scheduler` 块。
 ### Agent skill audit（review-only，由 review SKILL Workflow 0a 弹窗默认跳过、选审触发）
 
 按 `references/agent-skill-audit.md` 的规程，对注入给 agent 的 skill 文档（`crates/ralph-core/data/*.md` / 外仓二进制内嵌）做内容级审计。**默认不审**，review SKILL 第 0a 步必须弹出交互选择菜单，默认选项是「仅审查 preset YAML（推荐）」。命中按上表 `default_severity` + `default_confidence` 入主表（与 `ralph preset check --strict` 输出的 lint ID 分开——本表 ID 不带 `lint.` 前缀，也**不**出现在 `ralph preset check` JSON）。
@@ -496,6 +496,6 @@ review 报告必须在 Executive Summary 标 `source_mode: builtin | external`�
 
 DAG 模式下，runtime 为每个 active job 注入一组 typed `JobContext` 字段（通过 `RALPH_DAG_*` 环境变量暴露）。hat 不应再依赖旧的 wave/slot 标识。
 
-12 个 typed 字段： `RALPH_DAG_PLAN_KEY`, `RALPH_DAG_UNIT_KEY`, `RALPH_DAG_TASK_KEY`, `RALPH_DAG_TASK_ID`, `RALPH_DAG_JOB_ID`, `RALPH_DAG_JOB_TOKEN`, `RALPH_DAG_STAGE`, `RALPH_DAG_ATTEMPT`, `RALPH_DAG_WORKTREE`, `RALPH_DAG_BASE`, `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH`, `RALPH_DAG_ARTIFACT_REFS`.
+13 个 typed 字段： `RALPH_DAG_PLAN_KEY`, `RALPH_DAG_UNIT_KEY`, `RALPH_DAG_TASK_KEY`, `RALPH_DAG_TASK_ID`, `RALPH_DAG_JOB_ID`, `RALPH_DAG_JOB_TOKEN`, `RALPH_DAG_STAGE`, `RALPH_DAG_ATTEMPT`, `RALPH_DAG_WORKTREE`, `RALPH_DAG_BASE`, `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH`, `RALPH_DAG_ARTIFACT_REFS`, `RALPH_DAG_EXPECTED_HEAD`.
 
 3 个已弃用/移除字段： `RALPH_WAVE_ID`, `RALPH_SLOT_INDEX`, `RALPH_WORKTREE_MAP`. runtime 不再注入这三个值；带这三个字段的 payload 会被 typed schema 拒收。

@@ -134,7 +134,7 @@ review 必须先确认 source mode：`builtin:*` 可使用仓库源码、BDD 或
 
 3e. **Supervisor capability audit** — **capability-triggered**, **不**按 preset 名称点名门控：
    1. **检测顺序**：先读 Intent.execution_model → 再扫 YAML `event_loop.supervisor.enabled` 与 hat `instructions` 是否引用 `.ralph/supervisor.db` / 协调 topic。
-   2. **触发条件**：`execution_model ∈ {supervisor, supervisor+wave}` **或** `event_loop.supervisor.enabled: true` **或** 上述命令 / 路径字样出现。**未触发**：N/A。
+   2. **触发条件**：`execution_model ∈ {supervisor, supervisor+wave, supervisor+dag}` **或** `event_loop.supervisor.enabled: true` **或** 上述命令 / 路径字样出现。**未触发**：N/A。
    3. **判定**：按 `references/finding-rubric.md`「Supervisor capability audit」段逐项查 `preset.supervisor_requires_isolated` / `preset.supervisor_hat_publishes_coord_topic` / `preset.supervisor_unit_state_not_via_task_api` / `preset.artifact_uses_internal_ledger` / `preset.execution_model_intent_mismatch`；命中 → 主表，默认 P0。
    4. **与 3b 既有 CE pipeline 检查的关系**：3e **不**修改 3b 的「仅 `ce-executor-pipeline*` preset 触发」语义；3e 是 capability-triggered 的新通用审计，**新增** 5 条 finding_id（含 review-only 软性），3b 既有 4 条 review-only 软性 finding 保留不动。
 

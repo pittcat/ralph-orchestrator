@@ -47,7 +47,7 @@ evidence_gaps: <list of strings>                          # bundle reader / trac
 > **执行方式**: 4 sub-agent 并行（流程还原 / 历史 / 对账 / 归因）→ 汇总；**`history_search=disabled` 时仅 3 个 sub-agent**（Agent B 跳过）
 > **Diagnostics 模式**: FULL | MINIMAL | LOGS_ONLY | DISABLED
 > **history_search**: `disabled` | `preset-only` | `full`（默认 `disabled`）— 来自主 SKILL §0.1 AskUserQuestion
-> **execution_capabilities**: [single-chain | wave | supervisor | supervisor+wave 的子集]（Phase 0 推断结果; 由 `event_loop.supervisor.enabled` / hat `ralph wave emit` / `.ralph/supervisor.db` 存在 / events 含 `wave_id` 等 capability 信号决定; **`ralph inspect loop` 的 `supervisor` 键**在 enabled **或** 盘上已有可打开 wave 账本时出现，先 `has("supervisor")`；**禁止**按 builtin preset 名称点名; 详见 `SKILL.md`「Phase 0 能力推断」段）
+> **execution_capabilities**: [single-chain | wave | supervisor | supervisor+wave | supervisor+dag 的子集]（Phase 0 推断结果；由 supervisor 配置、scheduler_mode、wave/DAG 业务证据等 capability 信号决定；**`ralph inspect loop` 的 `supervisor` 键**在 enabled 或盘上已有可打开 ledger 时出现，先 `has("supervisor")`；**禁止**按 builtin preset 名称点名；详见 `SKILL.md`「Phase 0 能力推断」段）
 > **报告仓库**: `ralph-orchestrator` 主仓（非 run_dir）
 > **Tier C 根**: （从 preset+schema 解析）
 > **置信度规则**: §5 仅收录 `status == complete`（DT7 机检 confidence > 85）；P0 同样要求 confidence > 85；`status == incomplete` / `not_evaluable` 移入 §7（见 confidence-rubric DT7）
@@ -61,7 +61,7 @@ evidence_gaps: <list of strings>                          # bundle reader / trac
 | S | events（current-events 解析） | | | |
 | … | | | | |
 
-**execution_capabilities 推断结果**（Phase 0 必填）: [single-chain / wave / supervisor / supervisor+wave 的子集] — 给出每个 capability 的判定信号 + 证据锚点（如 `event_loop.supervisor.enabled=true` / events 中第一条 `wave_id` 行号 / `.ralph/supervisor.db` 文件 stat）。
+**execution_capabilities 推断结果**（Phase 0 必填）: [single-chain / wave / supervisor / supervisor+wave / supervisor+dag 的子集] — 给出每个 capability 的判定信号 + 证据锚点（如 `event_loop.supervisor.enabled=true` / `scheduler_mode=dag` / events 中第一条 `wave_id` 或 `forge.unit.*` 行号 / ledger stat）。
 
 **缺失产物 → 故障判定**（capability-triggered）:
 

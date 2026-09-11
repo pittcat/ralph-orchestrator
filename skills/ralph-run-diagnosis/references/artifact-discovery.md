@@ -110,14 +110,16 @@ test -f "$RUN/.ralph/loop.lock" && echo "LOCK_HELD" || echo "lock_released"
 | 信号 | → capability / Observe |
 |------|----------------|
 | `event_loop.supervisor.enabled: true` | +supervisor |
+| `event_loop.supervisor.scheduler_mode: dag_shadow | dag` | +dag（同时要求 +supervisor） |
 | hat `instructions` 含 `ralph wave emit` / `ralph wave verify`，或 `## WAVE CONTEXT` | +wave |
 | events 含 `wave_id` | +wave（产物侧） |
+| scheduler 观测或 `forge.unit.*` 业务事件 | +dag 的产物证据；不能单独替代 YAML 配置确认 |
 | `.ralph/supervisor.db` 存在 | ledger 证据：YAML 已 enabled 时加固 +supervisor；enabled=false 时仍可能让 `ralph inspect loop` JSON 出现 `supervisor` 键（default-wave）——先 `has("supervisor")`，**不要**用 enabled=false 断言无键 |
 
 **硬规则**：
 
 - **禁止**用 `exec.wave.*` / `slot.*` 推断 +wave（协调 topic ≠ wave fan-out）。
-- 能力集合为单链（或不含 supervisor/wave）时：缺 `.ralph/supervisor.db`、events 无 `wave_id` 均为**预期**，**不**标故障。
+- 能力集合为单链（或不含 supervisor/wave/dag）时：缺 supervisor ledger、events 无 `wave_id` 均为**预期**，**不**标故障。+dag 时不要求出现 `wave_id`。
 - `inspect` 的 `supervisor` 块门控 = **enabled 或盘上已有可打开 wave 账本**（与注入 skill `ralph-tools-opac` 一致）；诊断时以 JSON 是否含键为准，禁止手读 ledger 文件内容。
 - 将 `execution_capabilities` 写入报告 §0（见 [report-template.md](report-template.md)）。
 
@@ -127,7 +129,7 @@ test -f "$RUN/.ralph/loop.lock" && echo "LOCK_HELD" || echo "lock_released"
 
 | Tier | 路径 | 存在 | 行数 | 备注 |
 |------|------|------|------|------|
-| S | events（指针解析后） | | | 扫 `wave_id` 作 capability 信号 |
+| S | events（指针解析后） | | | 扫 `wave_id` / `forge.unit.*` 作 capability 证据 |
 | S | recovery.jsonl | | 0行=无拒收 | |
 | A | tasks.jsonl | | | tasks.enabled? |
 | B | diagnostics mode | | | FULL/MINIMAL/LOGS_ONLY |

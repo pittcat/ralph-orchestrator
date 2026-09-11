@@ -85,6 +85,7 @@ L0 盘点 → L1 拓扑 → L2 日志三联 → L3 产物五证 → L4 机制十
 | `execution_capabilities` 含 supervisor | 勾差 `.ralph/supervisor.db`；缺 → 记缺失（runtime） |
 | 不含 supervisor | 缺 `supervisor.db` → **N/A**，非故障 |
 | `execution_capabilities` 含 wave，或 events 已见 `wave_id` | worker/dispatcher Confirm 走 `ralph events --events-source main`（main ledger）；**禁止**用 hat-channel 做 wave Confirm |
+| `execution_capabilities` 含 dag | 对账 scheduler 观测、DAG 业务事件和 runtime-owned terminal receipt；不得要求 hat 伪造 receipt |
 | 不含 wave | events 无 `wave_id` → **N/A**，非故障 |
 
 ### L3.activation — activation outcome 对账（plan 2026-08-15-1823）

@@ -47,6 +47,17 @@
 | `ralph-tools-wave.md` 未说明每个 wave 必须独立 payload 文件、独立 `wave verify` → `wave emit` | `agent_skill.unreadable` | P1 | 85 | payload 隔离约束描述缺失 |
 | `ralph-tools-wave.md` 未说明 integrator 按 `integration_order` 串行 merge 而非按完成时间抢 merge | `agent_skill.unreadable` | P1 | 85 | integration turn 约束描述缺失 |
 
+## DAG scheduler skill audit（选审时检查）
+
+当 reviewer 选择「同时审查注入 skill 文档」且 preset 触发 `supervisor+dag` capability（`scheduler_mode: dag_shadow` / `dag`）时，检查相关注入 skill 文档。DAG runtime 自己负责 admission、job 生命周期、integration 与 terminal receipt；hat 只能产出业务判断和证据。
+
+| 检查项 | finding_id | default_severity | default_confidence | 含义 |
+|---|---|---|---|---|
+| skill 文档未说明 DAG 模式下 runtime 管理 Unit/job 生命周期，agent 仍被引导自行调度 | `agent_skill.unreadable` | P1 | 85 | 缺少当前 activation 的下一步边界 |
+| skill 文档把 DAG 协调 topic 或 terminal receipt 描述为 hat 可自行伪造/发布的控制面 | `agent_skill.leaks_internals` | P0 | 95 | 诱导 agent 越权操作 runtime-owned 控制面 |
+| skill 文档要求 agent 读取 `wave_id` / `slot_index` / `worktree_map` 作为 DAG identity | `agent_skill.unreadable` | P1 | 85 | 把 legacy wave context 错用于 DAG job |
+| skill 文档未说明应从当前 prompt context / task list / trigger payload 取得 typed JobContext 与 task identity | `agent_skill.unreadable` | P1 | 85 | agent 无法确定字段来源，可能猜测 live identity |
+
 ## 4. 与其它 finding_id 的边界
 
 - **不去替代** `preset.instructions_opac_skill_reference_missing` 等既有 finding——后者是 lint 抓的 shape 缺失；本表是 review-only 的「内容口径」层。

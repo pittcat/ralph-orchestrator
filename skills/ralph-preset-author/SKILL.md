@@ -62,13 +62,14 @@ ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format js
      - put the recommended choice first and explain its consequence in one sentence;
      - allow the user to supply a custom answer when none fits;
      - avoid exposing internal topology jargon when a business-language choice is possible.
-   - **Execution-model menu (MUST ask when material topology or parallelism is in scope)**: for a new preset or any material topology change that touches parallelism / multiple units / unclear orchestration, present the execution-model menu below. The vocabulary (single-chain | wave | supervisor | supervisor+wave) is frozen in `references/agent-native-model.md`「执行模型（Execution Model）」段; do not invent synonyms. Required behavior:
+   - **Execution-model menu (MUST ask when material topology or parallelism is in scope)**: for a new preset or any material topology change that touches parallelism / multiple units / unclear orchestration, present the execution-model menu below. The vocabulary (single-chain | wave | supervisor | supervisor+wave | supervisor+dag) is frozen in `references/agent-native-model.md`「执行模型（Execution Model）」段; do not invent synonyms. Required behavior:
      1. **Recommended first**: `single-chain` — default path; lowest complexity; parallel work stays inside the executor hat's subagent boundary.
      2. Second: `wave` — main chain has one step that fans out across many workers on the same topic (uses `ralph wave emit` / `ralph wave verify`).
      3. Third: `supervisor` — runtime manages multiple slots / worktrees / queueing / fan-in (`event_loop.supervisor.enabled: true`).
      4. Fourth: `supervisor+wave` — supervisor where the dispatcher also fans out with wave.
-     5. The first item is always `single-chain`; do **not** reorder or hide it.
-     6. The user may supply a custom answer; if the answer is non-observable ("适当并行", "必要时用 supervisor", "由作者决定"), grill again with these same options before drafting.
+     5. Fifth: `supervisor+dag` — supervisor where runtime owns DAG admission, job lifecycle, integration, and terminal receipt.
+     6. The first item is always `single-chain`; do **not** reorder or hide it.
+     7. The user may supply a custom answer; if the answer is non-observable ("适当并行", "必要时用 supervisor", "由作者决定"), grill again with these same options before drafting.
    - **Deny → lock single-chain (hard rule)**: if the user denies wave / supervisor (or selects single-chain outright), the author must:
      1. Write `execution_model: single-chain` into the Intent Confirmation (field defined in `references/author-checklist.md`).
      2. **Not** introduce `event_loop.supervisor.enabled: true` in the YAML.
@@ -159,7 +160,7 @@ ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format js
 1. **Classify target:** local (`.ralph/hats/*.yml`) vs builtin (`presets/en/` + `presets/schemas/`). Note `execution_mode` and hat count (4+ → `isolated` mandatory). This step begins only after the Discovery gate passes.
 
 2. **Topology phase (author brain):**
-   - **Default execution model = single-chain**. The single-chain default is **only** relaxed when the user's Intent Confirmation has `execution_model ∈ {wave, supervisor, supervisor+wave}` **and** the corresponding hard-question section in `references/author-checklist.md` is fully ✓ with evidence. Do **not** upgrade the model on author preference or to "match a builtin preset name"; the choice is capability-triggered and user-owned.
+   - **Default execution model = single-chain**. The single-chain default is **only** relaxed when the user's Intent Confirmation has `execution_model ∈ {wave, supervisor, supervisor+wave, supervisor+dag}` **and** the corresponding hard-question section in `references/author-checklist.md` is fully ✓ with evidence. Do **not** upgrade the model on author preference or to "match a builtin preset name"; the choice is capability-triggered and user-owned.
    - Read schema SSOT for builtin presets.
    - Sketch event flow (topics, not prompts).
    - Align each handoff: upstream Q4 fields ↔ downstream Q2 Observe path.
@@ -247,6 +248,7 @@ ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format js
      - `wave` → 「Hard questions — wave fan-out」7 问全 ✓ + 证据；supervisor 段标 N/A。
      - `supervisor` → 「Hard questions — supervisor orchestration」6 问全 ✓ + 证据；wave 段标 N/A。
      - `supervisor+wave` → wave 7 问与 supervisor 6 问同时全 ✓，与 Intent.execution_model 一致。
+     - `supervisor+dag` → supervisor 问题与 scheduler mode 问题同时全 ✓，并明确 runtime-owned admission / job / terminal receipt 边界。
      - 不一致（YAML 与 Intent）按 `finding-rubric.md`「Wave / Supervisor capability audit」段 `preset.execution_model_intent_mismatch` 入 review 主表。
    - **Artifact-First Handoff 5 问全 ✓**: 填 `references/author-checklist.md` 的「Hard questions — Artifact-First Handoff」段；任一 ✗ 必须改写或显式 justify。
    - **Key-stage event gate (0e) 复查**：每个被 Gate Scope 列入的关键 hat 必须有 `Key-stage event gate` 表（按 notes 字段固定 8 列：`key_stage` / `guard_selection` / `precheck_guard` / `precheck_retry_budget` / `payload_consistency_guard` / `payload_consistency_retry_budget` / `reason` / `confirmation_status`）；所有行的 `confirmation_status` 必须为 `confirmed`；`guard_selection` ∈ {`precheck`, `payload_consistency`, `both`, `neither`}；`precheck_guard=true` ⇔ `guard_selection ∈ {precheck, both}`；`payload_consistency_guard=true` ⇔ `guard_selection ∈ {payload_consistency, both}`；`precheck_guard=true` ⇒ `precheck_retry_budget ∈ {3, 2, 1}`；`payload_consistency_guard=true` ⇒ `payload_consistency_retry_budget ∈ {3, 2, 1}`；`precheck_guard=false` ⇒ `precheck_retry_budget` 为 `null`；`payload_consistency_guard=false` ⇒ `payload_consistency_retry_budget` 为 `null`；两 budget 不共享；选择 `neither` 或 budget 低于 3 必须有 ≤80 字 `reason`，不得为空。任一不满足 → STOP 不得交付。

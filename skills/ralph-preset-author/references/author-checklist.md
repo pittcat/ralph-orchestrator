@@ -11,8 +11,8 @@
 - [ ] 不让用户替 author 决定 hat 数、topic 名或内部 topology；除非它们本身是用户明确的产品约束
 - [ ] 已回显 `Preset Intent Confirmation`：目标、操作路径、输入/事实源、成功、阻塞、修改范围、独立评审、artifact/消费者、非目标、author 假设
 - [ ] **执行模型菜单与 Intent Confirmation 字段**（仅当变更涉及实质拓扑 / 并行 / 多 unit / 未声明编排方式时强制；窄机械编辑可在笔记里记录推断来源后跳过）：
-  - [ ] 提问菜单覆盖 `single-chain`（推荐首项）/ `wave` / `supervisor` / `supervisor+wave` 四选项，并允许自定义答案
-  - [ ] 不可观察答案（「适当并行」「必要时用 supervisor」）已 grill 回到上述四选项后再继续
+  - [ ] 提问菜单覆盖 `single-chain`（推荐首项）/ `wave` / `supervisor` / `supervisor+wave` / `supervisor+dag` 五选项，并允许自定义答案
+  - [ ] 不可观察答案（「适当并行」「必要时用 supervisor」）已 grill 回到上述五选项后再继续
   - [ ] 用户否认 wave / supervisor → 一律锁定 `single-chain`，并在 Intent 写入 `execution_model: single-chain` 与 ≤50 字 why；后续拓扑不得引入 `event_loop.supervisor.enabled: true`、dispatcher 不得调 `ralph wave emit` / `ralph wave verify`
   - [ ] 选定 wave / supervisor(*) 时，按模型分支填对应 Hard questions（见「Hard questions — wave fan-out」/「Hard questions — supervisor orchestration」段）
   - [ ] YAML 能力信号（`event_loop.supervisor.enabled` / hat instructions 含 `ralph wave emit`）与 Intent.execution_model 一致；不一致按 `finding-rubric.md`「Wave / Supervisor capability audit」 段 `preset.execution_model_intent_mismatch` 入 review 主表
@@ -59,14 +59,14 @@
 - **允许的修改范围：**
 - **必须独立执行的评审：**
 - **重要 artifact、生产方与消费者：**
-- **execution_model：** single-chain | wave | supervisor | supervisor+wave
+- **execution_model：** single-chain | wave | supervisor | supervisor+wave | supervisor+dag
   **why：** ≤50 字；锁定该执行模型的业务理由（例如「无并行/无 supervisor 需求，单链即可」 / 「需要同 topic 批并行 fan-out」 / 「需要 runtime 管理 slot / worktree / 排队」）
 - **非目标：**
 - **Author 推导与假设：**
 - **用户确认：** 已确认 / 返回修改 / 暂停
 ```
 
-> **`execution_model` 字段硬规则**：枚举四个值已冻结在 `agent-native-model.md`「执行模型（Execution Model）」段。Author 必须在 Intent Confirmation 里填写一个值并附 ≤50 字 why；review 端按该字段与 `agent-native-model.md` 检测信号对照，YAML 与 Intent 不一致（如 `event_loop.supervisor.enabled: true` 但 Intent 写 `single-chain`）按 `finding-rubric.md` 「Wave / Supervisor capability audit」 段 `preset.execution_model_intent_mismatch` finding 入主表。用户否认 wave / supervisor → 一律锁定 `single-chain`，不得暗中升级。
+> **`execution_model` 字段硬规则**：枚举五个值已冻结在 `agent-native-model.md`「执行模型（Execution Model）」段。Author 必须在 Intent Confirmation 里填写一个值并附 ≤50 字 why；review 端按该字段与 `agent-native-model.md` 检测信号对照，YAML 与 Intent 不一致（如 `event_loop.supervisor.enabled: true` 但 Intent 写 `single-chain`）按 `finding-rubric.md` 「Wave / Supervisor capability audit」 段 `preset.execution_model_intent_mismatch` finding 入主表。用户否认 wave / supervisor → 一律锁定 `single-chain`，不得暗中升级。
 
 ## 双阶段大脑（强制）
 
@@ -250,7 +250,7 @@
 
 ## Hard questions — supervisor orchestration
 
-> **触发条件**：`execution_model ∈ {supervisor, supervisor+wave}`。`single-chain` 与 `wave` preset **不**适用本段（标记 N/A）。
+> **触发条件**：`execution_model ∈ {supervisor, supervisor+wave, supervisor+dag}`。`single-chain` 与 `wave` preset **不**适用本段（标记 N/A）。
 > **目的**：把 supervisor 视角下 hat 能 Observe / 调用的边界先钉死; supervisor 内部 ledger / 队列 / slot 调度由 runtime 管控,hat 不得越界。
 
 1. **`supervisor.enabled` + isolated**：preset `event_loop.execution_mode: isolated` 且 `event_loop.supervisor.enabled: true`。✓ / ✗ + 引用字段路径
@@ -303,6 +303,7 @@
 | `wave` | 必填（与 wave 同存） | 必填（7 问全 ✓ + 证据） | **N/A** |
 | `supervisor` | 必填（single-chain-first 默认也仍答,作为基线） | **N/A** | 必填（8 问全 ✓ + 证据） |
 | `supervisor+wave` | 必填 | 必填 | 必填（三段并列;每段独立判定） |
+| `supervisor+dag` | 必填 | **N/A**（不使用 wave fan-out） | 必填 + scheduler mode（runtime-owned DAG 边界） |
 
 **N/A 写法**:勾选框标 `N/A` + ≤30 字理由（如「execution_model=single-chain,无 wave 拓扑」），**不得**留空 / 写「同上」 / 写「由 wave 段覆盖」。N/A 不是「跳过」而是「显式不适用」。
 
