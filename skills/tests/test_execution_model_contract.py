@@ -3,7 +3,8 @@
 Locks the cross-skill contract introduced by plan
 ``2026-07-22-002-feat-preset-skills-execution-model-wave-supervisor-plan``:
 
-* The execution-model enum (single-chain | wave | supervisor | supervisor+wave)
+* The execution-model enum (single-chain | wave | supervisor | supervisor+wave |
+  supervisor+dag)
   is **frozen** in ``agent-native-model.md`` so every other unit (U2 author
   menu, U4 rubric, U5 review, U7 diagnosis) can reference the same four
   values without drift.
@@ -48,7 +49,13 @@ DIAGNOSIS_SKILL = ROOT / "skills" / "ralph-run-diagnosis" / "SKILL.md"
 FIXTURES_DIR = ROOT / "skills" / "ralph-preset-review" / "fixtures"
 FIXTURES_README = FIXTURES_DIR / "README.md"
 
-EXECUTION_MODELS = ("single-chain", "wave", "supervisor", "supervisor+wave")
+EXECUTION_MODELS = (
+    "single-chain",
+    "wave",
+    "supervisor",
+    "supervisor+wave",
+    "supervisor+dag",
+)
 
 # Capability-trigger signals per plan §1 (frozen detection grammar).
 SIGNAL_KEYWORDS = (
@@ -71,9 +78,9 @@ def _read(path: Path) -> str:
 
 
 def test_agent_native_model_defines_execution_models() -> None:
-    """``agent-native-model.md`` must declare all four execution-model values.
+    """``agent-native-model.md`` must declare all five execution-model values.
 
-    These four values are the frozen detection vocabulary used by review (U4)
+    These five values are the frozen detection vocabulary used by review (U4)
     and diagnosis (U7).  Review / diagnosis consumers must be able to grep
     for any of them and find exactly one canonical anchor in this document.
     """
@@ -99,11 +106,11 @@ def test_agent_native_model_has_execution_model_section() -> None:
 
 
 def test_agent_native_model_lists_capability_signals() -> None:
-    """The execution-model section must enumerate the four signal keywords.
+    """The execution-model section must enumerate the capability signal keywords.
 
     Detection grammar (plan §1, frozen): Intent `execution_model`,
     YAML `event_loop.supervisor.enabled`, `ralph wave emit` / `## WAVE CONTEXT`,
-    and product evidence (`supervisor.db` / `wave_id`).  All four anchors
+    and product evidence (`supervisor.db` / `wave_id`).  The anchors
     must appear inside the agent-native-model section so review / diagnosis
     share one detection surface.
     """
@@ -204,7 +211,7 @@ def test_intent_template_execution_model_has_why_slot() -> None:
 
 
 def test_intent_template_execution_model_options_enum() -> None:
-    """The ``execution_model`` field must enumerate the four allowed values.
+    """The ``execution_model`` field must enumerate the five allowed values.
 
     Lock the enum into the template so the field is self-documenting for
     the author.
@@ -592,8 +599,8 @@ def test_diagnosis_missing_supervisor_db_not_fault_without_signal() -> None:
     pattern = re.compile(
         r"missing.{0,40}supervisor\.db.{0,120}not.{0,20}fault|"
         r"supervisor\.db.{0,120}not.{0,40}fault|"
-        r"缺.{0,20}supervisor\.db.{0,40}不.{0,40}异常|"
-        r"supervisor\.db.{0,40}不.{0,20}异常",
+        r"缺.{0,20}(?:supervisor\.db|supervisor ledger).{0,40}不.{0,40}异常|"
+        r"(?:supervisor\.db|supervisor ledger).{0,40}不.{0,20}异常",
         re.IGNORECASE | re.DOTALL,
     )
     assert pattern.search(text), (
