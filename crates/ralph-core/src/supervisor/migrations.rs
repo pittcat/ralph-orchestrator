@@ -1306,7 +1306,7 @@ mod tests {
     /// the v24 table, rewind `user_version` to 23, seed a
     /// representative v23 dataset, reopen, upgrade.
     #[test]
-    fn migration_v23_to_v24_preserves_existing_rows() {
+    fn migrations_apply_v24_creates_stage_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("supervisor.db");
 

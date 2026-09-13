@@ -715,7 +715,7 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────
 
     #[test]
-    fn u1_safe_repo_relative_path_accepts_normal_repo_paths() {
+    fn dag_artifacts_path_is_safe_repo_relative() {
         assert!(is_safe_repo_relative_path("a/b.md"));
         assert!(is_safe_repo_relative_path("a/b/c.md"));
         assert!(is_safe_repo_relative_path("./a.md"));

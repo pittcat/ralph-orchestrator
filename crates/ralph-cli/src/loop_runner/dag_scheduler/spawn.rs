@@ -4185,7 +4185,7 @@ units:
     /// `unit_report_path` under `(plan, unit, "execute")` with
     /// the on-disk SHA-256 as `artifact_digest`.
     #[test]
-    fn u1_artifact_recorded_on_accepted_execute_payload() {
+    fn dag_artifacts_recorded_on_accepted_completion() {
         let worktree = u1_worktree();
         std::fs::create_dir_all(&worktree).unwrap();
         let mut runtime = u1_u2_runtime_with_worktree(&worktree);
@@ -4229,7 +4229,7 @@ units:
     /// U1 BDD scenario 2: a review REJECTED terminal records
     /// `review_report_path` under `stage = "review"`.
     #[test]
-    fn u1_artifact_recorded_on_rejected_review_payload() {
+    fn dag_artifacts_record_rejected_review_report() {
         let worktree = u1_worktree();
         std::fs::create_dir_all(&worktree).unwrap();
         let mut runtime = u1_u2_runtime_with_worktree(&worktree);
@@ -4268,7 +4268,7 @@ units:
     /// U1 BDD scenario 3: a Fix terminal coalesces under
     /// `stage = "execute"` (D7).
     #[test]
-    fn u1_artifact_fix_coalesces_under_execute_stage() {
+    fn dag_artifacts_record_fix_under_execute_stage() {
         let worktree = u1_worktree();
         std::fs::create_dir_all(&worktree).unwrap();
         let mut runtime = u1_u2_runtime_with_worktree(&worktree);
@@ -4311,7 +4311,7 @@ units:
     /// U1 BDD scenarios 4+5+6: hostile / missing / empty
     /// payloads record zero rows (fail-soft).
     #[test]
-    fn u1_artifact_rejects_unsafe_or_missing_paths() {
+    fn dag_artifacts_reject_unsafe_or_missing_paths() {
         let worktree = u1_worktree();
         std::fs::create_dir_all(&worktree).unwrap();
         let mut runtime = u1_u2_runtime_with_worktree(&worktree);
@@ -4473,7 +4473,7 @@ units:
     /// U2 BDD scenario 1: a valid record + matching on-disk file
     /// returns an absolute path + the recorded digest.
     #[test]
-    fn u2_consume_returns_artifact_ref_when_record_and_disk_match() {
+    fn dag_spawn_review_succeeds_with_real_record_for_consume() {
         let worktree = u1_worktree();
         std::fs::create_dir_all(&worktree).unwrap();
         let mut runtime = u1_u2_runtime_with_worktree(&worktree);
@@ -4506,7 +4506,7 @@ units:
 
     /// U2 BDD scenario 2: recorded digest drifted → fail-closed.
     #[test]
-    fn u2_consume_fails_closed_on_digest_drift() {
+    fn dag_spawn_fails_closed_on_artifact_drift() {
         let worktree = u1_worktree();
         std::fs::create_dir_all(&worktree).unwrap();
         let mut runtime = u1_u2_runtime_with_worktree(&worktree);
@@ -4537,7 +4537,7 @@ units:
 
     /// U2 BDD scenario 3: file deleted after recording → fail-closed.
     #[test]
-    fn u2_consume_fails_closed_on_missing_file() {
+    fn dag_spawn_fails_closed_on_artifact_absent() {
         let worktree = u1_worktree();
         std::fs::create_dir_all(&worktree).unwrap();
         let mut runtime = u1_u2_runtime_with_worktree(&worktree);
@@ -4652,7 +4652,7 @@ units:
     /// so the agent sees the hand-off evidence without parsing
     /// env.
     #[test]
-    fn u3_job_prompt_lists_artifact_refs() {
+    fn dag_job_prompt_lists_artifact_refs() {
         let identity = JobIdentity {
             plan_key: "pf-u3".to_string(),
             unit_id: "U1".to_string(),
@@ -4711,7 +4711,7 @@ units:
     /// plan layer still produces a sensible prompt. This pins
     /// the "uniform render" contract from D10.
     #[test]
-    fn u3_job_prompt_with_empty_artifact_refs_renders_no_block() {
+    fn dag_execute_artifact_refs_unchanged() {
         let identity = JobIdentity {
             plan_key: "pf-u3".to_string(),
             unit_id: "U1".to_string(),
