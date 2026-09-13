@@ -159,6 +159,24 @@ fn validate_commit_oid(field: &'static str, value: &str) -> UnitWorktreeResult<(
 }
 
 impl UnitWorktree {
+    /// 2026-09-13-001 plan U1: canonical worktree path for the
+    /// `(repo_root, loop_id, unit_id)` triple — single source of
+    /// truth so `acquire`, the spawn seam's
+    /// `record_stage_artifacts_from_payload` containment check,
+    /// and any future caller agree on the on-disk location. The
+    /// shape mirrors the in-`acquire` computation
+    /// (`<repo_root>/.ralph/worktrees/<loop>-<unit>`).
+    ///
+    /// NO shape validation is performed here — callers must
+    /// have already routed the IDs through `validate_component_id`
+    /// (or be a test fixture with controlled inputs).
+    pub(crate) fn worktree_path_for(repo_root: &Path, loop_id: &str, unit_id: &str) -> PathBuf {
+        repo_root
+            .join(".ralph")
+            .join("worktrees")
+            .join(format!("{}-{}", loop_id, unit_id))
+    }
+
     /// Acquire a trusted worktree for `unit_id`.
     ///
     /// `verified_base_commit` is the SHA the runtime captured
@@ -199,7 +217,7 @@ impl UnitWorktree {
 
         let branch = format!("ralph/{}/{}", loop_id, unit_id);
         let worktree_root = repo_root.join(".ralph").join("worktrees");
-        let path = worktree_root.join(format!("{}-{}", loop_id, unit_id));
+        let path = Self::worktree_path_for(repo_root, loop_id, unit_id);
 
         // Try reuse: does the branch already exist?
         let existing_tip = read_branch_tip(repo_root, &branch);

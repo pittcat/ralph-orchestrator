@@ -28,7 +28,7 @@
 //!     `mode == Dag` plus an attached [`DagExecutionContext`]; wave
 //!     and `dag_shadow` never reach it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -817,6 +817,18 @@ impl DagSchedulerRuntime {
             self.record_accepted_evidence(kind, &completion.identity, &digest);
         }
 
+        // 2026-09-13-001 plan U1: record the per-stage artifact
+        // ledger for BOTH accepted and review-rejected terminals
+        // (D6). The fixer needs the rejected review's
+        // review_report_path (E18), and the verifier needs the
+        // accepted execute's unit_report_path (E6). Recording
+        // happens after `complete_payload` so runtime-owned
+        // fields are not mistaken for agent-supplied artifacts;
+        // `record_stage_artifacts_from_payload` only walks
+        // `*_path` string fields, so `unit_id` / `plan_key` /
+        // `task_id` are never considered.
+        self.record_stage_artifacts_from_payload(&completion.identity, &payload);
+
         self.queue_result_event(
             kind.success_topic(),
             completion.identity.hat.clone(),
@@ -1513,6 +1525,192 @@ impl DagSchedulerRuntime {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// 2026-09-13-001 plan U2: read a single artifact row for the
+    /// `(plan_key, unit_key, stage)` triple from the durable
+    /// `dag_stage_artifacts` store, resolve its repo-relative path
+    /// against the unit worktree, verify the file still exists,
+    /// and re-hash it to confirm the recorded digest matches the
+    /// on-disk content. Returns the typed `ArtifactRef` (absolute
+    /// path + digest) on success; returns a human-readable reason
+    /// string on every failure mode so `spawn_job` can route it
+    /// straight into `fail_job`.
+    ///
+    /// The failure modes covered:
+    ///   - store unavailable (treat as contract violation: the
+    ///     spawn seam cannot prove the prior hat's evidence
+    ///     persisted, so it refuses to launch the next stage);
+    ///   - artifact row missing for `(plan_key, unit_key, stage,
+    ///     field_name)`;
+    ///   - recorded path fails the surface shape check (`is_safe_repo_relative_path`);
+    ///   - resolved absolute path escapes the unit worktree
+    ///     (defense in depth — the recorded row may have come
+    ///     from a corrupted journal);
+    ///   - on-disk file missing;
+    ///   - digest drift between the recorded row and the live file.
+    fn consume_stage_artifact(
+        &mut self,
+        plan_key: &str,
+        unit_key: &str,
+        stage: &str,
+        field_name: &str,
+    ) -> Result<ArtifactRef, String> {
+        let stores = self
+            .ensure_stores()
+            .map_err(|err| format!("DAG artifact store unavailable for {stage}: {err}"))?;
+        let rows = stores
+            .plans
+            .latest_stage_artifacts(plan_key, unit_key, stage)
+            .map_err(|err| format!("DAG artifact store read failed for {stage}: {err}"))?;
+        let row = rows.iter().find(|row| row.field_name == field_name).ok_or_else(|| {
+            format!(
+                "DAG artifact missing: stage={stage} field={field_name} plan={plan_key} unit={unit_key} \
+                 (no row recorded by the prior hat — the prior stage did not publish a valid {field_name})"
+            )
+        })?;
+        let relative = &row.artifact_path;
+        if !super::jobs::is_safe_repo_relative_path(relative) {
+            return Err(format!(
+                "DAG artifact path unsafe: stage={stage} field={field_name} path=`{relative}` \
+                 (rejected by is_safe_repo_relative_path)"
+            ));
+        }
+        let exec = self
+            .exec
+            .as_ref()
+            .ok_or_else(|| "DAG artifact: no execution context".to_string())?;
+        let worktree = UnitWorktree::worktree_path_for(&self.workspace, &exec.loop_id, unit_key);
+        let candidate = worktree.join(relative);
+        let canonical = candidate.canonicalize().map_err(|err| {
+            format!(
+                "DAG artifact file unreadable: stage={stage} field={field_name} path=`{relative}` err={err}"
+            )
+        })?;
+        let canonical_worktree = worktree.canonicalize().map_err(|err| {
+            format!("DAG artifact worktree unreadable: stage={stage} unit={unit_key} err={err}")
+        })?;
+        if !canonical.starts_with(&canonical_worktree) {
+            return Err(format!(
+                "DAG artifact escapes worktree: stage={stage} field={field_name} resolved=`{}`",
+                canonical.display()
+            ));
+        }
+        let bytes = std::fs::read(&canonical).map_err(|err| {
+            format!(
+                "DAG artifact read failed: stage={stage} field={field_name} path=`{}` err={err}",
+                canonical.display()
+            )
+        })?;
+        let live_digest = ralph_core::workspace_mutation_guard::sha256_hex(&bytes);
+        if live_digest != row.artifact_digest {
+            return Err(format!(
+                "DAG artifact digest drift: stage={stage} field={field_name} \
+                 recorded={} live={}",
+                row.artifact_digest, live_digest
+            ));
+        }
+        Ok(ArtifactRef {
+            path: canonical.to_string_lossy().into_owned(),
+            digest: row.artifact_digest.clone(),
+        })
+    }
+
+    /// 2026-09-13-001 plan U1: walk the accepted (or
+    /// review-rejected) payload, pick every non-empty `*_path`
+    /// string field, validate its shape, hash the on-disk file
+    /// (if any), and persist one row per surviving field to
+    /// `dag_stage_artifacts`. Fail-soft: a missing file, an
+    /// unsafe path, a shape rejection, or a store-write failure
+    /// is logged and skipped — never propagated as a job
+    /// failure. The `Fix` stage coalesces under `stage =
+    /// "execute"` (D7).
+    fn record_stage_artifacts_from_payload(&mut self, identity: &JobIdentity, payload: &Value) {
+        let Some(obj) = payload.as_object() else {
+            return;
+        };
+        let stage_storage = super::jobs::coalesce_stage_for_storage(&identity.stage);
+        let plan_key = identity.plan_key.clone();
+        let unit_key = identity.unit_id.clone();
+        let attempt = identity.attempt;
+
+        let mut records = Vec::new();
+        for (field_name, value) in obj {
+            // Only string-valued `*_path` fields.
+            let Some(path_str) = value.as_str() else {
+                continue;
+            };
+            // Filename suffix convention keeps the surface tight:
+            // every `*_path` is repo-relative.
+            if !field_name.ends_with("_path") {
+                continue;
+            }
+            if !super::jobs::is_safe_repo_relative_path(path_str) {
+                warn!(
+                    plan_key,
+                    unit_key,
+                    stage = %stage_storage,
+                    field = %field_name,
+                    path = %path_str,
+                    "DAG artifact record: unsafe path; skipping"
+                );
+                continue;
+            }
+            let Some(exec) = self.exec.as_ref() else {
+                continue;
+            };
+            let worktree =
+                UnitWorktree::worktree_path_for(&self.workspace, &exec.loop_id, &unit_key);
+            let candidate = worktree.join(path_str);
+            let bytes = match std::fs::read(&candidate) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    warn!(
+                        plan_key,
+                        unit_key,
+                        stage = %stage_storage,
+                        field = %field_name,
+                        path = %path_str,
+                        error = %err,
+                        "DAG artifact record: file unreadable; skipping"
+                    );
+                    continue;
+                }
+            };
+            let digest = ralph_core::workspace_mutation_guard::sha256_hex(&bytes);
+            records.push(ralph_core::supervisor::dag_store::StageArtifactRecord {
+                plan_key: plan_key.clone(),
+                unit_key: unit_key.clone(),
+                stage: stage_storage.to_string(),
+                attempt,
+                field_name: field_name.clone(),
+                artifact_path: path_str.to_string(),
+                artifact_digest: digest,
+                recorded_at_ms: now_ms(),
+            });
+        }
+
+        if records.is_empty() {
+            return;
+        }
+        let Ok(stores) = self.ensure_stores() else {
+            warn!(
+                plan_key,
+                unit_key,
+                stage = %stage_storage,
+                "DAG artifact record: store unavailable; skipping"
+            );
+            return;
+        };
+        if let Err(err) = stores.plans.record_stage_artifacts(&records) {
+            warn!(
+                plan_key,
+                unit_key,
+                stage = %stage_storage,
+                error = %err,
+                "DAG artifact record: store write failed; skipping"
+            );
+        }
+    }
+
     /// Launch one fenced job. Every failure before `spawn_pty_job`
     /// (journal reserve conflict, missing hat template, unresolvable
     /// base commit, worktree rejection) strands the unit with a
@@ -1699,7 +1897,18 @@ impl DagSchedulerRuntime {
             SpawnKind::Verify => JobStage::Verify,
             SpawnKind::Fix => JobStage::Fix,
         };
-        let mut artifact_refs = std::collections::BTreeMap::new();
+        // 2026-09-13-001 plan U2: artifact_refs for Review/Verify/Fix
+        // now point at real files recorded by the prior hat in the
+        // `dag_stage_artifacts` store (U1). The plan layer for
+        // `verified_execution_plan_*` keeps its dual-key shape so
+        // downstream `required_fields` stay satisfied. The spawn
+        // seam runs every consumed ref through a fail-closed digest
+        // recheck BEFORE the child process is launched — any
+        // missing row / missing file / digest drift / worktree
+        // escape routes through `fail_job` with
+        // `FailureClass::ContractViolation` so the next stage never
+        // starts against stale evidence.
+        let mut artifact_refs: BTreeMap<String, ArtifactRef> = BTreeMap::new();
         if let Some(plan) = self.plans.get(&plan_key) {
             artifact_refs.insert(
                 "verified_execution_plan_path".to_string(),
@@ -1716,42 +1925,88 @@ impl DagSchedulerRuntime {
                 },
             );
         }
-        let prior_event_ref =
-            |stage: &str| events_file.with_file_name(format!("{}.events.jsonl", stage));
         match kind {
+            SpawnKind::Execute => {}
             SpawnKind::Review => {
-                let r = ArtifactRef {
-                    path: prior_event_ref("execute").display().to_string(),
-                    digest: "runtime-accepted".to_string(),
+                let execute_artifact = match self.consume_stage_artifact(
+                    &plan_key,
+                    bare_unit_id,
+                    "execute",
+                    "unit_report_path",
+                ) {
+                    Ok(artifact) => artifact,
+                    Err(reason) => {
+                        self.fail_job(&identity, kind, &reason, FailureClass::ContractViolation);
+                        return;
+                    }
                 };
-                artifact_refs.insert("executor_completion_artifact_path".to_string(), r.clone());
-                artifact_refs.insert("executor_completion_artifact_digest".to_string(), r);
+                artifact_refs.insert(
+                    "executor_completion_artifact_path".to_string(),
+                    execute_artifact.clone(),
+                );
+                artifact_refs.insert(
+                    "executor_completion_artifact_digest".to_string(),
+                    execute_artifact,
+                );
             }
             SpawnKind::Verify => {
-                for (name, stage) in [
-                    ("executor_completion_artifact_path", "execute"),
-                    ("reviewer_completion_artifact_path", "review"),
-                ] {
-                    artifact_refs.insert(
-                        name.to_string(),
-                        ArtifactRef {
-                            path: prior_event_ref(stage).display().to_string(),
-                            digest: "runtime-accepted".to_string(),
-                        },
-                    );
-                }
+                let execute_artifact = match self.consume_stage_artifact(
+                    &plan_key,
+                    bare_unit_id,
+                    "execute",
+                    "unit_report_path",
+                ) {
+                    Ok(artifact) => artifact,
+                    Err(reason) => {
+                        self.fail_job(&identity, kind, &reason, FailureClass::ContractViolation);
+                        return;
+                    }
+                };
+                let review_artifact = match self.consume_stage_artifact(
+                    &plan_key,
+                    bare_unit_id,
+                    "review",
+                    "review_report_path",
+                ) {
+                    Ok(artifact) => artifact,
+                    Err(reason) => {
+                        self.fail_job(&identity, kind, &reason, FailureClass::ContractViolation);
+                        return;
+                    }
+                };
+                artifact_refs.insert(
+                    "executor_completion_artifact_path".to_string(),
+                    execute_artifact,
+                );
+                artifact_refs.insert(
+                    "reviewer_completion_artifact_path".to_string(),
+                    review_artifact,
+                );
             }
             SpawnKind::Fix => {
-                let r = ArtifactRef {
-                    path: feedback
-                        .clone()
-                        .unwrap_or_else(|| events_file.display().to_string()),
-                    digest: "runtime-correction".to_string(),
+                // The fixer needs the rejected review's report path
+                // (E18: rejected review IS the hand-off payload for
+                // a fix-stage spawn). Surface it under the two
+                // historical key names so the preset schema's
+                // required_fields stay satisfied.
+                let review_artifact = match self.consume_stage_artifact(
+                    &plan_key,
+                    bare_unit_id,
+                    "review",
+                    "review_report_path",
+                ) {
+                    Ok(artifact) => artifact,
+                    Err(reason) => {
+                        self.fail_job(&identity, kind, &reason, FailureClass::ContractViolation);
+                        return;
+                    }
                 };
-                artifact_refs.insert("fix_failure_fingerprint".to_string(), r.clone());
-                artifact_refs.insert("correction_digest".to_string(), r);
+                artifact_refs.insert(
+                    "fix_failure_fingerprint".to_string(),
+                    review_artifact.clone(),
+                );
+                artifact_refs.insert("correction_digest".to_string(), review_artifact);
             }
-            SpawnKind::Execute => {}
         }
         let context = JobContext {
             plan_key: identity.plan_key.clone(),
@@ -1762,7 +2017,7 @@ impl DagSchedulerRuntime {
             worktree_path: worktree.path.clone(),
             current_base: verified_base.clone(),
             expected_head: verified_base.clone(),
-            artifact_refs,
+            artifact_refs: artifact_refs.clone(),
             resource_namespace: super::job_context::resource_namespace(
                 &identity.plan_key,
                 &identity.unit_key(),
@@ -1771,12 +2026,26 @@ impl DagSchedulerRuntime {
             ),
             skill_set: vec!["ralph-tools".to_string()],
         };
-        if let ContextValidation::MissingFields { fields } =
-            super::job_context::validate_context(&context)
-        {
-            let reason = format!("DAG job context is incomplete: {}", fields.join(","));
-            self.fail_job(&identity, kind, &reason, FailureClass::ContractViolation);
-            return;
+        // 2026-09-13-001 plan U2 (E4 fix): every non-Ok variant of
+        // `validate_context` is fail-closed. The previous code
+        // only matched `MissingFields` and silently ignored
+        // `DigestMismatch`, which let a tampered evidence row reach
+        // a child process. `DigestMismatch` from the typed
+        // JobContext validator (a defense-in-depth check layered
+        // on top of the store-query re-verification above) still
+        // routes through the same fail-closed contract.
+        match super::job_context::validate_context(&context) {
+            ContextValidation::Ok => {}
+            ContextValidation::MissingFields { fields } => {
+                let reason = format!("DAG job context is incomplete: {}", fields.join(","));
+                self.fail_job(&identity, kind, &reason, FailureClass::ContractViolation);
+                return;
+            }
+            ContextValidation::DigestMismatch { field, .. } => {
+                let reason = format!("DAG job context digest mismatch for field `{field}`");
+                self.fail_job(&identity, kind, &reason, FailureClass::ContractViolation);
+                return;
+            }
         }
         let prompt = build_job_prompt(
             &identity,
@@ -1789,6 +2058,7 @@ impl DagSchedulerRuntime {
             &allowed_paths,
             &forbidden_paths,
             feedback.as_deref(),
+            &artifact_refs,
         );
 
         // Backend resolution mirrors the wave dispatcher: hat backend
@@ -1821,19 +2091,22 @@ impl DagSchedulerRuntime {
             .into_iter()
             .collect();
         env.extend(backend.env_vars.iter().cloned());
-        let artifact_refs = self
-            .plans
-            .get(&plan_key)
-            .map(|plan| {
-                serde_json::json!({
-                    "verified_execution_plan_path": {
-                        "path": plan.artifact_path,
-                        "digest": plan.artifact_digest,
-                    }
-                })
-                .to_string()
-            })
-            .unwrap_or_else(|| "{}".to_string());
+        // 2026-09-13-001 plan U3 (E3 fix): the previous code built
+        // a LOCAL `artifact_refs` string here that only embedded
+        // `verified_execution_plan_path`, shadowing the typed map
+        // above. The shadow is gone: `RALPH_DAG_ARTIFACT_REFS`
+        // carries the full validated map so the child hat can
+        // discover every upstream file by key.
+        let artifact_refs_env = serde_json::json!({
+            "refs": artifact_refs
+                .iter()
+                .map(|(name, value)| (name.clone(), serde_json::json!({
+                    "path": value.path,
+                    "digest": value.digest,
+                })))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .to_string();
         env.extend([
             ("RALPH_DAG_PLAN_KEY".to_string(), identity.plan_key.clone()),
             ("RALPH_DAG_UNIT_KEY".to_string(), identity.unit_key()),
@@ -1859,7 +2132,7 @@ impl DagSchedulerRuntime {
                     .map(|plan| plan.artifact_path.clone())
                     .unwrap_or_default(),
             ),
-            ("RALPH_DAG_ARTIFACT_REFS".to_string(), artifact_refs),
+            ("RALPH_DAG_ARTIFACT_REFS".to_string(), artifact_refs_env),
         ]);
 
         let (cmd, args, stdin_input, _temp_file_guard) = backend.build_command(&prompt, false);
@@ -1991,6 +2264,7 @@ fn build_job_prompt(
     allowed_paths: &[PathBuf],
     forbidden_paths: &[PathBuf],
     feedback: Option<&str>,
+    artifact_refs: &BTreeMap<String, ArtifactRef>,
 ) -> String {
     let required: Vec<String> = schema
         .map(|s| s.required_fields.clone())
@@ -2045,6 +2319,20 @@ fn build_job_prompt(
              fix every finding in this worktree, then emit `{success}` again.\n",
             success = kind.success_topic(),
         ));
+    }
+    // 2026-09-13-001 plan U3 (D10): surface every upstream
+    // artifact the spawn seam verified for this job so the agent
+    // does not need to consult `RALPH_DAG_ARTIFACT_REFS` (or guess
+    // a path) to discover prior-stage evidence. Execute also
+    // lists its plan ref so the rendering stays uniform.
+    if !artifact_refs.is_empty() {
+        prompt.push_str("\n## UPSTREAM ARTIFACTS (runtime-verified at spawn)\n");
+        for (name, value) in artifact_refs {
+            prompt.push_str(&format!(
+                "- `{name}`: path=`{}` digest=`{}`\n",
+                value.path, value.digest,
+            ));
+        }
     }
     prompt.push('\n');
     prompt.push_str(&hat_config.instructions);
@@ -3296,6 +3584,7 @@ units:
             &[PathBuf::from("src"), PathBuf::from("tests")],
             &[PathBuf::from("secrets")],
             None,
+            &BTreeMap::new(),
         );
 
         assert!(prompt.contains("Allowed paths for this Unit: `src`, `tests`"));
@@ -3330,6 +3619,21 @@ units:
             PathBuf::from("/tmp/dag-u3-test"),
         );
         runtime.attach_in_memory_stores();
+        runtime
+    }
+
+    /// 2026-09-13-001 plan U1/U2/U3 test helper: a runtime
+    /// shaped like `u3_runtime` BUT with a minimal `exec`
+    /// populated so the spawn-seam helpers can resolve the
+    /// unit worktree path. `loop_id` is derived from the
+    /// workspace path so each test's worktree lives under a
+    /// distinct root, avoiding cross-test pollution when the
+    /// nextest harness runs them in parallel.
+    fn u1_u2_runtime_with_worktree(worktree_root: &Path) -> DagSchedulerRuntime {
+        let mut runtime = u3_runtime();
+        runtime.workspace = worktree_root.to_path_buf();
+        let exec = exec_context(worktree_root);
+        runtime.exec = Some(exec);
         runtime
     }
 
@@ -3724,5 +4028,496 @@ units:
             resolved_attempt_2, "acc-exec-2",
             "review must resume from latest execute accepted commit"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-13-001 plan U1 acceptance: the spawn seam records
+    // per-stage artifact rows for accepted and review-rejected
+    // terminals, fail-soft on unsafe paths / missing files, and
+    // coalesces Fix under `stage = "execute"`. These tests pin
+    // the surface contract of
+    // `record_stage_artifacts_from_payload` — they exercise the
+    // helper directly through the runtime so the spawn-seam
+    // plumbing stays covered end-to-end.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn u1_worktree() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "ralph-u1-test-{}-{}",
+            std::process::id(),
+            chrono_like_now_ms(),
+        ))
+    }
+
+    fn u1_canonical(
+        runtime: &DagSchedulerRuntime,
+        worktree: &std::path::Path,
+        unit_key: &str,
+    ) -> std::path::PathBuf {
+        let loop_id = runtime.exec.as_ref().map(|e| e.loop_id.clone()).unwrap();
+        worktree.join(format!(".ralph/worktrees/{}-{}", loop_id, unit_key))
+    }
+
+    fn u1_identity(
+        plan_key: &str,
+        unit_key: &str,
+        job_id: &str,
+        hat: &str,
+        stage: &str,
+        attempt: u32,
+        token: &str,
+    ) -> JobIdentity {
+        JobIdentity {
+            plan_key: plan_key.to_string(),
+            unit_id: unit_key.to_string(),
+            job_id: job_id.to_string(),
+            hat: hat.to_string(),
+            stage: stage.to_string(),
+            attempt,
+            token: token.to_string(),
+        }
+    }
+
+    /// U1 BDD scenario 1: an accepted execute terminal records
+    /// `unit_report_path` under `(plan, unit, "execute")` with
+    /// the on-disk SHA-256 as `artifact_digest`.
+    #[test]
+    fn u1_artifact_recorded_on_accepted_execute_payload() {
+        let worktree = u1_worktree();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut runtime = u1_u2_runtime_with_worktree(&worktree);
+        runtime.register_plan_for_test("pf-u1", Some("plan-base-u1".to_string()));
+        let unit_key = "U1";
+        let canonical = u1_canonical(&runtime, &worktree, unit_key);
+        std::fs::create_dir_all(&canonical).unwrap();
+        let body = b"U1 completion body";
+        std::fs::write(canonical.join("unit-report.md"), body).unwrap();
+
+        let identity = u1_identity(
+            "pf-u1",
+            unit_key,
+            "dag-U1-execute-a1",
+            "executor",
+            "execute",
+            1,
+            "tok-1",
+        );
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "unit_report_path".to_string(),
+            Value::String("unit-report.md".to_string()),
+        );
+        runtime.record_stage_artifacts_from_payload(&identity, &Value::Object(payload));
+
+        let stores = runtime.ensure_stores().expect("stores");
+        let rows = stores
+            .plans
+            .latest_stage_artifacts("pf-u1", unit_key, "execute")
+            .expect("read artifacts");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].field_name, "unit_report_path");
+        assert_eq!(rows[0].artifact_path, "unit-report.md");
+        assert_eq!(
+            rows[0].artifact_digest,
+            ralph_core::workspace_mutation_guard::sha256_hex(body),
+        );
+    }
+
+    /// U1 BDD scenario 2: a review REJECTED terminal records
+    /// `review_report_path` under `stage = "review"`.
+    #[test]
+    fn u1_artifact_recorded_on_rejected_review_payload() {
+        let worktree = u1_worktree();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut runtime = u1_u2_runtime_with_worktree(&worktree);
+        runtime.register_plan_for_test("pf-u1-rev", Some("plan-base".to_string()));
+        let unit_key = "U1";
+        let canonical = u1_canonical(&runtime, &worktree, unit_key);
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(canonical.join("review-report.md"), b"review rejected body").unwrap();
+
+        let identity = u1_identity(
+            "pf-u1-rev",
+            unit_key,
+            "dag-U1-review-a1",
+            "reviewer",
+            "review",
+            1,
+            "tok-r",
+        );
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "review_report_path".to_string(),
+            Value::String("review-report.md".to_string()),
+        );
+        runtime.record_stage_artifacts_from_payload(&identity, &Value::Object(payload));
+
+        let stores = runtime.ensure_stores().expect("stores");
+        let rows = stores
+            .plans
+            .latest_stage_artifacts("pf-u1-rev", unit_key, "review")
+            .expect("read review artifacts");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].field_name, "review_report_path");
+        assert_eq!(rows[0].stage, "review");
+    }
+
+    /// U1 BDD scenario 3: a Fix terminal coalesces under
+    /// `stage = "execute"` (D7).
+    #[test]
+    fn u1_artifact_fix_coalesces_under_execute_stage() {
+        let worktree = u1_worktree();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut runtime = u1_u2_runtime_with_worktree(&worktree);
+        runtime.register_plan_for_test("pf-u1-fix", Some("plan-base".to_string()));
+        let unit_key = "U1";
+        let canonical = u1_canonical(&runtime, &worktree, unit_key);
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(canonical.join("unit-report.md"), b"fix body").unwrap();
+
+        let identity = u1_identity(
+            "pf-u1-fix",
+            unit_key,
+            "dag-U1-fix-a2",
+            "fixer",
+            "fix",
+            2,
+            "tok-f",
+        );
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "unit_report_path".to_string(),
+            Value::String("unit-report.md".to_string()),
+        );
+        runtime.record_stage_artifacts_from_payload(&identity, &Value::Object(payload));
+
+        let stores = runtime.ensure_stores().expect("stores");
+        let execute_rows = stores
+            .plans
+            .latest_stage_artifacts("pf-u1-fix", unit_key, "execute")
+            .expect("read execute coalesced artifacts");
+        assert_eq!(execute_rows.len(), 1);
+        assert_eq!(execute_rows[0].field_name, "unit_report_path");
+        let fix_rows = stores
+            .plans
+            .latest_stage_artifacts("pf-u1-fix", unit_key, "fix")
+            .expect("read fix-stage artifacts");
+        assert!(fix_rows.is_empty(), "fix stage must coalesce to execute");
+    }
+
+    /// U1 BDD scenarios 4+5+6: hostile / missing / empty
+    /// payloads record zero rows (fail-soft).
+    #[test]
+    fn u1_artifact_rejects_unsafe_or_missing_paths() {
+        let worktree = u1_worktree();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut runtime = u1_u2_runtime_with_worktree(&worktree);
+        runtime.register_plan_for_test("pf-u1-bad", Some("plan-base".to_string()));
+        let unit_key = "U1";
+        let canonical = u1_canonical(&runtime, &worktree, unit_key);
+        std::fs::create_dir_all(&canonical).unwrap();
+
+        let identity = u1_identity(
+            "pf-u1-bad",
+            unit_key,
+            "dag-U1-execute-a1",
+            "executor",
+            "execute",
+            1,
+            "tok-bad",
+        );
+        let hostile_payload = Value::Object({
+            let mut p = serde_json::Map::new();
+            p.insert(
+                "unit_report_path".to_string(),
+                Value::String("/etc/passwd".to_string()),
+            );
+            p.insert(
+                "secondary_path".to_string(),
+                Value::String("../escape.md".to_string()),
+            );
+            p.insert(
+                "ok_field".to_string(),
+                Value::String("not a path".to_string()),
+            );
+            p.insert(
+                "missing_path".to_string(),
+                Value::String("does-not-exist.md".to_string()),
+            );
+            p
+        });
+        runtime.record_stage_artifacts_from_payload(&identity, &hostile_payload);
+        {
+            let stores = runtime.ensure_stores().expect("stores");
+            let rows = stores
+                .plans
+                .latest_stage_artifacts("pf-u1-bad", unit_key, "execute")
+                .expect("read artifacts");
+            assert!(rows.is_empty(), "hostile payload must record zero rows");
+        }
+
+        runtime.record_stage_artifacts_from_payload(&identity, &Value::Object(Default::default()));
+        let stores = runtime.ensure_stores().expect("stores");
+        let rows = stores
+            .plans
+            .latest_stage_artifacts("pf-u1-bad", unit_key, "execute")
+            .expect("read artifacts (empty payload)");
+        assert!(rows.is_empty(), "empty payload must record zero rows");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-13-001 plan U2 acceptance: `consume_stage_artifact`
+    // fail-closes on every drift / missing / escape / record-absent
+    // scenario so the next-stage spawn never starts against stale
+    // evidence. We exercise the helper directly here so the
+    // behavior is locked without needing a real child process.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn u2_seed_record(
+        runtime: &mut DagSchedulerRuntime,
+        plan_key: &str,
+        unit_key: &str,
+        stage: &str,
+        field_name: &str,
+        relative: &str,
+        digest: &str,
+    ) {
+        let stores = runtime.ensure_stores().expect("stores");
+        let rec = ralph_core::supervisor::dag_store::StageArtifactRecord {
+            plan_key: plan_key.to_string(),
+            unit_key: unit_key.to_string(),
+            stage: stage.to_string(),
+            attempt: 1,
+            field_name: field_name.to_string(),
+            artifact_path: relative.to_string(),
+            artifact_digest: digest.to_string(),
+            recorded_at_ms: 1_700_000_000_000,
+        };
+        stores
+            .plans
+            .record_stage_artifacts(std::slice::from_ref(&rec))
+            .expect("seed record");
+    }
+
+    /// U2 BDD scenario 1: a valid record + matching on-disk file
+    /// returns an absolute path + the recorded digest.
+    #[test]
+    fn u2_consume_returns_artifact_ref_when_record_and_disk_match() {
+        let worktree = u1_worktree();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut runtime = u1_u2_runtime_with_worktree(&worktree);
+        runtime.register_plan_for_test("pf-u2", Some("plan-base".to_string()));
+        let unit_key = "U1";
+        let canonical = u1_canonical(&runtime, &worktree, unit_key);
+        std::fs::create_dir_all(&canonical).unwrap();
+        let body = b"verifier body";
+        std::fs::write(canonical.join("unit-report.md"), body).unwrap();
+
+        u2_seed_record(
+            &mut runtime,
+            "pf-u2",
+            unit_key,
+            "execute",
+            "unit_report_path",
+            "unit-report.md",
+            &ralph_core::workspace_mutation_guard::sha256_hex(body),
+        );
+
+        let artifact = runtime
+            .consume_stage_artifact("pf-u2", unit_key, "execute", "unit_report_path")
+            .expect("consume must succeed");
+        assert!(artifact.path.contains("unit-report.md"));
+        assert_eq!(
+            artifact.digest,
+            ralph_core::workspace_mutation_guard::sha256_hex(body),
+        );
+    }
+
+    /// U2 BDD scenario 2: recorded digest drifted → fail-closed.
+    #[test]
+    fn u2_consume_fails_closed_on_digest_drift() {
+        let worktree = u1_worktree();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut runtime = u1_u2_runtime_with_worktree(&worktree);
+        runtime.register_plan_for_test("pf-u2-drift", Some("plan-base".to_string()));
+        let unit_key = "U1";
+        let canonical = u1_canonical(&runtime, &worktree, unit_key);
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(canonical.join("unit-report.md"), b"new body").unwrap();
+
+        u2_seed_record(
+            &mut runtime,
+            "pf-u2-drift",
+            unit_key,
+            "execute",
+            "unit_report_path",
+            "unit-report.md",
+            &"0".repeat(64),
+        );
+
+        let err = runtime
+            .consume_stage_artifact("pf-u2-drift", unit_key, "execute", "unit_report_path")
+            .expect_err("drift must fail-closed");
+        assert!(
+            err.contains("digest drift"),
+            "expected digest-drift reason, got {err:?}"
+        );
+    }
+
+    /// U2 BDD scenario 3: file deleted after recording → fail-closed.
+    #[test]
+    fn u2_consume_fails_closed_on_missing_file() {
+        let worktree = u1_worktree();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut runtime = u1_u2_runtime_with_worktree(&worktree);
+        runtime.register_plan_for_test("pf-u2-miss", Some("plan-base".to_string()));
+        let unit_key = "U1";
+        let canonical = u1_canonical(&runtime, &worktree, unit_key);
+        std::fs::create_dir_all(&canonical).unwrap();
+
+        u2_seed_record(
+            &mut runtime,
+            "pf-u2-miss",
+            unit_key,
+            "execute",
+            "unit_report_path",
+            "unit-report.md",
+            &"a".repeat(64),
+        );
+
+        let err = runtime
+            .consume_stage_artifact("pf-u2-miss", unit_key, "execute", "unit_report_path")
+            .expect_err("missing file must fail-closed");
+        assert!(
+            err.contains("unreadable")
+                || err.contains("does not exist")
+                || err.contains("not found")
+                || err.contains("missing"),
+            "expected missing-file reason, got {err:?}"
+        );
+    }
+
+    /// U2 BDD scenario 4: no prior record → fail-closed.
+    #[test]
+    fn u2_consume_fails_closed_when_no_record() {
+        let worktree = u1_worktree();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut runtime = u1_u2_runtime_with_worktree(&worktree);
+        runtime.register_plan_for_test("pf-u2-none", Some("plan-base".to_string()));
+        let err = runtime
+            .consume_stage_artifact("pf-u2-none", "U1", "execute", "unit_report_path")
+            .expect_err("missing row must fail-closed");
+        assert!(
+            err.contains("DAG artifact missing"),
+            "expected missing-row reason, got {err:?}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-13-001 plan U3 acceptance: the spawn seam embeds
+    // the full validated artifact_refs map in the child env and
+    // surfaces the same map in the prompt.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// U3 BDD scenario 2: `build_job_prompt` lists every artifact
+    /// ref (key + absolute path + digest) in a dedicated section
+    /// so the agent sees the hand-off evidence without parsing
+    /// env.
+    #[test]
+    fn u3_job_prompt_lists_artifact_refs() {
+        let identity = JobIdentity {
+            plan_key: "pf-u3".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-review-a1".to_string(),
+            hat: "reviewer".to_string(),
+            stage: "review".to_string(),
+            attempt: 1,
+            token: "tok".to_string(),
+        };
+        let hat = HatConfig::default();
+        let mut refs = BTreeMap::new();
+        refs.insert(
+            "executor_completion_artifact_path".to_string(),
+            ArtifactRef {
+                path: "/worktree/U1/completion.md".to_string(),
+                digest: "abc123".to_string(),
+            },
+        );
+        refs.insert(
+            "executor_completion_artifact_digest".to_string(),
+            ArtifactRef {
+                path: "/worktree/U1/completion.md".to_string(),
+                digest: "abc123".to_string(),
+            },
+        );
+        let prompt = build_job_prompt(
+            &identity,
+            SpawnKind::Review,
+            &hat,
+            Path::new("/worktree/U1"),
+            Path::new("/worktree/U1/events.jsonl"),
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+            &refs,
+        );
+        assert!(
+            prompt.contains("## UPSTREAM ARTIFACTS"),
+            "prompt must surface an UPSTREAM ARTIFACTS section, got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("executor_completion_artifact_path"),
+            "prompt must list the executor_completion_artifact_path key"
+        );
+        assert!(
+            prompt.contains("/worktree/U1/completion.md"),
+            "prompt must list the absolute path"
+        );
+        assert!(prompt.contains("abc123"), "prompt must list the digest");
+    }
+
+    /// U3: empty `artifact_refs` (only the plan refs are absent
+    /// too) renders no evidence block, so Execute without a
+    /// plan layer still produces a sensible prompt. This pins
+    /// the "uniform render" contract from D10.
+    #[test]
+    fn u3_job_prompt_with_empty_artifact_refs_renders_no_block() {
+        let identity = JobIdentity {
+            plan_key: "pf-u3".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-execute-a1".to_string(),
+            hat: "executor".to_string(),
+            stage: "execute".to_string(),
+            attempt: 1,
+            token: "tok".to_string(),
+        };
+        let hat = HatConfig::default();
+        let prompt = build_job_prompt(
+            &identity,
+            SpawnKind::Execute,
+            &hat,
+            Path::new("/worktree/U1"),
+            Path::new("/worktree/U1/events.jsonl"),
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+            &BTreeMap::new(),
+        );
+        assert!(
+            !prompt.contains("## UPSTREAM ARTIFACTS"),
+            "empty artifact_refs must NOT render the evidence block"
+        );
+    }
+
+    fn chrono_like_now_ms() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
     }
 }
