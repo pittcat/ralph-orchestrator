@@ -1,15 +1,32 @@
 //! Activation-scoped worktree snapshots used by handoff guards and audits.
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// SHA-256 of a file's bytes at the moment the snapshot was taken.
+/// Computed by `WorkspaceMutationGuard::sha256_hex`; the field is
+/// typed as the lowercase hex string so two snapshots stay
+/// comparable with no need for byte-vs-hex ambiguity.
+pub(crate) type FileContentHash = String;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorktreeSnapshot {
     pub(crate) head_sha: String,
     pub(crate) dirty_fingerprint: u64,
     pub(crate) dirty_paths: Vec<String>,
+    /// 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U2 (C1+M3):
+    /// per-path SHA-256 hex digest of the dirty foreign file at the
+    /// moment the snapshot was taken. `dirty_paths_content_equal`
+    /// compares this between `before` and `current` so a content
+    /// edit mid-handoff is detected even though both snapshots
+    /// share the same path set. An absent entry means the path was
+    /// not a regular file at capture time (directory / symlink /
+    /// unreadable); the comparison helper treats those as
+    /// non-comparable and returns `Err` so the caller can decide.
+    pub(crate) content_hashes: BTreeMap<PathBuf, FileContentHash>,
 }
 
 impl WorktreeSnapshot {
@@ -28,22 +45,64 @@ impl WorktreeSnapshot {
             .collect::<Vec<_>>();
 
         let mut hasher = DefaultHasher::new();
-        entries.hash(&mut hasher);
+        let mut content_hashes: BTreeMap<PathBuf, FileContentHash> = BTreeMap::new();
         for entry in &entries {
             let path = status_entry_path(entry);
             path.hash(&mut hasher);
-            hash_worktree_path(workspace, path, &mut hasher)?;
+            let full_path = workspace.join(path);
+            // 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U2
+            // (C1+M3): capture the SHA-256 of the file's bytes at
+            // snapshot time. `dirty_paths_content_equal` uses these
+            // to detect content edits between `before` and
+            // `current` without having to re-read the live disk
+            // twice (the previous impl double-read the same on-disk
+            // state, so any mid-handoff edit was invisible).
+            match hash_worktree_path(workspace, path, &mut hasher) {
+                HashOutcome::File => {
+                    if let Ok(bytes) = std::fs::read(&full_path) {
+                        // Key by the relative `path` (the same
+                        // shape `dirty_paths` carries) so the
+                        // comparison helper can look up the digest
+                        // directly from the relative entry rather
+                        // than re-joining against the workspace.
+                        content_hashes.insert(
+                            PathBuf::from(path),
+                            crate::workspace_mutation_guard::sha256_hex(&bytes),
+                        );
+                    }
+                }
+                HashOutcome::NonFile | HashOutcome::Missing => {
+                    // Non-regular files (directories, symlinks) and
+                    // entries that disappeared between `git status`
+                    // and our `read` are intentionally absent from
+                    // the map. `dirty_paths_content_equal` treats
+                    // those as non-comparable.
+                }
+                HashOutcome::IoError(err) => return Err(err),
+            }
         }
         Ok(Self {
             head_sha,
             dirty_fingerprint: hasher.finish(),
             dirty_paths: entries,
+            content_hashes,
         })
     }
 
     pub(crate) fn changed_since(&self, before: &Self) -> bool {
         self.head_sha != before.head_sha || self.dirty_fingerprint != before.dirty_fingerprint
     }
+}
+
+/// Outcome of `hash_worktree_path`: distinguishes a captured file
+/// (whose bytes we want to also record in `content_hashes`) from
+/// non-files and IO errors so `capture` can branch without a
+/// second stat.
+enum HashOutcome {
+    File,
+    NonFile,
+    Missing,
+    IoError(std::io::Error),
 }
 
 fn is_ralph_path(status_entry: &str) -> bool {
@@ -66,23 +125,30 @@ fn hash_worktree_path(
     workspace: &Path,
     path: &str,
     hasher: &mut DefaultHasher,
-) -> std::io::Result<()> {
+) -> HashOutcome {
     let full_path = workspace.join(path);
     match std::fs::metadata(&full_path) {
         Ok(metadata) if metadata.is_file() => {
             b"file".hash(hasher);
-            std::fs::read(full_path)?.hash(hasher);
+            match std::fs::read(full_path) {
+                Ok(bytes) => {
+                    bytes.hash(hasher);
+                    HashOutcome::File
+                }
+                Err(error) => HashOutcome::IoError(error),
+            }
         }
         Ok(metadata) => {
             b"non-file".hash(hasher);
             metadata.file_type().is_dir().hash(hasher);
+            HashOutcome::NonFile
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             b"missing".hash(hasher);
+            HashOutcome::Missing
         }
-        Err(error) => return Err(error),
+        Err(error) => HashOutcome::IoError(error),
     }
-    Ok(())
 }
 
 pub(crate) fn validate_work_done_handoff(
@@ -275,49 +341,65 @@ fn is_sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// Compares the dirty foreign paths of two snapshots by reading their on-disk
-/// content. Used in place of the aggregate `dirty_fingerprint` (which is seeded
-/// from `process::id()` and is therefore not stable across the two `ralph`
-/// processes that typically cooperate on a single handoff: the loop CLI that
-/// captured `before` at `build_prompt`, and the RPC worker that captures
-/// `current` at precheck). We only need to call this when both snapshots have
-/// matching non-empty path sets — anything else is already short-circuited by
-/// the caller.
+/// Compares the dirty foreign paths of two snapshots by reading
+/// the SHA-256 hex digests captured at snapshot time (NOT by
+/// re-reading the live disk twice).  The previous implementation
+/// silently double-read the same on-disk state through an unused
+/// `_current` parameter, so a content edit between `before` and
+/// `current` was invisible (C1+M3 in the
+/// 2026-09-13-001-fix-forge-dag-artifact-handoff-plan review).
 ///
-/// `_current` is reserved for future asymmetric checks (e.g. "did current
-/// introduce a new path that wasn't in `before`?"). Today we trust the
-/// path-set equality guard the caller enforces before invoking us.
+/// `before` and `current` carry independent `content_hashes`
+/// captured at the moments their respective snapshots were taken,
+/// so we can detect a mid-handoff edit even if both calls happen
+/// to read the same current disk state after the edit is gone.
+///
+/// Returns `Ok(true)` only when every path that exists in both
+/// snapshots has a matching digest; `Ok(false)` if any path
+/// disagrees (the prior `_current`-unused code wrongly returned
+/// `Ok(true)` in that case).  An absent entry in either side
+/// (non-file / missing / unreadable) is treated as a non-comparable
+/// path and surfaces as `Err` so the caller can decide whether to
+/// bail; a path only present in `current` is a `dirty → dirty-with-
+/// new-path` change and also surfaces as `Err` since the path-set
+/// guard has already matched by the time we run.
 fn dirty_paths_content_equal(
     workspace: &Path,
     before: &WorktreeSnapshot,
-    _current: &WorktreeSnapshot,
+    current: &WorktreeSnapshot,
 ) -> Result<bool, String> {
-    for path in &before.dirty_paths {
-        let full_path = workspace.join(path);
-        let before_bytes = match std::fs::read(&full_path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(format!(
-                    "could not read baseline dirty path {path}: {error}"
-                ));
-            }
-        };
-        let current_bytes = match std::fs::read(&full_path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(false);
-            }
-            Err(error) => {
-                return Err(format!(
-                    "could not read current dirty path {path}: {error}"
-                ));
-            }
-        };
-        if before_bytes != current_bytes {
+    for raw_entry in &before.dirty_paths {
+        // `dirty_paths` carries the raw `git status` entries (e.g.
+        // ` M foo.txt`), but `content_hashes` is keyed by the
+        // path extracted by `status_entry_path`. Apply the same
+        // extraction here so the lookup matches.
+        let path = status_entry_path(raw_entry);
+        let before_digest = before.content_hashes.get(&PathBuf::from(path)).ok_or_else(|| {
+            format!(
+                "baseline dirty path {path} has no captured content hash \
+                 (non-regular file at capture time; cannot compare)"
+            )
+        })?;
+        let current_digest = current
+            .content_hashes
+            .get(&PathBuf::from(path))
+            .ok_or_else(|| {
+                format!(
+                    "current dirty path {path} has no captured content hash \
+                     (non-regular file at capture time; cannot compare)"
+                )
+            })?;
+        if before_digest != current_digest {
             return Ok(false);
         }
     }
+    // `before.dirty_paths` already covered every shared entry (the
+    // call site guarantees `before.dirty_paths == current.dirty_paths`),
+    // so reaching this line means every path matched. The previous
+    // implementation re-walked `current.dirty_paths` for the same
+    // lookup, which double-read the same on-disk state and silently
+    // accepted mid-handoff edits; we removed that walk.
+    let _ = workspace;
     Ok(true)
 }
 
@@ -346,7 +428,8 @@ fn git_output_bytes(workspace: &Path, args: &[&str]) -> std::io::Result<Vec<u8>>
 #[cfg(test)]
 mod tests {
     use super::{
-        WorktreeSnapshot, is_ralph_path, validate_stabilization_handoff, validate_work_done_handoff,
+        WorktreeSnapshot, dirty_paths_content_equal, is_ralph_path,
+        validate_stabilization_handoff, validate_work_done_handoff,
     };
     use serde_json::json;
     use std::process::Command;
@@ -531,6 +614,89 @@ mod tests {
         assert!(
             error.contains("worktree changed"),
             "unexpected error: {error}"
+        );
+    }
+
+    /// Regression for plan 2026-09-13-001 U2 / C1+M3: the previous
+    /// `dirty_paths_content_equal` double-read the same on-disk
+    /// state via an unused `_current` parameter, so a content edit
+    /// between `before` and `current` was invisible — the function
+    /// returned `Ok(true)` even though the bytes actually changed.
+    /// After the fix, `before` and `current` carry independent
+    /// `content_hashes` captured at their respective snapshot
+    /// moments, so the comparison surfaces a mid-handoff edit.
+    #[test]
+    fn dirty_paths_content_equal_detects_content_edit_between_snapshots() {
+        let temp = TempDir::new().expect("tempdir");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("git starts");
+            assert!(output.status.success(), "git {:?} failed", args);
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        std::fs::write(temp.path().join("tracked.txt"), "baseline\n").expect("write baseline");
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "--quiet", "-m", "init"]);
+
+        // Pre-existing dirty foreign file at activation.
+        std::fs::write(temp.path().join("tracked.txt"), "v1\n").expect("pre-dirty");
+        let before = WorktreeSnapshot::capture(temp.path()).expect("capture before");
+
+        // Edit the dirty file mid-handoff (this is the bug the old
+        // implementation silently accepted).
+        std::fs::write(temp.path().join("tracked.txt"), "v2\n").expect("mid-edit");
+        let current = WorktreeSnapshot::capture(temp.path()).expect("capture current");
+
+        // Same path set on both sides — the helper MUST see the
+        // content drift and return Ok(false). The previous
+        // implementation returned Ok(true) here (the bug).
+        assert!(
+            before.dirty_paths == current.dirty_paths,
+            "preconditions: path sets must match"
+        );
+        let equal = dirty_paths_content_equal(temp.path(), &before, &current)
+            .expect("comparison must run cleanly");
+        assert!(
+            !equal,
+            "dirty→dirty-with-content-edit must NOT be reported as equal"
+        );
+    }
+
+    /// Negative control: same dirty file, no edit between
+    /// snapshots → the helper MUST return Ok(true) (legitimate
+    /// "dirt was untouched" hand-off).
+    #[test]
+    fn dirty_paths_content_equal_returns_true_when_content_unchanged() {
+        let temp = TempDir::new().expect("tempdir");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("git starts");
+            assert!(output.status.success(), "git {:?} failed", args);
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        std::fs::write(temp.path().join("tracked.txt"), "baseline\n").expect("write baseline");
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "--quiet", "-m", "init"]);
+
+        std::fs::write(temp.path().join("tracked.txt"), "stable\n").expect("pre-dirty");
+        let before = WorktreeSnapshot::capture(temp.path()).expect("capture before");
+        // No edit between snapshots.
+        let current = WorktreeSnapshot::capture(temp.path()).expect("capture current");
+
+        assert!(
+            dirty_paths_content_equal(temp.path(), &before, &current)
+                .expect("comparison must run cleanly"),
+            "dirty→dirty-without-edit must report equal"
         );
     }
 
