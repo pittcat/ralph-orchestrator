@@ -97,7 +97,11 @@ impl fmt::Display for ArtifactConsumeError {
                 "DAG artifact path unsafe: stage={stage} field={field} path=`{path}` \
                  (rejected by is_safe_repo_relative_path)"
             ),
-            Self::WorktreeEscape { stage, field, resolved } => write!(
+            Self::WorktreeEscape {
+                stage,
+                field,
+                resolved,
+            } => write!(
                 f,
                 "DAG artifact escapes worktree: stage={stage} field={field} \
                  resolved=`{resolved}`"
@@ -107,12 +111,22 @@ impl fmt::Display for ArtifactConsumeError {
                 "DAG artifact file unreadable: stage={stage} field={field} path=`{path}` \
                  (file not found)"
             ),
-            Self::FileUnreadable { stage, field, path, source } => write!(
+            Self::FileUnreadable {
+                stage,
+                field,
+                path,
+                source,
+            } => write!(
                 f,
                 "DAG artifact read failed: stage={stage} field={field} path=`{path}` \
                  err={source}"
             ),
-            Self::DigestDrift { stage, field, recorded, live } => write!(
+            Self::DigestDrift {
+                stage,
+                field,
+                recorded,
+                live,
+            } => write!(
                 f,
                 "DAG artifact digest drift: stage={stage} field={field} \
                  recorded={recorded} live={live}"

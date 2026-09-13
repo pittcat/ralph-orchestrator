@@ -1013,7 +1013,10 @@ mod poison_tests {
         assert!(
             matches!(
                 &err,
-                DagStoreError::InvalidKeyComponent { component: "plan_key", .. }
+                DagStoreError::InvalidKeyComponent {
+                    component: "plan_key",
+                    ..
+                }
             ),
             "expected plan_key rejection on the artifact path too, got {err:?}"
         );

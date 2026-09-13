@@ -1577,9 +1577,9 @@ impl DagSchedulerRuntime {
         field_name: &str,
     ) -> Result<(std::fs::File, PathBuf), String> {
         let candidate = worktree.join(relative);
-        let canonical_worktree = worktree.canonicalize().map_err(|err| {
-            format!("DAG artifact worktree unreadable: stage={stage} err={err}")
-        })?;
+        let canonical_worktree = worktree
+            .canonicalize()
+            .map_err(|err| format!("DAG artifact worktree unreadable: stage={stage} err={err}"))?;
         let canonical = candidate.canonicalize().map_err(|err| {
             format!(
                 "DAG artifact file unreadable: stage={stage} field={field_name} \
@@ -1657,7 +1657,9 @@ impl DagSchedulerRuntime {
         field_name: &str,
     ) -> Result<ArtifactRef, super::artifact_consume::ArtifactConsumeError> {
         use super::artifact_consume::ArtifactConsumeError;
-        let stores = self.ensure_stores().map_err(|_| ArtifactConsumeError::StoreUnavailable)?;
+        let stores = self
+            .ensure_stores()
+            .map_err(|_| ArtifactConsumeError::StoreUnavailable)?;
         let rows = stores
             .plans
             .latest_stage_artifacts(plan_key, unit_key, stage)
@@ -1691,7 +1693,8 @@ impl DagSchedulerRuntime {
         // the kernel's open-vs-unlink resolution. The platform-
         // specific fd-recheck inside the helper provides defense
         // in depth on Linux and macOS.
-        let open_result = Self::open_under_canonical_worktree(&worktree, relative, stage, field_name);
+        let open_result =
+            Self::open_under_canonical_worktree(&worktree, relative, stage, field_name);
         let (_file, canonical) = match open_result {
             Ok(pair) => pair,
             Err(err_str) => {
@@ -1725,14 +1728,13 @@ impl DagSchedulerRuntime {
             use std::io::Read;
             let mut buf = Vec::new();
             let mut file = _file;
-            file.read_to_end(&mut buf).map_err(|err| {
-                ArtifactConsumeError::FileUnreadable {
+            file.read_to_end(&mut buf)
+                .map_err(|err| ArtifactConsumeError::FileUnreadable {
                     stage: stage.to_string(),
                     field: field_name.to_string(),
                     path: canonical.display().to_string(),
                     source: err.to_string(),
-                }
-            })?;
+                })?;
             buf
         };
         let live_digest = ralph_core::workspace_mutation_guard::sha256_hex(&bytes);
@@ -4548,14 +4550,13 @@ units:
         let body = b"hello u1 open-by-fd\n";
         std::fs::write(worktree.join("u1.md"), body).unwrap();
 
-        let (mut file, canonical) =
-            DagSchedulerRuntime::open_under_canonical_worktree(
-                &worktree,
-                "u1.md",
-                "execute",
-                "unit_report_path",
-            )
-            .expect("open must succeed for normal in-worktree file");
+        let (mut file, canonical) = DagSchedulerRuntime::open_under_canonical_worktree(
+            &worktree,
+            "u1.md",
+            "execute",
+            "unit_report_path",
+        )
+        .expect("open must succeed for normal in-worktree file");
         assert!(canonical.ends_with("u1.md"));
         let mut buf = Vec::new();
         use std::io::Read;

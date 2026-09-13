@@ -978,11 +978,7 @@ impl DagSchedulerStore for RusqliteDagSchedulerStore {
         // (C3+A2): reject `::` in any key component before opening
         // the SQLite transaction (mirrors the in-memory variant).
         for rec in records {
-            super::dag_store::validate_key_components(
-                &rec.plan_key,
-                &rec.unit_key,
-                &rec.stage,
-            )?;
+            super::dag_store::validate_key_components(&rec.plan_key, &rec.unit_key, &rec.stage)?;
         }
         #[cfg(not(feature = "supervisor-db"))]
         {
