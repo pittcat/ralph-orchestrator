@@ -111,7 +111,46 @@ pub(crate) fn validate_work_done_handoff(
         ));
     }
     if let Some(before) = activation_baseline {
-        if current.dirty_fingerprint != before.dirty_fingerprint {
+        // The dirty-state comparison must detect any change to non-`.ralph/`
+        // worktree state during the executor activation: modifications,
+        // untracked additions, or content edits. There are three legitimate
+        // end states:
+        //
+        // 1. **clean → clean**: worktree was clean at activation, stays clean.
+        //    Goal state; path set must be empty on both sides.
+        // 2. **dirty → clean**: pre-existing dirt at activation was committed
+        //    (e.g. `before` captured before the agent's normal commit
+        //    workflow, `current` captured after). This is the legitimate
+        //    "everything was committed" outcome — the path set differs by
+        //    design, so we only require that `current` is actually clean.
+        // 3. **dirty → same-dirty**: dirt was untouched (rare, e.g. tests
+        //    that intentionally leave files behind). Both path sets and
+        //    per-path content hashes must match.
+        //
+        // Reject when:
+        // - clean → dirty: agent introduced new foreign dirt mid-handoff.
+        // - dirty → different-dirty: agent modified the dirt (additions or
+        //   content edits) without committing.
+        //
+        // We compare path sets and per-path content hashes, NOT the
+        // aggregate `dirty_fingerprint`: that value is seeded from the
+        // process id (SipHash defaults), so two `WorktreeSnapshot` captures
+        // taken from different `ralph` processes (e.g. RPC worker vs the
+        // loop CLI) — which is the common case when `before` is captured at
+        // build_prompt in one process and `current` is captured at
+        // precheck in another — produce different hashes for the same
+        // underlying state. Path-and-content equality is what the check is
+        // really trying to enforce.
+        let before_clean = before.dirty_paths.is_empty();
+        let current_clean = current.dirty_paths.is_empty();
+        let paths_agree = before.dirty_paths == current.dirty_paths;
+        let dirty_to_same_dirty = !before_clean
+            && !current_clean
+            && paths_agree
+            && dirty_paths_content_equal(workspace, before, &current)?;
+        let clean_to_clean = before_clean && current_clean;
+        let dirty_to_clean = !before_clean && current_clean;
+        if !(clean_to_clean || dirty_to_clean || dirty_to_same_dirty) {
             return Err(format!(
                 "worktree changed during executor activation; dirty paths: {:?}",
                 current.dirty_paths
@@ -187,7 +226,19 @@ pub(crate) fn validate_stabilization_handoff(
         ));
     }
     if let Some(before) = activation_baseline {
-        if current.dirty_fingerprint != before.dirty_fingerprint {
+        // See the matching comment in `validate_work_done_handoff` for the
+        // three legitimate end states and the rationale for using path +
+        // content equality instead of the per-process `dirty_fingerprint`.
+        let before_clean = before.dirty_paths.is_empty();
+        let current_clean = current.dirty_paths.is_empty();
+        let paths_agree = before.dirty_paths == current.dirty_paths;
+        let dirty_to_same_dirty = !before_clean
+            && !current_clean
+            && paths_agree
+            && dirty_paths_content_equal(workspace, before, &current)?;
+        let clean_to_clean = before_clean && current_clean;
+        let dirty_to_clean = !before_clean && current_clean;
+        if !(clean_to_clean || dirty_to_clean || dirty_to_same_dirty) {
             return Err(format!(
                 "worktree changed during stabilization; dirty paths: {:?}",
                 current.dirty_paths
@@ -222,6 +273,52 @@ fn required_u64(
 
 fn is_sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Compares the dirty foreign paths of two snapshots by reading their on-disk
+/// content. Used in place of the aggregate `dirty_fingerprint` (which is seeded
+/// from `process::id()` and is therefore not stable across the two `ralph`
+/// processes that typically cooperate on a single handoff: the loop CLI that
+/// captured `before` at `build_prompt`, and the RPC worker that captures
+/// `current` at precheck). We only need to call this when both snapshots have
+/// matching non-empty path sets — anything else is already short-circuited by
+/// the caller.
+///
+/// `_current` is reserved for future asymmetric checks (e.g. "did current
+/// introduce a new path that wasn't in `before`?"). Today we trust the
+/// path-set equality guard the caller enforces before invoking us.
+fn dirty_paths_content_equal(
+    workspace: &Path,
+    before: &WorktreeSnapshot,
+    _current: &WorktreeSnapshot,
+) -> Result<bool, String> {
+    for path in &before.dirty_paths {
+        let full_path = workspace.join(path);
+        let before_bytes = match std::fs::read(&full_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "could not read baseline dirty path {path}: {error}"
+                ));
+            }
+        };
+        let current_bytes = match std::fs::read(&full_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "could not read current dirty path {path}: {error}"
+                ));
+            }
+        };
+        if before_bytes != current_bytes {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn git_output(workspace: &Path, args: &[&str]) -> std::io::Result<String> {
@@ -341,6 +438,100 @@ mod tests {
         .to_string();
         validate_work_done_handoff(temp.path(), Some(&activation), &committed_payload)
             .expect("committed work with a clean handoff must pass");
+    }
+
+    /// Regression: when the activation baseline captured pre-existing dirty
+    /// foreign paths (e.g. another hat or operator left them behind) and the
+    /// executor legitimately commits them away, `before` is dirty and
+    /// `current` is clean — that must still pass. The earlier fingerprint-only
+    /// comparison incorrectly rejected this case as `worktree_handoff_inconsistent`
+    /// because the dirty_fingerprint hashes of a non-empty set vs an empty set
+    /// can never agree.
+    #[test]
+    fn work_done_handoff_allows_committing_pre_existing_dirt() {
+        let temp = TempDir::new().expect("tempdir");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("git starts");
+            assert!(output.status.success(), "git {:?} failed", args);
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        std::fs::write(temp.path().join("tracked.txt"), "one\n").expect("write tracked");
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "--quiet", "-m", "baseline"]);
+
+        // Pre-existing dirty tracked file at activation time.
+        std::fs::write(temp.path().join("tracked.txt"), "two\n").expect("pre-dirty");
+        let activation = WorktreeSnapshot::capture(temp.path()).expect("capture activation");
+        assert!(
+            !activation.dirty_paths.is_empty(),
+            "activation baseline must record pre-existing dirt"
+        );
+
+        // Executor commits the pre-existing dirt — current is now clean.
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "--quiet", "-m", "U1: deliver change"]);
+        let head_sha = git_sha(temp.path(), &["rev-parse", "HEAD"]);
+        let baseline_sha = git_sha(temp.path(), &["rev-list", "HEAD~1"]);
+        let committed_payload = json!({
+            "executor_head_sha": head_sha,
+            "resolved_baseline_sha": baseline_sha,
+            "completed_units": ["U1"],
+            "commit_count": 1,
+        })
+        .to_string();
+        validate_work_done_handoff(temp.path(), Some(&activation), &committed_payload)
+            .expect("committing pre-existing dirt must still pass");
+    }
+
+    /// Regression: clean activation that introduced *new* foreign dirt mid-handoff
+    /// must still be rejected. The relaxed fingerprint rule must not regress
+    /// the original security guarantee.
+    #[test]
+    fn work_done_handoff_rejects_clean_to_new_dirt() {
+        let temp = TempDir::new().expect("tempdir");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("git starts");
+            assert!(output.status.success(), "git {:?} failed", args);
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        std::fs::write(temp.path().join("tracked.txt"), "one\n").expect("write tracked");
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "--quiet", "-m", "baseline"]);
+        let baseline_sha = git_sha(temp.path(), &["rev-parse", "HEAD"]);
+        let activation = WorktreeSnapshot::capture(temp.path()).expect("capture activation");
+        assert!(
+            activation.dirty_paths.is_empty(),
+            "activation baseline must be clean for this test"
+        );
+
+        // Executor introduces new untracked foreign dirt.
+        std::fs::write(temp.path().join("untracked.txt"), "leaked\n").expect("leak");
+        let payload = json!({
+            "executor_head_sha": baseline_sha,
+            "resolved_baseline_sha": baseline_sha,
+            "completed_units": ["U1"],
+            "commit_count": 0,
+        })
+        .to_string();
+        let error =
+            validate_work_done_handoff(temp.path(), Some(&activation), &payload)
+                .expect_err("clean→dirty must be rejected");
+        assert!(
+            error.contains("worktree changed"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
