@@ -118,6 +118,35 @@ const DAG_ENV_ALLOWLIST: [&str; 25] = [
     "MOONSHOT_API_KEY",
 ];
 
+// 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U10 (A3):
+// explicit allowlist of `*_path` field names that
+// `record_stage_artifacts_from_payload` will record. Anything
+// outside this set is silently dropped, so a hostile hat can
+// no longer dump arbitrary `*_path` fields into the durable
+// ledger and amplify storage / smuggle prompt-injection bytes
+// through the `RALPH_DAG_ARTIFACT_REFS` env var.
+const STAGE_ARTIFACT_FIELDS: &[&str] = &["unit_report_path", "review_report_path"];
+
+// 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U10 (A4):
+// length cap on the `feedback` string embedded in the fixer's
+// prompt. The original code passed the raw `review_report_path`
+// payload field verbatim into a `format!` interpolation in
+// `build_job_prompt`, with no length cap and no path-shape
+// check, so a malicious review could inject shell-special bytes
+// (backticks, `$()`, newlines) into the spawn prompt. We route
+// feedback through `is_safe_repo_relative_path` and truncate to
+// this many characters before interpolation.
+const MAX_FEEDBACK_BYTES: usize = 256;
+
+// 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U10 (A5
+// partial): maximum serialized size of the `RALPH_DAG_ARTIFACT_REFS`
+// env var. Above this size we fail-closed (typed error routed
+// to the merge queue) instead of overflowing `ARG_MAX` at exec
+// time and producing a confusing `SpawnFailed` diagnostic. The
+// 64 KiB bound matches `ARG_MAX` headroom on Linux/macOS for the
+// commonly-observed job types.
+const MAX_ARTIFACT_REFS_BYTES: usize = 64 * 1024;
+
 /// Execution-scoped inputs `inner` attaches once the global backend
 /// exists. Constructing this never spawns anything.
 pub struct DagExecutionContext {
@@ -1717,6 +1746,21 @@ impl DagSchedulerRuntime {
             if !field_name.ends_with("_path") {
                 continue;
             }
+            // 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U10
+            // (A3): explicit allowlist filter on top of the
+            // `_path` suffix. A hostile hat cannot dump arbitrary
+            // `*_path` fields into the durable ledger or smuggle
+            // bytes through `RALPH_DAG_ARTIFACT_REFS` any more.
+            if !STAGE_ARTIFACT_FIELDS.contains(&field_name.as_str()) {
+                warn!(
+                    plan_key,
+                    unit_key,
+                    stage = %stage_storage,
+                    field = %field_name,
+                    "DAG artifact record: field name outside allowlist; skipping"
+                );
+                continue;
+            }
             if !super::jobs::is_safe_repo_relative_path(path_str) {
                 warn!(
                     plan_key,
@@ -2210,6 +2254,21 @@ impl DagSchedulerRuntime {
                 .collect::<BTreeMap<_, _>>()
         })
         .to_string();
+        // 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U10
+        // (A5 partial): fail-closed at a deterministic size
+        // instead of ARG_MAX overflow. Above the cap we route
+        // through `fail_job` with a ContractViolation so the
+        // downstream stage knows the spawn was rejected, not the
+        // kernel.
+        if artifact_refs_env.len() > MAX_ARTIFACT_REFS_BYTES {
+            let reason = format!(
+                "DAG artifact_refs env exceeds MAX_ARTIFACT_REFS_BYTES={} (got {} bytes)",
+                MAX_ARTIFACT_REFS_BYTES,
+                artifact_refs_env.len()
+            );
+            self.fail_job(&identity, kind, &reason, FailureClass::ContractViolation);
+            return;
+        }
         env.extend([
             ("RALPH_DAG_PLAN_KEY".to_string(), identity.plan_key.clone()),
             ("RALPH_DAG_UNIT_KEY".to_string(), identity.unit_key()),
@@ -2417,11 +2476,26 @@ fn build_job_prompt(
         }
     }
     if let Some(report) = feedback {
-        prompt.push_str(&format!(
-            "- The previous review REJECTED this unit. Read the review report at `{report}`, \
-             fix every finding in this worktree, then emit `{success}` again.\n",
-            success = kind.success_topic(),
-        ));
+        // 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U10
+        // (A4): gate `feedback` through `is_safe_repo_relative_path`
+        // and truncate to `MAX_FEEDBACK_BYTES` before inserting
+        // into the spawn prompt. The raw review-report path is
+        // hat-controlled and was previously embedded verbatim;
+        // shell-special bytes (backticks, `$()`, newlines) and
+        // unbounded length are no longer reachable.
+        if super::jobs::is_safe_repo_relative_path(report) && report.len() <= MAX_FEEDBACK_BYTES {
+            prompt.push_str(&format!(
+                "- The previous review REJECTED this unit. Read the review report at `{report}`, \
+                 fix every finding in this worktree, then emit `{success}` again.\n",
+                success = kind.success_topic(),
+            ));
+        } else {
+            prompt.push_str(
+                "- The previous review REJECTED this unit. The review-report path was \
+                 rejected by the runtime (unsafe shape or length cap); consult the spawn \
+                 reason via `ralph inspect loop` to recover the feedback before fixing.\n",
+            );
+        }
     }
     // 2026-09-13-001 plan U3 (D10): surface every upstream
     // artifact the spawn seam verified for this job so the agent
@@ -4738,6 +4812,141 @@ units:
         assert!(
             !prompt.contains("## UPSTREAM ARTIFACTS"),
             "empty artifact_refs must NOT render the evidence block"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U10
+    // adversarial hardening coverage (A3 + A4 + A5 partial).
+    // ─────────────────────────────────────────────────────────────────
+
+    /// U10 A3: the field-name allowlist must drop
+    /// `prompt_injection_path` while still persisting
+    /// `unit_report_path`. Regression-pins the storage-amplification
+    /// and prompt-injection smuggling surfaces.
+    #[test]
+    fn u1_artifact_rejects_field_name_outside_allowlist() {
+        let worktree = u1_worktree();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut runtime = u1_u2_runtime_with_worktree(&worktree);
+        runtime.register_plan_for_test("pf-u10-allow", Some("plan-base".to_string()));
+        let unit_key = "U1";
+        let canonical = u1_canonical(&runtime, &worktree, unit_key);
+        std::fs::create_dir_all(&canonical).unwrap();
+        let body = b"legitimate body";
+        std::fs::write(canonical.join("u1.md"), body).unwrap();
+
+        let identity = u1_identity(
+            "pf-u10-allow",
+            unit_key,
+            "dag-U1-execute-a1",
+            "executor",
+            "execute",
+            1,
+            "tok-u10",
+        );
+        let payload = Value::Object({
+            let mut p = serde_json::Map::new();
+            // Legitimate field: recorded.
+            p.insert(
+                "unit_report_path".to_string(),
+                Value::String("u1.md".to_string()),
+            );
+            // Hostile field outside the allowlist: dropped silently.
+            p.insert(
+                "prompt_injection_path".to_string(),
+                Value::String(".ralph/forge/U1/x.md".to_string()),
+            );
+            p
+        });
+        runtime.record_stage_artifacts_from_payload(&identity, &payload);
+
+        let stores = runtime.ensure_stores().expect("stores");
+        let rows = stores
+            .plans
+            .latest_stage_artifacts("pf-u10-allow", unit_key, "execute")
+            .expect("read artifacts");
+        assert_eq!(rows.len(), 1, "only the allowlisted field must persist");
+        assert_eq!(rows[0].field_name, "unit_report_path");
+    }
+
+    /// U10 A4: feedback with a path-traversal pattern must NOT
+    /// appear in the rendered prompt; the prompt must surface the
+    /// runtime's "feedback unavailable" fallback instead.
+    #[test]
+    fn u3_job_prompt_feedback_rejects_unsafe_path() {
+        let identity = JobIdentity {
+            plan_key: "pf-u10-feedback".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-fix-a2".to_string(),
+            hat: "fixer".to_string(),
+            stage: "fix".to_string(),
+            attempt: 2,
+            token: "tok".to_string(),
+        };
+        let hat = HatConfig::default();
+        let prompt = build_job_prompt(
+            &identity,
+            SpawnKind::Fix,
+            &hat,
+            Path::new("/worktree/U1"),
+            Path::new("/worktree/U1/events.jsonl"),
+            None,
+            &[],
+            &[],
+            &[],
+            Some("../rogue.md"),
+            &BTreeMap::new(),
+        );
+        assert!(
+            !prompt.contains("../rogue.md"),
+            "unsafe feedback path must not appear in prompt"
+        );
+        assert!(
+            prompt.contains("feedback unavailable") || prompt.contains("rejected by the runtime"),
+            "prompt must surface the runtime's rejection marker"
+        );
+    }
+
+    /// U10 A4 (length cap): an oversized feedback string must be
+    /// truncated / replaced by the rejection marker so the prompt
+    /// does not grow unboundedly.
+    #[test]
+    fn u3_job_prompt_feedback_caps_length() {
+        let identity = JobIdentity {
+            plan_key: "pf-u10-cap".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-fix-a2".to_string(),
+            hat: "fixer".to_string(),
+            stage: "fix".to_string(),
+            attempt: 2,
+            token: "tok".to_string(),
+        };
+        let hat = HatConfig::default();
+        let long_feedback = "a".repeat(10_000);
+        let prompt_long = build_job_prompt(
+            &identity,
+            SpawnKind::Fix,
+            &hat,
+            Path::new("/worktree/U1"),
+            Path::new("/worktree/U1/events.jsonl"),
+            None,
+            &[],
+            &[],
+            &[],
+            Some(&long_feedback),
+            &BTreeMap::new(),
+        );
+        // The feedback itself is `a` * 10_000; the rendered prompt
+        // should contain the rejection marker instead of the raw
+        // 10_000-char string.
+        assert!(
+            !prompt_long.contains(&long_feedback),
+            "oversized feedback must not appear in prompt verbatim"
+        );
+        assert!(
+            prompt_long.contains("rejected by the runtime"),
+            "oversized feedback must surface the runtime rejection marker"
         );
     }
 
