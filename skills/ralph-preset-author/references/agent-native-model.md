@@ -307,7 +307,7 @@ DAG 模式（`event_loop.supervisor.scheduler_mode: dag`，builtin `parallel-for
 - `RALPH_DAG_WORKTREE` — 本 job 应该在其中工作的 worktree 绝对路径
 - `RALPH_DAG_BASE` — 本 job 的基线 commit sha
 - `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH` — 已核验执行计划的 repo-relative 路径
-- `RALPH_DAG_ARTIFACT_REFS` — 上游交付物引用列表（JSON 字符串）
+- `RALPH_DAG_ARTIFACT_REFS` — 本 stage 的所有交付物引用（JSON 字符串：`{"refs": {key: {path, digest}, ...}}`）；`path` 是 spawn 前的绝对路径，`digest` 是文件字节 SHA-256；spawn 时 runtime 已复核（缺失 / 漂移 / 逃逸 → 拒启动当前 job）；preset author 必须确保 hat payload 中以 `*_path` 命名的字段值指向真实磁盘文件（consume-time runtime 会 fail-closed）
 - `RALPH_DAG_EXPECTED_HEAD` — 当前 job 开始前 runtime 记录的预期基线 commit；用于只读 hat 的 handoff 对账
 
 3 个已弃用/移除字段（runtime 不再注入，旧 payload 字段被 typed schema 拒收）：
