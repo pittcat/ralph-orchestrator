@@ -941,6 +941,167 @@ impl DagSchedulerStore for RusqliteDagSchedulerStore {
             .map_err(plan_io_err)
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-13-001 plan U1: per-stage accepted + review-rejected
+    // artifact ledger. The slice handed in is already validated
+    // (path shape + canonical-worktree containment) by the spawn
+    // seam; the store persists the rows idempotent on the full
+    // primary key (`plan_key`, `unit_key`, `stage`, `attempt`,
+    // `field_name`) with `INSERT OR REPLACE` semantics.
+    //
+    // Fail-soft contract: a missing or unsafe path is filtered
+    // by the spawn seam BEFORE the store call, so this method
+    // never returns a path-shape error. Decoding failures still
+    // fail closed (IntegerOverflow) because a poisoned row would
+    // corrupt the durable artifact ledger.
+    //
+    // Latest-read uses an ORDER BY attempt DESC LIMIT 1 over
+    // the (plan, unit, stage) triple so the spawn path receives
+    // every field whose attempt matches the highest recorded
+    // one. Lower-attempt rows remain durable history but are not
+    // surfaced to the next stage.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn record_stage_artifacts(
+        &self,
+        records: &[super::dag_store::StageArtifactRecord],
+    ) -> DagStoreResult<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        #[cfg(not(feature = "supervisor-db"))]
+        {
+            let _ = records;
+            Err(DagStoreError::IoError(
+                "supervisor-db cargo feature is off in this build".to_string(),
+            ))
+        }
+        #[cfg(feature = "supervisor-db")]
+        {
+            let mut conn = self
+                .inner
+                .conn
+                .lock()
+                .map_err(|_| DagStoreError::IoError("dag plan store mutex poisoned".into()))?;
+            // Single transaction spanning every INSERT. INSERT OR
+            // REPLACE mirrors the in-memory variant: re-recording
+            // an identical `(plan, unit, stage, attempt, field)`
+            // tuple rewrites the row with the latest
+            // `recorded_at_ms` / digest so a slow reader can see
+            // the most-recent write. The PRIMARY KEY enforces
+            // uniqueness at the schema level so a second write to
+            // the same tuple cannot create a duplicate row.
+            let tx = conn.transaction().map_err(plan_io_err)?;
+            for rec in records {
+                tx.execute(
+                    "INSERT OR REPLACE INTO dag_stage_artifacts \
+                     (plan_key, unit_key, stage, attempt, field_name, artifact_path, \
+                      artifact_digest, recorded_at_ms) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    rusqlite::params![
+                        rec.plan_key,
+                        rec.unit_key,
+                        rec.stage,
+                        rec.attempt as i64,
+                        rec.field_name,
+                        rec.artifact_path,
+                        rec.artifact_digest,
+                        rec.recorded_at_ms as i64,
+                    ],
+                )
+                .map_err(plan_io_err)?;
+            }
+            tx.commit().map_err(plan_io_err)?;
+            Ok(())
+        }
+    }
+
+    fn latest_stage_artifacts(
+        &self,
+        plan_key: &str,
+        unit_key: &str,
+        stage: &str,
+    ) -> DagStoreResult<Vec<super::dag_store::StageArtifactRecord>> {
+        #[cfg(not(feature = "supervisor-db"))]
+        {
+            let _ = (plan_key, unit_key, stage);
+            Err(DagStoreError::IoError(
+                "supervisor-db cargo feature is off in this build".to_string(),
+            ))
+        }
+        #[cfg(feature = "supervisor-db")]
+        {
+            let conn = self
+                .inner
+                .conn
+                .lock()
+                .map_err(|_| DagStoreError::IoError("dag plan store mutex poisoned".into()))?;
+            // Two-step query: first discover the highest
+            // `attempt` recorded for the (plan, unit, stage)
+            // triple, then read every row at that attempt. This
+            // avoids a self-join on `dag_stage_artifacts` while
+            // staying correct: the `MAX(attempt)` subquery is
+            // evaluated under the same SQLite snapshot as the
+            // outer SELECT.
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT plan_key, unit_key, stage, attempt, field_name, artifact_path, \
+                     artifact_digest, recorded_at_ms \
+                     FROM dag_stage_artifacts \
+                     WHERE plan_key = ?1 AND unit_key = ?2 AND stage = ?3 \
+                       AND attempt = (\
+                         SELECT MAX(attempt) FROM dag_stage_artifacts \
+                         WHERE plan_key = ?1 AND unit_key = ?2 AND stage = ?3\
+                       ) \
+                     ORDER BY field_name",
+                )
+                .map_err(plan_io_err)?;
+            let rows = stmt
+                .query_map(rusqlite::params![plan_key, unit_key, stage], |row| {
+                    let attempt: i64 = row.get("attempt")?;
+                    let attempt_u32 = u32::try_from(attempt).map_err(|_| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            30,
+                            rusqlite::types::Type::Integer,
+                            Box::new(DagStoreError::IntegerOverflow {
+                                field: "dag_stage_artifacts.attempt".to_string(),
+                                expected: "u32".to_string(),
+                                actual: attempt,
+                            }),
+                        )
+                    })?;
+                    let recorded_at: i64 = row.get("recorded_at_ms")?;
+                    let recorded_at_ms = u64::try_from(recorded_at).map_err(|_| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            31,
+                            rusqlite::types::Type::Integer,
+                            Box::new(DagStoreError::IntegerOverflow {
+                                field: "dag_stage_artifacts.recorded_at_ms".to_string(),
+                                expected: "u64".to_string(),
+                                actual: recorded_at,
+                            }),
+                        )
+                    })?;
+                    Ok(super::dag_store::StageArtifactRecord {
+                        plan_key: row.get("plan_key")?,
+                        unit_key: row.get("unit_key")?,
+                        stage: row.get("stage")?,
+                        attempt: attempt_u32,
+                        field_name: row.get("field_name")?,
+                        artifact_path: row.get("artifact_path")?,
+                        artifact_digest: row.get("artifact_digest")?,
+                        recorded_at_ms,
+                    })
+                })
+                .map_err(plan_io_err)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(plan_io_err)?);
+            }
+            Ok(out)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1893,6 +2054,31 @@ mod tests {
     fn u3_stages_are_tracked_independently() {
         let (_dir, store) = fresh_plan_store();
         contract_tests::assert_stages_are_tracked_independently(&store);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-13-001 plan U1: per-stage artifact ledger contract
+    // suite. The helpers below are mirrored against the in-memory
+    // variant so a contract regression on either side surfaces
+    // the same test name.
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn u1_stage_artifacts_roundtrip() {
+        let (_dir, store) = fresh_plan_store();
+        contract_tests::assert_stage_artifacts_roundtrip(&store);
+    }
+
+    #[test]
+    fn u1_stage_artifacts_latest_picks_highest_attempt() {
+        let (_dir, store) = fresh_plan_store();
+        contract_tests::assert_stage_artifacts_latest_picks_highest_attempt(&store);
+    }
+
+    #[test]
+    fn u1_stage_artifacts_empty_query_returns_empty() {
+        let (_dir, store) = fresh_plan_store();
+        contract_tests::assert_stage_artifacts_empty_query_returns_empty(&store);
     }
 
     /// v18 schema-only migration landed in `2bbea7bf`; this

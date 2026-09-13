@@ -55,6 +55,85 @@ pub fn path_within_workspace(workspace: &Path, target: &Path) -> std::io::Result
 }
 
 // ---------------------------------------------------------------------------
+// Artifact path-shape validator (2026-09-13-001 plan U1).
+// ---------------------------------------------------------------------------
+
+/// Pure (no filesystem access) shape check for an artifact
+/// path string the prior hat emitted on its accepted or
+/// review-rejected terminal. The runtime applies this BEFORE
+/// `path_within_workspace` so the canonicalize step only runs
+/// on shapes that are already guaranteed repo-relative.
+///
+/// Returns `false` (and therefore the runtime treats the path
+/// as fail-soft: logged + skipped, never persisted) when:
+///   - the string is empty (`""`)
+///   - the string contains a NUL byte (`\0`)
+///   - the string starts with `/` (absolute POSIX path)
+///   - the string starts with `\` (Windows UNC / absolute)
+///   - the string is a Windows-drive absolute (`<letter>:\foo`
+///     or `<letter>:/foo` — drive + separator)
+///   - any `/`- or `\`-split segment equals `..` (parent-dir
+///     escape attempt)
+///
+/// Returns `true` for normal repo-relative paths (`a/b.md`,
+/// `./a/b.md`, `.`). Windows drive-relative (`C:foo`) is
+/// allowed by the surface contract — the downstream
+/// `path_within_workspace` canonicalizes the file path on disk
+/// to decide whether the file actually lives inside the
+/// worktree.
+pub fn is_safe_repo_relative_path(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    if value.contains('\0') {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    // Absolute POSIX (`/foo`).
+    if bytes[0] == b'/' {
+        return false;
+    }
+    // Windows UNC / absolute (`\foo`).
+    if bytes[0] == b'\\' {
+        return false;
+    }
+    // Windows-drive absolute (`<letter>:/...` or
+    // `<letter>:\...`). Drive letter must be exactly ONE ASCII
+    // letter (the byte at index 0); the colon at index 1 must
+    // be followed by `/` or `\` (not another character, which
+    // would be a drive-relative path like `C:foo`).
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let next = bytes[2];
+        if next == b'/' || next == b'\\' {
+            return false;
+        }
+    }
+    for segment in value.split(|c| c == '/' || c == '\\') {
+        if segment == ".." {
+            return false;
+        }
+    }
+    true
+}
+
+/// Pure stage coalescing for the durable artifact ledger. The
+/// `Fix` stage coalesces under `stage = "execute"` (D7) so a
+/// downstream fix-trigger sees the prior execute artifacts
+/// under a stable stage key — the spawn seam stores everything
+/// under `execute` regardless of whether the producer hat ran
+/// the original execute stage or a fix-loop retry.
+///
+/// Identity for every other stage name — `"execute"`,
+/// `"verify"`, `"review"`, `"integration"` round-trip
+/// unchanged. `JobIdentity::stage` is always lowercase by
+/// construction (the runtime emits `SpawnKind::Fix.stage_str()
+/// == "fix"` from `spawn.rs:339`), so only the exact lowercase
+/// token needs the coalesce.
+pub fn coalesce_stage_for_storage(stage: &str) -> &str {
+    if stage == "fix" { "execute" } else { stage }
+}
+
+// ---------------------------------------------------------------------------
 // SHA validator (U5, fix-plan 2026-09-09-0917 F10/R5).
 // ---------------------------------------------------------------------------
 
@@ -624,6 +703,74 @@ impl JobPipeline {
 mod tests {
     use super::*;
     use crate::loop_runner::runtime_job::Stage;
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-13-001 plan U1 (pure-fn tests): the spawn seam
+    // applies `is_safe_repo_relative_path` and
+    // `coalesce_stage_for_storage` BEFORE recording any
+    // artifact, so the store never sees a hostile path or a
+    // fix-stage record. These tests pin the surface contract
+    // — the runtime must not pass through anything the helpers
+    // reject.
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn u1_safe_repo_relative_path_accepts_normal_repo_paths() {
+        assert!(is_safe_repo_relative_path("a/b.md"));
+        assert!(is_safe_repo_relative_path("a/b/c.md"));
+        assert!(is_safe_repo_relative_path("./a.md"));
+        assert!(is_safe_repo_relative_path("."));
+        assert!(is_safe_repo_relative_path(".ralph/forge/U1/report.md"));
+        // Backslash is also a separator for the segment check.
+        assert!(is_safe_repo_relative_path("a\\b.md"));
+        // Windows drive-relative (`C:foo`) is allowed by the
+        // surface contract — the canonicalize-on-disk step
+        // decides whether it actually lives inside the
+        // worktree.
+        assert!(is_safe_repo_relative_path("C:foo"));
+    }
+
+    #[test]
+    fn u1_safe_repo_relative_path_rejects_absolute() {
+        assert!(!is_safe_repo_relative_path("/etc/passwd"));
+        assert!(!is_safe_repo_relative_path("/"));
+        assert!(!is_safe_repo_relative_path("\\foo"));
+        assert!(!is_safe_repo_relative_path("\\"));
+        assert!(!is_safe_repo_relative_path("C:\\foo"));
+        assert!(!is_safe_repo_relative_path("C:/foo"));
+    }
+
+    #[test]
+    fn u1_safe_repo_relative_path_rejects_parent_dir_segments() {
+        assert!(!is_safe_repo_relative_path(".."));
+        assert!(!is_safe_repo_relative_path("../etc/passwd"));
+        assert!(!is_safe_repo_relative_path("a/../b.md"));
+        assert!(!is_safe_repo_relative_path("a\\..\\b.md"));
+    }
+
+    #[test]
+    fn u1_safe_repo_relative_path_rejects_empty() {
+        assert!(!is_safe_repo_relative_path(""));
+    }
+
+    #[test]
+    fn u1_safe_repo_relative_path_rejects_nul_byte() {
+        assert!(!is_safe_repo_relative_path("foo\0bar"));
+        assert!(!is_safe_repo_relative_path("\0"));
+    }
+
+    #[test]
+    fn u1_coalesce_stage_for_storage_fixes_to_execute() {
+        assert_eq!(coalesce_stage_for_storage("fix"), "execute");
+    }
+
+    #[test]
+    fn u1_coalesce_stage_for_storage_identity_for_other_stages() {
+        assert_eq!(coalesce_stage_for_storage("execute"), "execute");
+        assert_eq!(coalesce_stage_for_storage("verify"), "verify");
+        assert_eq!(coalesce_stage_for_storage("review"), "review");
+        assert_eq!(coalesce_stage_for_storage("integration"), "integration");
+    }
 
     /// A fast Unit enters Review while a slow sibling is still
     /// in Execute — no wave barrier.

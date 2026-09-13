@@ -300,6 +300,53 @@ pub trait DagSchedulerStore: Send + Sync {
     ) -> DagStoreResult<Option<StageEvidenceRecord>> {
         Ok(None)
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-13-001 plan U1 (DAG artifact handoff): record the
+    // file-path artifacts the prior hat emitted on its
+    // success / review-rejected terminal, so the next-stage hat
+    // can pick them up from the durable DAG store instead of
+    // relying on JSONL fan-out alone. The runtime applies this on
+    // every accepted terminal (execute / verify / fix) AND on a
+    // review-rejected terminal, where the rejection report IS the
+    // hand-off payload. The `Fix` stage coalesces under `stage =
+    // "execute"` (D7) so a downstream fix-trigger sees the prior
+    // execute artifacts under a stable stage key.
+    //
+    // Fail-soft semantics: a missing file or unsafe path is
+    // logged at the spawn seam and skipped, never propagated.
+    // The trait's `record_stage_artifacts` therefore takes a
+    // pre-validated slice and persists ALL rows in one call.
+    //
+    // The default impls are no-op so legacy callers (pre-U1 store
+    // mocks) keep compiling. The in-memory and rusqlite production
+    // stores MUST override both methods — the next-stage spawn
+    // path needs the recorded rows to surface `*_path` fields.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Persist a batch of stage artifacts. Re-recording an
+    /// identical row is a no-op (idempotent on the full primary
+    /// key). The slice is validated by the caller (the spawn
+    /// seam enforces path-shape + canonical-worktree invariants
+    /// before reaching the store).
+    fn record_stage_artifacts(&self, _records: &[StageArtifactRecord]) -> DagStoreResult<()> {
+        Ok(())
+    }
+
+    /// Read every artifact row whose `(plan_key, unit_key, stage)`
+    /// matches and whose `attempt` is the highest recorded for
+    /// that triple. Returns an empty `Vec` when no artifact has
+    /// ever been recorded (the spawn path treats this as "no
+    /// prior artifacts to hand off", which is a non-error
+    /// path for the fix / verifier stages).
+    fn latest_stage_artifacts(
+        &self,
+        _plan_key: &str,
+        _unit_key: &str,
+        _stage: &str,
+    ) -> DagStoreResult<Vec<StageArtifactRecord>> {
+        Ok(Vec::new())
+    }
 }
 
 /// 2026-09-09-0917 plan U3: persisted row for the
@@ -336,6 +383,40 @@ pub struct StageEvidenceRecord {
     pub accepted_at_ms: u64,
 }
 
+/// 2026-09-13-001 plan U1: persisted row for the
+/// `dag_stage_artifacts` table. Records one file-path artifact
+/// the prior hat published on its accepted (or review-rejected)
+/// terminal. The next-stage hat reads these rows via
+/// `latest_stage_artifacts` to discover which repo-relative
+/// files (commit-baseline, verification-delta, report,
+/// reentry-payload) it should open, instead of relying solely on
+/// JSONL log fan-out.
+///
+/// The `Fix` stage coalesces under `stage = "execute"` (D7), so
+/// the `stage` field stored on disk is always one of
+/// `"execute"` / `"verify"` / `"review"` — never `"fix"`. The
+/// spawn seam is responsible for the coalescing before the
+/// store call.
+///
+/// `field_name` is a stable semantic key (e.g. `"commit_baseline"`,
+/// `"verification_delta"`, `"report"`); the path value is
+/// canonical-worktree relative so `path_within_workspace`
+/// accepts it on the next stage's spawn path. `artifact_digest`
+/// is the SHA-256 hex of the file at record time, captured by
+/// the spawn seam BEFORE the row is persisted so a hand-off can
+/// detect post-write drift (D8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageArtifactRecord {
+    pub plan_key: String,
+    pub unit_key: String,
+    pub stage: String,
+    pub attempt: u32,
+    pub field_name: String,
+    pub artifact_path: String,
+    pub artifact_digest: String,
+    pub recorded_at_ms: u64,
+}
+
 // The bounded registration receipt type and its in-memory
 // registry live in `dag_plan_receipt.rs`; this module only owns
 // the store trait + the plan record / registration types that
@@ -357,7 +438,9 @@ pub(crate) mod contract_tests {
     //! checks centralised means a new store gets the full U3
     //! suite by re-exporting these helpers.
 
-    use super::{DagSchedulerStore, DagStoreError, StageEvidenceRecord, UnitBaseRecord};
+    use super::{
+        DagSchedulerStore, DagStoreError, StageArtifactRecord, StageEvidenceRecord, UnitBaseRecord,
+    };
 
     /// Build an evidence record with deterministic defaults; tests
     /// override only the fields they exercise.
@@ -379,6 +462,29 @@ pub(crate) mod contract_tests {
             evidence_token: format!("tok-{stage}-{attempt}"),
             evidence_fingerprint: format!("fp-{accepted}-{stage}-{attempt}"),
             accepted_at_ms: 1_700_000_000_000 + u64::from(attempt),
+        }
+    }
+
+    /// Build a stage artifact record with deterministic defaults;
+    /// tests override only the fields they exercise.
+    pub(crate) fn artifact(
+        plan_key: &str,
+        unit_key: &str,
+        stage: &str,
+        attempt: u32,
+        field_name: &str,
+        artifact_path: &str,
+        artifact_digest: &str,
+    ) -> StageArtifactRecord {
+        StageArtifactRecord {
+            plan_key: plan_key.to_string(),
+            unit_key: unit_key.to_string(),
+            stage: stage.to_string(),
+            attempt,
+            field_name: field_name.to_string(),
+            artifact_path: artifact_path.to_string(),
+            artifact_digest: artifact_digest.to_string(),
+            recorded_at_ms: 1_700_000_000_000 + u64::from(attempt),
         }
     }
 
@@ -598,6 +704,121 @@ pub(crate) mod contract_tests {
                 .latest_stage_evidence("p", "U1", "verify")
                 .expect("verify read")
                 .is_none()
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-13-001 plan U1 contract helpers for stage artifacts.
+    // The next-stage spawn path reads via `latest_stage_artifacts`
+    // to discover repo-relative file artifacts from the prior
+    // hat's accepted (or review-rejected) terminal. The contract
+    // is: row = (plan_key, unit_key, stage, attempt, field_name);
+    // latest = highest attempt for the triple; empty query =
+    // empty Vec.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Recording a batch of artifacts round-trips identically
+    /// via `latest_stage_artifacts`.
+    pub(crate) fn assert_stage_artifacts_roundtrip(store: &dyn DagSchedulerStore) {
+        let rows = vec![
+            artifact(
+                "p",
+                "U1",
+                "execute",
+                1,
+                "commit_baseline",
+                ".ralph/forge/U1/baseline.md",
+                "dig-base",
+            ),
+            artifact(
+                "p",
+                "U1",
+                "execute",
+                1,
+                "verification_delta",
+                ".ralph/forge/U1/delta.md",
+                "dig-delta",
+            ),
+        ];
+        store
+            .record_stage_artifacts(&rows)
+            .expect("record artifacts");
+        let got = store
+            .latest_stage_artifacts("p", "U1", "execute")
+            .expect("read artifacts");
+        assert_eq!(got.len(), 2);
+        assert!(got.contains(&rows[0]), "missing baseline row");
+        assert!(got.contains(&rows[1]), "missing delta row");
+    }
+
+    /// Recording artifacts for the SAME (plan, unit, stage) at a
+    /// HIGHER attempt causes `latest_stage_artifacts` to return
+    /// ONLY the higher-attempt rows. Lower-attempt rows are not
+    /// part of the latest snapshot — they are durable history
+    /// but the spawn path only needs the highest attempt.
+    pub(crate) fn assert_stage_artifacts_latest_picks_highest_attempt(
+        store: &dyn DagSchedulerStore,
+    ) {
+        let a1 = vec![artifact(
+            "p",
+            "U1",
+            "execute",
+            1,
+            "report",
+            ".ralph/forge/U1/r1.md",
+            "dig-r1",
+        )];
+        let a2 = vec![
+            artifact(
+                "p",
+                "U1",
+                "execute",
+                2,
+                "report",
+                ".ralph/forge/U1/r2.md",
+                "dig-r2",
+            ),
+            artifact(
+                "p",
+                "U1",
+                "execute",
+                2,
+                "verification_delta",
+                ".ralph/forge/U1/delta2.md",
+                "dig-d2",
+            ),
+        ];
+        store.record_stage_artifacts(&a1).expect("a1");
+        store.record_stage_artifacts(&a2).expect("a2");
+        let got = store
+            .latest_stage_artifacts("p", "U1", "execute")
+            .expect("read");
+        assert_eq!(got.len(), 2, "expected only attempt=2 rows, got {got:?}");
+        assert!(got.contains(&a2[0]), "missing attempt=2 report");
+        assert!(got.contains(&a2[1]), "missing attempt=2 delta");
+        assert!(
+            !got.contains(&a1[0]),
+            "attempt=1 row must not appear in latest"
+        );
+    }
+
+    /// Querying artifacts for an unknown (plan, unit, stage)
+    /// returns an empty `Vec`, NOT an error. The spawn path
+    /// treats this as "no prior artifacts to hand off", which is
+    /// a non-error path for the fix / verifier stages when the
+    /// prior stage emitted no artifacts.
+    pub(crate) fn assert_stage_artifacts_empty_query_returns_empty(store: &dyn DagSchedulerStore) {
+        let got = store
+            .latest_stage_artifacts("p", "U_MISSING", "execute")
+            .expect("empty read must not error");
+        assert!(got.is_empty(), "expected empty Vec, got {got:?}");
+
+        let got = store
+            .latest_stage_artifacts("p", "U1", "review")
+            .expect("empty stage read must not error");
+        assert!(
+            got.is_empty(),
+            "expected empty Vec for unset stage, got {got:?}"
         );
     }
 }

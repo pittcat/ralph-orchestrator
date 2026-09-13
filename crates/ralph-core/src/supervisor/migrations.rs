@@ -117,8 +117,21 @@ mod imp {
     /// `failure_class` is enforced by CHECK
     /// (`merge_conflict` / `gate_failure` / `foreign_target` /
     /// `unknown`).
+    /// v24 (2026-09-13-001 plan U1) adds the `dag_stage_artifacts`
+    /// per-stage accepted + review-rejected completion artifact
+    /// ledger so the next-stage hat can hand off file paths from
+    /// the prior stage's completed unit via the durable DAG
+    /// store, instead of relying on JSON payload fan-out alone.
+    /// Forward-only CREATE TABLE; no ALTERs, no column-probe
+    /// path. `PRIMARY KEY (plan_key, unit_key, stage, attempt,
+    /// field_name)` keeps each artifact row idempotent; the
+    /// `(plan_key, unit_key, stage, attempt)` index accelerates
+    /// the latest-attempt lookup used by the next-stage spawn
+    /// path. Fail-soft semantics: a record call missing the
+    /// underlying file or carrying an unsafe path is logged and
+    /// skipped, never propagated as a job failure.
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 23;
+    pub const CURRENT_VERSION: i64 = 24;
 
     /// PMI-013 / TGP-02: typed error returned when a database's
     /// `user_version` is ABOVE this binary's migration ledger tail
@@ -673,6 +686,27 @@ mod imp {
                 ddl: include_str!("migrations/v23.sql"),
                 column_probe: None,
             },
+            // 2026-09-13-001 plan U1 (DAG artifact handoff):
+            // adds the `dag_stage_artifacts` per-stage accepted +
+            // review-rejected completion artifact ledger so the
+            // next-stage hat can hand off file paths from the
+            // prior stage's completed unit via the durable DAG
+            // store, instead of relying on JSON payload fan-out
+            // alone. Forward-only CREATE TABLE; no ALTERs, so no
+            // column probe. `PRIMARY KEY (plan_key, unit_key,
+            // stage, attempt, field_name)` keeps each artifact
+            // row idempotent; the `(plan_key, unit_key, stage,
+            // attempt)` lookup index accelerates the
+            // latest-attempt read used by the next-stage spawn
+            // path. Fail-soft semantics: a record call missing
+            // the underlying file or carrying an unsafe path is
+            // logged and skipped at the spawn seam; the table
+            // itself never errors the migration.
+            Migration {
+                version: 24,
+                ddl: include_str!("migrations/v24.sql"),
+                column_probe: None,
+            },
         ]
     }
 }
@@ -704,25 +738,26 @@ mod tests {
     }
 
     /// 2026-09-09-0917 fix-plan U6: a fresh supervisor DB must
-    /// run migrations v20-v23 and land on `CURRENT_VERSION` (23)
-    /// with all 5 new tables created. The test pins four
+    /// run migrations v20-v24 and land on `CURRENT_VERSION` (24)
+    /// with all 5 new tables created. The test pins five
     /// migrations worth of durable DAG store evidence:
     /// - v20 → `dag_terminal_deliveries` (U8)
     /// - v21 → `dag_registration_evidence` + `dag_approval_evidence` (U9)
     /// - v22 → `dag_correction_requests` (U11)
     /// - v23 → `dag_integration_failures` (U12)
+    /// - v24 → `dag_stage_artifacts` (2026-09-13-001 plan U1)
     #[test]
-    fn migrations_apply_v20_v23_creates_4_new_tables() {
+    fn migrations_apply_v20_v24_creates_5_new_tables() {
         let conn = Connection::open_in_memory().unwrap();
         run(&conn).unwrap();
         assert_eq!(
             user_version(&conn).unwrap(),
             CURRENT_VERSION,
-            "user_version must reach CURRENT_VERSION (=23) after v20-v23 migrations"
+            "user_version must reach CURRENT_VERSION (=24) after v20-v24 migrations"
         );
         assert_eq!(
-            CURRENT_VERSION, 23,
-            "CURRENT_VERSION must be 23 after v20-v23 are registered"
+            CURRENT_VERSION, 24,
+            "CURRENT_VERSION must be 24 after v20-v24 are registered"
         );
         let new_tables = [
             // v20: terminal delivery state for U8 (replay-once terminal
@@ -743,6 +778,11 @@ mod tests {
             // integration-failure facts tied to verify attempt +
             // checkout generation for fail-closed replay.
             "dag_integration_failures",
+            // v24: stage artifacts (2026-09-13-001 plan U1) —
+            // per-stage accepted + review-rejected completion
+            // artifact ledger keyed by (plan_key, unit_key,
+            // stage, attempt, field_name).
+            "dag_stage_artifacts",
         ];
         for table in new_tables {
             let count: i64 = conn
@@ -831,6 +871,11 @@ mod tests {
             // atomicity (state machine: prepared / ref_advanced /
             // materialized / superseded / blocked).
             "dag_checkout_intents",
+            // U1 (2026-09-13-001 plan): per-stage accepted +
+            // review-rejected completion artifact ledger for
+            // file-path handoff between successive hats on the
+            // same Unit.
+            "dag_stage_artifacts",
         ];
         for table in tables {
             let count: i64 = conn
@@ -1251,6 +1296,101 @@ mod tests {
         assert_eq!(
             unit_ids, "[\"U1\"]",
             "dag_plans unit_ids preserved across v14"
+        );
+    }
+
+    /// 2026-09-13-001 plan U1: a v23 fixture upgraded to v24
+    /// keeps every prior DAG row intact and gains the (empty)
+    /// `dag_stage_artifacts` table. Mirrors the v12→v13
+    /// differential technique: run migrations on a fresh DB, drop
+    /// the v24 table, rewind `user_version` to 23, seed a
+    /// representative v23 dataset, reopen, upgrade.
+    #[test]
+    fn migration_v23_to_v24_preserves_existing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor.db");
+
+        // Phase 1: fresh DB at CURRENT_VERSION, then rewind to a
+        // "real" v23 instance (drop the v24 table + index and
+        // rewind the version so the v24 migration re-fires).
+        {
+            let conn = Connection::open(&path).unwrap();
+            run(&conn).unwrap();
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS dag_stage_artifacts;
+                 DROP INDEX IF EXISTS idx_dag_stage_artifacts_lookup;",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 23_i64).unwrap();
+        }
+
+        // Phase 2: seed a representative v23 dataset — one wave
+        // row (wave family must not be disturbed) plus one
+        // `dag_correction_requests` row (the v22 DAG family
+        // must survive the v24 upgrade).
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "INSERT INTO waves (wave_id, idempotency_key, kind, phase, expected_total, slot_retry_budget)
+                   VALUES ('w-v23-legacy', 'idem-v23-legacy', 'exec', 'dispatch', 2, 1);
+                 INSERT INTO dag_correction_requests
+                   (unit_key, failure_fingerprint, failed_job_id, failed_job_token, failed_attempt,
+                    correction_digest, feedback_path, feedback_hash, state, created_at_ms, updated_at_ms)
+                   VALUES ('U-legacy', 'fp-legacy', 'job-legacy', 'tok-legacy', 0,
+                           'cd-legacy', '.ralph/feedback-legacy.md', 'fp-hash-legacy', 'pending',
+                           1700000000000, 1700000000000);",
+            )
+            .unwrap();
+        }
+
+        // Phase 3: reopen → v24 migration applies; every v23 row
+        // is unchanged; the v24 table exists and starts empty.
+        let conn = Connection::open(&path).unwrap();
+        run(&conn).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), CURRENT_VERSION);
+
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='dag_stage_artifacts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            table_count, 1,
+            "dag_stage_artifacts table must exist after v24 upgrade"
+        );
+        let row_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dag_stage_artifacts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            row_count, 0,
+            "dag_stage_artifacts starts empty for legacy DB"
+        );
+
+        // Legacy wave row preserved.
+        let wave_kind: String = conn
+            .query_row(
+                "SELECT kind FROM waves WHERE wave_id = 'w-v23-legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(wave_kind, "exec", "wave row preserved across v24");
+
+        // v22 correction request row preserved.
+        let feedback_path: String = conn
+            .query_row(
+                "SELECT feedback_path FROM dag_correction_requests WHERE unit_key = 'U-legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            feedback_path, ".ralph/feedback-legacy.md",
+            "dag_correction_requests row preserved across v24"
         );
     }
 

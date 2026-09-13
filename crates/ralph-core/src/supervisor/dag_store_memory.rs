@@ -53,7 +53,7 @@ use std::sync::Mutex;
 
 use super::dag_store::{
     CanonicalPlanRecord, DagSchedulerStore, DagStoreError, DagStoreResult, PlanRegistration,
-    PlanStatus, StageEvidenceRecord, UnitBaseRecord,
+    PlanStatus, StageArtifactRecord, StageEvidenceRecord, UnitBaseRecord,
 };
 
 /// In-memory `DagSchedulerStore`. Backed by a single `Mutex`
@@ -74,6 +74,14 @@ pub struct InMemoryDagSchedulerStore {
     /// `latest_stage_evidence` lookup scans the unit's entries
     /// (in practice O(1)–O(4) — execute/review/verify/fix).
     stage_evidence: Mutex<HashMap<String, StageEvidenceRecord>>,
+    /// 2026-09-13-001 plan U1: per-(plan_key, unit_key, stage,
+    /// attempt, field_name) accepted + review-rejected artifact
+    /// ledger. Keyed by `"{plan_key}::{unit_key}::{stage}::{attempt}::{field_name}"`
+    /// so a single map mirrors the schema-level PRIMARY KEY. The
+    /// `Fix` stage coalesces under `stage = "execute"` (D7) so
+    /// the on-disk key never contains `"::fix::"` — the spawn
+    /// seam normalises before calling the store.
+    stage_artifacts: Mutex<HashMap<String, StageArtifactRecord>>,
 }
 
 impl InMemoryDagSchedulerStore {
@@ -88,6 +96,16 @@ impl InMemoryDagSchedulerStore {
 
     fn evidence_key(plan_key: &str, unit_key: &str, stage: &str, attempt: u32) -> String {
         format!("{plan_key}::{unit_key}::{stage}::{attempt}")
+    }
+
+    fn artifact_key(
+        plan_key: &str,
+        unit_key: &str,
+        stage: &str,
+        attempt: u32,
+        field_name: &str,
+    ) -> String {
+        format!("{plan_key}::{unit_key}::{stage}::{attempt}::{field_name}")
     }
 }
 
@@ -315,6 +333,85 @@ impl DagSchedulerStore for InMemoryDagSchedulerStore {
             }
         }
         Ok(best.cloned())
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-13-001 plan U1: per-stage accepted + review-rejected
+    // artifact ledger. The slice handed in is already validated
+    // (path shape + canonical-worktree containment) by the spawn
+    // seam; the store persists the rows idempotent on the full
+    // primary key, no field-drift enforcement (artifacts are
+    // append-only history — a re-record at the same
+    // `(plan, unit, stage, attempt, field_name)` is intentionally
+    // a no-op, mirroring the rusqlite `INSERT OR REPLACE`
+    // contract).
+    // ─────────────────────────────────────────────────────────────────
+
+    fn record_stage_artifacts(&self, records: &[StageArtifactRecord]) -> DagStoreResult<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut guard = self.stage_artifacts.lock().map_err(|e| {
+            DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}"))
+        })?;
+        for rec in records {
+            let key = Self::artifact_key(
+                &rec.plan_key,
+                &rec.unit_key,
+                &rec.stage,
+                rec.attempt,
+                &rec.field_name,
+            );
+            // INSERT OR REPLACE semantics: re-recording an
+            // identical row rewrites it (the rusqlite variant
+            // uses `INSERT OR REPLACE` to mirror this).
+            guard.insert(key, rec.clone());
+        }
+        Ok(())
+    }
+
+    fn latest_stage_artifacts(
+        &self,
+        plan_key: &str,
+        unit_key: &str,
+        stage: &str,
+    ) -> DagStoreResult<Vec<StageArtifactRecord>> {
+        let guard = self.stage_artifacts.lock().map_err(|e| {
+            DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}"))
+        })?;
+        let prefix = format!("{plan_key}::{unit_key}::{stage}::");
+        // First pass: find the highest attempt recorded for the
+        // triple (matches by `attempt` only — field_name is
+        // absent from the prefix, so we extract attempt via
+        // `splitn(5, "::")` and keep max).
+        let mut max_attempt: Option<u32> = None;
+        for key in guard.keys() {
+            if !key.starts_with(&prefix) {
+                continue;
+            }
+            // `{prefix}` is `plan::unit::stage::`; the segment
+            // right after the prefix is the attempt.
+            let after = &key[prefix.len()..];
+            let mut segs = after.splitn(2, "::");
+            let attempt_seg = segs.next().expect("split always yields >=1 segment");
+            if let Ok(attempt) = attempt_seg.parse::<u32>() {
+                max_attempt = Some(max_attempt.map_or(attempt, |cur| cur.max(attempt)));
+            }
+        }
+        let Some(max_attempt) = max_attempt else {
+            return Ok(Vec::new());
+        };
+        // Second pass: collect every row whose attempt equals
+        // the max. Field names are stable per attempt so the
+        // spawn path receives the full set.
+        let mut rows = Vec::new();
+        let full_prefix = format!("{plan_key}::{unit_key}::{stage}::{max_attempt}::");
+        for (key, value) in guard.iter() {
+            if key.starts_with(&full_prefix) {
+                rows.push(value.clone());
+            }
+        }
+        Ok(rows)
     }
 }
 
@@ -613,6 +710,31 @@ mod tests {
         let store = InMemoryDagSchedulerStore::new();
         contract_tests::assert_stages_are_tracked_independently(&store);
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-13-001 plan U1: per-stage artifact ledger contract
+    // suite. The helpers below are mirrored against the rusqlite
+    // variant so a contract regression on either side surfaces
+    // the same test name.
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn u1_stage_artifacts_roundtrip() {
+        let store = InMemoryDagSchedulerStore::new();
+        contract_tests::assert_stage_artifacts_roundtrip(&store);
+    }
+
+    #[test]
+    fn u1_stage_artifacts_latest_picks_highest_attempt() {
+        let store = InMemoryDagSchedulerStore::new();
+        contract_tests::assert_stage_artifacts_latest_picks_highest_attempt(&store);
+    }
+
+    #[test]
+    fn u1_stage_artifacts_empty_query_returns_empty() {
+        let store = InMemoryDagSchedulerStore::new();
+        contract_tests::assert_stage_artifacts_empty_query_returns_empty(&store);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -635,6 +757,8 @@ mod tests {
 //   - get_unit_base  → 1 (unit_bases poisoned)
 //   - record_stage_evidence → 1 (stage_evidence poisoned)
 //   - latest_stage_evidence → 1 (stage_evidence poisoned)
+//   - record_stage_artifacts → 1 (stage_artifacts poisoned)
+//   - latest_stage_artifacts → 1 (stage_artifacts poisoned)
 // ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -771,5 +895,29 @@ mod poison_tests {
         let store = InMemoryDagSchedulerStore::new();
         poison(&store.stage_evidence);
         assert_io_poisoned(store.latest_stage_evidence("p1", "U1", "execute"));
+    }
+
+    #[test]
+    fn record_stage_artifacts_returns_io_error_when_stage_artifacts_mutex_poisoned() {
+        let store = InMemoryDagSchedulerStore::new();
+        poison(&store.stage_artifacts);
+        let rows = vec![StageArtifactRecord {
+            plan_key: "p1".to_string(),
+            unit_key: "U1".to_string(),
+            stage: "execute".to_string(),
+            attempt: 1,
+            field_name: "report".to_string(),
+            artifact_path: ".ralph/forge/U1/r.md".to_string(),
+            artifact_digest: "dig-r".to_string(),
+            recorded_at_ms: 1_700_000_000_000,
+        }];
+        assert_io_poisoned(store.record_stage_artifacts(&rows));
+    }
+
+    #[test]
+    fn latest_stage_artifacts_returns_io_error_when_stage_artifacts_mutex_poisoned() {
+        let store = InMemoryDagSchedulerStore::new();
+        poison(&store.stage_artifacts);
+        assert_io_poisoned(store.latest_stage_artifacts("p1", "U1", "execute"));
     }
 }
