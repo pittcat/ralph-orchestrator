@@ -1,7 +1,7 @@
 //! Activation-scoped worktree snapshots used by handoff guards and audits.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -121,11 +121,7 @@ fn status_entry_path(status_entry: &str) -> &str {
     }
 }
 
-fn hash_worktree_path(
-    workspace: &Path,
-    path: &str,
-    hasher: &mut DefaultHasher,
-) -> HashOutcome {
+fn hash_worktree_path(workspace: &Path, path: &str, hasher: &mut DefaultHasher) -> HashOutcome {
     let full_path = workspace.join(path);
     match std::fs::metadata(&full_path) {
         Ok(metadata) if metadata.is_file() => {
@@ -374,12 +370,15 @@ fn dirty_paths_content_equal(
         // path extracted by `status_entry_path`. Apply the same
         // extraction here so the lookup matches.
         let path = status_entry_path(raw_entry);
-        let before_digest = before.content_hashes.get(&PathBuf::from(path)).ok_or_else(|| {
-            format!(
-                "baseline dirty path {path} has no captured content hash \
+        let before_digest = before
+            .content_hashes
+            .get(&PathBuf::from(path))
+            .ok_or_else(|| {
+                format!(
+                    "baseline dirty path {path} has no captured content hash \
                  (non-regular file at capture time; cannot compare)"
-            )
-        })?;
+                )
+            })?;
         let current_digest = current
             .content_hashes
             .get(&PathBuf::from(path))
@@ -428,8 +427,8 @@ fn git_output_bytes(workspace: &Path, args: &[&str]) -> std::io::Result<Vec<u8>>
 #[cfg(test)]
 mod tests {
     use super::{
-        WorktreeSnapshot, dirty_paths_content_equal, is_ralph_path,
-        validate_stabilization_handoff, validate_work_done_handoff,
+        WorktreeSnapshot, dirty_paths_content_equal, is_ralph_path, validate_stabilization_handoff,
+        validate_work_done_handoff,
     };
     use serde_json::json;
     use std::process::Command;
@@ -608,9 +607,8 @@ mod tests {
             "commit_count": 0,
         })
         .to_string();
-        let error =
-            validate_work_done_handoff(temp.path(), Some(&activation), &payload)
-                .expect_err("clean→dirty must be rejected");
+        let error = validate_work_done_handoff(temp.path(), Some(&activation), &payload)
+            .expect_err("clean→dirty must be rejected");
         assert!(
             error.contains("worktree changed"),
             "unexpected error: {error}"
