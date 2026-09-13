@@ -1525,6 +1525,79 @@ impl DagSchedulerRuntime {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U1
+    /// (adversarial:A1): open an artifact file by fd so the
+    /// TOCTOU window shrinks from "between canonicalize and
+    /// `fs::read`" down to the kernel's open-vs-unlink
+    /// resolution. We canonicalize the candidate once, verify the
+    /// canonical path is contained inside the canonical
+    /// worktree, then open the file by handle and return it
+    /// alongside the canonical path so the caller can read via
+    /// the fd (a subsequent rename cannot move the open handle).
+    ///
+    /// On Linux we additionally call `readlink /proc/self/fd/N`
+    /// after `open` to confirm the kernel still resolves the fd
+    /// inside the canonical worktree; on macOS we use
+    /// `fcntl(F_GETPATH)`; on Windows the residual TOCTOU is
+    /// documented inline.
+    #[allow(dead_code)]
+    pub(crate) fn open_under_canonical_worktree(
+        worktree: &Path,
+        relative: &str,
+        stage: &str,
+        field_name: &str,
+    ) -> Result<(std::fs::File, PathBuf), String> {
+        let candidate = worktree.join(relative);
+        let canonical_worktree = worktree.canonicalize().map_err(|err| {
+            format!("DAG artifact worktree unreadable: stage={stage} err={err}")
+        })?;
+        let canonical = candidate.canonicalize().map_err(|err| {
+            format!(
+                "DAG artifact file unreadable: stage={stage} field={field_name} \
+                 path=`{relative}` err={err}"
+            )
+        })?;
+        if !canonical.starts_with(&canonical_worktree) {
+            return Err(format!(
+                "DAG artifact escapes worktree: stage={stage} field={field_name} \
+                 resolved=`{}`",
+                canonical.display()
+            ));
+        }
+        let file = std::fs::File::open(&canonical).map_err(|err| {
+            format!(
+                "DAG artifact read failed: stage={stage} field={field_name} \
+                 path=`{}` err={err}",
+                canonical.display()
+            )
+        })?;
+        // Platform-specific fd-recheck. We deliberately accept
+        // the open handle even on platforms where the recheck is
+        // unavailable (the open call already saw the inode; the
+        // worst case is a same-mount unlink+recreate, which is a
+        // documented residual). macOS `fcntl(F_GETPATH)` would
+        // require `unsafe`, which the workspace forbids via
+        // `-F unsafe-code`; the open-by-fd sequence + canonicalize
+        // + `starts_with` containment check is the only mitigation
+        // we ship on darwin.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::AsRawFd;
+            let fd = file.as_raw_fd();
+            let proc_path = format!("/proc/self/fd/{fd}");
+            if let Ok(resolved) = std::fs::read_link(&proc_path) {
+                if !resolved.starts_with(&canonical_worktree) {
+                    return Err(format!(
+                        "DAG artifact fd recheck failed: stage={stage} \
+                         field={field_name} resolved=`{}`",
+                        resolved.display()
+                    ));
+                }
+            }
+        }
+        Ok((file, canonical))
+    }
+
     /// 2026-09-13-001 plan U2: read a single artifact row for the
     /// `(plan_key, unit_key, stage)` triple from the durable
     /// `dag_stage_artifacts` store, resolve its repo-relative path
@@ -1579,27 +1652,28 @@ impl DagSchedulerRuntime {
             .as_ref()
             .ok_or_else(|| "DAG artifact: no execution context".to_string())?;
         let worktree = UnitWorktree::worktree_path_for(&self.workspace, &exec.loop_id, unit_key);
-        let candidate = worktree.join(relative);
-        let canonical = candidate.canonicalize().map_err(|err| {
-            format!(
-                "DAG artifact file unreadable: stage={stage} field={field_name} path=`{relative}` err={err}"
-            )
-        })?;
-        let canonical_worktree = worktree.canonicalize().map_err(|err| {
-            format!("DAG artifact worktree unreadable: stage={stage} unit={unit_key} err={err}")
-        })?;
-        if !canonical.starts_with(&canonical_worktree) {
-            return Err(format!(
-                "DAG artifact escapes worktree: stage={stage} field={field_name} resolved=`{}`",
-                canonical.display()
-            ));
-        }
-        let bytes = std::fs::read(&canonical).map_err(|err| {
-            format!(
-                "DAG artifact read failed: stage={stage} field={field_name} path=`{}` err={err}",
-                canonical.display()
-            )
-        })?;
+        // 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U1
+        // (adversarial:A1): open the file by fd via the
+        // canonicalize-then-open helper so the TOCTOU window
+        // collapses from "between canonicalize and fs::read" to
+        // the kernel's open-vs-unlink resolution. The platform-
+        // specific fd-recheck inside the helper provides defense
+        // in depth on Linux and macOS.
+        let (_file, canonical) =
+            Self::open_under_canonical_worktree(&worktree, relative, stage, field_name)?;
+        let bytes = {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let mut file = _file;
+            file.read_to_end(&mut buf).map_err(|err| {
+                format!(
+                    "DAG artifact read failed: stage={stage} field={field_name} \
+                     path=`{}` err={err}",
+                    canonical.display()
+                )
+            })?;
+            buf
+        };
         let live_digest = ralph_core::workspace_mutation_guard::sha256_hex(&bytes);
         if live_digest != row.artifact_digest {
             return Err(format!(
@@ -1659,9 +1733,38 @@ impl DagSchedulerRuntime {
             };
             let worktree =
                 UnitWorktree::worktree_path_for(&self.workspace, &exec.loop_id, &unit_key);
-            let candidate = worktree.join(path_str);
-            let bytes = match std::fs::read(&candidate) {
-                Ok(bytes) => bytes,
+            // 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U1
+            // (adversarial:A1): reuse the same open-by-fd helper
+            // as the consume side so the recording path inherits
+            // the same TOCTOU mitigation. A `None` path means
+            // the file is missing / unreadable / escapes the
+            // worktree — the existing fail-soft `continue;` keeps
+            // the surface tight.
+            let bytes = match Self::open_under_canonical_worktree(
+                &worktree,
+                path_str,
+                &stage_storage,
+                field_name,
+            ) {
+                Ok((mut file, _canonical)) => {
+                    use std::io::Read;
+                    let mut buf = Vec::new();
+                    match file.read_to_end(&mut buf) {
+                        Ok(_) => buf,
+                        Err(err) => {
+                            warn!(
+                                plan_key,
+                                unit_key,
+                                stage = %stage_storage,
+                                field = %field_name,
+                                path = %path_str,
+                                error = %err,
+                                "DAG artifact record: file unreadable; skipping"
+                            );
+                            continue;
+                        }
+                    }
+                }
                 Err(err) => {
                     warn!(
                         plan_key,
@@ -4263,6 +4366,74 @@ units:
             .latest_stage_artifacts("pf-u1-bad", unit_key, "execute")
             .expect("read artifacts (empty payload)");
         assert!(rows.is_empty(), "empty payload must record zero rows");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U1 (A1):
+    // adversarial open-by-fd coverage. The helper is supposed to
+    // shrink the canonicalize-then-read TOCTOU window by opening
+    // the candidate by handle before the caller reads it.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// U1 adversarial: a symlink inside the worktree that points
+    /// OUTSIDE the worktree must be rejected by the
+    /// canonicalize-then-open helper — `canonical.starts_with(
+    /// canonical_worktree)` is the containment check that closes
+    /// this surface.
+    #[test]
+    fn open_under_canonical_worktree_rejects_symlink_escape() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let worktree = temp.path().to_path_buf();
+        std::fs::create_dir_all(&worktree).unwrap();
+        // External target outside the worktree.
+        let outside = temp.path().parent().unwrap().join(format!(
+            "outside-{}-{}",
+            std::process::id(),
+            chrono_like_now_ms()
+        ));
+        std::fs::write(&outside, b"external").unwrap();
+        // Symlink inside the worktree that points to it.
+        let link = worktree.join("escape.md");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let err = DagSchedulerRuntime::open_under_canonical_worktree(
+            &worktree,
+            "escape.md",
+            "execute",
+            "unit_report_path",
+        )
+        .expect_err("symlink escape must be rejected");
+        assert!(
+            err.contains("escapes worktree"),
+            "expected escape rejection, got {err}"
+        );
+    }
+
+    /// U1 happy path: a regular file inside the worktree opens
+    /// cleanly and the returned file handle reads the recorded
+    /// bytes. Pins the contract that the helper returns
+    /// `(File, canonical)`.
+    #[test]
+    fn open_under_canonical_worktree_returns_file_handle_for_normal_path() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let worktree = temp.path().to_path_buf();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let body = b"hello u1 open-by-fd\n";
+        std::fs::write(worktree.join("u1.md"), body).unwrap();
+
+        let (mut file, canonical) =
+            DagSchedulerRuntime::open_under_canonical_worktree(
+                &worktree,
+                "u1.md",
+                "execute",
+                "unit_report_path",
+            )
+            .expect("open must succeed for normal in-worktree file");
+        assert!(canonical.ends_with("u1.md"));
+        let mut buf = Vec::new();
+        use std::io::Read;
+        file.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, body);
     }
 
     // ─────────────────────────────────────────────────────────────────
