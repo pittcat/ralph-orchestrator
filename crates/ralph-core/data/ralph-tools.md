@@ -45,7 +45,7 @@ DAG 模式（`event_loop.supervisor.scheduler_mode: dag`）下，runtime 为每�
 | `RALPH_DAG_BASE` | 本 job 的基线 commit sha；据此判断你的改动范围 | 同上 |
 | `RALPH_DAG_EXPECTED_HEAD` | 本 job 启动时用于校验工作树的期望 HEAD；与 `RALPH_DAG_BASE` 一起核对 | 同上 |
 | `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH` | 已核验执行计划的 repo-relative 路径 | 尚未产出该 artifact 时 |
-| `RALPH_DAG_ARTIFACT_REFS` | 上游交付物引用列表（JSON 字符串） | 无上游交付物时 |
+| `RALPH_DAG_ARTIFACT_REFS` | 本 stage 的所有交付物引用（JSON 字符串：`{"refs": {key: {path, digest}, ...}}`）；`path` 是 spawn 前的绝对路径，`digest` 是文件字节 SHA-256；spawn 时 runtime 已复核（缺失 / 漂移 / 逃逸 → 拒启动当前 job） | 当前 stage 没有任何上游交付物时仍注入 `{"refs": {}}`，代表无可消费证据 |
 
 **已弃用/移除**：`wave_id` / `slot_index` / `worktree_map`——runtime 不再注入这三个值，带这三个字段的 payload 会被拒收；job 身份一律由 `RALPH_DAG_JOB_ID` + `RALPH_DAG_JOB_TOKEN` 锚定。
 
