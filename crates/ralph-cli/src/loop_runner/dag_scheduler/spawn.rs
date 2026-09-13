@@ -4584,6 +4584,63 @@ units:
         );
     }
 
+    /// 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U6
+    /// (testing+correctness:T2+C4): pin the Linux/macOS
+    /// post-join behavior of `is_safe_repo_relative_path(\"C:foo\")`
+    /// → `consume_stage_artifact` → containment check. Path::join
+    /// treats the Windows-drive-relative string as a literal
+    /// segment on POSIX, so a file literally named `C:foo` inside
+    /// the worktree is contained and the consume succeeds.
+    #[test]
+    fn u2_consume_windows_drive_relative_path_under_worktree() {
+        let worktree = u1_worktree();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut runtime = u1_u2_runtime_with_worktree(&worktree);
+        runtime.register_plan_for_test("pf-u2-drive", Some("plan-base".to_string()));
+        let unit_key = "U1";
+        let canonical = u1_canonical(&runtime, &worktree, unit_key);
+        std::fs::create_dir_all(&canonical).unwrap();
+        let body = b"drive-relative body\n";
+        let drive_name = "C:foo";
+        std::fs::write(canonical.join(drive_name), body).unwrap();
+
+        u2_seed_record(
+            &mut runtime,
+            "pf-u2-drive",
+            unit_key,
+            "execute",
+            "unit_report_path",
+            drive_name,
+            &ralph_core::workspace_mutation_guard::sha256_hex(body),
+        );
+
+        let artifact = runtime
+            .consume_stage_artifact("pf-u2-drive", unit_key, "execute", "unit_report_path")
+            .expect("C:foo inside the worktree must consume cleanly on POSIX");
+        assert!(
+            artifact.path.ends_with(drive_name),
+            "consume path must point at the canonical C:foo file, got {}",
+            artifact.path
+        );
+        assert_eq!(
+            artifact.digest,
+            ralph_core::workspace_mutation_guard::sha256_hex(body),
+            "consume digest must equal the recorded digest"
+        );
+
+        // Negative control: digest drift on the drive-relative
+        // path must still fail-closed (regression-pins the digest
+        // check fires on this branch).
+        std::fs::write(canonical.join(drive_name), b"different body").unwrap();
+        let err = runtime
+            .consume_stage_artifact("pf-u2-drive", unit_key, "execute", "unit_report_path")
+            .expect_err("digest drift on drive-relative path must fail-closed");
+        assert!(
+            err.contains("digest drift"),
+            "expected digest-drift reason, got {err:?}"
+        );
+    }
+
     // ─────────────────────────────────────────────────────────────────
     // 2026-09-13-001 plan U3 acceptance: the spawn seam embeds
     // the full validated artifact_refs map in the child env and
