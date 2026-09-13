@@ -1655,31 +1655,34 @@ impl DagSchedulerRuntime {
         unit_key: &str,
         stage: &str,
         field_name: &str,
-    ) -> Result<ArtifactRef, String> {
-        let stores = self
-            .ensure_stores()
-            .map_err(|err| format!("DAG artifact store unavailable for {stage}: {err}"))?;
+    ) -> Result<ArtifactRef, super::artifact_consume::ArtifactConsumeError> {
+        use super::artifact_consume::ArtifactConsumeError;
+        let stores = self.ensure_stores().map_err(|_| ArtifactConsumeError::StoreUnavailable)?;
         let rows = stores
             .plans
             .latest_stage_artifacts(plan_key, unit_key, stage)
-            .map_err(|err| format!("DAG artifact store read failed for {stage}: {err}"))?;
-        let row = rows.iter().find(|row| row.field_name == field_name).ok_or_else(|| {
-            format!(
-                "DAG artifact missing: stage={stage} field={field_name} plan={plan_key} unit={unit_key} \
-                 (no row recorded by the prior hat — the prior stage did not publish a valid {field_name})"
-            )
-        })?;
+            .map_err(|_| ArtifactConsumeError::StoreReadFailed)?;
+        let row = rows
+            .iter()
+            .find(|row| row.field_name == field_name)
+            .ok_or_else(|| ArtifactConsumeError::RowMissing {
+                stage: stage.to_string(),
+                field: field_name.to_string(),
+                plan_key: plan_key.to_string(),
+                unit_key: unit_key.to_string(),
+            })?;
         let relative = &row.artifact_path;
         if !super::jobs::is_safe_repo_relative_path(relative) {
-            return Err(format!(
-                "DAG artifact path unsafe: stage={stage} field={field_name} path=`{relative}` \
-                 (rejected by is_safe_repo_relative_path)"
-            ));
+            return Err(ArtifactConsumeError::PathShapeRejected {
+                stage: stage.to_string(),
+                field: field_name.to_string(),
+                path: relative.to_string(),
+            });
         }
         let exec = self
             .exec
             .as_ref()
-            .ok_or_else(|| "DAG artifact: no execution context".to_string())?;
+            .ok_or(ArtifactConsumeError::NoExecutionContext)?;
         let worktree = UnitWorktree::worktree_path_for(&self.workspace, &exec.loop_id, unit_key);
         // 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U1
         // (adversarial:A1): open the file by fd via the
@@ -1688,28 +1691,58 @@ impl DagSchedulerRuntime {
         // the kernel's open-vs-unlink resolution. The platform-
         // specific fd-recheck inside the helper provides defense
         // in depth on Linux and macOS.
-        let (_file, canonical) =
-            Self::open_under_canonical_worktree(&worktree, relative, stage, field_name)?;
+        let open_result = Self::open_under_canonical_worktree(&worktree, relative, stage, field_name);
+        let (_file, canonical) = match open_result {
+            Ok(pair) => pair,
+            Err(err_str) => {
+                // Map the helper's String error to the typed
+                // variant by substring matching on the format we
+                // emit (escapes worktree, file unreadable,
+                // read failed).
+                if err_str.contains("escapes worktree") {
+                    return Err(ArtifactConsumeError::WorktreeEscape {
+                        stage: stage.to_string(),
+                        field: field_name.to_string(),
+                        resolved: err_str.clone(),
+                    });
+                }
+                if err_str.contains("file unreadable") || err_str.contains("not found") {
+                    return Err(ArtifactConsumeError::FileMissing {
+                        stage: stage.to_string(),
+                        field: field_name.to_string(),
+                        path: err_str.clone(),
+                    });
+                }
+                return Err(ArtifactConsumeError::FileUnreadable {
+                    stage: stage.to_string(),
+                    field: field_name.to_string(),
+                    path: err_str.clone(),
+                    source: err_str,
+                });
+            }
+        };
         let bytes = {
             use std::io::Read;
             let mut buf = Vec::new();
             let mut file = _file;
             file.read_to_end(&mut buf).map_err(|err| {
-                format!(
-                    "DAG artifact read failed: stage={stage} field={field_name} \
-                     path=`{}` err={err}",
-                    canonical.display()
-                )
+                ArtifactConsumeError::FileUnreadable {
+                    stage: stage.to_string(),
+                    field: field_name.to_string(),
+                    path: canonical.display().to_string(),
+                    source: err.to_string(),
+                }
             })?;
             buf
         };
         let live_digest = ralph_core::workspace_mutation_guard::sha256_hex(&bytes);
         if live_digest != row.artifact_digest {
-            return Err(format!(
-                "DAG artifact digest drift: stage={stage} field={field_name} \
-                 recorded={} live={}",
-                row.artifact_digest, live_digest
-            ));
+            return Err(ArtifactConsumeError::DigestDrift {
+                stage: stage.to_string(),
+                field: field_name.to_string(),
+                recorded: row.artifact_digest.clone(),
+                live: live_digest,
+            });
         }
         Ok(ArtifactRef {
             path: canonical.to_string_lossy().into_owned(),
@@ -2083,7 +2116,12 @@ impl DagSchedulerRuntime {
                 ) {
                     Ok(artifact) => artifact,
                     Err(reason) => {
-                        self.fail_job(&identity, kind, &reason, FailureClass::ContractViolation);
+                        self.fail_job(
+                            &identity,
+                            kind,
+                            &reason.to_string(),
+                            FailureClass::ContractViolation,
+                        );
                         return;
                     }
                 };
@@ -2105,7 +2143,12 @@ impl DagSchedulerRuntime {
                 ) {
                     Ok(artifact) => artifact,
                     Err(reason) => {
-                        self.fail_job(&identity, kind, &reason, FailureClass::ContractViolation);
+                        self.fail_job(
+                            &identity,
+                            kind,
+                            &reason.to_string(),
+                            FailureClass::ContractViolation,
+                        );
                         return;
                     }
                 };
@@ -2117,7 +2160,12 @@ impl DagSchedulerRuntime {
                 ) {
                     Ok(artifact) => artifact,
                     Err(reason) => {
-                        self.fail_job(&identity, kind, &reason, FailureClass::ContractViolation);
+                        self.fail_job(
+                            &identity,
+                            kind,
+                            &reason.to_string(),
+                            FailureClass::ContractViolation,
+                        );
                         return;
                     }
                 };
@@ -2144,7 +2192,12 @@ impl DagSchedulerRuntime {
                 ) {
                     Ok(artifact) => artifact,
                     Err(reason) => {
-                        self.fail_job(&identity, kind, &reason, FailureClass::ContractViolation);
+                        self.fail_job(
+                            &identity,
+                            kind,
+                            &reason.to_string(),
+                            FailureClass::ContractViolation,
+                        );
                         return;
                     }
                 };
@@ -4604,7 +4657,7 @@ units:
             .consume_stage_artifact("pf-u2-drift", unit_key, "execute", "unit_report_path")
             .expect_err("drift must fail-closed");
         assert!(
-            err.contains("digest drift"),
+            err.to_string().contains("digest drift"),
             "expected digest-drift reason, got {err:?}"
         );
     }
@@ -4633,12 +4686,13 @@ units:
         let err = runtime
             .consume_stage_artifact("pf-u2-miss", unit_key, "execute", "unit_report_path")
             .expect_err("missing file must fail-closed");
+        let err_str = err.to_string();
         assert!(
-            err.contains("unreadable")
-                || err.contains("does not exist")
-                || err.contains("not found")
-                || err.contains("missing"),
-            "expected missing-file reason, got {err:?}"
+            err_str.contains("unreadable")
+                || err_str.contains("does not exist")
+                || err_str.contains("not found")
+                || err_str.contains("missing"),
+            "expected missing-file reason, got {err_str:?}"
         );
     }
 
@@ -4653,7 +4707,7 @@ units:
             .consume_stage_artifact("pf-u2-none", "U1", "execute", "unit_report_path")
             .expect_err("missing row must fail-closed");
         assert!(
-            err.contains("DAG artifact missing"),
+            err.to_string().contains("DAG artifact missing"),
             "expected missing-row reason, got {err:?}"
         );
     }
@@ -4710,7 +4764,7 @@ units:
             .consume_stage_artifact("pf-u2-drive", unit_key, "execute", "unit_report_path")
             .expect_err("digest drift on drive-relative path must fail-closed");
         assert!(
-            err.contains("digest drift"),
+            err.to_string().contains("digest drift"),
             "expected digest-drift reason, got {err:?}"
         );
     }

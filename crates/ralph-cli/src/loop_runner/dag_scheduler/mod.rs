@@ -49,6 +49,7 @@
 
 mod admission;
 pub mod admission_base_pin;
+mod artifact_consume;
 pub mod driver;
 mod integrate;
 pub mod integration;
