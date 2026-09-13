@@ -107,6 +107,19 @@ pub enum DagStoreError {
     },
     #[error("DAG store IO error: {0}")]
     IoError(String),
+    /// 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U5
+    /// (correctness+adversarial:C3+A2): a key component
+    /// (`plan_key`, `unit_key`, or `stage`) carries the substring
+    /// `"::"` and would falsely match another row whose key tuple
+    /// is a strict prefix of the corrupted value (the in-memory
+    /// store uses `String::starts_with` against a `::`-joined
+    /// prefix). The input layer rejects this at the boundary so
+    /// the persisted ledger can never collide.
+    #[error("DAG store key component `{component}` contains `::`: {value}")]
+    InvalidKeyComponent {
+        component: &'static str,
+        value: String,
+    },
     /// 2026-09-09-0917 plan F2 / U17 (fail-closed integer decode):
     /// a SQLite column read returned an `i64` that cannot be
     /// losslessly narrowed to its target type (`u64` /
@@ -143,6 +156,41 @@ impl fmt::Display for PlanStatus {
             PlanStatus::Closed => write!(f, "closed"),
         }
     }
+}
+
+/// 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U5 (C3+A2):
+/// reject any of `plan_key`, `unit_key`, or `stage` containing the
+/// substring `"::"`. The in-memory store keys rows by a
+/// `::`-joined prefix (`plan::unit::stage::attempt`) and uses
+/// `String::starts_with` for the `latest_stage_*` lookup; a
+/// corrupted value can falsely match a sibling row. The validator
+/// sits at the input layer so the persisted ledger can never
+/// collide. The trait default impls also call it on entry so
+/// legacy callers (pre-U5 store mocks) stay consistent.
+pub(crate) fn validate_key_components(
+    plan_key: &str,
+    unit_key: &str,
+    stage: &str,
+) -> DagStoreResult<()> {
+    if plan_key.contains("::") {
+        return Err(DagStoreError::InvalidKeyComponent {
+            component: "plan_key",
+            value: plan_key.to_string(),
+        });
+    }
+    if unit_key.contains("::") {
+        return Err(DagStoreError::InvalidKeyComponent {
+            component: "unit_key",
+            value: unit_key.to_string(),
+        });
+    }
+    if stage.contains("::") {
+        return Err(DagStoreError::InvalidKeyComponent {
+            component: "stage",
+            value: stage.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Input record handed to `DagSchedulerStore::register_plan`.

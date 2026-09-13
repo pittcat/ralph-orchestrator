@@ -776,6 +776,10 @@ impl DagSchedulerStore for RusqliteDagSchedulerStore {
         attempt: u32,
         evidence: &super::dag_store::StageEvidenceRecord,
     ) -> DagStoreResult<()> {
+        // 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U5
+        // (C3+A2): reject `::` in any key component at the input
+        // layer (mirrors the in-memory store).
+        super::dag_store::validate_key_components(plan_key, unit_key, stage)?;
         #[cfg(not(feature = "supervisor-db"))]
         {
             let _ = (plan_key, unit_key, stage, attempt, evidence);
@@ -969,6 +973,16 @@ impl DagSchedulerStore for RusqliteDagSchedulerStore {
     ) -> DagStoreResult<()> {
         if records.is_empty() {
             return Ok(());
+        }
+        // 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U5
+        // (C3+A2): reject `::` in any key component before opening
+        // the SQLite transaction (mirrors the in-memory variant).
+        for rec in records {
+            super::dag_store::validate_key_components(
+                &rec.plan_key,
+                &rec.unit_key,
+                &rec.stage,
+            )?;
         }
         #[cfg(not(feature = "supervisor-db"))]
         {

@@ -252,6 +252,11 @@ impl DagSchedulerStore for InMemoryDagSchedulerStore {
         attempt: u32,
         evidence: &StageEvidenceRecord,
     ) -> DagStoreResult<()> {
+        // 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U5
+        // (C3+A2): reject `::` in any key component at the input
+        // layer so the `::`-joined `latest_*` prefix scan can
+        // never collide.
+        crate::supervisor::dag_store::validate_key_components(plan_key, unit_key, stage)?;
         let key = Self::evidence_key(plan_key, unit_key, stage, attempt);
         let mut guard = self.stage_evidence.lock().map_err(|e| {
             DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}"))
@@ -350,6 +355,18 @@ impl DagSchedulerStore for InMemoryDagSchedulerStore {
     fn record_stage_artifacts(&self, records: &[StageArtifactRecord]) -> DagStoreResult<()> {
         if records.is_empty() {
             return Ok(());
+        }
+        // 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U5
+        // (C3+A2): reject `::` in any of plan_key / unit_key /
+        // stage before acquiring the lock so the validator's
+        // typed error surfaces to the spawn seam without a
+        // half-persisted batch.
+        for rec in records {
+            crate::supervisor::dag_store::validate_key_components(
+                &rec.plan_key,
+                &rec.unit_key,
+                &rec.stage,
+            )?;
         }
         let mut guard = self.stage_artifacts.lock().map_err(|e| {
             DagStoreError::IoError(format!("InMemoryDagSchedulerStore mutex poisoned: {e}"))
@@ -919,5 +936,86 @@ mod poison_tests {
         let store = InMemoryDagSchedulerStore::new();
         poison(&store.stage_artifacts);
         assert_io_poisoned(store.latest_stage_artifacts("p1", "U1", "execute"));
+    }
+
+    // 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U5 (C3+A2):
+    // the validator must reject any of plan_key / unit_key / stage
+    // containing the substring "::". The in-memory store's
+    // latest_stage_* lookup uses String::starts_with on a ::-joined
+    // prefix, so a corrupted value would falsely match a sibling
+    // row whose key tuple is a strict prefix of the corrupted value.
+    #[test]
+    fn key_components_may_not_contain_double_colon() {
+        use crate::supervisor::dag_store::DagStoreError;
+        let store = InMemoryDagSchedulerStore::new();
+        let ev = evidence("p::q", "U1", "execute", 1);
+        let err = store
+            .record_stage_evidence("p::q", "U1", "execute", 1, &ev)
+            .expect_err("plan_key with :: must be rejected");
+        assert!(
+            matches!(
+                &err,
+                DagStoreError::InvalidKeyComponent { component: "plan_key", value } if value == "p::q"
+            ),
+            "expected plan_key rejection, got {err:?}"
+        );
+
+        let ev = evidence("p", "U::1", "execute", 1);
+        let err = store
+            .record_stage_evidence("p", "U::1", "execute", 1, &ev)
+            .expect_err("unit_key with :: must be rejected");
+        assert!(
+            matches!(
+                &err,
+                DagStoreError::InvalidKeyComponent { component: "unit_key", value } if value == "U::1"
+            ),
+            "expected unit_key rejection, got {err:?}"
+        );
+
+        let ev = evidence("p", "U1", "exe::cute", 1);
+        let err = store
+            .record_stage_evidence("p", "U1", "exe::cute", 1, &ev)
+            .expect_err("stage with :: must be rejected");
+        assert!(
+            matches!(
+                &err,
+                DagStoreError::InvalidKeyComponent { component: "stage", value } if value == "exe::cute"
+            ),
+            "expected stage rejection, got {err:?}"
+        );
+
+        // Negative control: well-formed keys are accepted; the row
+        // is persisted; the latest lookup returns it.
+        let ev = evidence("2026-09-13-001-x", "U1", "execute", 1);
+        store
+            .record_stage_evidence("2026-09-13-001-x", "U1", "execute", 1, &ev)
+            .expect("well-formed keys must be accepted");
+        let latest = store
+            .latest_stage_evidence("2026-09-13-001-x", "U1", "execute")
+            .expect("read latest");
+        assert!(latest.is_some(), "row must be persisted after acceptance");
+
+        // Re-rejection: a record_stage_artifacts batch with `::`
+        // in any row is refused as a whole (no half-persisted batch).
+        let rec = crate::supervisor::dag_store::StageArtifactRecord {
+            plan_key: "p::q".to_string(),
+            unit_key: "U1".to_string(),
+            stage: "execute".to_string(),
+            attempt: 1,
+            field_name: "unit_report_path".to_string(),
+            artifact_path: "u1.md".to_string(),
+            artifact_digest: "deadbeef".to_string(),
+            recorded_at_ms: 1,
+        };
+        let err = store
+            .record_stage_artifacts(std::slice::from_ref(&rec))
+            .expect_err("record_stage_artifacts with :: in plan_key must fail");
+        assert!(
+            matches!(
+                &err,
+                DagStoreError::InvalidKeyComponent { component: "plan_key", .. }
+            ),
+            "expected plan_key rejection on the artifact path too, got {err:?}"
+        );
     }
 }
