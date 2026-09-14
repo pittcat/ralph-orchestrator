@@ -628,6 +628,15 @@ pub struct EventLoopConfig {
     /// defence #1).
     #[serde(default)]
     pub handoff_envelope: HandoffEnvelopeConfig,
+
+    /// 2026-09-14-001 plan U3: receiver contract — when `enabled`
+    /// (default), the isolated prompt builder prepends a
+    /// `## RECEIVER CONTRACT` block derived from the current hat's
+    /// `publishes` and the `event_policy.schemas` required fields.
+    /// Default-on is regression-safe: hats without `publishes` render
+    /// nothing.
+    #[serde(default)]
+    pub receiver_contract: ReceiverContractConfig,
 }
 
 /// 2026-07-06-004 plan U1: typed view of the
@@ -671,6 +680,35 @@ pub struct HandoffEnvelopeConfig {
     /// the envelope it just emitted was recognised (U9).
     #[serde(default)]
     pub emit_result_summary: bool,
+}
+
+/// Plan 2026-09-14-001 Unit 3: typed view of the
+/// `event_loop.receiver_contract:` block.
+///
+/// When `enabled` (the default), the isolated prompt builder prepends a
+/// `## RECEIVER CONTRACT` block derived from the current hat's
+/// `publishes` declaration and the `event_policy.schemas`
+/// `required_fields`. Hats without `publishes` render nothing, so the
+/// default is a strict no-op for loops that declare none — the flag
+/// exists so operators can turn the block off entirely.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiverContractConfig {
+    /// Master switch for the `## RECEIVER CONTRACT` prompt block.
+    #[serde(default = "default_receiver_contract_enabled")]
+    pub enabled: bool,
+}
+
+fn default_receiver_contract_enabled() -> bool {
+    true
+}
+
+impl Default for ReceiverContractConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_receiver_contract_enabled(),
+        }
+    }
 }
 
 /// Configuration for the macro-edge next hint (U18 P2).
@@ -810,6 +848,10 @@ impl Default for EventLoopConfig {
             // disabled (every flag false). U7 is the first unit
             // that flips any flag on.
             handoff_envelope: HandoffEnvelopeConfig::default(),
+            // 2026-09-14-001 plan U3: receiver contract defaults to
+            // enabled; the empty-publishes no-render contract keeps the
+            // default regression-free.
+            receiver_contract: ReceiverContractConfig::default(),
         }
     }
 }
@@ -1303,6 +1345,45 @@ handoff_envelope:
         assert!(cfg.handoff_envelope.enabled);
         assert!(cfg.handoff_envelope.validate_payload);
         assert!(!cfg.handoff_envelope.prompt_injection);
+    }
+
+    /// Plan 2026-09-14-001 Unit 3: receiver contract defaults to
+    /// enabled. The block renders nothing for hats without `publishes`,
+    /// so the default is a strict no-op for loops that declare none.
+    #[test]
+    fn receiver_contract_defaults_to_enabled() {
+        let cfg = ReceiverContractConfig::default();
+        assert!(cfg.enabled);
+
+        let parsed: ReceiverContractConfig = serde_yaml::from_str("{}\n").unwrap();
+        assert_eq!(parsed, cfg, "an empty block must parse to defaults");
+
+        // Omitting `event_loop.receiver_contract` from a top-level
+        // config still yields the enabled default.
+        let top: EventLoopConfig = serde_yaml::from_str("prompt_file: \"PROMPT.md\"\n").unwrap();
+        assert!(
+            top.receiver_contract.enabled,
+            "event_loop without receiver_contract must default to enabled"
+        );
+    }
+
+    /// Serde roundtrip + deny_unknown_fields, mirroring the
+    /// `HandoffEnvelopeConfig` test contract above.
+    #[test]
+    fn receiver_contract_deserializes_explicit_flags() {
+        let cfg: ReceiverContractConfig = serde_yaml::from_str("enabled: false\n").unwrap();
+        assert!(!cfg.enabled);
+
+        let rendered = serde_yaml::to_string(&cfg).unwrap();
+        let reparsed: ReceiverContractConfig = serde_yaml::from_str(&rendered).unwrap();
+        assert_eq!(reparsed, cfg);
+
+        let bad: Result<ReceiverContractConfig, _> =
+            serde_yaml::from_str("enabled: true\nbogus_field: 1\n");
+        assert!(
+            bad.is_err(),
+            "unknown receiver_contract field must produce a deserialization error"
+        );
     }
 
     /// U2 (plan 2026-07-29-002): `completion_payload_match` config

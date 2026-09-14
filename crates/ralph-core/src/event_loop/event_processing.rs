@@ -1741,6 +1741,15 @@ impl EventLoop {
             // pre-feature contract holds for undeclared
             // presets.
             let base_prompt = self.prepend_trigger_context(base_prompt, hat_id, &regular_events);
+            // 2026-09-14-001 plan U3: prepend the runtime-derived
+            // `## RECEIVER CONTRACT` block (this hat's publishes +
+            // their schema required fields). The helper is a no-op
+            // when the hat publishes nothing, so the byte-identical
+            // contract for undeclared hats holds; it sits above
+            // TRIGGER CONTEXT so the agent sees its own emit contract
+            // first. Wave worker prompts are built on a separate path
+            // (`build_wave_worker_prompt`) and are out of scope.
+            let base_prompt = self.prepend_receiver_contract(base_prompt, hat_id);
             let with_skills = self.prepend_auto_inject_skills(base_prompt, hat_id);
             let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
             let with_state_files = self.prepend_state_files(with_scratchpad);

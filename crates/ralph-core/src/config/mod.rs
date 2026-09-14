@@ -65,8 +65,8 @@ pub use loop_config::{
     EventFieldDoc, EventLoopConfig, EventSchema, FlowDeclarationConfig, FlowStepConfig,
     HandoffEnvelopeConfig, HatAllowedValues, HintCondition, HintOp, MechanismConfig,
     PathRequiredEventGate, PayloadType, Phase, PhaseConfig, ProgressStewardConfig,
-    ResolvedDagPools, RoutingHintConfig, SupervisorConfig, TriggerContextConfig, VerdictGateConfig,
-    WarmupConfig,
+    ReceiverContractConfig, ResolvedDagPools, RoutingHintConfig, SupervisorConfig,
+    TriggerContextConfig, VerdictGateConfig, WarmupConfig,
 };
 pub use memories::{InjectMode, MemoriesConfig, MemoriesFilter};
 pub use multi_hat_policy::{

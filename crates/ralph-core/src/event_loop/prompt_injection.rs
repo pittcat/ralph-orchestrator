@@ -1166,6 +1166,77 @@ impl EventLoop {
         )
     }
 
+    /// Plan 2026-09-14-001 Unit 3: derive the `## RECEIVER CONTRACT`
+    /// block from the hat's `publishes` declaration and the
+    /// `event_policy.schemas` required fields.
+    ///
+    /// Returns `None` when the hat publishes nothing or no event policy
+    /// is declared (empty-state zero-rendering contract). Topics render
+    /// sorted for a stable prompt; a topic without a matching schema is
+    /// listed by name with a `(no schema declared)` marker, and a schema
+    /// without `required_fields` says so explicitly. All content comes
+    /// from preset declarations (hat config + schemas); topic and field
+    /// names still pass through
+    /// [`crate::handoff_envelope::escape_for_prompt`] as defence in
+    /// depth.
+    pub(super) fn build_receiver_contract_block(
+        hat_config: &crate::config::HatConfig,
+        event_policy: Option<&crate::config::EventPolicyConfig>,
+    ) -> Option<String> {
+        if hat_config.publishes.is_empty() {
+            return None;
+        }
+        let policy = event_policy?;
+        let mut topics: Vec<&str> = hat_config.publishes.iter().map(String::as_str).collect();
+        topics.sort_unstable();
+        topics.dedup();
+
+        let mut out = String::from("## RECEIVER CONTRACT\n");
+        for topic in topics {
+            let rendered_topic = crate::handoff_envelope::escape_for_prompt(topic);
+            match policy.schemas.get(topic) {
+                Some(schema) if !schema.required_fields.is_empty() => {
+                    let fields = schema
+                        .required_fields
+                        .iter()
+                        .map(|field| crate::handoff_envelope::escape_for_prompt(field))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    out.push_str(&format!("- {rendered_topic}: required fields: {fields}\n"));
+                }
+                Some(_) => {
+                    out.push_str(&format!(
+                        "- {rendered_topic}: (no required fields declared)\n"
+                    ));
+                }
+                None => {
+                    out.push_str(&format!("- {rendered_topic}: (no schema declared)\n"));
+                }
+            }
+        }
+        Some(out.trim_end().to_string())
+    }
+
+    /// Prepend the `## RECEIVER CONTRACT` block on the isolated prompt
+    /// chain. No-op when `event_loop.receiver_contract.enabled` is
+    /// false, when the hat publishes nothing, or when the hat is
+    /// unknown to the registry (byte-identical prompt).
+    pub(super) fn prepend_receiver_contract(&self, prompt: String, hat_id: &HatId) -> String {
+        if !self.config.event_loop.receiver_contract.enabled {
+            return prompt;
+        }
+        let Some(hat_config) = self.registry.get_config(hat_id) else {
+            return prompt;
+        };
+        let Some(block) = Self::build_receiver_contract_block(
+            hat_config,
+            self.config.event_loop.event_policy.as_ref(),
+        ) else {
+            return prompt;
+        };
+        format!("{block}\n{prompt}")
+    }
+
     /// Injects the current loop's workstate entries as a `## WORKSTATE`
     /// block into the auto-inject prefix.
     ///

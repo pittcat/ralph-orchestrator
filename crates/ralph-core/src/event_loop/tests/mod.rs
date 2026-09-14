@@ -109,6 +109,9 @@ mod u1_plan_blocked_reporter_target;
 // 2026-06-23 T2: `## RUNTIME CONFIG` block injection for `max_residuals`.
 // See `runtime_config_block.rs`.
 mod event_policy_lint_resume;
+/// Plan 2026-09-14-001 Unit 3: runtime-derived `## RECEIVER CONTRACT`
+/// block on the isolated prompt chain (serial + wave consumer hats).
+mod receiver_contract_prompt;
 mod runtime_config_block;
 mod runtime_state_injection;
 mod scope_enforcement;

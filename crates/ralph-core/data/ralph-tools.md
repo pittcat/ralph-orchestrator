@@ -97,6 +97,7 @@ DAG 模式（`event_loop.supervisor.scheduler_mode: dag`）下，runtime 为每�
    - **`source hat` 是 optional** —— v1 runtime 不知道哪个 hat 实际发布了这个 trigger event，渲染器会显示 `(unknown source hat)`。**不要依赖 `source hat` 决定分支判断或假设当前 hat 之前的链路是某个具体 hat**；需要查链路用 `ralph tools task list` / `ralph inspect loop`。
    - **关键字段从哪里取得**：注入的 `## TRIGGER CONTEXT` 区块，不是 runtime 内部 ledger 或事件历史。Summary 字段是 schema 声明字段的当前 trigger payload 切片；missing 字段显示 `<missing>`，不要推断成 `0` / `false` / 空字符串。
    - **失败停止条件**：若 Trigger Context 与 hat instructions 冲突，按 hat instructions 与既有恢复机制（`task.resume` / `plan.blocked`）处理，不要自行猜测；若 Trigger Context 显示某字段为 `<missing>` 而你又必须用它，先 `ralph inspect loop --format json` / `ralph tools task list` 复核当前任务状态，再决定继续、阻塞或报告。
+8. **`## RECEIVER CONTRACT` 区块列出你本 hat 的 emit 契约** —— 当 prompt 中出现 `## RECEIVER CONTRACT` 时，它由 runtime 根据当前 hat 声明的可发 topic 列表与 preset 的 event schema 自动生成，逐条列出你可以 emit 的 topic 及其必填字段；构造 payload 时以该清单为准（可用 `ralph emit --schema <TOPIC>` 复核字段定义），某个 topic 没有附带字段清单时表示 preset 未为它声明 schema 约束。
 
 ## 收到 `task.resume` 时（policy / origin / contract 拒收后自动注入）
 
