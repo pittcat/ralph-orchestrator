@@ -1611,7 +1611,7 @@ impl DagSchedulerRuntime {
         // we ship on darwin.
         #[cfg(target_os = "linux")]
         {
-            use std::os::unix::fs::AsRawFd;
+            use std::os::fd::AsRawFd;
             let fd = file.as_raw_fd();
             let proc_path = format!("/proc/self/fd/{fd}");
             if let Ok(resolved) = std::fs::read_link(&proc_path) {
