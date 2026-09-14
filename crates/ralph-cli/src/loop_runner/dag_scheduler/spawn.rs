@@ -1996,18 +1996,26 @@ impl DagSchedulerRuntime {
                         exec.hats_source_label.clone(),
                         exec.config_path.clone(),
                         exec.schemas.get(kind.success_topic()).cloned(),
+                        exec.schemas.get(kind.failure_topic()).cloned(),
                     )
                 })
                 .ok_or_else(|| format!("no `{}` hat template in preset config", kind.hat()))
         };
-        let (loop_id, hat_config, global_backend, hats_source_label, config_path, schema) =
-            match snapshot {
-                Ok(snapshot) => snapshot,
-                Err(reason) => {
-                    self.fail_job(&identity, kind, &reason, FailureClass::SpawnFailed);
-                    return;
-                }
-            };
+        let (
+            loop_id,
+            hat_config,
+            global_backend,
+            hats_source_label,
+            config_path,
+            schema,
+            failure_schema,
+        ) = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(reason) => {
+                self.fail_job(&identity, kind, &reason, FailureClass::SpawnFailed);
+                return;
+            }
+        };
 
         // Trusted worktree against the per-Unit base pin (U3,
         // 2026-09-09-0917). The base pin is read first so a
@@ -2256,6 +2264,7 @@ impl DagSchedulerRuntime {
             &worktree.path,
             &events_file,
             schema.as_ref(),
+            failure_schema.as_ref(),
             &tests,
             &allowed_paths,
             &forbidden_paths,
@@ -2477,6 +2486,7 @@ fn build_job_prompt(
     worktree_path: &Path,
     events_file: &Path,
     schema: Option<&EventSchema>,
+    failure_schema: Option<&EventSchema>,
     tests: &[String],
     allowed_paths: &[PathBuf],
     forbidden_paths: &[PathBuf],
@@ -2484,6 +2494,9 @@ fn build_job_prompt(
     artifact_refs: &BTreeMap<String, ArtifactRef>,
 ) -> String {
     let required: Vec<String> = schema
+        .map(|s| s.required_fields.clone())
+        .unwrap_or_default();
+    let failure_required: Vec<String> = failure_schema
         .map(|s| s.required_fields.clone())
         .unwrap_or_default();
     let mut prompt = format!(
@@ -2499,8 +2512,7 @@ fn build_job_prompt(
          - The runtime points RALPH_EVENTS_FILE at `{events}`; `ralph emit` writes there. \
          Emit EXACTLY ONE business event.\n\
          - On success emit `{success}` with a JSON payload containing: {required}. The runtime \
-         overwrites unit_id/plan_key/task_id/task_key; you MUST supply the remaining fields.\n\
-         - On failure emit `{failure}` instead (same identity fields; plus its own required fields).\n",
+         overwrites unit_id/plan_key/task_id/task_key; you MUST supply the remaining fields.\n",
         hat = kind.hat(),
         job = identity.job_id,
         stage = kind.stage_str(),
@@ -2513,9 +2525,22 @@ fn build_job_prompt(
         allowed_paths = format_path_policy(allowed_paths),
         forbidden_paths = format_path_policy(forbidden_paths),
         success = kind.success_topic(),
-        failure = kind.failure_topic(),
         required = required.join(", "),
     );
+    if failure_required.is_empty() {
+        prompt.push_str(&format!(
+            "- On failure emit `{failure}` instead (same identity fields; plus its own required fields).\n",
+            failure = kind.failure_topic(),
+        ));
+    } else {
+        prompt.push_str(&format!(
+            "- On failure emit `{failure}` with a JSON payload containing: {failure_required}. \
+             The runtime overwrites unit_id/plan_key/task_id/task_key; you MUST supply the \
+             remaining fields.\n",
+            failure = kind.failure_topic(),
+            failure_required = failure_required.join(", "),
+        ));
+    }
     if kind == SpawnKind::Verify {
         if tests.is_empty() {
             prompt.push_str(
@@ -3812,6 +3837,7 @@ units:
             Path::new("/worktree/U1"),
             Path::new("/worktree/U1/events.jsonl"),
             None,
+            None,
             &[],
             &[PathBuf::from("src"), PathBuf::from("tests")],
             &[PathBuf::from("secrets")],
@@ -4814,6 +4840,7 @@ units:
             Path::new("/worktree/U1"),
             Path::new("/worktree/U1/events.jsonl"),
             None,
+            None,
             &[],
             &[],
             &[],
@@ -4858,6 +4885,7 @@ units:
             Path::new("/worktree/U1"),
             Path::new("/worktree/U1/events.jsonl"),
             None,
+            None,
             &[],
             &[],
             &[],
@@ -4867,6 +4895,149 @@ units:
         assert!(
             !prompt.contains("## UPSTREAM ARTIFACTS"),
             "empty artifact_refs must NOT render the evidence block"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-09-14-001 plan Unit 4 (GAP-02 / R5): the emit contract
+    // block lists the failure topic's required_fields field by
+    // field; without a failure schema (or with an empty field list)
+    // the historical one-line fallback text is preserved verbatim.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// U4 acceptance: the failure line names every required field,
+    /// while the success side and the rest of the contract block
+    /// stay byte-identical to the no-failure-schema baseline.
+    #[test]
+    fn dag_job_prompt_lists_failure_required_fields() {
+        let identity = JobIdentity {
+            plan_key: "pf-u4".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-execute-a1".to_string(),
+            hat: "executor".to_string(),
+            stage: "execute".to_string(),
+            attempt: 1,
+            token: "tok".to_string(),
+        };
+        let hat = HatConfig::default();
+        let success_schema = EventSchema {
+            required_fields: vec!["summary".to_string(), "commit".to_string()],
+            ..EventSchema::default()
+        };
+        let failure_schema = EventSchema {
+            required_fields: vec!["reason".to_string(), "detail".to_string()],
+            ..EventSchema::default()
+        };
+        let build = |failure: Option<&EventSchema>| {
+            build_job_prompt(
+                &identity,
+                SpawnKind::Execute,
+                &hat,
+                Path::new("/worktree/U1"),
+                Path::new("/worktree/U1/events.jsonl"),
+                Some(&success_schema),
+                failure,
+                &[],
+                &[],
+                &[],
+                None,
+                &BTreeMap::new(),
+            )
+        };
+        let prompt = build(Some(&failure_schema));
+        let baseline = build(None);
+
+        // Failure line lists each required field of the failure topic.
+        assert!(
+            prompt.contains(
+                "- On failure emit `forge.unit.execution_failed` with a JSON payload containing: reason, detail."
+            ),
+            "failure line must list every required field, got:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("plus its own required fields"),
+            "listed fields replace the fallback wording, got:\n{prompt}"
+        );
+        // Everything before the failure line (success side included)
+        // is byte-identical to the baseline without a failure schema.
+        let head = |p: &str| p.split("- On failure emit").next().unwrap().to_string();
+        assert_eq!(
+            head(&prompt),
+            head(&baseline),
+            "success side of the contract block must not change"
+        );
+    }
+
+    /// U4 fallback: no schema registered for the failure topic → the
+    /// historical one-line wording is preserved verbatim.
+    #[test]
+    fn dag_job_prompt_failure_schema_missing_falls_back() {
+        let identity = JobIdentity {
+            plan_key: "pf-u4".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-execute-a1".to_string(),
+            hat: "executor".to_string(),
+            stage: "execute".to_string(),
+            attempt: 1,
+            token: "tok".to_string(),
+        };
+        let hat = HatConfig::default();
+        let prompt = build_job_prompt(
+            &identity,
+            SpawnKind::Execute,
+            &hat,
+            Path::new("/worktree/U1"),
+            Path::new("/worktree/U1/events.jsonl"),
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+            &BTreeMap::new(),
+        );
+        assert!(
+            prompt.contains(
+                "- On failure emit `forge.unit.execution_failed` instead (same identity fields; plus its own required fields)."
+            ),
+            "missing failure schema must keep the fallback line, got:\n{prompt}"
+        );
+    }
+
+    /// U4 fallback: failure schema present but required_fields is an
+    /// empty Vec → same historical one-line wording.
+    #[test]
+    fn dag_job_prompt_failure_empty_required_fields_falls_back() {
+        let identity = JobIdentity {
+            plan_key: "pf-u4".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-execute-a1".to_string(),
+            hat: "executor".to_string(),
+            stage: "execute".to_string(),
+            attempt: 1,
+            token: "tok".to_string(),
+        };
+        let hat = HatConfig::default();
+        let failure_schema = EventSchema::default();
+        let prompt = build_job_prompt(
+            &identity,
+            SpawnKind::Execute,
+            &hat,
+            Path::new("/worktree/U1"),
+            Path::new("/worktree/U1/events.jsonl"),
+            None,
+            Some(&failure_schema),
+            &[],
+            &[],
+            &[],
+            None,
+            &BTreeMap::new(),
+        );
+        assert!(
+            prompt.contains(
+                "- On failure emit `forge.unit.execution_failed` instead (same identity fields; plus its own required fields)."
+            ),
+            "empty required_fields must keep the fallback line, got:\n{prompt}"
         );
     }
 
@@ -4947,6 +5118,7 @@ units:
             Path::new("/worktree/U1"),
             Path::new("/worktree/U1/events.jsonl"),
             None,
+            None,
             &[],
             &[],
             &[],
@@ -4985,6 +5157,7 @@ units:
             &hat,
             Path::new("/worktree/U1"),
             Path::new("/worktree/U1/events.jsonl"),
+            None,
             None,
             &[],
             &[],
