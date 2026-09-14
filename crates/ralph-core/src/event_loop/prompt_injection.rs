@@ -479,6 +479,7 @@ impl EventLoop {
     /// Injection order:
     /// 1. Memory data + ralph-tools skill (special case: loads memory data from store, applies budget)
     /// 2. Other auto-inject skills from the registry (wrapped in XML tags)
+    /// 3. Workstate data for the current loop (`## WORKSTATE` block)
     ///
     /// Note (2026-06-25 refactor): the former step 2 was "RObot interaction skill (gated by
     /// `robot.enabled`)", which was removed together with the `ralph-telegram` crate; the
@@ -491,6 +492,10 @@ impl EventLoop {
 
         // 2. Other auto-inject skills from the registry
         self.inject_custom_auto_skills(&mut prefix, hat_id);
+
+        // 3. Workstate data for the current loop (fail-soft; no-op when
+        // the store is empty or the feature is disabled).
+        self.inject_workstate(&mut prefix, self.current_loop_id().as_deref());
 
         if prefix.is_empty() {
             return prompt;
@@ -1159,5 +1164,85 @@ impl EventLoop {
             config,
             &self.config.core.workspace_root,
         )
+    }
+
+    /// Injects the current loop's workstate entries as a `## WORKSTATE`
+    /// block into the auto-inject prefix.
+    ///
+    /// Fail-soft: a missing store, read error, or empty current-loop view
+    /// leaves `prefix` untouched (empty-state zero-rendering contract).
+    pub(super) fn inject_workstate(&self, prefix: &mut String, loop_id: Option<&str>) {
+        let workstate_config = &self.config.workstate;
+        if !workstate_config.enabled || workstate_config.inject != InjectMode::Auto {
+            return;
+        }
+
+        let store =
+            crate::workstate::WorkstateStore::with_default_path(&self.config.core.workspace_root);
+        if !store.exists() {
+            return;
+        }
+        let entries = match store.list(loop_id) {
+            Ok(entries) => entries,
+            Err(e) => {
+                info!(
+                    "Failed to load workstate for injection: {} (path: {:?})",
+                    e,
+                    store.path()
+                );
+                return;
+            }
+        };
+
+        if let Some(block) = Self::render_workstate_block(&entries, workstate_config.budget) {
+            if !prefix.is_empty() {
+                prefix.push_str("\n\n");
+            }
+            prefix.push_str(&block);
+        }
+    }
+
+    /// Renders workstate entries into the `## WORKSTATE` block.
+    ///
+    /// Returns `None` for an empty entry set (empty-state zero-rendering
+    /// contract). Entries render sorted by key, one `- <key>: <value>`
+    /// line each, with keys and values passed through
+    /// [`crate::handoff_envelope::escape_for_prompt`]. `budget` is in
+    /// tokens (~4 chars per token, 0 = unlimited); when the render would
+    /// exceed the budget, entries are dropped at the entry boundary and a
+    /// visible truncation marker is appended.
+    pub(super) fn render_workstate_block(
+        entries: &[crate::workstate::WorkstateEntry],
+        budget: usize,
+    ) -> Option<String> {
+        if entries.is_empty() {
+            return None;
+        }
+
+        let mut sorted: Vec<&crate::workstate::WorkstateEntry> = entries.iter().collect();
+        sorted.sort_by(|a, b| a.key.cmp(&b.key));
+
+        let char_budget = budget.saturating_mul(4);
+        let total = sorted.len();
+        let mut out = String::from("## WORKSTATE\n");
+        let mut rendered = 0_usize;
+        for entry in sorted {
+            let line = format!(
+                "- {}: {}\n",
+                crate::handoff_envelope::escape_for_prompt(&entry.key),
+                crate::handoff_envelope::escape_for_prompt(&entry.value),
+            );
+            if budget > 0 && out.len() + line.len() > char_budget {
+                break;
+            }
+            out.push_str(&line);
+            rendered += 1;
+        }
+        if rendered < total {
+            out.push_str(&format!(
+                "<!-- truncated: budget {budget} tokens exceeded ({rendered} of {total} entries shown) -->\n"
+            ));
+        }
+        Some(out.trim_end().to_string())
     }
 }

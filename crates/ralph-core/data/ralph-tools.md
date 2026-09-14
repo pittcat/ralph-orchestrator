@@ -147,6 +147,7 @@ preset 的 `event_policy.schemas` 是 `required_fields` 的权威来源；不要
 |------|------|---------|
 | `ralph tools task` | 任务管理 | 已注入（`ralph-tools-tasks` skill，仅当 `tasks.enabled`） |
 | `ralph tools memory` | 记忆管理 | 已注入（`ralph-tools-memories` skill，仅当 `memories.enabled`） |
+| `ralph tools workstate` | 当前 loop 的工作态（中间态）读写 | `ralph tools skill load ralph-tools-workstate` |
 | `ralph tools skill` | 加载 skill | `ralph tools skill load ralph-tools-cmdref` |
 
 > `ralph tools interact` 与 `ralph bot` 已随 `ralph-telegram` crate 一起删除;运行时不再提供人工通道(`human.guidance` 已废弃;`task.resume` 恢复通道保留)。

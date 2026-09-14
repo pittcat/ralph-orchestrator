@@ -756,6 +756,7 @@ fn archive_files_matching(
 /// - `.ralph/current-loop-id`
 /// - `.ralph/agent/scratchpad.md`, `.ralph/agent/scratchpad-*.md`
 /// - `.ralph/agent/tasks.jsonl`
+/// - `.ralph/agent/workstate.jsonl`
 /// - `.ralph/agent/summary.md`
 /// - `.ralph/agent/handoff.md`
 /// - `.ralph/agent/decisions.md`
@@ -921,6 +922,12 @@ pub fn clean_worktree_runtime_artifacts(
         &agent_dir.join("tasks.jsonl"),
         &archive_dir,
         Path::new("agent/tasks.jsonl"),
+    )?;
+    // workstate.jsonl (loop-scoped intermediate state)
+    archived_any |= archive_if_exists(
+        &agent_dir.join("workstate.jsonl"),
+        &archive_dir,
+        Path::new("agent/workstate.jsonl"),
     )?;
     // summary.md
     archived_any |= archive_if_exists(
@@ -2103,6 +2110,33 @@ branch refs/heads/ralph/loop-1
         assert_eq!(
             fs::read_link(agent_dir.join("memories.md")).unwrap(),
             temp_dir.path().join(".ralph/agent/memories.md")
+        );
+    }
+
+    #[test]
+    fn worktree_reuse_archives_workstate() {
+        // Unit 2 (plan 2026-09-14-001): the loop-scoped workstate file is
+        // per-loop runtime state; reusing a worktree must archive it into
+        // `.ralph/reuse-history/<ts>/` so the new loop starts empty.
+        let temp_dir = TempDir::new().unwrap();
+        let worktree_path = temp_dir.path().join("wt-workstate");
+        let agent_dir = worktree_path.join(".ralph/agent");
+        fs::create_dir_all(&agent_dir).unwrap();
+        let workstate = "{\"loop_id\":\"old\",\"key\":\"k\",\"value\":\"v\",\"updated_at_ms\":1}\n";
+        fs::write(agent_dir.join("workstate.jsonl"), workstate).unwrap();
+
+        let archive = clean_worktree_runtime_artifacts(&worktree_path, None)
+            .unwrap()
+            .expect("a workstate file must produce an archive");
+
+        assert!(
+            !agent_dir.join("workstate.jsonl").exists(),
+            "live workstate.jsonl must be cleared on reuse"
+        );
+        assert_eq!(
+            fs::read_to_string(archive.join("agent/workstate.jsonl")).unwrap(),
+            workstate,
+            "prior workstate must be preserved under reuse-history"
         );
     }
 

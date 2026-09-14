@@ -134,6 +134,9 @@ mod wave_policy_rejection;
 mod wave_recovery_timeout;
 mod wave_results;
 mod workflow_guard;
+/// Plan 2026-09-14-001 Unit 2: `## WORKSTATE` prompt injection
+/// (loop-scoped workstate store → hat activation prompt).
+mod workstate_prompt;
 
 /// U1 (2026-07-30-004 refactor-unified-execution-contract-plan):
 /// freeze the production `EventBus::publish` ingress

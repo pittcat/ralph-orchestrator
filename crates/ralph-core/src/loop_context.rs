@@ -19,6 +19,7 @@
 //! ├── agent/                    # Agent state (memories, tasks, scratchpad)
 //! │   ├── memories.md           # Symlinked in worktrees
 //! │   ├── tasks.jsonl           # Isolated per worktree
+//! │   ├── workstate.jsonl       # Loop-scoped workstate (isolated per worktree)
 //! │   ├── scratchpad.md         # Isolated per worktree
 //! │   └── context.md            # Worktree metadata (worktrees only)
 //! ├── specs/                    # Specification files (symlinked in worktrees)

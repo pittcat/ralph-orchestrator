@@ -31,6 +31,7 @@ mod v1_adapters;
 mod warning;
 mod workflow_contract;
 pub(crate) mod workflow_guards;
+mod workstate;
 
 pub mod multi_hat_policy;
 mod state_projection;
@@ -108,6 +109,7 @@ pub use workflow_contract::{
 pub use workflow_guards::{
     HatExecutionMode, WorkflowChain, WorkflowChainMode, WorkflowGuardsConfig,
 };
+pub use workstate::WorkstateConfig;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -238,6 +240,12 @@ pub struct RalphConfig {
     #[serde(default)]
     pub memories: MemoriesConfig,
 
+    /// Workstate configuration for loop-scoped intermediate state.
+    /// Defaults are on-with-auto-inject; an empty store renders nothing,
+    /// so omitting `workstate:` is a strict no-op.
+    #[serde(default)]
+    pub workstate: WorkstateConfig,
+
     /// Tasks configuration for runtime work tracking.
     #[serde(default)]
     pub tasks: TasksConfig,
@@ -340,6 +348,8 @@ impl Default for RalphConfig {
             tui: TuiConfig::default(),
             // Memories
             memories: MemoriesConfig::default(),
+            // Workstate
+            workstate: WorkstateConfig::default(),
             // Tasks
             tasks: TasksConfig::default(),
             // Hooks

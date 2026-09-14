@@ -138,6 +138,21 @@ Reuse existing tags for consistency. Common tag patterns:
 3. **One concept per memory**: Split complex learnings
 4. **Tag consistently**: Reuse existing tags when possible
 
+## 工作态（workstate）≠ 记忆（memories）
+
+两者是不同层级的存储，不要混用：
+
+| | workstate | memories |
+|---|---|---|
+| 生命周期 | 跟随当前 loop；新 loop 从空开始 | 跨 loop 长期保留 |
+| 可见范围 | 仅当前 loop 内的 hat | 全部 loop（含人工 CLI） |
+| 写入语义 | 同 key 覆盖（upsert） | 追加新条目 |
+| 典型内容 | 本轮的中间结论、待验证假设、跨 hat 草稿 | 代码库惯例、架构决策、可复用修复经验 |
+
+- 一次性中间态写 workstate（`ralph tools workstate set`），不要污染 memories。
+- 需要跨 loop 保留的知识写 memories（`ralph tools memory add`），不要只写 workstate——新 loop 启动后旧工作态不再可见。
+- 命令细节见 `ralph tools skill load ralph-tools-workstate`。
+
 ## Decision Journal
 
 Use `.ralph/agent/decisions.md` to capture consequential decisions and their

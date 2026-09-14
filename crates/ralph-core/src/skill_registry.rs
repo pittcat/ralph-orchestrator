@@ -46,6 +46,10 @@ const RALPH_TOOLS_CMDREF_SKILL_RAW: &str = include_str!("../data/ralph-tools-cmd
 const RALPH_TOOLS_RECOVERY_DIRECTIVES_SKILL_RAW: &str =
     include_str!("../data/ralph-tools-recovery-directives.md");
 
+/// Built-in ralph-tools-workstate skill content (loop-scoped workstate CLI
+/// reference). Loaded on demand via `ralph tools skill load`.
+const RALPH_TOOLS_WORKSTATE_SKILL_RAW: &str = include_str!("../data/ralph-tools-workstate.md");
+
 /// U8: OPAC four-stage discipline (Observe → Precheck → Apply → Confirm).
 /// Auto-injected whenever tasks or memories are enabled, mirroring the
 /// `ralph-tools` base skill behaviour.
@@ -95,7 +99,7 @@ impl SkillRegistry {
 
     /// Register built-in skills (ralph-tools, ralph-tools-tasks, ralph-tools-memories,
     /// ralph-tools-emit, ralph-tools-wave, ralph-tools-precheck, ralph-tools-cmdref,
-    /// ralph-tools-opac, ralph-tools-recovery-directives).
+    /// ralph-tools-opac, ralph-tools-recovery-directives, ralph-tools-workstate).
     ///
     /// 2026-06-25 refactor: `robot-interaction` was removed because its
     /// only content was `human.interact` / `human.guidance` Telegram guidance
@@ -121,6 +125,8 @@ impl SkillRegistry {
             "ralph-tools-recovery-directives",
             RALPH_TOOLS_RECOVERY_DIRECTIVES_SKILL_RAW,
         )?;
+        // Loop-scoped workstate CLI reference (on-demand load).
+        self.register_builtin("ralph-tools-workstate", RALPH_TOOLS_WORKSTATE_SKILL_RAW)?;
         Ok(())
     }
 
@@ -429,6 +435,7 @@ mod tests {
         assert!(registry.get("ralph-tools-precheck").is_some());
         assert!(registry.get("ralph-tools-cmdref").is_some());
         assert!(registry.get("ralph-tools-recovery-directives").is_some());
+        assert!(registry.get("ralph-tools-workstate").is_some());
         // U8: OPAC four-stage discipline skill is always-injected when
         // tasks or memories are enabled.
         assert!(registry.get("ralph-tools-opac").is_some());
