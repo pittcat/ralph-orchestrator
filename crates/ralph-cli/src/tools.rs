@@ -8,6 +8,7 @@
 //! - `memory`: Persistent memories for accumulated learning
 //! - `task`: Work item tracking (beads-lite)
 //! - `skill`: Load skill content on demand
+//! - `workstate`: Loop-scoped workstate entries
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -16,6 +17,7 @@ use crate::ConfigSource;
 use crate::memory;
 use crate::skill_cli;
 use crate::task_cli;
+use crate::workstate_cli;
 
 /// Ralph's runtime tools (agent-facing).
 #[derive(Parser, Debug)]
@@ -34,6 +36,9 @@ pub enum ToolsCommands {
 
     /// Load and manage skills
     Skill(skill_cli::SkillArgs),
+
+    /// Manage loop-scoped workstate entries
+    Workstate(workstate_cli::WorkstateArgs),
 }
 
 /// Execute a tools command.
@@ -47,5 +52,6 @@ pub async fn execute(
         ToolsCommands::Memory(memory_args) => memory::execute(memory_args, use_colors),
         ToolsCommands::Task(task_args) => task_cli::execute(task_args, use_colors, config_sources),
         ToolsCommands::Skill(skill_args) => skill_cli::execute(skill_args, config_sources),
+        ToolsCommands::Workstate(workstate_args) => workstate_cli::execute(workstate_args),
     }
 }

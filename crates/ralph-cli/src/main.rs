@@ -46,6 +46,7 @@ mod tools;
 mod wave;
 mod wave_verify_gate;
 mod web;
+mod workstate_cli;
 
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};

@@ -162,6 +162,7 @@ pub mod wave_tracker;
 pub mod workflow_contract;
 pub mod workspace;
 pub mod workspace_mutation_guard;
+mod workstate;
 pub mod worktree;
 
 #[cfg(feature = "recording")]
@@ -320,6 +321,7 @@ pub use workspace::{
     CleanupPolicy, TaskWorkspace, VerificationResult, WorkspaceError, WorkspaceInfo,
     WorkspaceManager,
 };
+pub use workstate::{DEFAULT_WORKSTATE_PATH, WorkstateEntry, WorkstateError, WorkstateStore};
 pub use worktree::{
     ReusableWorktree, SyncStats, Worktree, WorktreeConfig, WorktreeError,
     clean_worktree_runtime_artifacts, create_worktree, ensure_gitignore, list_ralph_worktrees,
