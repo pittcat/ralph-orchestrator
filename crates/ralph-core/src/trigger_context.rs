@@ -104,6 +104,30 @@ pub fn find_matching_trigger_event<'a>(
     None
 }
 
+/// Return all matching non-system events in their original arrival order.
+/// Unlike [`find_matching_trigger_event`], this is for activation views that
+/// need to summarize fan-in rather than select a single latest trigger.
+pub fn find_all_matching_trigger_events<'a>(
+    events: &'a [ralph_proto::Event],
+    hat_triggers: &[String],
+) -> Vec<MatchedTrigger<'a>> {
+    events
+        .iter()
+        .filter_map(|ev| {
+            let topic = ev.topic.as_str();
+            if SYSTEM_TOPICS.contains(&topic)
+                || !hat_triggers
+                    .iter()
+                    .any(|trigger| Topic::from(trigger.as_str()).matches_str(topic))
+            {
+                return None;
+            }
+            let payload = serde_json::from_str(&ev.payload).unwrap_or(Value::Null);
+            Some(MatchedTrigger { topic, payload })
+        })
+        .collect()
+}
+
 /// Stable source-of-truth for one trigger context. Built by
 /// [`build`] and consumed by [`render`]. Keeping the typed
 /// structure separate from the markdown string means callers
@@ -252,15 +276,33 @@ pub struct TriggerContextInput<'a> {
 /// the SC6 / R3 / R29 contract that pre-feature prompts are
 /// byte-identical to post-feature prompts.
 pub fn build(input: &TriggerContextInput<'_>) -> TriggerContextView {
+    build_with_fallback(input, &[])
+}
+
+/// Build a trigger view, using `fallback_fields` only when the schema has no
+/// explicit summary fields or routing hints. Runtime callers should pass the
+/// topic schema's `required_fields` when fallback is enabled.
+pub fn build_with_fallback(
+    input: &TriggerContextInput<'_>,
+    fallback_fields: &[String],
+) -> TriggerContextView {
     if input.source_topic.is_empty() {
         return TriggerContextView::noop(input.current_hat);
     }
     let cfg: &TriggerContextConfig = &input.schema.trigger_context;
-    if cfg.summary_fields.is_empty() && cfg.routing_hints.is_empty() {
+    let summary_fields = if cfg.summary_fields.is_empty()
+        && cfg.routing_hints.is_empty()
+        && !fallback_fields.is_empty()
+    {
+        fallback_fields
+    } else {
+        &cfg.summary_fields
+    };
+    if summary_fields.is_empty() && cfg.routing_hints.is_empty() {
         return TriggerContextView::noop(input.current_hat);
     }
 
-    let summary = extract_summary_fields(&cfg.summary_fields, input.payload);
+    let summary = extract_summary_fields(summary_fields, input.payload);
     let matched_hints = evaluate_hints(&cfg.routing_hints, input.payload);
 
     TriggerContextView {
@@ -426,6 +468,60 @@ pub fn render(view: &TriggerContextView) -> Option<String> {
         }
     }
     Some(out)
+}
+
+/// Render fan-in trigger views. A single view deliberately delegates to
+/// [`render`] so its established output remains byte-for-byte identical.
+pub fn render_multiple(views: &[TriggerContextView]) -> Option<String> {
+    let views: Vec<_> = views.iter().filter(|view| !view.is_noop()).collect();
+    if views.is_empty() {
+        return None;
+    }
+    if views.len() == 1 {
+        return render(views[0]);
+    }
+
+    const MAX_RENDERED_EVENTS: usize = 5;
+    let mut out = String::from("## TRIGGER CONTEXT\n");
+    let mut rendered = 0;
+    for (index, view) in views.iter().take(MAX_RENDERED_EVENTS).enumerate() {
+        rendered += 1;
+        out.push_str(&format!("### event {}: {}\n", index + 1, view.source_topic));
+        append_view_details(&mut out, view);
+    }
+    let omitted = views.len() - rendered;
+    if omitted > 0 {
+        out.push_str(&format!("...(and {omitted} more events)\n"));
+    }
+    (rendered > 0).then_some(out)
+}
+
+fn append_view_details(out: &mut String, view: &TriggerContextView) {
+    out.push_str("- source hat: ");
+    match &view.source_hat {
+        Some(hat) => out.push_str(hat),
+        None => out.push_str("(unknown source hat)"),
+    }
+    out.push('\n');
+    if !view.summary.is_empty() {
+        out.push_str("- summary fields:\n");
+        for row in &view.summary {
+            out.push_str("  - ");
+            out.push_str(&row.field);
+            out.push_str(": ");
+            match &row.value {
+                FieldValue::Present(value) => out.push_str(&render_value(value)),
+                FieldValue::Missing => out.push_str("<missing>"),
+            }
+            out.push('\n');
+        }
+    }
+    if !view.matched_hints.is_empty() {
+        out.push_str("- matched routing hints:\n");
+        for hint in &view.matched_hints {
+            out.push_str(&format!("  - [{}] {}\n", hint.label, hint.guidance));
+        }
+    }
 }
 
 /// Serialise a JSON value into a short agent-facing string.
@@ -601,6 +697,82 @@ mod u4_trigger_context_builder_tests {
         let view = build(&input("any-hat", "review.synthesized", &schema, &payload));
         assert!(view.is_noop());
         assert!(render(&view).is_none());
+    }
+
+    #[test]
+    fn u5_fallback_fields_are_used_only_without_explicit_context() {
+        let schema = EventSchema::default();
+        let fields = vec!["verdict".to_string(), "report_path".to_string()];
+        let payload = json!({"verdict": "pass", "report_path": "out.md", "secret": "x"});
+        let view = build_with_fallback(
+            &input("consumer", "review.done", &schema, &payload),
+            &fields,
+        );
+        assert_eq!(
+            view.summary
+                .iter()
+                .map(|row| row.field.as_str())
+                .collect::<Vec<_>>(),
+            ["verdict", "report_path"]
+        );
+        let rendered = render(&view).expect("fallback fields create a context");
+        assert!(rendered.contains("verdict: \"pass\""));
+        assert!(rendered.contains("report_path: \"out.md\""));
+        assert!(!rendered.contains("secret"));
+
+        let explicit = schema_with_summary_fields(&["verdict"]);
+        let explicit_view = build_with_fallback(
+            &input("consumer", "review.done", &explicit, &payload),
+            &fields,
+        );
+        assert_eq!(explicit_view.summary.len(), 1);
+        assert_eq!(explicit_view.summary[0].field, "verdict");
+    }
+
+    #[test]
+    fn u5_empty_fallback_fields_remain_noop() {
+        let schema = EventSchema::default();
+        let payload = json!({"secret": "not visible"});
+        let view = build_with_fallback(&input("consumer", "review.done", &schema, &payload), &[]);
+        assert!(view.is_noop());
+        assert!(render(&view).is_none());
+    }
+
+    #[test]
+    fn u6_find_all_preserves_order_and_excludes_system_topics() {
+        let events = vec![
+            ralph_proto::Event::new("review.request", r#"{"x":1}"#),
+            ralph_proto::Event::new("task.resume", r#"{"x":99}"#),
+            ralph_proto::Event::new("review.request", r#"{"x":2}"#),
+        ];
+        let triggers = vec!["review.*".to_string()];
+        let found = find_all_matching_trigger_events(&events, &triggers);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].payload["x"], json!(1));
+        assert_eq!(found[1].payload["x"], json!(2));
+    }
+
+    #[test]
+    fn u6_single_view_render_multiple_is_byte_identical() {
+        let schema = schema_with_summary_fields(&["value"]);
+        let payload = json!({"value": 1});
+        let view = build(&input("consumer", "review.request", &schema, &payload));
+        assert_eq!(render_multiple(std::slice::from_ref(&view)), render(&view));
+    }
+
+    #[test]
+    fn u6_multiple_render_caps_events_and_reports_omitted_count() {
+        let views: Vec<_> = (1..=7)
+            .map(|sequence| {
+                let schema = schema_with_summary_fields(&["sequence"]);
+                let payload = json!({"sequence": sequence});
+                build(&input("consumer", "review.request", &schema, &payload))
+            })
+            .collect();
+        let rendered = render_multiple(&views).expect("non-empty fan-in renders");
+        assert!(rendered.contains("### event 5: review.request"));
+        assert!(!rendered.contains("### event 6:"));
+        assert!(rendered.contains("...(and 2 more events)"));
     }
 
     /// 4. Non-object payload: builder treats non-object payload

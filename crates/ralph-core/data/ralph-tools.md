@@ -92,10 +92,10 @@ DAG 模式（`event_loop.supervisor.scheduler_mode: dag`）下，runtime 为每�
 5. **emit step handoff 事件前，先用 schema 预检** — `ralph emit --schema <TOPIC>` 会列出 `required_fields`；payload 必须包含全部 required fields，且字段之间不自相矛盾（例如 `step` 与 `task_key` 中的 step 段必须一致）。不要凭记忆构造 payload。
 6. **isolated 模式:一个 activation 只发 1 个业务事件** —— 运行时只保留你这一回合最先发出的那个,其后的全部静默丢弃(不分 topic)。发完即停,**终态事件(如 `plan.complete`)前面绝不要夹带 `work.ready` 等其它 emit**,否则终态事件会被丢弃。细则见 `ralph emit` 深参考「isolated mode 单业务事件 / 重发规则」。
 7. **先读 `## TRIGGER CONTEXT` 区块，再执行 hat instructions** —— 当 prompt 顶部出现 `## TRIGGER CONTEXT` 时:
-   - **触发条件**：preset/schema 为当前 trigger topic 声明了 `trigger_context`（`summary_fields` + 可选 `routing_hints`）。
+   - **触发条件**：当前 trigger topic schema 声明了 `trigger_context`，或未声明时由 runtime 使用 schema 的 `required_fields` 生成默认摘要；无 required fields 时不生成兜底块。
    - **agent 动作**：先读该区块，再按 hat instructions 执行；区块已把当前 trigger payload 的关键字段（`source topic`、可选 `source hat`、summary fields、命中 routing hints）整理好，直接作为本轮任务指导。
    - **`source hat` 是 optional** —— v1 runtime 不知道哪个 hat 实际发布了这个 trigger event，渲染器会显示 `(unknown source hat)`。**不要依赖 `source hat` 决定分支判断或假设当前 hat 之前的链路是某个具体 hat**；需要查链路用 `ralph tools task list` / `ralph inspect loop`。
-   - **关键字段从哪里取得**：注入的 `## TRIGGER CONTEXT` 区块，不是 runtime 内部 ledger 或事件历史。Summary 字段是 schema 声明字段的当前 trigger payload 切片；missing 字段显示 `<missing>`，不要推断成 `0` / `false` / 空字符串。
+   - **关键字段从哪里取得**：注入的 `## TRIGGER CONTEXT` 区块，不是 runtime 内部 ledger 或事件历史。Summary 字段是显式声明字段，或默认兜底时的 `required_fields`，对应当前 trigger payload 的切片；missing 字段显示 `<missing>`，不要推断成 `0` / `false` / 空字符串。多个上游事件同轮触发时，每条事件按到达顺序各有摘要段；超过展示上限时以折叠提示为准。
    - **失败停止条件**：若 Trigger Context 与 hat instructions 冲突，按 hat instructions 与既有恢复机制（`task.resume` / `plan.blocked`）处理，不要自行猜测；若 Trigger Context 显示某字段为 `<missing>` 而你又必须用它，先 `ralph inspect loop --format json` / `ralph tools task list` 复核当前任务状态，再决定继续、阻塞或报告。
 8. **`## RECEIVER CONTRACT` 区块列出你本 hat 的 emit 契约** —— 当 prompt 中出现 `## RECEIVER CONTRACT` 时，它由 runtime 根据当前 hat 声明的可发 topic 列表与 preset 的 event schema 自动生成，逐条列出你可以 emit 的 topic 及其必填字段；构造 payload 时以该清单为准（可用 `ralph emit --schema <TOPIC>` 复核字段定义），某个 topic 没有附带字段清单时表示 preset 未为它声明 schema 约束。
 

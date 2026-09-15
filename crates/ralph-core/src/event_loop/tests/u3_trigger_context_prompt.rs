@@ -89,10 +89,9 @@ fn u3_prepend_trigger_context_no_event_policy_is_noop() {
 }
 
 #[test]
-fn u3_prepend_trigger_context_empty_declaration_is_noop() {
-    // R3 / R29: schema exists for the topic, but its
-    // `trigger_context` is the default-empty struct. The
-    // helper must short-circuit and not inject.
+fn u3_prepend_trigger_context_empty_declaration_uses_required_field_fallback() {
+    // U5 intentionally changes the old empty-declaration no-op:
+    // required schema fields now provide a safe default summary.
     let cfg = two_hat_config_with_policy(
         r"
   event_policy:
@@ -115,9 +114,130 @@ fn u3_prepend_trigger_context_empty_declaration_is_noop() {
         .build_prompt(&HatId::new("reviewer"))
         .expect("isolated build_prompt returns Some");
     assert!(
-        !prompt.contains("- source topic:"),
-        "empty trigger_context declaration must yield no block, got: {prompt}"
+        prompt.contains("- source topic: review.request"),
+        "required_fields fallback must render a trigger block, got: {prompt}"
     );
+    assert!(
+        prompt.contains("x: 1"),
+        "required field value must appear: {prompt}"
+    );
+}
+
+#[test]
+fn u5_trigger_context_fallback_only_exposes_required_fields() {
+    let cfg = two_hat_config_with_policy(
+        r#"
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    schemas:
+      review.request:
+        required_fields: [verdict, report_path]
+"#,
+    );
+    let mut event_loop = EventLoop::new(cfg);
+    event_loop.initialize("unit test");
+    event_loop.bus.publish(Event::new(
+        "review.request",
+        r#"{"verdict":"pass","report_path":"out.md","secret_note":"do not leak"}"#,
+    ));
+
+    let prompt = event_loop
+        .build_prompt(&HatId::new("reviewer"))
+        .expect("isolated build_prompt returns Some");
+    let context = prompt
+        .split("## TRIGGER CONTEXT\n")
+        .nth(1)
+        .expect("trigger context block exists")
+        .split("\n## ")
+        .next()
+        .expect("trigger context block has a body");
+    assert!(context.contains("verdict: \"pass\""), "{context}");
+    assert!(context.contains("report_path: \"out.md\""), "{context}");
+    assert!(
+        !context.contains("secret_note"),
+        "undeclared payload data leaked: {context}"
+    );
+}
+
+#[test]
+fn u5_trigger_context_fallback_can_be_disabled() {
+    let cfg = two_hat_config_with_policy(
+        r#"
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    schemas:
+      review.request:
+        required_fields: [x]
+"#,
+    );
+    let mut cfg = cfg;
+    cfg.event_loop.trigger_context_fallback = false;
+    let mut event_loop = EventLoop::new(cfg);
+    event_loop.initialize("unit test");
+    event_loop
+        .bus
+        .publish(Event::new("review.request", r#"{"x":1}"#));
+    let prompt = event_loop
+        .build_prompt(&HatId::new("reviewer"))
+        .expect("isolated build_prompt returns Some");
+    assert!(
+        !prompt.contains("- source topic:"),
+        "fallback disabled: {prompt}"
+    );
+}
+
+#[test]
+fn u6_trigger_context_aggregates_matching_events_in_arrival_order() {
+    let cfg = two_hat_config_with_policy(
+        r#"
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    schemas:
+      review.request:
+        required_fields: [sequence]
+"#,
+    );
+    let mut event_loop = EventLoop::new(cfg);
+    event_loop.initialize("unit test");
+    for sequence in 1..=3 {
+        event_loop.bus.publish(Event::new(
+            "review.request",
+            format!(r#"{{"sequence":{sequence}}}"#),
+        ));
+    }
+
+    let prompt = event_loop
+        .build_prompt(&HatId::new("reviewer"))
+        .expect("isolated build_prompt returns Some");
+    let context = prompt
+        .split("## TRIGGER CONTEXT\n")
+        .nth(1)
+        .expect("aggregated trigger context exists")
+        .split("\n## ")
+        .next()
+        .expect("trigger context block has a body");
+    let one = context
+        .find("### event 1: review.request")
+        .expect("first event");
+    let two = context
+        .find("### event 2: review.request")
+        .expect("second event");
+    let three = context
+        .find("### event 3: review.request")
+        .expect("third event");
+    assert!(
+        one < two && two < three,
+        "events must retain arrival order: {context}"
+    );
+    assert!(context.contains("sequence: 1"), "{context}");
+    assert!(context.contains("sequence: 2"), "{context}");
+    assert!(context.contains("sequence: 3"), "{context}");
 }
 
 #[test]

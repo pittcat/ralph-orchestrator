@@ -814,39 +814,41 @@ impl EventLoop {
             return prompt;
         }
 
-        // Find the most recent non-system event the hat
-        // subscribes to.
-        let Some(trigger) =
-            crate::trigger_context::find_matching_trigger_event(regular_events, &hat_triggers)
-        else {
-            return prompt;
-        };
-
-        // Gate 2: schema for the source topic must exist and
-        // declare a non-empty `trigger_context` block.
-        let Some(schema) = policy.schemas.get(trigger.topic) else {
-            return prompt;
-        };
-        if schema.trigger_context.summary_fields.is_empty()
-            && schema.trigger_context.routing_hints.is_empty()
-        {
+        let triggers =
+            crate::trigger_context::find_all_matching_trigger_events(regular_events, &hat_triggers);
+        if triggers.is_empty() {
             return prompt;
         }
 
-        // Build + render. `source_hat` is unknown at this
-        // layer (events do not carry it), so the renderer
-        // surfaces `(unknown source hat)`. That is a U4 / U5
-        // observable gap that strict lint can flag if a
-        // schema/preset relies on it.
-        let view = crate::trigger_context::build(&crate::trigger_context::TriggerContextInput {
-            current_hat: hat_id.as_str(),
-            source_topic: trigger.topic,
-            source_hat: None,
-            schema,
-            payload: &trigger.payload,
-        });
+        let fallback_enabled = self.config.event_loop.trigger_context_fallback;
+        let views: Vec<_> = triggers
+            .iter()
+            .filter_map(|trigger| {
+                // Each event owns its schema and fallback field set. An
+                // undeclared topic contributes no summary rather than
+                // borrowing another producer's schema.
+                let schema = policy.schemas.get(trigger.topic)?;
+                let explicit_context = !schema.trigger_context.summary_fields.is_empty()
+                    || !schema.trigger_context.routing_hints.is_empty();
+                if !explicit_context && (!fallback_enabled || schema.required_fields.is_empty()) {
+                    return None;
+                }
+                let input = crate::trigger_context::TriggerContextInput {
+                    current_hat: hat_id.as_str(),
+                    source_topic: trigger.topic,
+                    source_hat: None,
+                    schema,
+                    payload: &trigger.payload,
+                };
+                Some(if explicit_context || !fallback_enabled {
+                    crate::trigger_context::build(&input)
+                } else {
+                    crate::trigger_context::build_with_fallback(&input, &schema.required_fields)
+                })
+            })
+            .collect();
 
-        let Some(block) = crate::trigger_context::render(&view) else {
+        let Some(block) = crate::trigger_context::render_multiple(&views) else {
             return prompt;
         };
 

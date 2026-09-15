@@ -637,6 +637,15 @@ pub struct EventLoopConfig {
     /// nothing.
     #[serde(default)]
     pub receiver_contract: ReceiverContractConfig,
+
+    /// When true, topics without an explicit `trigger_context` summary use
+    /// their schema's `required_fields` to build a safe trigger summary.
+    #[serde(default = "default_trigger_context_fallback")]
+    pub trigger_context_fallback: bool,
+}
+
+fn default_trigger_context_fallback() -> bool {
+    true
 }
 
 /// 2026-07-06-004 plan U1: typed view of the
@@ -852,6 +861,7 @@ impl Default for EventLoopConfig {
             // enabled; the empty-publishes no-render contract keeps the
             // default regression-free.
             receiver_contract: ReceiverContractConfig::default(),
+            trigger_context_fallback: default_trigger_context_fallback(),
         }
     }
 }
@@ -2178,6 +2188,17 @@ trigger_context: {}
         assert!(schema.trigger_context.summary_fields.is_empty());
         assert!(schema.trigger_context.routing_hints.is_empty());
         assert!(schema.known_fields.is_empty());
+    }
+
+    #[test]
+    fn u5_trigger_context_fallback_defaults_on_and_accepts_override() {
+        let default_config = crate::config::RalphConfig::default();
+        assert!(default_config.event_loop.trigger_context_fallback);
+
+        let config: crate::config::RalphConfig =
+            serde_yaml::from_str("event_loop:\n  trigger_context_fallback: false\n")
+                .expect("fallback override parses");
+        assert!(!config.event_loop.trigger_context_fallback);
     }
 }
 
