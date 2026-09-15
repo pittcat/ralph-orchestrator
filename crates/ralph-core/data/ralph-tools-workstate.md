@@ -31,7 +31,7 @@ ralph tools workstate delete <key>        # 删除当前 loop 的一个 key
 
 ## `## WORKSTATE` 注入块
 
-- **触发条件**：当前 loop 至少有一条工作态，且配置 `workstate.enabled: true`、`workstate.inject: auto`（均为默认值）。当前 loop 没有任何工作态时该块不出现。
+- **触发条件**：prompt 出现 `## WORKSTATE` 时读取该块；当前 loop 没有工作态时该块不会注入。若块未出现但需要检查工作态，执行 `ralph tools workstate list`。
 - **agent 动作**：把该块当作当前 loop 已登记的中间态清单来读，每行是 `- key: value`。需要更新某条时用 `ralph tools workstate set` 覆盖同 key，不要推断条目是何时由谁写入的。
 - **截断**：内容超出注入预算时，块在条目边界截断并附 `<!-- truncated: ... -->` 标记；被截掉的条目用 `ralph tools workstate list` / `ralph tools workstate get` 读取全文。
 - **失败停止条件**：块内容与 `ralph tools workstate list` 的输出不一致时，以 CLI 输出为准；仍无法确认当前中间态时，停止本轮写入并报告阻塞原因。

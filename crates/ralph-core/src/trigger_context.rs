@@ -436,37 +436,11 @@ pub fn render(view: &TriggerContextView) -> Option<String> {
     let mut out = String::new();
     out.push_str("## TRIGGER CONTEXT\n");
     out.push_str("- source topic: ");
-    out.push_str(&view.source_topic);
+    out.push_str(&crate::handoff_envelope::escape_for_prompt(
+        &view.source_topic,
+    ));
     out.push('\n');
-    out.push_str("- source hat: ");
-    match &view.source_hat {
-        Some(hat) => out.push_str(hat),
-        None => out.push_str("(unknown source hat)"),
-    }
-    out.push('\n');
-    if !view.summary.is_empty() {
-        out.push_str("- summary fields:\n");
-        for row in &view.summary {
-            out.push_str("  - ");
-            out.push_str(&row.field);
-            out.push_str(": ");
-            match &row.value {
-                FieldValue::Present(v) => out.push_str(&render_value(v)),
-                FieldValue::Missing => out.push_str("<missing>"),
-            }
-            out.push('\n');
-        }
-    }
-    if !view.matched_hints.is_empty() {
-        out.push_str("- matched routing hints:\n");
-        for hint in &view.matched_hints {
-            out.push_str("  - [");
-            out.push_str(&hint.label);
-            out.push_str("] ");
-            out.push_str(&hint.guidance);
-            out.push('\n');
-        }
-    }
+    append_view_details(&mut out, view);
     Some(out)
 }
 
@@ -486,7 +460,11 @@ pub fn render_multiple(views: &[TriggerContextView]) -> Option<String> {
     let mut rendered = 0;
     for (index, view) in views.iter().take(MAX_RENDERED_EVENTS).enumerate() {
         rendered += 1;
-        out.push_str(&format!("### event {}: {}\n", index + 1, view.source_topic));
+        out.push_str(&format!(
+            "### event {}: {}\n",
+            index + 1,
+            crate::handoff_envelope::escape_for_prompt(&view.source_topic)
+        ));
         append_view_details(&mut out, view);
     }
     let omitted = views.len() - rendered;
@@ -499,7 +477,7 @@ pub fn render_multiple(views: &[TriggerContextView]) -> Option<String> {
 fn append_view_details(out: &mut String, view: &TriggerContextView) {
     out.push_str("- source hat: ");
     match &view.source_hat {
-        Some(hat) => out.push_str(hat),
+        Some(hat) => out.push_str(&crate::handoff_envelope::escape_for_prompt(hat)),
         None => out.push_str("(unknown source hat)"),
     }
     out.push('\n');
@@ -507,7 +485,7 @@ fn append_view_details(out: &mut String, view: &TriggerContextView) {
         out.push_str("- summary fields:\n");
         for row in &view.summary {
             out.push_str("  - ");
-            out.push_str(&row.field);
+            out.push_str(&crate::handoff_envelope::escape_for_prompt(&row.field));
             out.push_str(": ");
             match &row.value {
                 FieldValue::Present(value) => out.push_str(&render_value(value)),
@@ -519,7 +497,11 @@ fn append_view_details(out: &mut String, view: &TriggerContextView) {
     if !view.matched_hints.is_empty() {
         out.push_str("- matched routing hints:\n");
         for hint in &view.matched_hints {
-            out.push_str(&format!("  - [{}] {}\n", hint.label, hint.guidance));
+            out.push_str("  - [");
+            out.push_str(&crate::handoff_envelope::escape_for_prompt(&hint.label));
+            out.push_str("] ");
+            out.push_str(&crate::handoff_envelope::escape_for_prompt(&hint.guidance));
+            out.push('\n');
         }
     }
 }
@@ -534,7 +516,7 @@ fn render_value(v: &Value) -> String {
         Value::Null => "null".to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => n.to_string(),
-        Value::String(s) => format!("\"{s}\""),
+        Value::String(s) => format!("\"{}\"", crate::handoff_envelope::escape_for_prompt(s)),
         Value::Array(items) => format!("[{} items]", items.len()),
         Value::Object(map) => format!("{{{} keys}}", map.len()),
     }
@@ -745,7 +727,7 @@ mod u4_trigger_context_builder_tests {
             ralph_proto::Event::new("task.resume", r#"{"x":99}"#),
             ralph_proto::Event::new("review.request", r#"{"x":2}"#),
         ];
-        let triggers = vec!["review.*".to_string()];
+        let triggers = vec!["review.*".to_string(), "task.resume".to_string()];
         let found = find_all_matching_trigger_events(&events, &triggers);
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].payload["x"], json!(1));
@@ -773,6 +755,23 @@ mod u4_trigger_context_builder_tests {
         assert!(rendered.contains("### event 5: review.request"));
         assert!(!rendered.contains("### event 6:"));
         assert!(rendered.contains("...(and 2 more events)"));
+    }
+
+    #[test]
+    fn u6_multiple_renderer_escapes_event_topics() {
+        let schema = schema_with_summary_fields(&["value"]);
+        let payload = json!({"value": 1});
+        let first = build(&input(
+            "consumer",
+            "review.request\n## injected-heading",
+            &schema,
+            &payload,
+        ));
+        let second = build(&input("consumer", "review.done", &schema, &payload));
+
+        let rendered = render_multiple(&[first, second]).expect("fan-in renders");
+        assert!(rendered.contains("### event 1: review.request\\n## injected-heading"));
+        assert!(!rendered.contains("\n## injected-heading"));
     }
 
     /// 4. Non-object payload: builder treats non-object payload
@@ -1036,6 +1035,42 @@ mod u4_trigger_context_builder_tests {
                         - matched routing hints:\n  \
                           - [accept_residual] Residual findings are report-only; do not generate fix units.\n";
         assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn u6_renderer_escapes_event_values_and_schema_text() {
+        let field = "value\n- injected-field";
+        let schema = schema_with_summary_and_hints(
+            &[field],
+            vec![RoutingHintConfig {
+                label: "hint\n## injected-heading".into(),
+                guidance: "guidance `fence`\n- injected-guidance".into(),
+                conditions: vec![HintCondition {
+                    field: "ready".into(),
+                    op: HintOp::Exists,
+                    value: Value::Null,
+                }],
+                exclusive_group: String::new(),
+            }],
+        );
+        let payload = json!({
+            field: "value `snippet`\n## injected-value",
+            "ready": true
+        });
+        let view = build(&input(
+            "consumer",
+            "review.done\n## injected-topic",
+            &schema,
+            &payload,
+        ));
+        let rendered = render(&view).expect("summary and hint render");
+
+        assert!(rendered.contains("review.done\\n## injected-topic"));
+        assert!(rendered.contains("value\\n- injected-field"));
+        assert!(rendered.contains("value ``snippet``\\n## injected-value"));
+        assert!(rendered.contains("hint\\n## injected-heading"));
+        assert!(rendered.contains("guidance ``fence``\\n- injected-guidance"));
+        assert!(!rendered.contains("\n## injected-"));
     }
 
     /// 12. Empty source topic yields a no-op even when the

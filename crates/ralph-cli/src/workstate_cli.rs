@@ -21,6 +21,12 @@ pub struct WorkstateArgs {
     #[command(subcommand)]
     pub command: WorkstateCommands,
 
+    /// Select a loop scope for human operator commands (get the id from
+    /// `ralph inspect loop --format json`). Agent context uses its
+    /// runtime-injected loop id and cannot override it.
+    #[arg(long, global = true)]
+    pub loop_id: Option<String>,
+
     /// Working directory (default: current directory)
     #[arg(long, global = true)]
     pub root: Option<PathBuf>,
@@ -74,7 +80,7 @@ pub fn execute(args: WorkstateArgs) -> Result<()> {
     let root = resolve_workspace_root(args.root.as_ref());
     let store = WorkstateStore::with_default_path(&root);
     let ctx = OperationContext::detect(root);
-    let scope = workstate_scope(&ctx)?;
+    let scope = workstate_scope(&ctx, args.loop_id.as_deref())?;
 
     match args.command {
         WorkstateCommands::Set(set_args) => {
@@ -128,8 +134,14 @@ struct WorkstateScope {
 ///
 /// Agent context must carry a loop id (fail closed otherwise); the human
 /// CLI falls back to the loop-less scope.
-fn workstate_scope(ctx: &OperationContext) -> Result<WorkstateScope> {
+fn workstate_scope(
+    ctx: &OperationContext,
+    requested_loop_id: Option<&str>,
+) -> Result<WorkstateScope> {
     if ctx.is_agent_context {
+        if requested_loop_id.is_some() {
+            bail!("workstate: agent context cannot select a loop id");
+        }
         let loop_id = ctx.current_loop_id.clone().ok_or_else(|| {
             anyhow::anyhow!(
                 "workstate: agent context requires a current loop id (set RALPH_CURRENT_LOOP_ID)"
@@ -141,7 +153,7 @@ fn workstate_scope(ctx: &OperationContext) -> Result<WorkstateScope> {
         })
     } else {
         Ok(WorkstateScope {
-            loop_id: None,
+            loop_id: requested_loop_id.map(str::to_string),
             hat_id: None,
         })
     }
@@ -167,7 +179,7 @@ mod tests {
     fn scope_agent_uses_current_loop() {
         let tmp = tempfile::TempDir::new().expect("temp dir");
         let ctx = ctx_for(tmp.path(), Some("executor"), Some("loop-1"));
-        let scope = workstate_scope(&ctx).expect("scope");
+        let scope = workstate_scope(&ctx, None).expect("scope");
         assert_eq!(scope.loop_id.as_deref(), Some("loop-1"));
         assert_eq!(scope.hat_id.as_deref(), Some("executor"));
     }
@@ -176,7 +188,7 @@ mod tests {
     fn scope_agent_without_loop_id_fails_closed() {
         let tmp = tempfile::TempDir::new().expect("temp dir");
         let ctx = ctx_for(tmp.path(), Some("executor"), None);
-        let err = workstate_scope(&ctx).expect_err("must fail without loop id");
+        let err = workstate_scope(&ctx, None).expect_err("must fail without loop id");
         assert!(err.to_string().contains("loop id"));
     }
 
@@ -185,8 +197,24 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("temp dir");
         let ctx = ctx_for(tmp.path(), None, None);
         assert!(!ctx.is_agent_context);
-        let scope = workstate_scope(&ctx).expect("scope");
+        let scope = workstate_scope(&ctx, None).expect("scope");
         assert_eq!(scope.loop_id, None);
         assert_eq!(scope.hat_id, None);
+    }
+
+    #[test]
+    fn scope_human_can_select_loop() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let ctx = ctx_for(tmp.path(), None, None);
+        let scope = workstate_scope(&ctx, Some("loop-1")).expect("operator loop scope");
+        assert_eq!(scope.loop_id.as_deref(), Some("loop-1"));
+    }
+
+    #[test]
+    fn scope_agent_cannot_override_loop_id() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let ctx = ctx_for(tmp.path(), Some("executor"), Some("loop-1"));
+        let err = workstate_scope(&ctx, Some("loop-2")).expect_err("agent cannot select loop");
+        assert!(err.to_string().contains("cannot select a loop id"));
     }
 }

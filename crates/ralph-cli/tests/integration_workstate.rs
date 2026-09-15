@@ -163,6 +163,56 @@ fn workstate_cli_cross_loop_invisible() -> Result<()> {
 }
 
 #[test]
+fn workstate_cli_human_can_select_a_loop_scope() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let temp_path = temp_dir.path();
+
+    for (loop_id, key, value) in [
+        ("loop-1", "draft-conclusion", "first"),
+        ("loop-2", "other-conclusion", "second"),
+    ] {
+        let set = ralph_workstate_as_agent(temp_path, loop_id, &["set", key, value]);
+        assert!(
+            set.status.success(),
+            "agent set failed: {}",
+            String::from_utf8_lossy(&set.stderr)
+        );
+    }
+
+    let default_scope = ralph_workstate_ok(temp_path, &["list"]);
+    assert!(
+        default_scope.is_empty(),
+        "default human scope stays loop-less"
+    );
+
+    let selected_scope = ralph_workstate_ok(temp_path, &["list", "--loop-id", "loop-1"]);
+    assert!(selected_scope.contains("draft-conclusion"));
+    assert!(!selected_scope.contains("other-conclusion"));
+
+    ralph_workstate_ok(
+        temp_path,
+        &["set", "draft-conclusion", "updated", "--loop-id", "loop-1"],
+    );
+    let updated = ralph_workstate_ok(
+        temp_path,
+        &["get", "draft-conclusion", "--loop-id", "loop-1"],
+    );
+    assert_eq!(updated.trim_end(), "updated");
+
+    Ok(())
+}
+
+#[test]
+fn workstate_cli_agent_cannot_select_a_loop_scope() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let output =
+        ralph_workstate_as_agent(temp_dir.path(), "loop-1", &["list", "--loop-id", "loop-2"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot select a loop id"));
+    Ok(())
+}
+
+#[test]
 fn workstate_cli_rejects_invalid_input() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let temp_path = temp_dir.path();

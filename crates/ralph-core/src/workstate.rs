@@ -170,10 +170,13 @@ impl WorkstateStore {
         hat: Option<&str>,
     ) -> Result<bool, WorkstateError> {
         validate_key(key)?;
-        if self.get(loop_id, key)?.is_none() {
+        let lock = FileLock::new(&self.path)?;
+        let _guard = lock.exclusive()?;
+        let lookup = (loop_id.map(str::to_string), key.to_string());
+        if !self.load_folded_locked()?.contains_key(&lookup) {
             return Ok(false);
         }
-        self.append_line(&WorkstateEntry {
+        self.append_line_locked(&WorkstateEntry {
             loop_id: loop_id.map(str::to_string),
             key: key.to_string(),
             value: String::new(),
@@ -188,6 +191,11 @@ impl WorkstateStore {
     fn append_line(&self, entry: &WorkstateEntry) -> Result<(), WorkstateError> {
         let lock = FileLock::new(&self.path)?;
         let _guard = lock.exclusive()?;
+        self.append_line_locked(entry)
+    }
+
+    /// Appends one serialized record while the caller holds the exclusive lock.
+    fn append_line_locked(&self, entry: &WorkstateEntry) -> Result<(), WorkstateError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -206,12 +214,22 @@ impl WorkstateStore {
     fn load_folded(
         &self,
     ) -> Result<BTreeMap<(Option<String>, String), WorkstateEntry>, WorkstateError> {
-        if !self.exists() {
-            return Ok(BTreeMap::new());
-        }
         let lock = FileLock::new(&self.path)?;
         let _guard = lock.shared()?;
-        let content = fs::read_to_string(&self.path)?;
+        self.load_folded_locked()
+    }
+
+    /// Reads and folds records while the caller holds a file lock.
+    fn load_folded_locked(
+        &self,
+    ) -> Result<BTreeMap<(Option<String>, String), WorkstateEntry>, WorkstateError> {
+        let content = match fs::read_to_string(&self.path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeMap::new());
+            }
+            Err(error) => return Err(error.into()),
+        };
         let entries = content
             .lines()
             .filter(|line| !line.trim().is_empty())
