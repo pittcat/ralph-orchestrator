@@ -494,4 +494,5 @@ preset 作者**不需要**手动把 `aggregate_timeout_secs` 乘以尝试次数�
 - **fail-closed 组合由 runtime 强制**（`validate_scheduler_mode`，preflight / `ralph preset check` 启动即拒），review 不重复检查该组合，重点在 runtime 不覆盖的三条 review-only 缺口（见 rubric 表）。
 - **instructions 与接线事实对账**：`dag` runtime preset 可以描述 per-Unit admission 与 runtime-owned `forge.exec.development.done`，但不得让 agent 伪造 scheduler receipts、跨 Unit 调度或绕过 runtime fences；发现控制面越权仍按 `scheduler_mode_instructions_describe_unwired_behavior`（P0）入主表。
 - **叙述诚实性**：preset 注释 / notes 声称 runtime 已接管调度，却没有对应 runtime-driven contract 或 active mode → `scheduler_mode_overstates_cutover`（P1）；`dag_shadow` / `dag` 声明但 notes 没有说明实际 side-effect boundary → `scheduler_mode_transitional_state_undocumented`（P1）。
+- **协调 topic 族核对**：`dag` 模式下 hat `instructions` 涉及协调语义时必须引用 `forge.unit.*` 族；引用已弃用的 `forge.wave.*` 族（`dag` 模式下 hat 不再订阅该族）→ `scheduler_mode_dag_instructions_reference_wave_topics`（P1，capability-triggered）。事实核对以 `presets/en/parallel-forge.yml`（hat `triggers` / `publishes`）与 `presets/schemas/parallel-forge.yml` 为准。
 - **inspect 证据**：配置生效核对用 `ralph inspect loop --format json` 的只读 `scheduler` 块（非 `wave` 模式才出现），不要求跑真 loop。

@@ -525,9 +525,11 @@ preset 作者**不需要**手动把 `aggregate_timeout_secs` 乘以尝试次数�
 - **fail-closed 组合（runtime 强制）**：`dag_shadow` / `dag` 要求 `event_loop.supervisor.enabled: true` ∧ `event_loop.execution_mode: isolated`；违反组合在 `ralph preset check` / preflight 启动即拒（错误含字段路径 `event_loop.supervisor.scheduler_mode`），无静默降级。
 - **执行面事实（2026-09-08 U10 cutover 后）**：builtin `parallel-forge` 的 `scheduler_mode: dag` 已由 runtime 接管 Unit admission、job 生命周期、recovery、integration 与 completion fence；preset 注释与 author notes 必须说明这些是 runtime-owned effects，不应再把旧 wave dispatcher 当作控制面。
 - **inspect 核对**：`ralph inspect loop --format json` 在非 `wave` 模式输出只读 `scheduler` 块（`scheduler_mode` / `plan_keys` / 观测计数）——配置生效与否用这个核对，不要从行为反推。
+- **协调 topic 族迁移（`dag` 模式）**：`scheduler_mode: dag` 下 hat `instructions:` 涉及协调语义时必须引用 `forge.unit.*` 族（`forge.unit.ready` / `forge.unit.executed` / `forge.unit.failed` / `forge.unit.correction` 等），不得引用已弃用的 `forge.wave.*` 族——`dag` 模式下 hat 不再订阅该族。事实核对以 `presets/en/parallel-forge.yml`（hat `triggers` / `publishes`）与 `presets/schemas/parallel-forge.yml` 为准。
 
 **反模式：**
 
 - ❌ hat `instructions:` 要求 agent 自行执行或伪造 DAG 调度器行为（per-Unit admission、job lifecycle、integration、`forge.exec.development.done` 等 runtime-owned effects）
 - ❌ `dag_shadow` preset 注释声称已经产生 DAG 执行副作用，或 `dag` preset 声称 runtime-owned 控制面仍由 hat 手工驱动
 - ❌ 把 `scheduler_mode: dag` 当成行为开关写进 hat 触发逻辑 / payload 字段
+- ❌ `dag` 模式 hat `instructions:` 引用已弃用的 `forge.wave.*` 协调 topic 族（应改用 `forge.unit.*` 族）

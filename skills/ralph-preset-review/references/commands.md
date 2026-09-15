@@ -201,6 +201,7 @@ supervisor 块下的三态调度权威选择器（serde `snake_case`，缺省 `w
 - **fail-closed 组合**：`dag_shadow` / `dag` 要求 `event_loop.supervisor.enabled: true` **且** `event_loop.execution_mode: isolated`；违反组合在 `ralph preset check --strict` / preflight 启动即拒（错误信息含字段路径 `event_loop.supervisor.scheduler_mode`），不会静默降级回 `wave`。`wave` 任意组合恒合法。
 - **inspect 可见性**：`ralph inspect loop --format json` 在 mode ≠ `wave` 时输出只读 `scheduler` 块（`scheduler_mode` / `plan_keys` / 观测计数）。
 - **builtin 现状**：`parallel-forge` 的 `scheduler_mode: dag` 使用 runtime-owned DAG execution face；review 时检查 hat 不伪造 runtime admission、job 或 terminal receipt，并按上述 fail-closed 组合审查其他 supervisor preset。
+- **协调 topic 族迁移（`dag` 模式）**：`dag` 模式下 hat `instructions` 涉及协调语义时必须引用 `forge.unit.*` 族（`forge.unit.ready` / `forge.unit.executed` / `forge.unit.failed` / `forge.unit.correction` 等），不得引用已弃用的 `forge.wave.*` 族——`dag` 模式下 hat 不再订阅该族。事实核对以 `presets/en/parallel-forge.yml`（hat `triggers` / `publishes`）与 `presets/schemas/parallel-forge.yml` 为准。
 
 ## Wave 子命令
 
@@ -239,4 +240,4 @@ DAG 模式下，runtime 为每个 active job 注入一组 typed `JobContext` 字
 
 13 个 typed 字段： `RALPH_DAG_PLAN_KEY`, `RALPH_DAG_UNIT_KEY`, `RALPH_DAG_TASK_KEY`, `RALPH_DAG_TASK_ID`, `RALPH_DAG_JOB_ID`, `RALPH_DAG_JOB_TOKEN`, `RALPH_DAG_STAGE`, `RALPH_DAG_ATTEMPT`, `RALPH_DAG_WORKTREE`, `RALPH_DAG_BASE`, `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH`, `RALPH_DAG_ARTIFACT_REFS`, `RALPH_DAG_EXPECTED_HEAD`.
 
-3 个已弃用/移除字段： `RALPH_WAVE_ID`, `RALPH_SLOT_INDEX`, `RALPH_WORKTREE_MAP`. runtime 不再注入这三个值；带这三个字段的 payload 会被 typed schema 拒收。
+3 个已弃用/移除的 payload 字段： `wave_id`, `slot_index`, `worktree_map` —— `dag` 模式下携带这三个字段的 payload 会被 typed schema 拒收。env 名澄清：wave worker 的实际注入 env 是 `RALPH_WAVE_ID` / `RALPH_WAVE_INDEX`（仅 legacy wave 模式）；`RALPH_SLOT_INDEX` / `RALPH_WORKTREE_MAP` 作为 env 名从未存在，`dag` 模式一律以上述 `RALPH_DAG_*` typed JobContext 为准。

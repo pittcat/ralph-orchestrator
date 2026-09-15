@@ -348,19 +348,19 @@ mod tests {
     }
 
     // 2026-09-09-0917 U10: author/review skill references must document the
-    // typed 12-field DAG JobContext injected via RALPH_DAG_* env vars, plus
+    // typed 13-field DAG JobContext injected via RALPH_DAG_* env vars, plus
     // the deprecation note for wave_id / slot_index / worktree_map.
     //
     // This is a structural test, not a content test: it asserts each .md
-    // reference contains the section header, the 12 field env-var tokens,
-    // and the 3 deprecated env-var tokens. Drift in prose wording is fine;
-    // drift in coverage is not.
+    // reference contains the section header, the 13 field env-var tokens,
+    // and the 3 deprecated legacy identifier tokens. Drift in prose wording
+    // is fine; drift in coverage is not.
     #[test]
     fn preset_skill_docs_document_typed_jobcontext() {
         // Section header the U10 doc changes promise to add.
         const SECTION_HEADER: &str = "Typed JobContext visibility (U15)";
 
-        // The 12 typed RALPH_DAG_* env-var tokens from
+        // The 13 typed RALPH_DAG_* env-var tokens from
         // `crates/ralph-core/data/ralph-tools.md` §"DAG 模式下" / U15.
         const TYPED_FIELDS: &[&str] = &[
             "RALPH_DAG_PLAN_KEY",
@@ -375,9 +375,13 @@ mod tests {
             "RALPH_DAG_BASE",
             "RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH",
             "RALPH_DAG_ARTIFACT_REFS",
+            "RALPH_DAG_EXPECTED_HEAD",
         ];
 
-        // Deprecated env vars per U15 — runtime no longer injects these.
+        // Deprecated legacy identifiers per U15 — the docs must keep naming
+        // these three tokens (payload fields `wave_id` / `slot_index` /
+        // `worktree_map` are rejected by the typed schema; as env names only
+        // `RALPH_WAVE_ID` ever existed, in legacy wave mode).
         const DEPRECATED_FIELDS: &[&str] =
             &["RALPH_WAVE_ID", "RALPH_SLOT_INDEX", "RALPH_WORKTREE_MAP"];
 
@@ -405,7 +409,7 @@ mod tests {
             for field in DEPRECATED_FIELDS {
                 assert!(
                     doc_has_anchor(doc, field),
-                    "missing deprecation marker for legacy env var: {field}"
+                    "missing deprecation marker for legacy identifier: {field}"
                 );
             }
         }

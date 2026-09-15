@@ -310,8 +310,10 @@ DAG 模式（`event_loop.supervisor.scheduler_mode: dag`，builtin `parallel-for
 - `RALPH_DAG_ARTIFACT_REFS` — 本 stage 的所有交付物引用（JSON 字符串：`{"refs": {key: {path, digest}, ...}}`）；`path` 是 spawn 前的绝对路径，`digest` 是文件字节 SHA-256；spawn 时 runtime 已复核（缺失 / 漂移 / 逃逸 → 拒启动当前 job）；preset author 必须确保 hat payload 中以 `*_path` 命名的字段值指向真实磁盘文件（consume-time runtime 会 fail-closed）
 - `RALPH_DAG_EXPECTED_HEAD` — 当前 job 开始前 runtime 记录的预期基线 commit；用于只读 hat 的 handoff 对账
 
-3 个已弃用/移除字段（runtime 不再注入，旧 payload 字段被 typed schema 拒收）：
+3 个已弃用/移除的 payload 字段（`dag` 模式下携带这些字段的 payload 会被 typed schema 拒收）：
 
-- `RALPH_WAVE_ID`
-- `RALPH_SLOT_INDEX`
-- `RALPH_WORKTREE_MAP`
+- `wave_id`
+- `slot_index`
+- `worktree_map`
+
+env 名澄清：wave worker 的实际注入 env 是 `RALPH_WAVE_ID` / `RALPH_WAVE_INDEX`（仅 legacy wave 模式）；`RALPH_SLOT_INDEX` / `RALPH_WORKTREE_MAP` 作为 env 名从未存在，`dag` 模式一律以上述 `RALPH_DAG_*` typed JobContext 为准。

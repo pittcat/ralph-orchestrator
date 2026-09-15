@@ -125,6 +125,27 @@ review 必须先确认 source mode：`builtin:*` 可使用仓库源码、BDD 或
    - `fixtures/trigger-context-negative-fixture.yml`（负）— 期望：trigger-context 系列 P0 出现。
    - `fixtures/aaf-wave-capability-negative-fixture.yml`（负）— 期望：Wave capability audit 系列 P0 出现。
    - `fixtures/aaf-supervisor-capability-negative-fixture.yml`（负）— 期望：Supervisor capability audit 系列 P0 出现。
+   - `fixtures/reentry-dirty-worktree-positive-fixture.yml`（正）— 期望：reentry dirty-worktree 系列 finding 不出现。
+   - `fixtures/reentry-dirty-worktree-negative-fixture.yml`（负）— 期望：reentry 反模式 P0 / P1 出现。
+   - `fixtures/worktree-reuse-negative-fixture.yml`（负）— 期望：`preset.worktree_reuse_fabricates_settlement`（review-only）出现。
+   - `fixtures/readonly-hat-gate-negative-fixture.yml`（负）— 期望：`preset.readonly_hat_writes_artifacts`（review-only，P0）出现。
+   - `fixtures/correction-exhaustion-negative-fixture.yml`（负）— 期望：`preset.correction_round_below_final_min`（review-only）出现。
+   - `fixtures/terminal-ownership-negative-fixture.yml`（负）— 期望：`preset.auditor_multi_terminal_publisher`（review-only，默认 P0）出现。
+   - `fixtures/key-stage-event-gate-positive-fixture.yml`（正）— 期望：`preset.key_stage_event_gate_*` 系列不出现。
+   - `fixtures/key-stage-event-gate-missing-selection-negative-fixture.yml`（负）— 期望：`preset.key_stage_event_gate_missing_selection` / `preset.key_stage_event_gate_pending_status` 出现。
+   - `fixtures/key-stage-event-gate-divergence-negative-fixture.yml`（负）— 期望：`preset.key_stage_event_gate_notes_preset_diverge` / `preset.key_stage_event_gate_shared_budget` 出现。
+   - `fixtures/key-stage-event-gate-no-reason-negative-fixture.yml`（负）— 期望：`preset.key_stage_event_gate_no_reason` 出现。
+   - `fixtures/runtime-verify-negative-fixture.yml`（负）— 期望：`verify.*` 系列 finding（no_progress / unclosed_terminal / dynamic evidence 缺口）出现。
+   - `fixtures/scheduler-mode-negative-fixture.yml`（负）— 期望：Scheduler mode audit 系列（`scheduler_mode_instructions_describe_unwired_behavior` / `scheduler_mode_overstates_cutover` / `scheduler_mode_transitional_state_undocumented`，review-only）出现。
+   - `fixtures/multi-wave-concurrency-negative-fixture.yml`（负）— 期望：Multi-wave concurrency 系列（`preset.wave_ready_set_not_dag` / `preset.wave_dispatch_budget_exceeded` / `preset.wave_integration_turn_violated` / `preset.wave_resource_conflict_unaudited` / `preset.wave_failure_cross_contamination`，review-only）出现。
+   - `fixtures/recovery-guidance-negative-fixture.yml`（负）— 期望：`preset.recovery_guidance_*` 与 `preset.workspace_precheck_*` 系列 finding 出现。
+   - `fixtures/emitter-skill-load-negative-fixture.yml`（负）— 期望：`preset.instructions_emit_skill_load_missing`（review-only）出现。
+   - `fixtures/evidence-bound-negative-fixture.yml`（负）— 期望：evidence-bound 系列（`evidence_bound_missing_invariant` / `evidence_bound_replacement_payload` / `evidence_bound_no_target` / `evidence_bound_unbounded_retry`）出现。
+   - `fixtures/scope_missing_negative_fixture.yml`（负）— 期望：`scope.contract.missing_manifest_field`（review-only）出现。
+   - `fixtures/scope_boundary_dependency_negative_fixture.yml`（负）— 期望：`scope.contract.boundary_authority`（review-only）出现。
+   - `fixtures/scope_placeholder_base_negative_fixture.yml`（负）— 期望：`scope.contract.placeholder_base`（review-only）出现。
+   - `fixtures/scope_confidence_gate_negative_fixture.yml`（负）— 期望：`scope.contract.confidence_gate_bypass`（review-only）出现。
+   - `fixtures/scope_polarity_negative_fixture.yml`（负）— 期望：`preset.payload_consistency_scope_positive_assertion`（strict lint）出现。
 
 3d. **Wave capability audit** — **capability-triggered**, **不**按 preset 名称点名门控：
    1. **检测顺序**：先读 `references/author-checklist.md` Intent Confirmation 的 `execution_model` 字段 → 再扫 YAML `event_loop.supervisor.enabled` 与 hat `instructions` / `publishes` 中是否出现 `ralph wave emit` / `ralph wave verify` / `## WAVE CONTEXT` 字样。

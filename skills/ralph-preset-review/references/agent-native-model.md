@@ -296,4 +296,4 @@ DAG 模式下，runtime 为每个 active job 注入一组 typed `JobContext` 字
 
 13 个 typed 字段： `RALPH_DAG_PLAN_KEY`, `RALPH_DAG_UNIT_KEY`, `RALPH_DAG_TASK_KEY`, `RALPH_DAG_TASK_ID`, `RALPH_DAG_JOB_ID`, `RALPH_DAG_JOB_TOKEN`, `RALPH_DAG_STAGE`, `RALPH_DAG_ATTEMPT`, `RALPH_DAG_WORKTREE`, `RALPH_DAG_BASE`, `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH`, `RALPH_DAG_ARTIFACT_REFS`, `RALPH_DAG_EXPECTED_HEAD`.
 
-3 个已弃用/移除字段： `RALPH_WAVE_ID`, `RALPH_SLOT_INDEX`, `RALPH_WORKTREE_MAP`. runtime 不再注入这三个值；带这三个字段的 payload 会被 typed schema 拒收。
+3 个已弃用/移除的 payload 字段： `wave_id`, `slot_index`, `worktree_map` —— `dag` 模式下携带这三个字段的 payload 会被 typed schema 拒收。env 名澄清：wave worker 的实际注入 env 是 `RALPH_WAVE_ID` / `RALPH_WAVE_INDEX`（仅 legacy wave 模式）；`RALPH_SLOT_INDEX` / `RALPH_WORKTREE_MAP` 作为 env 名从未存在，`dag` 模式一律以上述 `RALPH_DAG_*` typed JobContext 为准。

@@ -135,7 +135,7 @@ ralph run -c ralph.yml -H builtin:debug -p "Investigate why login fails on mobil
 - Review stage walks 6 dimensions strictly serially (goal-alignment → correctness → testing → maintainability → project-standards → adversarial)
 - Blocks all push operations (local commit only)
 
-For large plans with supervisor fan-out to per-slot worktrees, use `parallel-forge` (the default CLI build already includes the `supervisor-db` feature; `parallel-forge` ships with `event_loop.supervisor.enabled: true`).
+对于大型计划，使用 `parallel-forge`：它运行在 `event_loop.supervisor.scheduler_mode: dag` 下，由 runtime 自有的 DAG 调度器负责 per-Unit 准入、job 启动/恢复与串行 integration，worktree 由 runtime 管理（默认 CLI build 已含 `supervisor-db` feature；preset 自带 `event_loop.supervisor.enabled: true`）。
 
 **When to use `--worktree`:**
 - Multiple parallel ce-executor-pipeline runs

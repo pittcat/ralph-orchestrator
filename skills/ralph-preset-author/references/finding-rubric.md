@@ -269,6 +269,7 @@ review 命中时按上表 `finding_id` + `default_severity` + 默认 confidence 
 | hat `instructions` 伪造 runtime admission、job lifecycle 或 terminal receipt，绕过 runtime-owned DAG 控制面 | P0 | payload-content | Q4 | review-only（`scheduler_mode_instructions_describe_unwired_behavior`） |
 | preset 注释 / notes 声称 `scheduler_mode: dag` 已接管调度，却缺少对应 runtime-driven contract | P1 | payload-content | Q4 | review-only（`scheduler_mode_overstates_cutover`） |
 | `dag_shadow` / `dag` 模式下 preset 未在 author notes 说明 side-effect boundary 与 runtime ownership | P1 | feasibility | Q3 | review-only（`scheduler_mode_transitional_state_undocumented`） |
+| `dag` 模式下 hat `instructions` 涉及协调语义时引用已弃用的 `forge.wave.*` topic 族（应引用 `forge.unit.*` 族；事实核对以 `presets/en/parallel-forge.yml` 的 hat `triggers` / `publishes` 与 `presets/schemas/parallel-forge.yml` 为准） | P1 | payload-content | Q4 | review-only（`scheduler_mode_dag_instructions_reference_wave_topics`） |
 
 命中按上表 `finding_id` + default severity + 默认 confidence 起点 60 入主表。builtin `parallel-forge` 的 `scheduler_mode: dag` 已使用 runtime-owned DAG execution face；`ralph inspect loop --format json` 在非 `wave` 模式输出只读 `scheduler` 块。
 ### Agent skill audit（review-only，由 review SKILL Workflow 0a 弹窗默认跳过、选审触发）

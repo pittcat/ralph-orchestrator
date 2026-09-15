@@ -274,6 +274,7 @@
 2. **instructions 不越权伪造 DAG 行为**：`dag` 模式可以说明 per-Unit admission、job lifecycle、recovery、integration 和 `forge.exec.development.done` 是 runtime-owned；但任何 hat 都不得自行执行/伪造这些控制面副作用。`dag_shadow` 只能描述只读观察，不得声称已产生 DAG 执行副作用。✓ / ✗ + grep
 3. **执行面事实入 notes**：`dag` preset 的注释 / author notes 必须说明 runtime-owned admission、job lifecycle、recovery、integration 与 completion fence；不得让 hat 伪造这些控制面副作用。✓ / ✗ + 引用 notes 段
 4. **inspect 可见性核对**：`ralph inspect loop --format json` 在非 `wave` 模式输出只读 `scheduler` 块（`scheduler_mode` / `plan_keys` / 观测计数）——用它核对配置确实生效，而不是从行为反推。✓ / ✗ + 列 inspect 输出
+5. **协调 topic 族 grep**：`dag` 模式下 hat `instructions:` 涉及协调语义时必须引用 `forge.unit.*` 族，不得出现已弃用的 `forge.wave.*` 族；`grep -n 'forge\.wave\.' <preset>.yml` 在 hat `instructions:` 中应为零命中。✓ / ✗ + grep 输出
 
 任一问 ✗ → 必须改写或显式说明。完整 finding 默认 severity / confidence / aaf_question 见 `finding-rubric.md`「Scheduler mode audit」段。
 

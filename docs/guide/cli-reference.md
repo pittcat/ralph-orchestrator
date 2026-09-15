@@ -231,6 +231,11 @@ ralph inspect loop [OPTIONS]
 | `--format <human|json>` | Output format (default: `human`). |
 | `--root <ROOT>` | Workspace root (default: current directory). |
 
+**JSON 输出的条件块：**
+
+- `supervisor` 块：当 `event_loop.supervisor.enabled: true`（或工作区已存在 `.ralph/supervisor.db` 账本）时出现；内容为 agent-safe 摘要（`availability` / `active_waves` / `queue_depth` / `slot_summary` / `last_coordination_topics`），不含数据库路径或内部账本原文。supervisor 关闭且无账本文件时该键整体省略。
+- `scheduler` 块：仅当 `event_loop.supervisor.scheduler_mode` 不是 `wave` 时出现（即 `dag_shadow` / `dag`）；`wave` 模式下该键不存在，JSON 形状不变。字段为只读、已脱敏的计划级计数：`scheduler_mode`（`dag_shadow` / `dag`）、`plan_keys`（去重排序后的 plan key 列表）、`total_observations` / `admitted_total` / `blocked_total`，以及可选的 `oldest_observation_ms`（无观测时省略）。该块只是计划级计数，不提供 per-job 身份——DAG 模式下 job 身份以 runtime 注入的 `RALPH_DAG_*` 环境变量为准。
+
 ### ralph init
 
 Initialize a new `ralph.yml` configuration file.

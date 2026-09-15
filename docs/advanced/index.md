@@ -15,6 +15,7 @@ Deep dives into Ralph's internals and advanced usage patterns.
 | [Diagnostics](diagnostics.md) | Debug with full visibility |
 | [Parallel Loops](parallel-loops.md) | Run multiple loops concurrently with worktrees |
 | [Agent Waves](agent-waves.md) | Intra-loop parallelism for scatter-gather workflows |
+| [DAG Scheduler](dag-scheduler.md) | Operator manual for `dag_shadow` validation and `dag` scheduler mode |
 
 ## When to Read This
 

@@ -92,6 +92,7 @@ nav:
     - Diagnostics: advanced/diagnostics.md
     - Parallel Loops: advanced/parallel-loops.md
     - Agent Waves: advanced/agent-waves.md
+    - DAG Scheduler: advanced/dag-scheduler.md
   - API Reference:
     - api/index.md
     - ralph-proto: api/ralph-proto.md
@@ -161,6 +162,7 @@ plugins:
           - advanced/diagnostics.md
           - advanced/parallel-loops.md
           - advanced/agent-waves.md
+          - advanced/dag-scheduler.md
         API Reference:
           - api/index.md
           - api/ralph-proto.md

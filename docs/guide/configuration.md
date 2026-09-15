@@ -520,6 +520,9 @@ rusqlite-backed wave orchestrator.
 | `db_path` | string | `".ralph/supervisor.db"` | SQLite database path |
 | `max_concurrent_workers` | integer | `4` | Active worker slot ceiling |
 | `aggregate_timeout_secs` | integer | `600` | Wall-clock budget for one wave's collect phase |
+| `slot_retry_budget` | integer | `1` | worker 任务的 per-slot 自动重试预算（重试不经过 store 的 Failed 状态，supervisor 只消费最终结局）；取值范围 `0..=2`，显式越界 fail-closed，启动即拒 |
+| `scheduler_mode` | string | `wave` | 调度器权威三态：`wave`（legacy 内存 `WaveTracker`，默认）/ `dag_shadow`（legacy wave 照常执行 + DAG 调度器旁路 dry-run 观察，零副作用）/ `dag`（runtime 自有的 work-conserving DAG 调度器接管调度）。`dag_shadow` / `dag` 为 fail-closed 组合：要求 `enabled: true` 且 `event_loop.execution_mode: isolated`，否则 `ralph preset check` / preflight / `ralph run` 启动即拒，不静默降级 |
+| `dag_pools` | map | 无 | 可选的 DAG 调度器 per-pool 容量上限，键为 `executor` / `reviewer` / `verifier` / `fixer`；未设置的 pool 回落到 `max_concurrent_workers`。仅 `dag_shadow` / `dag` 合法：在 `wave` 下声明或单项值为 `0` 都会被 preflight 拒绝 |
 
 ### progress_steward
 

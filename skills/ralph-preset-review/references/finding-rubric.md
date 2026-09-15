@@ -268,6 +268,7 @@ review 命中时按上表 `finding_id` + `default_severity` + 默认 confidence 
 | hat `instructions` 伪造 runtime admission、job lifecycle 或 terminal receipt，绕过 runtime-owned DAG 控制面 | P0 | payload-content | Q4 | review-only（`scheduler_mode_instructions_describe_unwired_behavior`） |
 | preset 注释 / notes 声称 `scheduler_mode: dag` 已接管调度，却缺少对应 runtime-driven contract | P1 | payload-content | Q4 | review-only（`scheduler_mode_overstates_cutover`） |
 | `dag_shadow` / `dag` 模式下 preset 未在 author notes 说明 side-effect boundary 与 runtime ownership | P1 | feasibility | Q3 | review-only（`scheduler_mode_transitional_state_undocumented`） |
+| `dag` 模式下 hat `instructions` 涉及协调语义时引用已弃用的 `forge.wave.*` topic 族（应引用 `forge.unit.*` 族；事实核对以 `presets/en/parallel-forge.yml` 的 hat `triggers` / `publishes` 与 `presets/schemas/parallel-forge.yml` 为准） | P1 | payload-content | Q4 | review-only（`scheduler_mode_dag_instructions_reference_wave_topics`） |
 
 命中按上表 `finding_id` + default severity + 默认 confidence 起点 60 入主表。任何 `scheduler_mode: dag_shadow | dag` 的 supervisor preset 都适用本段；`ralph inspect loop --format json` 在非 `wave` 模式输出只读 `scheduler` 块。
 ### Agent skill audit（review-only，由 review SKILL Workflow 0a 弹窗默认跳过、选审触发）
@@ -498,4 +499,4 @@ DAG 模式下，runtime 为每个 active job 注入一组 typed `JobContext` 字
 
 13 个 typed 字段： `RALPH_DAG_PLAN_KEY`, `RALPH_DAG_UNIT_KEY`, `RALPH_DAG_TASK_KEY`, `RALPH_DAG_TASK_ID`, `RALPH_DAG_JOB_ID`, `RALPH_DAG_JOB_TOKEN`, `RALPH_DAG_STAGE`, `RALPH_DAG_ATTEMPT`, `RALPH_DAG_WORKTREE`, `RALPH_DAG_BASE`, `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH`, `RALPH_DAG_ARTIFACT_REFS`, `RALPH_DAG_EXPECTED_HEAD`.
 
-3 个已弃用/移除字段： `RALPH_WAVE_ID`, `RALPH_SLOT_INDEX`, `RALPH_WORKTREE_MAP`. runtime 不再注入这三个值；带这三个字段的 payload 会被 typed schema 拒收。
+3 个已弃用/移除的 payload 字段： `wave_id`, `slot_index`, `worktree_map` —— `dag` 模式下携带这三个字段的 payload 会被 typed schema 拒收。env 名澄清：wave worker 的实际注入 env 是 `RALPH_WAVE_ID` / `RALPH_WAVE_INDEX`（仅 legacy wave 模式）；`RALPH_SLOT_INDEX` / `RALPH_WORKTREE_MAP` 作为 env 名从未存在，`dag` 模式一律以上述 `RALPH_DAG_*` typed JobContext 为准。

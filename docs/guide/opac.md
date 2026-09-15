@@ -58,6 +58,15 @@ Before any state-changing command, the agent should know:
    ```
 5. **Supervisor state (when enabled)** — if the preset declares `event_loop.supervisor.enabled: true`, `ralph inspect loop --format json` includes an agent-safe `supervisor` summary (`active_waves`, `queue_depth`, `slot_summary`, `last_coordination_topics`). It never exposes the database path or raw ledger contents.
 
+### DAG 模式下的可见性差异（`scheduler_mode: dag` / `dag_shadow`）
+
+当 preset 使用 `event_loop.supervisor.scheduler_mode: dag`（如 builtin `parallel-forge`）或 `dag_shadow` 时，hat 可见的协调语义与 legacy wave 不同：
+
+- **协调 topic 换成 `forge.unit.*` 族**：`forge.unit.ready` / `forge.unit.executed` / `forge.unit.failed` / `forge.unit.correction` 等承担 Unit 级的准入、执行、失败与纠错交接。旧的 `forge.wave.*` 族在 `dag` 模式下不再由 hat 订阅（仅 dispatcher 内部过渡 seam 保留）；在 hat context 下 `ralph emit forge.wave.verified` 会被 `event_policy` 拒收，Unit 完成执行改用 `forge.unit.executed`。
+- **身份来自 typed `JobContext` 环境变量**：DAG 模式下 runtime 为每个 job 注入 `RALPH_DAG_*` 系列变量——`RALPH_DAG_PLAN_KEY` / `RALPH_DAG_UNIT_KEY` / `RALPH_DAG_TASK_KEY` / `RALPH_DAG_TASK_ID` / `RALPH_DAG_JOB_ID` / `RALPH_DAG_JOB_TOKEN` / `RALPH_DAG_STAGE` / `RALPH_DAG_ATTEMPT` / `RALPH_DAG_WORKTREE` / `RALPH_DAG_BASE` / `RALPH_DAG_EXPECTED_HEAD` / `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH` / `RALPH_DAG_ARTIFACT_REFS`。构造事件 payload 时原样读取这些变量，不要自行拼造。
+- **`wave_id` / `slot_index` / `worktree_map` 已弃用并移除**：runtime 不再注入这三个值，payload 中带这三个字段会被 typed schema 拒收；job 身份一律由 `RALPH_DAG_JOB_ID` + `RALPH_DAG_JOB_TOKEN` 锚定。
+- **inspect 的 `scheduler` 块只是计划级计数**：`ralph inspect loop --format json` 的 `scheduler` 块（`total_observations` / `admitted_total` / `blocked_total` / `plan_keys`）用于观察计划级准入情况，不提供 per-job context；身份与 payload 字段一律以 `RALPH_DAG_*` 环境变量为准。
+
 ## Precheck
 
 Precheck runs the same authorization and schema logic as the real command, but writes nothing.

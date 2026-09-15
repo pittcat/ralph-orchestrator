@@ -227,6 +227,13 @@ jq 'select(.type | startswith("Wave"))' .ralph/diagnostics/*/orchestration.jsonl
 - **Global backend fallback** — Workers use the global backend when the hat has no specific backend override
 - **No TUI progress** — Wave workers run headless; progress is logged but not shown in the TUI
 
+## 与 supervisor / DAG 执行面的关系
+
+本文其余部分描述的是默认的 legacy wave 执行面（内存 `WaveTracker`）。在此之上还有两条由 `event_loop.supervisor` 配置控制的增强路径（字段详见 [Configuration](../guide/configuration.md) 的 `supervisor` 段）：
+
+- **supervisor 账本路径**：`event_loop.supervisor.enabled: true`（配合 `event_loop.execution_mode: isolated`）时，wave 调度改由 rusqlite 账本（`.ralph/supervisor.db`）承载，worker 并发上限、collect 超时与 slot 重试获得持久化语义，执行语义本身不变。
+- **DAG 执行面**：`event_loop.supervisor.scheduler_mode: dag`（或过渡用的 `dag_shadow`）时，调度权威切换到 runtime 自有的 DAG 调度器（builtin `parallel-forge` 即此模式），协调 topic 与 job 身份语义随之改变；详见 [OPAC](../guide/opac.md) 的「DAG 模式下的可见性差异」小节。
+
 ## See Also
 
 - [Hats & Events](../concepts/hats-and-events.md) — How hats and events work
