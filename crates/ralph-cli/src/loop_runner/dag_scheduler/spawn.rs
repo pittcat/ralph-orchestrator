@@ -1996,18 +1996,26 @@ impl DagSchedulerRuntime {
                         exec.hats_source_label.clone(),
                         exec.config_path.clone(),
                         exec.schemas.get(kind.success_topic()).cloned(),
+                        exec.schemas.get(kind.failure_topic()).cloned(),
                     )
                 })
                 .ok_or_else(|| format!("no `{}` hat template in preset config", kind.hat()))
         };
-        let (loop_id, hat_config, global_backend, hats_source_label, config_path, schema) =
-            match snapshot {
-                Ok(snapshot) => snapshot,
-                Err(reason) => {
-                    self.fail_job(&identity, kind, &reason, FailureClass::SpawnFailed);
-                    return;
-                }
-            };
+        let (
+            loop_id,
+            hat_config,
+            global_backend,
+            hats_source_label,
+            config_path,
+            schema,
+            failure_schema,
+        ) = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(reason) => {
+                self.fail_job(&identity, kind, &reason, FailureClass::SpawnFailed);
+                return;
+            }
+        };
 
         // Trusted worktree against the per-Unit base pin (U3,
         // 2026-09-09-0917). The base pin is read first so a
@@ -2256,6 +2264,7 @@ impl DagSchedulerRuntime {
             &worktree.path,
             &events_file,
             schema.as_ref(),
+            failure_schema.as_ref(),
             &tests,
             &allowed_paths,
             &forbidden_paths,
@@ -2477,6 +2486,7 @@ fn build_job_prompt(
     worktree_path: &Path,
     events_file: &Path,
     schema: Option<&EventSchema>,
+    failure_schema: Option<&EventSchema>,
     tests: &[String],
     allowed_paths: &[PathBuf],
     forbidden_paths: &[PathBuf],
@@ -2486,6 +2496,17 @@ fn build_job_prompt(
     let required: Vec<String> = schema
         .map(|s| s.required_fields.clone())
         .unwrap_or_default();
+    let failure_required: Vec<String> = failure_schema
+        .map(|s| s.required_fields.clone())
+        .unwrap_or_default();
+    let failure_contract = if failure_required.is_empty() {
+        "plus its own required fields".to_string()
+    } else {
+        format!(
+            "plus its own required fields: {}",
+            failure_required.join(", ")
+        )
+    };
     let mut prompt = format!(
         "## DAG JOB CONTEXT (runtime-injected)\n\
          - You are the `{hat}` hat, running as DAG job `{job}` (stage `{stage}`, attempt {attempt}) \
@@ -2500,7 +2521,7 @@ fn build_job_prompt(
          Emit EXACTLY ONE business event.\n\
          - On success emit `{success}` with a JSON payload containing: {required}. The runtime \
          overwrites unit_id/plan_key/task_id/task_key; you MUST supply the remaining fields.\n\
-         - On failure emit `{failure}` instead (same identity fields; plus its own required fields).\n",
+         - On failure emit `{failure}` instead (same identity fields; {failure_contract}).\n",
         hat = kind.hat(),
         job = identity.job_id,
         stage = kind.stage_str(),
@@ -2515,6 +2536,7 @@ fn build_job_prompt(
         success = kind.success_topic(),
         failure = kind.failure_topic(),
         required = required.join(", "),
+        failure_contract = failure_contract,
     );
     if kind == SpawnKind::Verify {
         if tests.is_empty() {
@@ -3812,6 +3834,7 @@ units:
             Path::new("/worktree/U1"),
             Path::new("/worktree/U1/events.jsonl"),
             None,
+            None,
             &[],
             &[PathBuf::from("src"), PathBuf::from("tests")],
             &[PathBuf::from("secrets")],
@@ -3821,6 +3844,86 @@ units:
 
         assert!(prompt.contains("Allowed paths for this Unit: `src`, `tests`"));
         assert!(prompt.contains("Forbidden paths for this Unit: `secrets`"));
+    }
+
+    #[test]
+    fn dag_job_prompt_lists_failure_required_fields() {
+        let identity = JobIdentity {
+            plan_key: "pf-u4".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-execute-failure-contract".to_string(),
+            hat: HAT_EXECUTOR.to_string(),
+            stage: "execute".to_string(),
+            attempt: 1,
+            token: "tok-u4".to_string(),
+        };
+        let hat = HatConfig::default();
+        let success_schema = EventSchema {
+            required_fields: vec!["summary".to_string()],
+            ..EventSchema::default()
+        };
+        let failure_schema = EventSchema {
+            required_fields: vec!["reason".to_string(), "failure_class".to_string()],
+            ..EventSchema::default()
+        };
+
+        let prompt = build_job_prompt(
+            &identity,
+            SpawnKind::Execute,
+            &hat,
+            Path::new("/worktree/U1"),
+            Path::new("/worktree/U1/events.jsonl"),
+            Some(&success_schema),
+            Some(&failure_schema),
+            &[],
+            &[],
+            &[],
+            None,
+            &BTreeMap::new(),
+        );
+
+        assert!(prompt.contains("On success emit `forge.unit.executed`"));
+        assert!(prompt.contains("containing: summary"));
+        assert!(prompt.contains(
+            "On failure emit `forge.unit.execution_failed` instead (same identity fields; plus its own required fields: reason, failure_class)."
+        ));
+    }
+
+    #[test]
+    fn dag_job_prompt_failure_contract_falls_back_without_fields() {
+        let identity = JobIdentity {
+            plan_key: "pf-u4-fallback".to_string(),
+            unit_id: "U1".to_string(),
+            job_id: "dag-U1-execute-failure-fallback".to_string(),
+            hat: HAT_EXECUTOR.to_string(),
+            stage: "execute".to_string(),
+            attempt: 1,
+            token: "tok-u4-fallback".to_string(),
+        };
+        let hat = HatConfig::default();
+        let empty_schema = EventSchema::default();
+
+        for failure_schema in [None, Some(&empty_schema)] {
+            let prompt = build_job_prompt(
+                &identity,
+                SpawnKind::Execute,
+                &hat,
+                Path::new("/worktree/U1"),
+                Path::new("/worktree/U1/events.jsonl"),
+                None,
+                failure_schema,
+                &[],
+                &[],
+                &[],
+                None,
+                &BTreeMap::new(),
+            );
+
+            assert!(prompt.contains(
+                "On failure emit `forge.unit.execution_failed` instead (same identity fields; plus its own required fields)."
+            ));
+            assert!(!prompt.contains("plus its own required fields:"));
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -4814,6 +4917,7 @@ units:
             Path::new("/worktree/U1"),
             Path::new("/worktree/U1/events.jsonl"),
             None,
+            None,
             &[],
             &[],
             &[],
@@ -4857,6 +4961,7 @@ units:
             &hat,
             Path::new("/worktree/U1"),
             Path::new("/worktree/U1/events.jsonl"),
+            None,
             None,
             &[],
             &[],
@@ -4947,6 +5052,7 @@ units:
             Path::new("/worktree/U1"),
             Path::new("/worktree/U1/events.jsonl"),
             None,
+            None,
             &[],
             &[],
             &[],
@@ -4985,6 +5091,7 @@ units:
             &hat,
             Path::new("/worktree/U1"),
             Path::new("/worktree/U1/events.jsonl"),
+            None,
             None,
             &[],
             &[],
