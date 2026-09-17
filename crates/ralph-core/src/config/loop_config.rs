@@ -332,7 +332,13 @@ fn default_cancellation_promise() -> String {
 }
 
 /// Event loop configuration.
+///
+/// `deny_unknown_fields`: a mis-layered key (e.g. `scheduler_mode`
+/// written under `event_loop:` instead of `event_loop.supervisor:`)
+/// must fail loudly instead of being silently dropped into a
+/// legacy-default fallback (red-team F6a).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventLoopConfig {
     /// Inline prompt text (mutually exclusive with prompt_file).
     pub prompt: Option<String>,
@@ -1125,6 +1131,26 @@ bogus_field: 1
         assert!(
             result.is_err(),
             "unknown supervisor field must produce a deserialization error"
+        );
+    }
+
+    /// Red-team F6a regression: `EventLoopConfig` carries
+    /// `deny_unknown_fields`, so a `scheduler_mode` written one level
+    /// too high (under `event_loop:` instead of `event_loop.supervisor:`)
+    /// is a hard parse error — never a silent fallback to `wave`.
+    #[test]
+    fn event_loop_rejects_mislayered_scheduler_mode() {
+        let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  scheduler_mode: dag
+  supervisor:
+    enabled: true
+"#;
+        let result: Result<crate::config::RalphConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "mis-layered scheduler_mode must be a hard error, not a silent wave fallback"
         );
     }
 

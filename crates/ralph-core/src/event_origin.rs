@@ -198,6 +198,24 @@ pub const DAG_RUNTIME_UNIT_TOPICS: &[&str] = &[
     "forge.unit.integrated",
 ];
 
+/// Runtime-emitted DAG coordination topics (`scheduler_mode: dag`):
+/// the DAG scheduler writes these to the main ledger via
+/// `append_supervisor_coord_event` (stamped `system_injected: true`)
+/// and depends on reading them back as ACCEPTED events to ack the
+/// durable integration record (`on_unit_integrated_accepted`) and to
+/// close the plan (`forge.exec.development.done`). Like the supervisor
+/// wave coordination topics, they are produced by the runtime itself —
+/// the origin guard accepts them only when `system_injected == Some(true)`
+/// and agents remain unable to publish them (no hat declares them in
+/// `publishes`).
+pub const DAG_RUNTIME_COORD_TOPICS: &[&str] =
+    &["forge.unit.integrated", "forge.exec.development.done"];
+
+/// `true` when `topic` is a runtime-emitted DAG coordination topic.
+pub fn is_dag_runtime_coordination_topic(topic: &str) -> bool {
+    DAG_RUNTIME_COORD_TOPICS.contains(&topic)
+}
+
 /// `true` when `topic` is one of the six DAG-runtime-driven
 /// `forge.unit.*` topics in [`DAG_RUNTIME_UNIT_TOPICS`]. Callers must
 /// additionally gate on the dag scheduler mode (see
@@ -409,13 +427,19 @@ pub fn validate_event_origin(
     // MUST be rejected with `system_injected_on_business_topic`.
     // Only the six supervisor coordination topics (and future
     // `<kind>.wave.{complete,failed}` variants via
-    // `is_wave_coordination_topic`) may use the system injection
+    // `is_wave_coordination_topic`) plus the runtime-emitted DAG
+    // coordination topics (`forge.unit.integrated` /
+    // `forge.exec.development.done`, which the dag-mode ack loopback
+    // must read back as accepted events) may use the system injection
     // path. This preserves the runtime's coord injection seam
     // (KTD4/R5) while denying agent-emitted forged
     // `system_injected=true` business events.
     if event.system_injected == Some(true) {
         let topic_str = event.topic.as_str();
-        if is_supervisor_coordination_topic(topic_str) || is_wave_coordination_topic(topic_str) {
+        if is_supervisor_coordination_topic(topic_str)
+            || is_wave_coordination_topic(topic_str)
+            || is_dag_runtime_coordination_topic(topic_str)
+        {
             return OriginCheck::Accepted;
         }
         return OriginCheck::Rejected {

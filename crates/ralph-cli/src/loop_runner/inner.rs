@@ -715,6 +715,10 @@ pub(super) async fn run_loop_impl_inner(
     // the runtime-owned DAG scheduler is the sole execution
     // authority, so the legacy bridge is deliberately absent;
     // dag_shadow retains it for side-by-side observation.
+    // NOTE (red-team F5): the absence is enforced at TWO gates — the
+    // `supervisor_path_enabled` condition here AND the dag-mode guard
+    // at the top of the `else` branch below, which would otherwise
+    // still build the bridge whenever a `db_path` is configured.
     let supervisor_cfg = &config.event_loop.supervisor;
     let supervisor_path_enabled = config.event_loop.supervisor.scheduler_mode
         != ralph_core::config::SchedulerMode::Dag
@@ -886,7 +890,19 @@ pub(super) async fn run_loop_impl_inner(
             // "no wave → no DB" invariant.
             #[cfg(feature = "supervisor-db")]
             {
-                if !supervisor_cfg.db_path.trim().is_empty() {
+                // Red-team F5: in `dag` mode the runtime-owned DAG
+                // scheduler is the sole execution authority — the
+                // legacy wave bridge must NOT be built here even when
+                // the preset still carries a `db_path` (builtin
+                // `parallel-forge` does). Building it would re-open the
+                // wave ledger, inject `exec.wave.failed` for stale
+                // waves, and re-enable the redrive boot scan — a
+                // second spawn authority.
+                if config.event_loop.supervisor.scheduler_mode
+                    == ralph_core::config::SchedulerMode::Dag
+                {
+                    None
+                } else if !supervisor_cfg.db_path.trim().is_empty() {
                     let supervisor_events_path = resolve_emit_events_path(
                         &ctx,
                         crate::loop_runner::paths::config_state_machine_enabled(&config),
@@ -1006,16 +1022,21 @@ pub(super) async fn run_loop_impl_inner(
         };
 
     // ── Step 4 (2026-09-03-0959 DAG 接线): observation-only DAG ─────
-    // scheduler seam. Constructed only when the preset opts into a
+    // scheduler seam. Constructed when the preset opts into a
     // runtime-owned scheduler mode (`dag_shadow` / `dag`) on the
     // supervisor path (same gate as the bridge above). Construction is
     // pure bookkeeping; `.ralph/dag.db` opens lazily on the first
-    // relevant accepted `forge.*` event, so a dag-mode run that never
-    // sees one leaves the `.ralph` file listing identical to a wave
-    // run (TG-S05). The seam never spawns, never emits, never closes
-    // tasks — execution authority stays with the wave path.
+    // relevant accepted `forge.*` event in `dag` mode only
+    // (`dag_shadow` uses in-memory stores and never opens the file),
+    // so a dag-mode run that never sees one leaves the `.ralph` file
+    // listing identical to a wave run (TG-S05). In `dag_shadow` the
+    // seam observes and records admission decisions in memory but
+    // never spawns, never emits, never closes tasks — execution
+    // authority stays with the wave path (spawn face is gated on
+    // `mode == Dag`, and `attach_execution_context` is a no-op outside
+    // `dag` mode).
     let mut dag_scheduler = if config.event_loop.supervisor.scheduler_mode
-        == ralph_core::config::SchedulerMode::Dag
+        != ralph_core::config::SchedulerMode::Wave
         && config.event_loop.supervisor.enabled
         && matches!(
             config.event_loop.execution_mode,
@@ -1199,17 +1220,23 @@ pub(super) async fn run_loop_impl_inner(
 
     // ── Step E1 (2026-09-03-0959 DAG 接线): dag-mode execution face ──
     // Attach the job-template context (hat configs, global backend,
-    // ledger path) to the DAG seam. No-op in wave / dag_shadow mode;
-    // spawning still only starts once forge seam events arrive.
+    // ledger path) to the DAG seam. The event-loop attach is `dag`-only:
+    // in `dag_shadow` the seam must stay a pure observer (no virtual
+    // target registration, no exec context); `attach_execution_context`
+    // itself is also a no-op outside `dag` mode.
     if let Some(dag) = dag_scheduler.as_mut() {
-        event_loop.attach_dag_runtime();
-        dag.attach_execution_context(crate::loop_runner::dag_scheduler::DagExecutionContext::new(
-            &config,
-            &backend,
-            &loop_id,
-            crate::loop_runner::paths::resolve_current_events_path(&ctx),
-            hats_source_label.clone(),
-        ));
+        if config.event_loop.supervisor.scheduler_mode == ralph_core::config::SchedulerMode::Dag {
+            event_loop.attach_dag_runtime();
+            dag.attach_execution_context(
+                crate::loop_runner::dag_scheduler::DagExecutionContext::new(
+                    &config,
+                    &backend,
+                    &loop_id,
+                    crate::loop_runner::paths::resolve_current_events_path(&ctx),
+                    hats_source_label.clone(),
+                ),
+            );
+        }
         if resume {
             dag.recover_after_restart();
         }

@@ -91,7 +91,7 @@ DAG 调度器拥有自己的 SQLite 账本，默认路径 `<repo_root>/.ralph/da
 
 ### SQL migrations v19–v23
 
-DAG store 的表结构由 migration 管理；新安装自动迁移，旧库用 `ralph loops clean --ledger` 配合 migration runner 升级。各表一句话职责：
+DAG store 的表结构由 migration 管理：打开 dag.db 时自动执行迁移（新安装与旧库同一路径，无手工命令）。各表一句话职责：
 
 | migration | 表 | 职责 |
 |---|---|---|
@@ -118,9 +118,11 @@ ralph run --worktree --reuse-worktree --worktree-name <plan-name>-<suffix>
 
 正在运行的同名 worktree 不可复用。
 
-### exactly-once 交付
+### 终态交付的去重语义
 
-DAG runtime 通过 `dag_terminal_deliveries` 持久去重表保证终态事件恰好交付一次：同一 `unit_key` + `job_id` + `job_token` 三元组的 `forge.unit.executed` 只能成功发送一次，重复发送被 runtime 拦截（emitter 会收到 `duplicate_forge_unit_executed` 类拒绝）。`unit_key` 不是 `wave` 执行面的概念，无需 operator 干预；该表的意义是 loop 崩溃重启后，已交付的终态收据不会被重放第二次。
+DAG runtime 对**自身发射的**协调/终态事件（`forge.unit.integrated`、`forge.exec.development.done`）用持久 fence 表 `dag_terminal_emits` 去重：主键为 `(plan_key, topic)`，`INSERT OR IGNORE` 保证崩溃重启后同一终态不重放（`dag_store_rusqlite.rs:321-358`；fence key 冲突即 fail-closed）。
+
+agent 发射的 `forge.unit.executed` 不走该表：它由 durable job journal 的身份比对兜底（payload 的 `job_id` / `job_token` / `stage` / `attempt` 必须与 runtime 当前登记的在跑 job 一致，不符即静默丢弃）；Unit 已进入后续阶段后的重复发送被视为非法迁移，该 Unit 判 contract violation 失败。**不存在** `duplicate_forge_unit_executed` 拒绝码，也不存在按 `unit_key + job_id + job_token` 三元组去重的表（v20 `dag_terminal_deliveries` 目前仅为预留 schema，未接线）。
 
 ## `forge.unit.*` topic 参考表
 

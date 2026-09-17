@@ -3,6 +3,66 @@
 use super::common::*;
 use super::*;
 
+/// Red-team F1 regression: the DAG runtime emits `forge.unit.integrated` /
+/// `forge.exec.development.done` via `append_supervisor_coord_event`, which
+/// stamps `system_injected: true, hat: "ralph", source: "ralph"`
+/// (crates/ralph-cli/src/loop_runner/wave/dispatcher/coordination.rs). The
+/// dag-mode ack loopback (`observe_accepted_events` →
+/// `on_unit_integrated_accepted`) only sees ACCEPTED events, so these
+/// runtime coordination events must survive the isolated partition, the
+/// origin guard, and the topic-format gate.
+#[test]
+fn runtime_emitted_dag_coord_events_are_accepted() {
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    terminal_topics: [LOOP_COMPLETE]
+    business_topics: [forge.exec.development.done]
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["forge.unit.ready"]
+    publishes: ["forge.unit.executed"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.state.current_isolated_hat = Some(HatId::new("executor"));
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    for topic in ["forge.unit.integrated", "forge.exec.development.done"] {
+        let event_json = serde_json::json!({
+            "topic": topic,
+            "payload": "{\"unit_id\":\"U1\",\"plan_key\":\"pf-test\"}",
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "hat": "ralph",
+            "source": "ralph",
+            "system_injected": true,
+        });
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&events_path)
+                .unwrap();
+            writeln!(file, "{}", event_json).unwrap();
+        }
+        let result = event_loop.process_events_from_jsonl().unwrap();
+        assert!(
+            result.had_events,
+            "runtime-emitted {topic} must be accepted — the dag ack loopback depends on it"
+        );
+    }
+}
+
 #[test]
 fn test_origin_guard_accepts_valid_hat_event() {
     let yaml = r#"

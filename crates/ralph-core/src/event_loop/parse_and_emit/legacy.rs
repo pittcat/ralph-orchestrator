@@ -1578,6 +1578,18 @@ impl EventLoop {
                     if crate::event_policy::is_system_topic(&event.topic) {
                         return true;
                     }
+                    // system_injected events already passed the origin
+                    // guard's narrow allowlist (supervisor wave
+                    // coordination + dag runtime coordination topics);
+                    // the topic-format whitelist exists to catch
+                    // agent-authored typos, not runtime receipts. The
+                    // dag runtime's `forge.unit.integrated` is declared
+                    // in NO hat's publishes/triggers by design, so
+                    // without this bypass the ack loopback event would
+                    // be rejected here.
+                    if event.system_injected == Some(true) {
+                        return true;
+                    }
                     crate::event_policy::check_topic_format(&event.topic, &allowed_topics).is_none()
                 });
             if !topic_format_rejections.is_empty() {

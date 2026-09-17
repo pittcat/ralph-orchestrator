@@ -40,9 +40,12 @@
 //!
 //! Step 4 (2026-09-03-0959 DAG 接线) adds [`DagSchedulerRuntime`]
 //! below: the seam the loop runner feeds accepted (post-policy)
-//! events into. In `wave` / `dag_shadow` mode it stays
-//! **observability-only** (no spawn, no worktree, no merge, no
-//! emit). Step E1 adds the `dag`-mode execution face (`spawn`
+//! events into. The runtime is constructed for both `dag_shadow`
+//! and `dag` (never for `wave`); in `dag_shadow` it records admission
+//! observations to the in-memory sink only and stays
+//! **side-effect-free** (no spawn, no worktree, no merge, no emit —
+//! the spawn face and exec-context attach are gated on `mode == Dag`).
+//! Step E1 adds the `dag`-mode execution face (`spawn`
 //! module): per-unit executor → reviewer → verifier jobs fenced by
 //! the durable launch journal, with results merged back into the
 //! main ledger at most one business event per tick (OPAC).

@@ -295,8 +295,14 @@ impl DagSchedulerRuntime {
         let candidates: Vec<(String, String, String, usize)> = self
             .plans
             .iter()
-            .filter(|(_, plan)| {
-                !plan.units.is_empty()
+            // A blocked plan must never emit completion: recovery can
+            // restore acked units into `plan.integrated` (mod.rs) while
+            // `reconcile_after_restart` blocks the same plan for a
+            // missing trusted ledger event — both states coexist, so
+            // the candidate filter must consult `blocked_plans`.
+            .filter(|(plan_key, plan)| {
+                !self.blocked_plans.contains(plan_key.as_str())
+                    && !plan.units.is_empty()
                     && plan
                         .units
                         .iter()
@@ -1232,6 +1238,73 @@ units:
         assert!(recovered.blocked_plans.contains("pf-test"));
         assert_eq!(ledger_contains(tmp.path(), UNIT_INTEGRATED), 0);
         assert_eq!(ledger_contains(tmp.path(), DEVELOPMENT_DONE), 0);
+    }
+
+    /// Crash-window combination the test above misses: EVERY unit of the
+    /// plan holds a durable ack (so recovery restores all of them into
+    /// `plan.integrated`) while the trusted ledger events are missing (so
+    /// reconcile blocks the plan). A blocked plan must never emit
+    /// `forge.exec.development.done` even when it looks fully integrated.
+    #[cfg(feature = "supervisor-db")]
+    #[test]
+    fn blocked_plan_with_full_acks_never_emits_development_done() {
+        let (tmp, mut first) = git_fixture(PLAN_ARTIFACT, false);
+        let target_branch = first
+            .plans
+            .get("pf-test")
+            .expect("plan")
+            .target_branch
+            .clone();
+        let store = first
+            .journal()
+            .expect("durable journal")
+            .shared_with_integration();
+        for unit_id in ["U1", "U2"] {
+            store
+                .record_integrated(&ralph_core::supervisor::dag_integration::IntegrationInput {
+                    unit_id: unit_id.to_string(),
+                    target_branch: target_branch.clone(),
+                    base_commit: "base".to_string(),
+                    integrated_commit: "integrated".to_string(),
+                    expected_head_before: "base".to_string(),
+                    created_at_ms: 1,
+                })
+                .expect("record integration");
+            store.ack(unit_id, &target_branch).expect("ack integration");
+        }
+        drop(first);
+
+        let mut recovered = DagSchedulerRuntime::new(
+            SchedulerMode::Dag,
+            ResolvedDagPools {
+                global: 4,
+                executor: 2,
+                reviewer: 2,
+                verifier: 2,
+                fixer: 2,
+            },
+            tmp.path().to_path_buf(),
+        );
+        recovered.attach_execution_context(exec_context(tmp.path()));
+        recovered.recover_after_restart();
+
+        assert!(recovered.blocked_plans.contains("pf-test"));
+        assert_eq!(
+            recovered
+                .plans
+                .get("pf-test")
+                .expect("plan")
+                .integrated
+                .len(),
+            2,
+            "both acked units are restored into plan.integrated"
+        );
+        recovered.maybe_emit_development_done();
+        assert_eq!(
+            ledger_contains(tmp.path(), DEVELOPMENT_DONE),
+            0,
+            "a blocked plan must never emit forge.exec.development.done"
+        );
     }
 
     /// Crash window: the terminal fence was committed, but the final event

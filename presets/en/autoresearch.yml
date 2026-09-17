@@ -45,9 +45,7 @@ event_loop:
   starting_event: experiment.start
   max_iterations: 500
   max_runtime_seconds: 28800
-  checkpoint_interval: 5
   max_consecutive_failures: 5
-  idle_timeout_secs: 300
   workflow_guards:
     chains:
     - name: experiment

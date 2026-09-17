@@ -659,9 +659,9 @@ policy-check 拒收:
 
 ### `forge.unit.executed` 的幂等约束
 
-在 DAG runtime（`scheduler_mode: dag`）下，"某个 Unit 完成执行"由 `forge.unit.executed` 主题承载（**取代**旧的 `forge.wave.verified`）。payload 的 `plan_key` / `unit_key` / `task_key` / `task_id` / `job_id` / `job_token` / `stage` / `attempt` / `verified_execution_plan_path` / `artifact_refs` 一律从本轮注入的 `RALPH_DAG_*` 环境变量原样读取（对照表见 `ralph-tools` §Runner 注入的环境变量 → DAG typed `JobContext`），不要自己拼造；连同 `candidate_commit_sha` 必须对应同一个已整合候选。同一 `unit_key` + `job_id` + `job_token` 三元组只能成功发送一次（重复发送由 runtime 持久去重表 `dag_terminal_deliveries` 拦截）。
+在 DAG runtime（`scheduler_mode: dag`）下，"某个 Unit 完成执行"由 `forge.unit.executed` 主题承载（**取代**旧的 `forge.wave.verified`）。payload 的 `plan_key` / `unit_key` / `task_key` / `task_id` / `job_id` / `job_token` / `stage` / `attempt` / `verified_execution_plan_path` / `artifact_refs` 一律从本轮注入的 `RALPH_DAG_*` 环境变量原样读取（对照表见 `ralph-tools` §Runner 注入的环境变量 → DAG typed `JobContext`），不要自己拼造；连同 `candidate_commit_sha` 必须对应同一个已整合候选。每个 job 只发送一次：**不要重发**。重复发送没有专门的去重拒绝码——携带 job 身份但与 runtime 持久记录不符的事件会被静默丢弃；若该 Unit 已进入后续阶段，重复事件会被视为非法迁移，Unit 直接判 contract violation 失败。（持久去重表 `dag_terminal_deliveries` 目前是预留 schema、未接线，不要假设它会拦截重复发送。）
 
-**已弃用/移除**：`wave_id` / `slot_index` / `worktree_map` 不再出现在该主题的 `required_fields` 中（typed schema 拒收）。若返回 `duplicate_forge_unit_executed` / `duplicate_work_done`，停止重复发送，先等待后续纠正或新的 candidate commit；不要修改时间戳等无关字段来绕过去重。
+**已弃用/移除**：`wave_id` / `slot_index` / `worktree_map` 不再出现在该主题的 `required_fields` 中（typed schema 拒收）。发送失败后不要修改时间戳等无关字段重试同一 payload；先停下来等待后续纠正或新的 candidate commit。
 
 **过渡期提醒**：`forge.wave.verified` 在 `dag` 模式下已不再由 hat 订阅（仅 dispatcher 内部 seam 保留），所以 `ralph emit forge.wave.verified` 在 hat context 下会被 `event_policy` 拒收；改用 `forge.unit.executed` 并按上段字段约束构造 payload。
 

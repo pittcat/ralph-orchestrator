@@ -250,3 +250,48 @@ F6a:给 `EventLoopConfig` 加 `deny_unknown_fields`(注意配置合并是先 YAM
 4. **F4/F5 门槛与注释对齐**:决定 dag_shadow 的生死(接线或下架);dag 模式跳过 else 分支 bridge。
 5. **F6 配置静默口**:`deny_unknown_fields` + opt-in 抢占 warning。
 6. **F7-F9 文档/操作面**:删除或实现 `loops clean --ledger`;inspect 标注「会触发 migration」或加只读打开模式;worktree 复用路径补 DAG 恢复。
+
+---
+
+## 修复状态(2026-09-17 复核后修复)
+
+所有 P0 / P1 均已复核确认存在并完成修复;P2 仅修了文档错误引用(F7 的命令引用随 F2 一并清除),其余 P2/P3 留待后续。
+
+### F1【已修复】origin guard 放行 runtime 协调事件
+
+- **复核**:新增端到端回归测试 `event_loop::tests::origin_guard::runtime_emitted_dag_coord_events_are_accepted`(`crates/ralph-core/src/event_loop/tests/origin_guard.rs`),按 `append_supervisor_coord_event` 的真实落盘形状(`system_injected: true, hat: "ralph", source: "ralph"`)、在 isolated + event_policy enforce 配置下经 `process_events_from_jsonl` 全链路验证——修复前 RED(`had_events == false`,确认死锁链成立),修复后 GREEN。
+- **修复**:
+  1. `crates/ralph-core/src/event_origin.rs`:新增 `DAG_RUNTIME_COORD_TOPICS`(`forge.unit.integrated` / `forge.exec.development.done`)与 `is_dag_runtime_coordination_topic`,origin guard 的 `system_injected` 分支(:416-426)在 wave 协调 topic 之外放行这两个 runtime 协调 topic(与 wave topic 同豁免模型:agent 未在 publishes 声明,无法经 CLI 伪造)。
+  2. `crates/ralph-core/src/event_loop/parse_and_emit/legacy.rs`:topic-format 白名单分区(:1576-1582)对 `system_injected == Some(true)` 事件豁免——origin guard 的窄白名单已先行拦截,该白名单面向 agent 笔误而非 runtime 收据(`forge.unit.integrated` 按设计不在任何 hat 的 publishes/triggers 中)。
+- **已知边界**:`hat: "ralph"` 的 business topic 仍有 `ralph_control_only` 拒收(event_origin.rs:473-483),但 system_injected 分支先于它命中,不影响本链路。
+
+### F2【已修复】文档与实现对齐
+
+- `crates/ralph-core/data/ralph-tools-emit.md`(agent 注入文档):删除「`dag_terminal_deliveries` 拦截三元组重复发送」与「返回 `duplicate_forge_unit_executed`」的虚构描述,改写为真实语义(身份不符静默丢弃 / 非法迁移判 contract violation;v20 表为预留 schema 未接线)。
+- `docs/advanced/dag-scheduler.md`:「exactly-once 交付」小节改写为 `dag_terminal_emits` 的 `(plan_key, topic)` fence 真实语义;删除不存在的 `ralph loops clean --ledger` 升级路径(F7 的文档面)。
+- `AGENTS.md` / `CLAUDE.md`(已同步,`claude_md_and_agents_md_are_byte_identical` 绿):v19-v23 段落补「多张表为预留 schema 无生产读写方,实际去重由 `dag_terminal_emits` 承担」,删除 `loops clean --ledger` 引用。
+- `ralph_tools_doc_drift` / `claude_md_doc_drift` 8/8 绿。
+
+### F3【已修复】blocked plan 禁发终态
+
+- **复核**:PoC 实证(修复前断言「blocked 不得发射」FAIL,left=1)。
+- **修复**:`integrate.rs` `maybe_emit_development_done` 候选过滤增加 `!self.blocked_plans.contains(plan_key)`;新增常驻回归测试 `blocked_plan_with_full_acks_never_emits_development_done`(全 ack + ledger 事件缺失组合)。
+
+### F4【已修复】dag_shadow 真正构建观测 runtime
+
+- **修复**:`inner.rs` 构建门槛由 `== Dag` 放宽为 `!= Wave`(保留 supervisor.enabled + isolated 条件);`attach_dag_runtime` / exec context 仍仅限 `dag`(shadow 纯观测);`dag_scheduler/mod.rs` 模块文档同步。安全性依据:shadow 下 `open_stores` 走内存 store(:738-742)、spawn 面 `== Dag` 门控(spawn.rs:681、mod.rs:1240)、`attach_execution_context` 非 Dag 空操作(mod.rs:286-290)。
+- **残留**:F11 限制不变——shadow 观测仍在 loop 进程内存,`ralph inspect` 跨进程读不到;parallel-forge 这类无 wave 拓扑的 preset 切 shadow 仍会停摆(preset 属性,非 runtime 缺陷)。
+
+### F5【已修复】dag 模式不再构建 legacy bridge
+
+- **修复**:`inner.rs` else 分支顶部增加 dag 模式短路(bridge = None),并在 :712-717 注释中记录双闸门。dag 模式下不再打开 supervisor.db、不再跑 `recover_active_waves_at_startup` / `inject_timed_out_failed_coord`,redrive boot scan 因 bridge 为 None 自然跳过。
+
+### F6【已修复】配置静默降级两个口
+
+- **F6a**:`EventLoopConfig` 加 `#[serde(deny_unknown_fields)]`(`loop_config.rs`);新增回归测试 `event_loop_rejects_mislayered_scheduler_mode`。**附带战果**:该改动立刻抓到 builtin `autoresearch`(en + zh)preset 里的两个死键——`checkpoint_interval: 5`(无任何代码读取)与错层的 `idle_timeout_secs: 300`(真实字段在 `cli.idle_timeout_secs`)——均已从 preset 删除。
+- **F6b**:`preflight.rs` opt-in 抢占分支(operator 已声明 `event_loop.supervisor` 导致 preset 整块被跳过时)新增 eprintln warning,不再静默。
+- preset 校验全绿:ralph-cli `presets` + `preset_lint` 81/81,ralph-core `preset_lint` 329/329。
+
+### 未修(P2/P3,留待后续)
+
+F7 的 CLI 面(`loops clean` 子命令不存在——文档引用已随 F2 删除,命令本身未实现)、F8(inspect 打开 dag.db 会跑 migrations;mode 标签与账本计数无一致性校验)、F9(worktree 复用路径不跑 DAG 恢复)、F10 六项攻击面。

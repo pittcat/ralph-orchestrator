@@ -850,7 +850,7 @@ const ALLOWED_HATS_TOP_LEVEL: &[&str] = &[
 // end-to-end.
 //
 // Note: resource budgets (`max_iterations`, `max_runtime_seconds`,
-// `checkpoint_interval`) and `enforce_hat_scope` are intentionally
+// `max_cost_usd`) and `enforce_hat_scope` are intentionally
 // NOT in this list. They are operator-controlled, not hat-controlled,
 // so a hat collection must not be able to widen the loop budget or
 // disable scope enforcement behind the user's back.
@@ -1183,6 +1183,17 @@ pub(crate) fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> 
                     // then dropped, falling back to framework defaults.
                     if !event_loop_mapping.contains_key(key) {
                         event_loop_mapping.insert(key.clone(), value.clone());
+                    } else {
+                        // Red-team F6b: the operator declared this opt-in
+                        // key, so the preset's whole subtree (e.g. a
+                        // `scheduler_mode: dag` nested inside
+                        // `supervisor:`) is silently dropped and the loop
+                        // downgrades to the framework default. Surface it.
+                        eprintln!(
+                            "warning: operator ralph.yml already declares event_loop.{key_str}; \
+                             the preset's event_loop.{key_str} block (including any nested keys) \
+                             is ignored.",
+                        );
                     }
                 } else if ALLOWED_HATS_EVENT_LOOP_OVERLAY_KEYS.contains(&key_str) {
                     // Hat-defined keys: the preset's value wins, even if
