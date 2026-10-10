@@ -569,8 +569,7 @@ def _compose_managed_docs(
 
     Each side is composed with ``sync_with_other_doc=True`` against
     the OTHER doc's existing text, so any state in which the two
-    mirrors disagree with each other — or with the body this run
-    wants to write — surfaces ``sync_mirror_conflict`` before the
+    mirrors disagree with each other surfaces ``sync_mirror_conflict`` before the
     batch is staged. Both docs always receive the identical body; an
     asymmetric on-disk pair is a blocker the operator must reconcile.
 

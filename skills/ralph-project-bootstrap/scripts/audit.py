@@ -328,6 +328,22 @@ def collect_project_facts(root: Path) -> ProjectFacts:
             root / "nextest.toml"
         ).is_file()
         test = (("cargo nextest run",) if has_nextest else ("cargo test",))
+        # Repository instructions are authoritative even without a nextest
+        # config (nextest works with its defaults). Ignore our generated mirror
+        # so stale bootstrap guidance cannot perpetuate an incorrect command.
+        for name in DEFAULT_AGENTS_NAMES:
+            instructions = _read_text(root / name)
+            instructions = re.sub(
+                r"<!-- RALPH-BOOTSTRAP-START:.*?<!-- RALPH-BOOTSTRAP-END:.*?-->",
+                "",
+                instructions,
+                flags=re.DOTALL,
+            )
+            if re.search(r"\bcargo nextest run\b", instructions):
+                test = ("cargo nextest run --workspace",) if re.search(
+                    r"\bcargo nextest run --workspace\b", instructions
+                ) else ("cargo nextest run",)
+                break
         lint = ("cargo clippy --workspace --all-targets -- -D warnings",)
         fmt = ("cargo fmt --all -- --check",)
     elif (root / "package.json").is_file():

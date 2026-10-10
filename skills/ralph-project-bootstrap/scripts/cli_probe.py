@@ -821,7 +821,7 @@ def validate_pipeline(
 
     stdout, stderr, exit_code = preflight_result
     if exit_code != 0:
-        outcome, reason = _classify_preflight_stderr(stderr)
+        outcome, reason = _classify_preflight_stderr(stderr or stdout)
         _record_block_then_skip(
             decisions,
             argv_by_stage,
@@ -830,6 +830,7 @@ def validate_pipeline(
             reason=reason,
             evidence=(
                 f"exit_code={exit_code}",
+                f"stdout={stdout.strip()[:2000]}",
                 f"stderr={stderr.strip()[:400]}",
             ),
             skip_stages=("dry_run",),

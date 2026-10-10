@@ -245,6 +245,12 @@ agent to discover the authoritative gate instead of inventing one. Builtin
 presets and file presets use the same project-overlay path; builtin status is
 only a preset-resolution detail.
 
+Honor repository test-runner instructions even when no runner config exists.
+Ignore bootstrap-managed doc sections when discovering these instructions.
+The bootstrap agent's prohibition on creating branches/worktrees applies to
+provisioning; emitted runtime guardrails must allow the selected preset's
+declared branch/worktree lifecycle.
+
 **Owned keys.** `ralph.<stem>.yml` carries launch inputs plus embedded
 `generator_version`, `input_signature`, `profile_sha256`, and
 `prompt_sha256` under `_bootstrap:`. The hashes prove both generated files

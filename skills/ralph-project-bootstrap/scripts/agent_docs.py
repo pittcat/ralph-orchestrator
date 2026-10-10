@@ -223,7 +223,15 @@ def compose_agent_docs(
                 _, other_current_body, _ = _slice_ok(
                     other_existing_text, marker_id, other_parse
                 )
-                if other_current_body.strip() != owned_section_body.strip():
+                # Compare the existing mirrors, not old content against the
+                # requested update; otherwise every legitimate refresh blocks.
+                current_parse = parse_managed_section(existing_text or "", marker_id)
+                current_body = owned_section_body
+                if current_parse.kind == "Ok":
+                    _, current_body, _ = _slice_ok(
+                        existing_text, marker_id, current_parse
+                    )
+                if other_current_body.strip() != current_body.strip():
                     return ComposeResult(
                         kind="blocker",
                         code="sync_mirror_conflict",

@@ -42,7 +42,7 @@ GENERATOR_VERSION = "0.3.0"
 BASELINE_GUARDRAILS: tuple[str, ...] = (
     "Re-read the supplied business input and the nearest project instructions at the start of each activation.",
     "Keep changes scoped to the requested work and preserve unrelated operator changes.",
-    "Never push remotes, create or switch branches/worktrees, or stop the Ralph process; the operator owns those actions.",
+    "Never push remotes or stop the Ralph process without operator authorization. Manage branches/worktrees only as required by the selected preset's runtime contract; preserve unrelated operator resources.",
     "Never report completion while required verification is failing, skipped, or replaced by placeholder evidence.",
 )
 
