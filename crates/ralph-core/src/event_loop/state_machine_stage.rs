@@ -70,31 +70,29 @@ fn validate_events_against_candidate(
         let payload = event.payload.clone();
         let event_for_emit = event.clone();
 
-        // Capture the candidate's instance maps BEFORE the validator
-        // mutates them so the open/close decision reflects the
-        // pre-validation state — validate_event inserts the
-        // transition's effect into the maps, so a post-mutation read
-        // would always report `opens_instance=false, closes_instance=true`
-        // for opening transitions, which inverts the semantics the
-        // apply stage relies on.
-        let (pre_opens_map, pre_closed_map) = {
-            let (opens, closed) = candidate.instance_maps();
-            (opens.clone(), closed.clone())
-        };
-
         let decision = candidate.validate_event(topic.as_str(), payload.as_deref(), sm_config);
 
         match &decision {
-            StateMachineDecision::Accept { instance_key, .. } => {
-                let instance_key = instance_key.clone();
-                let key_ref = instance_key.as_deref().unwrap_or("");
-                // Plan 2026-08-15-2211 U5: compute the open/close
-                // decision from the PRE-validation instance maps so
-                // the apply stage gets the correct semantic flags.
-                let opens_instance =
-                    !pre_opens_map.contains_key(key_ref) && !pre_closed_map.contains_key(key_ref);
-                let closes_instance =
-                    pre_opens_map.contains_key(key_ref) && !pre_closed_map.contains_key(key_ref);
+            StateMachineDecision::Accept { .. } => {
+                // Keep projection semantics aligned with validation:
+                // lifecycle flags come from the matching transition
+                // declaration, never from the post/pre-validation map
+                // shape. Terminal and pass-through events have no
+                // transition and therefore carry neither flag.
+                let (opens_instance, closes_instance) = if sm_config
+                    .business_topics
+                    .iter()
+                    .any(|business_topic| business_topic == &topic)
+                {
+                    sm_config
+                        .transitions
+                        .iter()
+                        .find(|transition| transition.topic == topic)
+                        .map(|transition| (transition.opens_instance, transition.closes_instance))
+                        .unwrap_or((false, false))
+                } else {
+                    (false, false)
+                };
                 // Plan 2026-08-15-2211 U7: capture terminal_observed
                 // from the candidate snapshot (post-validate) but
                 // defer terminal_honored capture to apply time (see

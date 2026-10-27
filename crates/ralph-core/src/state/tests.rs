@@ -2448,7 +2448,6 @@ fn u1_state_machine_delta_commit_replays_to_same_runtime() {
     let mut live_state = StateMachineRuntimeState::new();
     let mut ledger = StateLedger::new(&workspace, true);
     // Open `t1` via the validator + projection helper.
-    let pre_open = live_state.classify_open_close(&Some("t1".to_string()));
     let open_decision =
         live_state.validate_event("experiment.planned", Some(r#"{"task_key":"t1"}"#), &config);
     let open_id = StateMachineTransitionId::build(
@@ -2464,8 +2463,8 @@ fn u1_state_machine_delta_commit_replays_to_same_runtime() {
             open_id,
             "experiment.planned",
             &open_decision,
-            pre_open.0,
-            pre_open.1,
+            true,
+            false,
             // Plan GAP-02 / Unit 2: terminal flags must be supplied by
             // the caller (the candidate snapshot, not the live runtime).
             // This delta is for a business event, not a terminal one.
@@ -2481,7 +2480,6 @@ fn u1_state_machine_delta_commit_replays_to_same_runtime() {
         .expect("commit open");
 
     // Close `t1`.
-    let pre_close = live_state.classify_open_close(&Some("t1".to_string()));
     let close_decision =
         live_state.validate_event("experiment.blocked", Some(r#"{"task_key":"t1"}"#), &config);
     let close_id = StateMachineTransitionId::build(
@@ -2497,8 +2495,8 @@ fn u1_state_machine_delta_commit_replays_to_same_runtime() {
             close_id,
             "experiment.blocked",
             &close_decision,
-            pre_close.0,
-            pre_close.1,
+            false,
+            true,
             // Plan GAP-02 / Unit 2: terminal flags come from the
             // caller (candidate snapshot). Close is a business event,
             // not a terminal one.

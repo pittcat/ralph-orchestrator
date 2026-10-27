@@ -259,19 +259,6 @@ impl StateMachineRuntimeState {
         (self.terminal_observed, self.terminal_honored)
     }
 
-    /// Plan GAP-02 / Unit 2 helper: read-only access to the
-    /// open/closed maps so the candidate stage can detect
-    /// open → close / open → advance transitions without
-    /// exposing the private `HashMap` fields.
-    pub fn instance_maps(
-        &self,
-    ) -> (
-        &HashMap<String, InstanceState>,
-        &HashMap<String, InstanceState>,
-    ) {
-        (&self.open_instances, &self.closed_instances)
-    }
-
     /// Returns the count of accepted state machine transitions.
     ///
     /// Used by the progress fingerprint to detect state machine progress
@@ -682,24 +669,6 @@ impl StateMachineRuntimeState {
             terminal_observed,
             terminal_honored,
         })
-    }
-
-    /// Read-only side-channel for callers that want the inferred
-    /// open/close classification *before* calling
-    /// `validate_event` (which mutates `self`). Takes a snapshot
-    /// of the pre-mutation state and the candidate
-    /// `instance_key`, and returns the flags that the validator's
-    /// open/close decision would produce.
-    pub fn classify_open_close(&self, key: &Option<String>) -> (bool, bool) {
-        let key = match key {
-            Some(k) => k,
-            None => return (false, false),
-        };
-        let opens =
-            !self.open_instances.contains_key(key) && !self.closed_instances.contains_key(key);
-        let closes =
-            self.open_instances.contains_key(key) && !self.closed_instances.contains_key(key);
-        (opens, closes)
     }
 
     /// Plan GAP-02 / Unit 1: apply a replay-only delta onto the

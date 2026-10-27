@@ -1166,6 +1166,91 @@ hats:
 }
 
 #[test]
+fn projection_uses_transition_flags_for_middle_and_terminal_events() {
+    let config: RalphConfig = serde_yaml::from_str(
+        r#"
+event_loop:
+  state_machine:
+    enabled: true
+    instance_key:
+      from_payload: task_key
+      required_for: [experiment.planned, experiment.ready, experiment.measured, experiment.evaluated, LOOP_COMPLETE]
+    terminal_topics: [LOOP_COMPLETE]
+    business_topics: [experiment.planned, experiment.ready, experiment.measured, experiment.evaluated]
+    terminal_guard:
+      require_no_open_instances: false
+    transitions:
+      - topic: experiment.planned
+        from: [idle]
+        to: planned
+        opens_instance: true
+      - topic: experiment.ready
+        from: [planned]
+        to: ready
+      - topic: experiment.measured
+        from: [ready]
+        to: measured
+      - topic: experiment.evaluated
+        from: [measured]
+        to: evaluated
+        closes_instance: true
+"#,
+    )
+    .unwrap();
+    let mut event_loop = EventLoop::new(config);
+    let event = |topic: &str| crate::event_reader::Event {
+        topic: topic.to_string(),
+        payload: Some(r#"{"task_key":"probe"}"#.to_string()),
+        ts: chrono::Utc::now().to_rfc3339(),
+        hat: None,
+        triggered: None,
+        source: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    };
+
+    let (_, decisions) = event_loop.run_state_machine_candidate_stage(vec![
+        event("experiment.planned"),
+        event("experiment.ready"),
+        event("experiment.measured"),
+        event("experiment.evaluated"),
+        event("LOOP_COMPLETE"),
+    ]);
+    assert_eq!(decisions.len(), 5);
+    let deltas = event_loop.apply_state_machine_decisions(&decisions, "projection-test");
+    assert_eq!(deltas.len(), 5);
+    assert_eq!(
+        (deltas[0].opens_instance, deltas[0].closes_instance),
+        (true, false)
+    );
+    assert_eq!(
+        (deltas[1].opens_instance, deltas[1].closes_instance),
+        (false, false)
+    );
+    assert_eq!(
+        (deltas[2].opens_instance, deltas[2].closes_instance),
+        (false, false)
+    );
+    assert_eq!(
+        (deltas[3].opens_instance, deltas[3].closes_instance),
+        (false, true)
+    );
+    assert_eq!(
+        (deltas[4].opens_instance, deltas[4].closes_instance),
+        (false, false)
+    );
+    let runtime = event_loop
+        .state
+        .state_machine_runtime_state
+        .as_ref()
+        .unwrap();
+    assert!(runtime.open_instances_snapshot().is_empty());
+    assert!(runtime.closed_instances_snapshot().contains_key("probe"));
+}
+
+#[test]
 fn u1_disabled_state_machine_returns_empty_revalidation() {
     // U1 §3 test (c): when state_machine is disabled,
     // revalidate_state_machine_candidates_in_order must return an
