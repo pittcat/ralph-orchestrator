@@ -108,6 +108,7 @@ pub mod loop_registry;
 mod loop_state_snapshot;
 mod memory;
 pub mod memory_parser;
+pub mod memory_selection;
 mod memory_store;
 pub mod merge_queue;
 pub mod notifications;

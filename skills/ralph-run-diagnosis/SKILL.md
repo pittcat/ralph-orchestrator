@@ -23,8 +23,19 @@ argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file] [--incl
 **产物隔离 HARD RULE**：`docs/report/` 只允许写入最终 Markdown 报告；诊断过程中的 JSON、工作笔记、sub-agent 输出、stderr、临时清单和其它中间产物，必须写入由 `mktemp -d` 创建的临时诊断目录（或用户明确指定的非 git 工作区），不得写入 target branch、`docs/report/`、`docs/plans/`、`docs/solutions/` 或 `docs/brainstorms/`。开始前记录 `DIAG_WORKDIR`，结束时清理；若清理失败，必须在最终回复中报告残留路径。
 
 > **变更日志**：
+> - 2026-10-29：plan 2026-10-29-0104 — 新增 §0.3 Run-Analysis 报告契约（`ralph diagnose --performance` / `--format html`）；报告须**视觉打磨**（内联 CSS + 安全 JS 交互），离线零外部资源；数字由固定程序计算，skill 文字分析必须单列、不得改写事实。契约见 [run-analysis-report.md](references/run-analysis-report.md)。
 > - 2026-08-26：U10 plan — `ralph diagnose --causal` 作为归因事实来源；DT7 机检 + `confidence > 85` 门禁；§0/§3/§5 改消费；移除 60/70 旧 entry-gate；新增 §4.3 Causal Attribution + frontmatter `causal_*` 字段。
 > - 2026-07-25：新增 §0.1 历史检索开关 + SSOT 常量 + §0.x 编号扩展约定。若主项目文档（CLAUDE.md / AGENTS.md / operator docs）需说明此开关，在此 `变更日志` 行追加即可（不触发 CLAUDE.md/AGENTS.md 强制同步——本 skill 不属于 `crates/ralph-core/data/`）。
+
+## 0.3 Run-Analysis 报告契约（plan 2026-10-29-0104）
+
+session 含 `timing.jsonl` 时，交付物除 Markdown 诊断报告外还包括**确定性 run-analysis 报告**：
+
+- 生成：`ralph diagnose --performance`（markdown/json）；`--format html` 产出**独立离线 HTML 报告**。
+- **表现层要求（HARD RULE）**：报告必须好看——完整内联 CSS（主题/卡片/统计格/按 kind 配色/响应式）+ 可选内联 JS 交互（筛选、百分比切换、证据展开）。JS 只允许安全 DOM API；禁止 `eval`/外部脚本/网络请求/执行产物内任何代码。
+- **事实/文字分离**：所有数字由程序确定性计算；skill 的瓶颈解释与建议为单列 prose，必须附证据 + 验证方法，不得覆盖统计值。
+- 未知/缺采集一律显式 `unknown`/`not_collected` 呈现，不猜、不补零。
+- 完整契约（命令、HTML 结构、安全约束、R7/R8 分级）：[run-analysis-report.md](references/run-analysis-report.md)。
 
 ## 0.1 历史检索开关（HARD RULE）
 
@@ -255,4 +266,5 @@ ralph diagnose --causal --session latest --diagnostics-root "$RUN/.ralph/diagnos
 - [source-trace-guide.md](references/source-trace-guide.md)
 - [history-sources.md](references/history-sources.md)
 - [examples/minimal-diagnostics-layout.md](references/examples/minimal-diagnostics-layout.md)
+- [run-analysis-report.md](references/run-analysis-report.md) — **run-analysis HTML/JSON 报告契约（CSS/JS 表现层 + 事实/prose 分离）**
 - 样板：`docs/report/2026-07-04-ce-executor-serial-primary-20260704-115242-diagnosis.md`

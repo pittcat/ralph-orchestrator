@@ -32,8 +32,12 @@ static CONTENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^> (.+)$").un
 ///   3. optional owner hat id (or empty)
 ///   4. optional visibility ("shared" or "private") or empty
 static METADATA_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Lifecycle fields (plan 2026-10-29-0104 U6) are optional
+    // trailing segments written in a fixed order by
+    // `memory_store::format_memory`; legacy comments without them
+    // parse with lifecycle defaults.
     Regex::new(
-        r"<!-- tags: ([^|]*) \| created: (\d{4}-\d{2}-\d{2})(?: \| owner: ([^|]*))?(?: \| visibility: ([a-z]+))? -->",
+        r"<!-- tags: ([^|]*) \| created: (\d{4}-\d{2}-\d{2})(?: \| owner: ([^|]*))?(?: \| visibility: ([a-z]+))?(?: \| applicability: ([^|]*))?(?: \| evidence: ([^|]*))?(?: \| verified: (\d{4}-\d{2}-\d{2}))?( \| invalidated: true)?(?: \| superseded_by: ([^|]*))? -->",
     )
     .unwrap()
 });
@@ -67,6 +71,7 @@ pub fn parse_memories(markdown: &str) -> Vec<Memory> {
     let mut current_created: Option<String> = None;
     let mut current_owner: Option<String> = None;
     let mut current_visibility: Option<MemoryVisibility> = None;
+    let mut current_lifecycle: LifecycleMeta = LifecycleMeta::default();
 
     for line in markdown.lines() {
         if let Some(caps) = SECTION_RE.captures(line) {
@@ -80,6 +85,7 @@ pub fn parse_memories(markdown: &str) -> Vec<Memory> {
                 &mut current_created,
                 &mut current_owner,
                 &mut current_visibility,
+                &mut current_lifecycle,
             );
             current_type = MemoryType::from_section(&caps[1]).unwrap_or(MemoryType::Pattern);
         } else if let Some(caps) = MEMORY_ID_RE.captures(line) {
@@ -93,6 +99,7 @@ pub fn parse_memories(markdown: &str) -> Vec<Memory> {
                 &mut current_created,
                 &mut current_owner,
                 &mut current_visibility,
+                &mut current_lifecycle,
             );
             current_id = Some(caps[1].to_string());
         } else if let Some(caps) = CONTENT_RE.captures(line) {
@@ -113,6 +120,21 @@ pub fn parse_memories(markdown: &str) -> Vec<Memory> {
                 .map(|m| m.as_str().trim())
                 .filter(|s| !s.is_empty())
                 .and_then(|s| s.parse::<MemoryVisibility>().ok());
+            // U6 lifecycle segments (optional, fixed order).
+            current_lifecycle.applicability = caps
+                .get(5)
+                .map(|m| m.as_str().trim().to_string())
+                .filter(|s| !s.is_empty());
+            current_lifecycle.evidence_source = caps
+                .get(6)
+                .map(|m| m.as_str().trim().to_string())
+                .filter(|s| !s.is_empty());
+            current_lifecycle.last_verified = caps.get(7).map(|m| m.as_str().to_string());
+            current_lifecycle.invalidated = caps.get(8).is_some();
+            current_lifecycle.superseded_by = caps
+                .get(9)
+                .map(|m| m.as_str().trim().to_string())
+                .filter(|s| !s.is_empty());
         }
     }
 
@@ -126,9 +148,22 @@ pub fn parse_memories(markdown: &str) -> Vec<Memory> {
         &mut current_created,
         &mut current_owner,
         &mut current_visibility,
+        &mut current_lifecycle,
     );
 
     memories
+}
+
+/// Lifecycle metadata parsed from optional trailing metadata
+/// segments (plan 2026-10-29-0104 U6). Defaults mean "no lifecycle
+/// info recorded" — the entry stays selectable.
+#[derive(Default)]
+struct LifecycleMeta {
+    applicability: Option<String>,
+    evidence_source: Option<String>,
+    last_verified: Option<String>,
+    invalidated: bool,
+    superseded_by: Option<String>,
 }
 
 /// Helper to finalize and push a memory if we have enough data.
@@ -141,6 +176,7 @@ fn flush_memory(
     current_created: &mut Option<String>,
     current_owner: &mut Option<String>,
     current_visibility: &mut Option<MemoryVisibility>,
+    current_lifecycle: &mut LifecycleMeta,
 ) {
     if let Some(id) = current_id.take()
         && !current_content.is_empty()
@@ -163,8 +199,14 @@ fn flush_memory(
                 .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string()),
             owner_hat_id: owner,
             visibility,
+            applicability: current_lifecycle.applicability.take(),
+            evidence_source: current_lifecycle.evidence_source.take(),
+            last_verified: current_lifecycle.last_verified.take(),
+            invalidated: current_lifecycle.invalidated,
+            superseded_by: current_lifecycle.superseded_by.take(),
         });
     }
+    *current_lifecycle = LifecycleMeta::default();
     current_content.clear();
 }
 

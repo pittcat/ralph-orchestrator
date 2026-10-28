@@ -1300,6 +1300,7 @@ mod tests {
             legacy: false,
             supervisor: SupervisorFormat::Off,
             causal: false,
+            performance: false,
         }
     }
 
@@ -1315,6 +1316,7 @@ mod tests {
             legacy: false,
             supervisor: SupervisorFormat::Off,
             causal: false,
+            performance: false,
         };
         assert!(validate_args(&args).is_err());
         args.output = None;
@@ -1364,6 +1366,7 @@ mod tests {
             legacy: false,
             supervisor: SupervisorFormat::Off,
             causal: false,
+            performance: false,
         };
         try_diagnose(ColorMode::Never, args).expect("try_diagnose should succeed");
         assert!(out.exists(), "output file should be created");
@@ -1388,6 +1391,7 @@ mod tests {
             legacy: false,
             supervisor: SupervisorFormat::Off,
             causal: false,
+            performance: false,
         };
         try_diagnose(ColorMode::Never, args).expect("try_diagnose should succeed");
         let content = std::fs::read_to_string(&out).unwrap();
@@ -1413,6 +1417,7 @@ mod tests {
             legacy: false,
             supervisor: SupervisorFormat::Off,
             causal: false,
+            performance: false,
         };
         let result = try_diagnose(ColorMode::Never, args);
         assert!(matches!(result, Err(DiagnoseExit::InvalidSession(_))));
@@ -1445,6 +1450,7 @@ mod tests {
             legacy: false,
             supervisor: SupervisorFormat::Off,
             causal: false,
+            performance: false,
         };
         assert_eq!(pick_report_kind(&args), ReportKind::LedgerOrLegacy);
     }
@@ -1461,6 +1467,7 @@ mod tests {
             legacy: true,
             supervisor: SupervisorFormat::Off,
             causal: false,
+            performance: false,
         };
         assert_eq!(pick_report_kind(&args), ReportKind::LegacyOnly);
     }
@@ -1477,6 +1484,7 @@ mod tests {
             legacy: false,
             supervisor: SupervisorFormat::Off,
             causal: false,
+            performance: false,
         };
         assert_eq!(pick_report_kind(&args), ReportKind::LedgerOnly);
     }
@@ -1521,6 +1529,7 @@ mod tests {
             legacy: false,
             supervisor: SupervisorFormat::Off,
             causal: false,
+            performance: false,
         };
         let result = try_diagnose(ColorMode::Never, args);
         match result {
@@ -1551,6 +1560,7 @@ mod tests {
             legacy: false,
             supervisor: SupervisorFormat::Off,
             causal: false,
+            performance: false,
         };
         try_diagnose(ColorMode::Never, args).expect("u8 from-ledger should succeed");
     }
@@ -1577,6 +1587,7 @@ mod tests {
             legacy: true,
             supervisor: SupervisorFormat::Off,
             causal: false,
+            performance: false,
         };
         let result = try_diagnose(ColorMode::Never, args);
         // Legacy view: no session → NoSession (not the ledger
@@ -1644,6 +1655,7 @@ mod tests {
             legacy: false,
             supervisor: SupervisorFormat::Off,
             causal: false,
+            performance: false,
         };
         try_diagnose(ColorMode::Never, args).expect("ledger report should still render");
         let content = std::fs::read_to_string(&out).unwrap();
@@ -1674,6 +1686,7 @@ mod tests {
             legacy: false,
             supervisor: SupervisorFormat::Off,
             causal: false,
+            performance: false,
         };
         // Note: workspace_for_report walks up from `diag` only
         // when `diag` ends with `diagnostics` AND the parent is
@@ -2368,6 +2381,7 @@ mod tests {
             legacy: false,
             supervisor: SupervisorFormat::Off,
             causal: false,
+            performance: false,
         };
         // The function is a no-op when the flag is `Off`. We
         // assert the contract by checking the branch lands in

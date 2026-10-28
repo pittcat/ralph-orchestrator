@@ -14,7 +14,8 @@ use crate::resolve_workspace_root;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use ralph_core::{
-    MarkdownMemoryStore, Memory, MemoryType, MemoryVisibility, truncate_with_ellipsis,
+    MarkdownMemoryStore, Memory, MemoryType, MemoryVisibility, format_memories_as_markdown,
+    truncate_with_ellipsis,
 };
 use std::path::PathBuf;
 
@@ -104,6 +105,9 @@ pub enum MemoryCommands {
 
     /// Output memories for context injection
     Prime(PrimeArgs),
+
+    /// Update lifecycle metadata of a memory (plan 2026-10-29-0104 U6)
+    Update(UpdateArgs),
 
     /// Initialize memories file
     Init(InitArgs),
@@ -211,6 +215,50 @@ pub struct PrimeArgs {
     /// Output format
     #[arg(long, value_enum, default_value_t = OutputFormat::Markdown)]
     pub format: OutputFormat,
+
+    /// Task query for relevance scoring (plan U7). When set (or
+    /// `--budget` is given), selection runs through the shared
+    /// budgeted selector instead of visible-order truncation.
+    #[arg(long)]
+    pub query: Option<String>,
+
+    /// Write the selection receipt (candidates, exclusions, scores,
+    /// budget, reasons — no memory content) as JSON to this path (R15).
+    #[arg(long, value_name = "PATH")]
+    pub receipt: Option<PathBuf>,
+}
+
+/// Arguments for the `memory update` command (plan U6): lifecycle
+/// metadata management. All flags are optional; only provided fields
+/// are changed.
+#[derive(Parser, Debug)]
+pub struct UpdateArgs {
+    /// Memory ID to update
+    pub id: String,
+
+    /// Applicability context (when the memory applies)
+    #[arg(long)]
+    pub applicability: Option<String>,
+
+    /// Evidence source for the memory's claim
+    #[arg(long)]
+    pub evidence: Option<String>,
+
+    /// Mark verified at this date (YYYY-MM-DD; "today" also accepted)
+    #[arg(long)]
+    pub verified_at: Option<String>,
+
+    /// Mark the memory invalidated (excluded from auto-injection)
+    #[arg(long)]
+    pub invalidate: bool,
+
+    /// Clear the invalidated flag
+    #[arg(long, conflicts_with = "invalidate")]
+    pub validate: bool,
+
+    /// Id of the memory that supersedes this one
+    #[arg(long)]
+    pub superseded_by: Option<String>,
 }
 
 /// Arguments for the `memory init` command.
@@ -292,6 +340,9 @@ pub fn execute(args: MemoryArgs, use_colors: bool) -> Result<()> {
             search_command(&store, &ctx, search_args, use_colors)
         }
         MemoryCommands::Prime(prime_args) => prime_command(&store, &ctx, prime_args),
+        MemoryCommands::Update(update_args) => {
+            update_command(&store, &ctx, update_args, use_colors)
+        }
         MemoryCommands::Init(init_args) => init_command(&store, init_args, use_colors),
     }
 }
@@ -658,6 +709,43 @@ fn prime_command(
         memories.retain(|m| m.created >= cutoff_str);
     }
 
+    // U7: `--query`/`--budget` route through the shared selector —
+    // whole entries packed under a finite budget, invalid/superseded
+    // excluded (R14), receipt available via `--receipt` (R15).
+    if args.query.is_some() || args.budget.is_some() {
+        let filters = ralph_core::memory_selection::SelectionFilters {
+            query: args.query.clone(),
+            types: Vec::new(),
+            tags: Vec::new(),
+            recent_days: None,
+        };
+        let budget_chars = args.budget.filter(|b| *b > 0).map(|b| b * 4).unwrap_or(usize::MAX);
+        let (selected, receipt) =
+            ralph_core::memory_selection::select_memories(&memories, &filters, budget_chars);
+        if let Some(path) = args.receipt.as_ref() {
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(parent).ok();
+            }
+            std::fs::write(path, serde_json::to_string_pretty(&receipt)?)?;
+        }
+        let memories = selected;
+        if memories.is_empty() {
+            return Ok(());
+        }
+        let output = match args.format {
+            OutputFormat::Json => serde_json::to_string_pretty(&memories)?,
+            OutputFormat::Markdown => format_memories_as_markdown(&memories),
+            OutputFormat::Table => format_memories_as_text(&memories),
+            OutputFormat::Quiet => {
+                memories.iter().map(|m| m.id.clone()).collect::<Vec<_>>().join("\n") + "\n"
+            }
+        };
+        print!("{output}");
+        return Ok(());
+    }
+
     if memories.is_empty() {
         return Ok(());
     }
@@ -689,6 +777,56 @@ fn prime_command(
     };
 
     print!("{}", final_output);
+    Ok(())
+}
+
+/// `memory update` (plan U6): apply lifecycle metadata edits to an
+/// existing entry. Authorization mirrors `delete` — agent context may
+/// only mutate own private entries; shared entries are human-only.
+fn update_command(
+    store: &MarkdownMemoryStore,
+    ctx: &OperationContext,
+    args: UpdateArgs,
+    use_colors: bool,
+) -> Result<()> {
+    let memory = store.get(&args.id).context("Failed to read memories")?;
+    authorize_memory_action(memory.as_ref(), ctx, "memory update")?;
+    let Some(mut memory) = memory else {
+        bail!("Memory not found: {}", args.id);
+    };
+
+    if let Some(v) = args.applicability {
+        memory.applicability = (!v.trim().is_empty()).then_some(v);
+    }
+    if let Some(v) = args.evidence {
+        memory.evidence_source = (!v.trim().is_empty()).then_some(v);
+    }
+    if let Some(v) = args.verified_at {
+        memory.last_verified = Some(if v == "today" {
+            chrono::Utc::now().format("%Y-%m-%d").to_string()
+        } else {
+            v
+        });
+    }
+    if args.invalidate {
+        memory.invalidated = true;
+    }
+    if args.validate {
+        memory.invalidated = false;
+    }
+    if let Some(v) = args.superseded_by {
+        memory.superseded_by = (!v.trim().is_empty()).then_some(v);
+    }
+
+    // Rewrite: remove the old block and append the updated entry at
+    // its section (the store's append path preserves the id).
+    store.delete(&memory.id).context("Failed to update memory")?;
+    store.append(&memory).context("Failed to write updated memory")?;
+    if use_colors {
+        println!("{}Memory updated:{} {}", colors::GREEN, colors::RESET, memory.id);
+    } else {
+        println!("Memory updated: {}", memory.id);
+    }
     Ok(())
 }
 
@@ -905,43 +1043,6 @@ fn print_memory_detail(memory: &Memory, use_colors: bool) {
         }
         println!();
     }
-}
-
-fn format_memories_as_markdown(memories: &[Memory]) -> String {
-    let mut output = String::from("# Memories\n");
-
-    // Group by type
-    for memory_type in MemoryType::all() {
-        let type_memories: Vec<_> = memories
-            .iter()
-            .filter(|m| m.memory_type == *memory_type)
-            .collect();
-
-        if type_memories.is_empty() {
-            continue;
-        }
-
-        output.push_str(&format!("\n## {}\n", memory_type.section_name()));
-
-        for memory in type_memories {
-            let owner_meta = memory
-                .owner_hat_id
-                .as_deref()
-                .map(|o| format!(" | owner: {}", o))
-                .unwrap_or_default();
-            output.push_str(&format!(
-                "\n### {}\n> {}\n<!-- tags: {} | created: {} | visibility: {}{} -->\n",
-                memory.id,
-                memory.content.replace('\n', "\n> "),
-                memory.tags.join(", "),
-                memory.created,
-                memory.visibility.as_str(),
-                owner_meta,
-            ));
-        }
-    }
-
-    output
 }
 
 fn format_memories_as_text(memories: &[Memory]) -> String {

@@ -562,29 +562,32 @@ impl EventLoop {
                 }
             };
 
-            if memories.is_empty() {
-                info!("Memory store is empty - no memories to inject");
+            // U7 (plan 2026-10-29-0104): auto-injection runs through
+            // the same shared selector as `memory prime` — invalidated
+            // and superseded entries are excluded before packing
+            // (R14), and the finite budget packs whole entries only.
+            let budget_chars = if memories_config.budget > 0 {
+                memories_config.budget * 4
             } else {
-                let mut memories_content = format_memories_as_markdown(&memories);
+                usize::MAX
+            };
+            let (selected, receipt) = crate::memory_selection::select_memories(
+                &memories,
+                &crate::memory_selection::SelectionFilters::default(),
+                budget_chars,
+            );
 
-                if memories_config.budget > 0 {
-                    let original_len = memories_content.len();
-                    memories_content =
-                        truncate_to_budget(&memories_content, memories_config.budget);
-                    debug!(
-                        "Applied budget: {} chars -> {} chars (budget: {})",
-                        original_len,
-                        memories_content.len(),
-                        memories_config.budget
-                    );
-                }
-
+            if selected.is_empty() {
+                info!("Memory store has no injectable memories");
+            } else {
+                let memories_content = format_memories_as_markdown(&selected);
                 info!(
-                    "Injecting {} memories ({} chars) into prompt",
-                    memories.len(),
-                    memories_content.len()
+                    "Injecting {} memories ({} chars, budget {} chars, {} candidates) into prompt",
+                    selected.len(),
+                    memories_content.len(),
+                    receipt.budget_chars,
+                    receipt.candidates.len()
                 );
-
                 prefix.push_str(&memories_content);
             }
         }

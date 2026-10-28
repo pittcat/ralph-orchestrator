@@ -286,24 +286,11 @@ impl MarkdownMemoryStore {
             .map(|line| format!("> {}", line))
             .collect();
 
-        // Always write visibility; write owner only when the memory
-        // actually has one (avoids polluting shared memories with an
-        // empty owner field).
-        let mut meta = format!(
-            "tags: {} | created: {}",
-            memory.tags.join(", "),
-            memory.created,
-        );
-        if let Some(owner) = memory.owner_hat_id.as_deref() {
-            meta.push_str(&format!(" | owner: {}", owner));
-        }
-        meta.push_str(&format!(" | visibility: {}", memory.visibility.as_str()));
-
         format!(
             "\n### {}\n{}\n<!-- {} -->\n",
             memory.id,
             content_lines.join("\n"),
-            meta,
+            memory_metadata_comment(memory),
         )
     }
 
@@ -324,6 +311,46 @@ impl MarkdownMemoryStore {
     fn template(&self) -> String {
         "# Memories\n\n## Patterns\n\n## Decisions\n\n## Fixes\n\n## Context\n".to_string()
     }
+}
+
+/// Canonical metadata comment for one memory — `tags | created |
+/// owner? | visibility | lifecycle?`. Order is fixed: it is the exact
+/// sequence `memory_parser::METADATA_RE` expects, so every writer
+/// (`format_memory`, `format_memories_as_markdown`, prime output)
+/// must emit it identically. `|` in free-text values would break the
+/// segment split, so it is normalized to `/`.
+fn memory_metadata_comment(memory: &Memory) -> String {
+    // Always write visibility; write owner only when the memory
+    // actually has one (avoids polluting shared memories with an
+    // empty owner field).
+    let mut meta = format!(
+        "tags: {} | created: {}",
+        memory.tags.join(", "),
+        memory.created,
+    );
+    if let Some(owner) = memory.owner_hat_id.as_deref() {
+        meta.push_str(&format!(" | owner: {}", owner));
+    }
+    meta.push_str(&format!(" | visibility: {}", memory.visibility.as_str()));
+    // U6 lifecycle segments (fixed order — the parser regex expects
+    // this sequence).
+    let sanitize = |s: &str| s.replace('|', "/");
+    if let Some(v) = memory.applicability.as_deref() {
+        meta.push_str(&format!(" | applicability: {}", sanitize(v)));
+    }
+    if let Some(v) = memory.evidence_source.as_deref() {
+        meta.push_str(&format!(" | evidence: {}", sanitize(v)));
+    }
+    if let Some(v) = memory.last_verified.as_deref() {
+        meta.push_str(&format!(" | verified: {v}"));
+    }
+    if memory.invalidated {
+        meta.push_str(" | invalidated: true");
+    }
+    if let Some(v) = memory.superseded_by.as_deref() {
+        meta.push_str(&format!(" | superseded_by: {}", sanitize(v)));
+    }
+    meta
 }
 
 /// Formats memories as markdown for context injection.
@@ -362,11 +389,10 @@ pub fn format_memories_as_markdown(memories: &[Memory]) -> String {
 
         for memory in type_memories {
             output.push_str(&format!(
-                "\n### {}\n> {}\n<!-- tags: {} | created: {} -->\n",
+                "\n### {}\n> {}\n<!-- {} -->\n",
                 memory.id,
                 memory.content.replace('\n', "\n> "),
-                memory.tags.join(", "),
-                memory.created
+                memory_metadata_comment(memory),
             ));
         }
     }

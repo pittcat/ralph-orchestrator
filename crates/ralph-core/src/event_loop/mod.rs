@@ -280,7 +280,7 @@ use crate::hat_registry::HatRegistry;
 use crate::hatless_ralph::HatlessRalph;
 use crate::instructions::InstructionBuilder;
 use crate::loop_context::LoopContext;
-use crate::memory_store::{MarkdownMemoryStore, format_memories_as_markdown, truncate_to_budget};
+use crate::memory_store::{MarkdownMemoryStore, format_memories_as_markdown};
 use crate::preset::engine::gates::RejectionKind;
 use crate::preset::engine::{
     LintResumeTarget, ProtocolView, build_lint_mirror_block, build_lint_resume_block,

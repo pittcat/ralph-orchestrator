@@ -165,6 +165,11 @@ impl Default for Memory {
             created: String::new(),
             owner_hat_id: None,
             visibility: MemoryVisibility::default(),
+            applicability: None,
+            evidence_source: None,
+            last_verified: None,
+            invalidated: false,
+            superseded_by: None,
         }
     }
 }
@@ -197,6 +202,30 @@ pub struct Memory {
     /// Visibility scope. Defaults to `Shared` for legacy entries.
     #[serde(default)]
     pub visibility: MemoryVisibility,
+
+    /// Plan 2026-10-29-0104 U6: when this memory applies (free-text
+    /// applicability context, e.g. "rust async services"). `None` =
+    /// applies generally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applicability: Option<String>,
+
+    /// Where the claim came from (plan/task/report/test evidence).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_source: Option<String>,
+
+    /// Last verification date (`YYYY-MM-DD`) the entry was confirmed
+    /// still accurate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_verified: Option<String>,
+
+    /// Explicitly invalidated entries are never auto-injected (R14).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub invalidated: bool,
+
+    /// Id of the memory that supersedes this one; superseded entries
+    /// are never auto-injected (R14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 impl Memory {
@@ -213,6 +242,11 @@ impl Memory {
             created: chrono::Utc::now().format("%Y-%m-%d").to_string(),
             owner_hat_id: None,
             visibility: MemoryVisibility::Shared,
+            applicability: None,
+            evidence_source: None,
+            last_verified: None,
+            invalidated: false,
+            superseded_by: None,
         }
     }
 
@@ -236,7 +270,21 @@ impl Memory {
             created: chrono::Utc::now().format("%Y-%m-%d").to_string(),
             owner_hat_id,
             visibility,
+            applicability: None,
+            evidence_source: None,
+            last_verified: None,
+            invalidated: false,
+            superseded_by: None,
         }
+    }
+
+    /// Plan 2026-10-29-0104 U6/R14: whether this entry is eligible
+    /// for automatic selection. `false` for invalidated and
+    /// superseded entries — they remain readable via
+    /// `list`/`show`/`search` but are never auto-injected.
+    #[must_use]
+    pub fn is_selectable(&self) -> bool {
+        !self.invalidated && self.superseded_by.is_none()
     }
 
     /// Returns true if this memory is visible to the given hat.
