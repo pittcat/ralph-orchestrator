@@ -1617,14 +1617,14 @@ impl DagSchedulerRuntime {
             use std::os::fd::AsRawFd;
             let fd = file.as_raw_fd();
             let proc_path = format!("/proc/self/fd/{fd}");
-            if let Ok(resolved) = std::fs::read_link(&proc_path) {
-                if !resolved.starts_with(&canonical_worktree) {
-                    return Err(format!(
-                        "DAG artifact fd recheck failed: stage={stage} \
-                         field={field_name} resolved=`{}`",
-                        resolved.display()
-                    ));
-                }
+            if let Ok(resolved) = std::fs::read_link(&proc_path)
+                && !resolved.starts_with(&canonical_worktree)
+            {
+                return Err(format!(
+                    "DAG artifact fd recheck failed: stage={stage} \
+                     field={field_name} resolved=`{}`",
+                    resolved.display()
+                ));
             }
         }
         Ok((file, canonical))
@@ -1825,7 +1825,7 @@ impl DagSchedulerRuntime {
             let bytes = match Self::open_under_canonical_worktree(
                 &worktree,
                 path_str,
-                &stage_storage,
+                stage_storage,
                 field_name,
             ) {
                 Ok((mut file, _canonical)) => {

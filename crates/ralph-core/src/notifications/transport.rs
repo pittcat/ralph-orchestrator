@@ -50,6 +50,7 @@ impl std::error::Error for TransportError {}
 ///
 /// Implementations must never panic; network-level failures are reported as
 /// [`TransportError`].
+#[allow(clippy::double_must_use)] // async_trait emits must_use on a Future return
 #[async_trait]
 pub trait WebhookTransport: Send + Sync {
     /// POSTs `body` to `url` with the given `headers`, bounded by `timeout`.

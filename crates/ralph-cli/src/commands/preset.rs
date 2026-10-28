@@ -1400,10 +1400,11 @@ impl DiffResult {
                 "local version {} is newer than catalog {} (Ralph may be outdated)",
                 local_version, catalog_version
             ),
-            changes_summary: vec![format!(
+            changes_summary: vec![
                 "Local preset was generated with a newer template version. \
                 Consider updating Ralph to get the latest template changes."
-            )],
+                    .to_string(),
+            ],
             diff_lines: vec![],
         }
     }
