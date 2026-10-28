@@ -130,6 +130,7 @@ pub mod preset_verify;
 /// appends them to `RalphConfig.hats[hat].instructions`. U1 (the
 /// `profiles.default` config block) lives in `crate::config::profiles`.
 pub mod profiles;
+pub mod run_manifest;
 pub mod runtime_contract;
 #[cfg(feature = "recording")]
 mod session_player;
@@ -280,6 +281,7 @@ pub mod runtime_state;
 pub use preset_validator::{
     TopologyError, TopologyErrorKind, TopologyValidationResult, validate_preset_topology,
 };
+pub use run_manifest::{RunKind, RunManifest, TerminalInfo, WriteStartArgs};
 pub use runtime_contract::{
     FindingSeverity, FindingSource, FindingStage, LOOP_RUNNER_INTERNAL_TOPICS,
     RuntimeContractAggregator, RuntimeContractFinding, RuntimeContractReport,

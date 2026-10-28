@@ -480,6 +480,50 @@ pub(super) async fn run_loop_impl_inner(
         }
     }
 
+    // feat(monitor) foundation U1 (plan 2026-10-28-1949): write the run
+    // manifest (`.ralph/runs/<run_id>.manifest.json`) so `ralph inspect
+    // run` and the monitor collector can observe this incarnation —
+    // identity, cwd, kind, prompt hash, preset, events file — without
+    // parsing runtime internals. For `--continue` resumes the existing
+    // manifest's `started_at` is preserved and `terminal` is cleared so
+    // the run is observable as alive again. Best-effort: a manifest
+    // I/O failure must never fail the run itself.
+    {
+        let plan_path = {
+            let pf = config.event_loop.prompt_file.trim();
+            if pf.is_empty() {
+                None
+            } else {
+                let p = PathBuf::from(pf);
+                Some(if p.is_absolute() {
+                    p
+                } else {
+                    ctx.workspace().join(p)
+                })
+            }
+        };
+        if let Err(e) =
+            ralph_core::run_manifest::write_start(&ralph_core::run_manifest::WriteStartArgs {
+                workspace_root: ctx.workspace(),
+                repo_root: ctx.repo_root(),
+                worktree_path: if ctx.is_primary() {
+                    None
+                } else {
+                    Some(ctx.workspace())
+                },
+                run_id: &loop_id,
+                pid: std::process::id(),
+                prompt: &prompt_content,
+                preset: hats_source_label.clone(),
+                plan_path,
+                client_request_id: None,
+                events_file: Some(ctx.resolve_events_path()),
+            })
+        {
+            warn!(error = %e, "failed to write run manifest");
+        }
+    }
+
     // U2 (plan 2026-07-30-004): compile the final resolved config through the
     // fallible execution-contract boundary BEFORE constructing the loop. A
     // contract gap (e.g. a declared contract topic with no consumer) fails
@@ -1800,6 +1844,11 @@ pub(super) async fn run_loop_impl_inner(
                 }
             }
 
+            // feat(monitor): merge commit produced by the in-loop merge
+            // path below is recorded into the run manifest's terminal
+            // evidence once queue state transitions have settled.
+            let mut manifest_merge_commit: Option<String> = None;
+
             // Handle merge queue state transitions for merge loops
             // Per spec: CompletionPromise → merged, other → needs-review
             if let Some(ref loop_id) = merge_loop_id {
@@ -1831,6 +1880,7 @@ pub(super) async fn run_loop_impl_inner(
                                 warn!(loop_id = %loop_id, error = %e, "Failed to mark merge as completed");
                             } else {
                                 info!(loop_id = %loop_id, commit = %sha, "Merge completed successfully");
+                                manifest_merge_commit = Some(sha.clone());
                             }
                         }
                         None => {
@@ -1982,6 +2032,23 @@ pub(super) async fn run_loop_impl_inner(
                 if let Err(e) = registry.deregister_current_process() {
                     warn!("Failed to deregister loop from registry: {}", e);
                 }
+            }
+
+            // feat(monitor) foundation U1 (plan 2026-10-28-1949): persist
+            // terminal evidence into `.ralph/runs/<run_id>.manifest.json`.
+            // `record_terminal` is first-write-wins — a second terminal
+            // call (e.g. late signal after convergence) can never clobber
+            // the authoritative record. Best-effort like history: I/O
+            // failure logs but must not mask the terminal reason.
+            if let Some(ctx) = context
+                && let Err(e) = ralph_core::run_manifest::record_terminal(
+                    ctx.workspace(),
+                    &loop_id,
+                    reason.as_str(),
+                    manifest_merge_commit.clone(),
+                )
+            {
+                warn!(error = %e, "failed to record run manifest terminal");
             }
 
             // Print termination info to console (skip in TUI mode - TUI handles display)

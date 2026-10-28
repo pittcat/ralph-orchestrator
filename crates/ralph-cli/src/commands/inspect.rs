@@ -36,6 +36,8 @@ use ralph_core::supervisor::SchedulerInspectSummary;
 use std::io::Write;
 use std::path::PathBuf;
 
+mod run;
+
 /// Inspect Ralph runtime state without modifying it.
 #[derive(Parser, Debug)]
 pub struct InspectArgs {
@@ -74,6 +76,18 @@ pub enum InspectCommands {
     /// additionally prints the rendered prompt body so the operator
     /// can read what the hat actually sees end-to-end.
     Prompt(InspectPromptArgs),
+
+    /// Aggregate run observation for every run in a workspace
+    /// (primary + worktree, current + historical).
+    ///
+    /// feat(monitor) foundation U1 (plan 2026-10-28-1949): emits the
+    /// `run-observation/v1` contract the monitor service collects.
+    /// Runs are discovered from `.ralph/runs/*.manifest.json`
+    /// (authoritative when present), the loop registry, the primary
+    /// `loop.lock`, and the merge queue; each is normalized to a coarse
+    /// `running | exited | unknown` state. Read-only — never creates
+    /// `.ralph/` files, never holds locks.
+    Run(run::InspectRunArgs),
 }
 
 /// Arguments for `ralph inspect loop`.
@@ -240,6 +254,7 @@ pub async fn execute(
         Some(InspectCommands::Prompt(prompt_args)) => {
             inspect_prompt_command(config_sources, hats_source, prompt_args, use_colors).await
         }
+        Some(InspectCommands::Run(run_args)) => run::inspect_run_command(&run_args),
         None => {
             // No subcommand: print help so users learn the surface.
             // Returning Ok is consistent with `ralph preset` (which falls
