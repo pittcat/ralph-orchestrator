@@ -1,11 +1,20 @@
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
+import { startCollector } from './collector/collector.js';
 
 const config = loadConfig();
-const { app, machineId } = buildApp({ dbPath: config.dbPath, logger: true });
+const { app, db, machineId } = buildApp({
+  dbPath: config.dbPath,
+  logger: true,
+});
+const collector = startCollector(db, {
+  pollMs: config.pollMs,
+  log: (msg, err) => app.log.error(err, msg),
+});
 
 const shutdown = async () => {
   try {
+    collector.stop();
     await app.close();
     process.exit(0);
   } catch (err) {

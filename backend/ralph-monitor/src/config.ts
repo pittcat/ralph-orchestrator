@@ -6,6 +6,7 @@ export interface MonitorConfig {
   host: string;
   port: number;
   dbPath: string;
+  pollMs: number;
 }
 
 const envSchema = z.object({
@@ -15,6 +16,7 @@ const envSchema = z.object({
     .string()
     .min(1)
     .default(path.join(os.homedir(), '.ralph', 'monitor.db')),
+  pollMs: z.coerce.number().int().min(100).default(3000),
 });
 
 export function defaultDbPath(): string {
@@ -41,10 +43,12 @@ export function loadConfig(
     host: env.RALPH_MONITOR_HOST,
     port: env.RALPH_MONITOR_PORT,
     dbPath: env.RALPH_MONITOR_DB_PATH,
+    pollMs: env.RALPH_MONITOR_POLL_MS,
   });
   return {
     host: parsed.host,
     port: parsed.port,
+    pollMs: parsed.pollMs,
     dbPath:
       parsed.dbPath === ':memory:'
         ? parsed.dbPath

@@ -5,6 +5,8 @@ import { runMigrations } from './db/migrations.js';
 import { ensureMachineId } from './lib/machine_id.js';
 import { registerSecurity } from './plugins/security.js';
 import { registerProjectRoutes } from './routes/projects.js';
+import { registerRunRoutes } from './routes/runs.js';
+import { registerHealthRoutes } from './routes/health.js';
 
 export interface BuildAppOptions {
   /** SQLite path; `:memory:` is honored for unit tests. */
@@ -59,6 +61,8 @@ export function buildApp(options: BuildAppOptions): MonitorApp {
 
   registerSecurity(app);
   registerProjectRoutes(app, db);
+  registerRunRoutes(app, db, machineId);
+  registerHealthRoutes(app, db);
 
   app.get('/api/monitor/v1/health', async () => ({
     ok: true,

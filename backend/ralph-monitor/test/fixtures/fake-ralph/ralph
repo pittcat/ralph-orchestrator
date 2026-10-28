@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# fake `ralph` for monitor tests — POSIX only (plan U3 §19).
+#
+# Answers `ralph inspect run --format json` from `./.monitor-fixture/`
+# in the current working directory:
+#   snapshot.json   → printed verbatim on stdout
+#   fail            → file contents select a failure mode:
+#                       nonzero   exit 3 with a stderr line
+#                       badjson   print non-JSON, exit 0
+#                       sleep     sleep 30s (drives client timeout)
+#                       huge      emit >2MB (drives payload cap)
+#                       envcheck  emit v1 JSON with $RALPH_CURRENT_HAT
+#                                 in the workspace field (env scrub probe)
+# Without .monitor-fixture/fail a canned empty v1 snapshot is printed.
+
+set -u
+
+if [ "${1:-}" = "inspect" ] && [ "${2:-}" = "run" ]; then
+  if [ -f .monitor-fixture/fail ]; then
+    mode="$(cat .monitor-fixture/fail)"
+    case "$mode" in
+      nonzero)
+        echo "fixture failure" >&2
+        exit 3
+        ;;
+      badjson)
+        echo "this is not json"
+        exit 0
+        ;;
+      sleep)
+        sleep 30
+        exit 0
+        ;;
+      huge)
+        dd if=/dev/zero bs=1048576 count=3 2>/dev/null | tr '\0' 'a'
+        exit 0
+        ;;
+      envcheck)
+        printf '{"schema_version":"run-observation/v1","workspace":"%s","generated_at":"2026-10-28T00:00:00Z","runs":[]}\n' "${RALPH_CURRENT_HAT:-unset}"
+        exit 0
+        ;;
+    esac
+  fi
+  if [ -f .monitor-fixture/snapshot.json ]; then
+    cat .monitor-fixture/snapshot.json
+    exit 0
+  fi
+  printf '{"schema_version":"run-observation/v1","workspace":"%s","generated_at":"2026-10-28T00:00:00Z","runs":[]}\n' "$PWD"
+  exit 0
+fi
+
+echo "fake ralph: unsupported args $*" >&2
+exit 64

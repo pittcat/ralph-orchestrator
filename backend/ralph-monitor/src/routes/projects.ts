@@ -50,6 +50,9 @@ export function registerProjectRoutes(
     'INSERT INTO projects (id, canonical_path, display_name, created_at) VALUES (?, ?, ?, ?)',
   );
   const remove = db.prepare('DELETE FROM projects WHERE id = ?');
+  const audit = db.prepare(
+    'INSERT INTO audit_log (at, project_id, action, details) VALUES (?, ?, ?, ?)',
+  );
   const list = db.prepare(
     'SELECT id, canonical_path, display_name, created_at FROM projects ORDER BY created_at, id',
   );
@@ -130,7 +133,17 @@ export function registerProjectRoutes(
       if (!row) {
         return sendError(reply, 404, 'project_not_found', 'unknown project id');
       }
-      remove.run(req.params.id);
+      // Runs/cursors/collection_errors cascade via FK; the audit row
+      // survives so the deletion stays observable (plan U3 §13).
+      db.transaction(() => {
+        audit.run(
+          new Date().toISOString(),
+          row.id,
+          'project_deleted',
+          JSON.stringify({ canonicalPath: row.canonical_path }),
+        );
+        remove.run(req.params.id);
+      })();
       return reply.code(204).send();
     },
   );

@@ -1,0 +1,72 @@
+{
+  "schema_version": "run-observation/v1",
+  "workspace": "/golden/workspace",
+  "generated_at": "2026-10-28T12:00:00Z",
+  "runs": [
+    {
+      "run_id": "primary-20261028-115900",
+      "kind": "primary",
+      "state": "exited",
+      "pid": 4242,
+      "cwd": "/golden/workspace",
+      "workspace": "/golden/workspace",
+      "repo_root": "/golden/workspace",
+      "prompt_preview": "ship the feature",
+      "prompt_sha256": "9b74c9897bac770ffc029518a56c8d9b2f5f4e3d2c1b0a99887766554433221100",
+      "preset": "builtin:ce-executor-lite",
+      "plan_path": "docs/plans/golden.md",
+      "started_at": "2026-10-28T11:59:00Z",
+      "events_file": "/golden/workspace/.ralph/events.jsonl",
+      "terminal": {
+        "reason": "completed",
+        "at": "2026-10-28T12:00:00Z"
+      },
+      "manifest": ".ralph/runs/primary-20261028-115900.manifest.json",
+      "evidence": {
+        "manifest_present": true,
+        "registry_present": true
+      }
+    },
+    {
+      "run_id": "loop-20261028-113000-a1b2c3",
+      "kind": "worktree",
+      "state": "exited",
+      "pid": 5151,
+      "cwd": "/golden/workspace/.worktrees/loop-20261028-113000-a1b2c3",
+      "workspace": "/golden/workspace/.worktrees/loop-20261028-113000-a1b2c3",
+      "repo_root": "/golden/workspace",
+      "worktree_path": "/golden/workspace/.worktrees/loop-20261028-113000-a1b2c3",
+      "prompt_preview": "parallel unit work",
+      "prompt_sha256": "1b74c9897bac770ffc029518a56c8d9b2f5f4e3d2c1b0a998877665544332211ff",
+      "preset": "builtin:ce-executor-lite",
+      "started_at": "2026-10-28T11:30:00Z",
+      "terminal": {
+        "reason": "completed",
+        "at": "2026-10-28T11:58:00Z",
+        "merge_commit": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+      },
+      "manifest": ".worktrees/loop-20261028-113000-a1b2c3/.ralph/runs/loop-20261028-113000-a1b2c3.manifest.json",
+      "evidence": {
+        "manifest_present": true,
+        "registry_present": true,
+        "merge_state": "merged"
+      }
+    },
+    {
+      "run_id": "primary-20261028-100000",
+      "kind": "primary",
+      "state": "unknown",
+      "pid": 99999999,
+      "cwd": "/golden/workspace",
+      "workspace": "/golden/workspace",
+      "repo_root": "/golden/workspace",
+      "prompt_preview": "legacy prompt",
+      "prompt_sha256": "2b74c9897bac770ffc029518a56c8d9b2f5f4e3d2c1b0a998877665544332211ee",
+      "started_at": "2026-10-28T10:00:00Z",
+      "evidence": {
+        "manifest_present": false,
+        "lock_present": true
+      }
+    }
+  ]
+}

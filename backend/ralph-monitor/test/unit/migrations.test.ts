@@ -12,8 +12,29 @@ test('migrations are idempotent on an in-memory db', () => {
     .all() as { version: string }[];
   assert.deepEqual(
     versions.map((v) => v.version),
-    ['0001_init'],
+    ['0001_init', '0002_runs'],
   );
+  db.close();
+});
+
+test('0002 creates the runs/cursors/errors/audit tables', () => {
+  const db = openDatabase(':memory:');
+  runMigrations(db);
+  const names = (
+    db
+      .prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`,
+      )
+      .all() as { name: string }[]
+  ).map((t) => t.name);
+  for (const t of [
+    'runs',
+    'source_cursors',
+    'collection_errors',
+    'audit_log',
+  ]) {
+    assert.ok(names.includes(t), `missing table ${t}`);
+  }
   db.close();
 });
 
