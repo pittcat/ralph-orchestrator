@@ -3187,6 +3187,58 @@ pub(super) async fn run_loop_impl_inner(
                 None
             };
 
+        // Plan 2026-10-29-0104 U2/U3: record the agent-exec interval as
+        // a `timing.jsonl` span and arm backend stream observations.
+        // The open row lands before the future starts so a crash still
+        // leaves a censored record; an interrupt arm (which returns
+        // early below) relies on the handle's Drop to record
+        // `interrupted`. plan/unit/task keys are `NotApplicable` at the
+        // hat-activation level — DAG job spans in `runtime_job/` carry
+        // real keys. `attempt` is not tracked at this layer and stays
+        // missing rather than guessed.
+        let (mut agent_span, exec_timing) = {
+            let diag = event_loop.diagnostics();
+            let identity = ralph_core::diagnostics::ExecutionIdentity {
+                loop_id: Some(loop_id.clone()),
+                session_id: diag.session_id(),
+                activation_id: Some(format!("{loop_id}:{display_hat}:{iteration}")),
+                hat: Some(display_hat.to_string()),
+                plan_key: ralph_core::diagnostics::IdentityValue::NotApplicable,
+                unit_key: ralph_core::diagnostics::IdentityValue::NotApplicable,
+                task_key: ralph_core::diagnostics::IdentityValue::NotApplicable,
+                ..Default::default()
+            };
+            let span = diag
+                .begin_timing_span(
+                    identity.clone(),
+                    ralph_core::diagnostics::SpanKind::AgentExec,
+                    None,
+                )
+                .map(|mut h| {
+                    h.set_attributes(serde_json::json!({
+                        "backend": backend_name_for_timeout,
+                        "iteration": iteration,
+                        "executor": if use_pty { "pty" } else { "cli" },
+                    }));
+                    h
+                });
+            // U3: wrap the streaming handler so backend/tool
+            // observations (first output, tool intervals, usage)
+            // land in the same timing.jsonl. Display behavior is
+            // unchanged — the wrapper passes every event through.
+            let timing = if use_pty && diag.timing_capture_active() {
+                let diag_sink = diag.clone();
+                Some(crate::loop_runner::execution::ExecTiming {
+                    identity,
+                    parent_span_id: span.as_ref().map(|h| h.span_id().to_string()),
+                    sink: Box::new(move |row| diag_sink.record_timing_span(row)),
+                })
+            } else {
+                None
+            };
+            (span, timing)
+        };
+
         // Race execution against interrupt signal for immediate termination on Ctrl+C
         let mut interrupt_rx_clone = interrupt_rx.clone();
         let interrupt_rx_for_pty = interrupt_rx.clone();
@@ -3212,6 +3264,7 @@ pub(super) async fn run_loop_impl_inner(
                     iteration,
                     display_hat.as_str(),
                     &backend_name_for_timeout,
+                    exec_timing,
                 )
                 .await
             } else {
@@ -3240,37 +3293,6 @@ pub(super) async fn run_loop_impl_inner(
                     ),
                 )
             }
-        };
-
-        // Plan 2026-10-29-0104 U2: record the agent-exec interval as a
-        // `timing.jsonl` span. The open row lands before the future
-        // starts so a crash still leaves a censored record; an
-        // interrupt arm (which returns early below) relies on the
-        // handle's Drop to record `interrupted`. plan/unit/task keys
-        // are `NotApplicable` at the hat-activation level — DAG job
-        // spans in `runtime_job/` carry real keys. `attempt` is not
-        // tracked at this layer and stays missing rather than guessed.
-        let mut agent_span = {
-            let diag = event_loop.diagnostics();
-            let identity = ralph_core::diagnostics::ExecutionIdentity {
-                loop_id: Some(loop_id.clone()),
-                session_id: diag.session_id(),
-                activation_id: Some(format!("{loop_id}:{display_hat}:{iteration}")),
-                hat: Some(display_hat.to_string()),
-                plan_key: ralph_core::diagnostics::IdentityValue::NotApplicable,
-                unit_key: ralph_core::diagnostics::IdentityValue::NotApplicable,
-                task_key: ralph_core::diagnostics::IdentityValue::NotApplicable,
-                ..Default::default()
-            };
-            diag.begin_timing_span(identity, ralph_core::diagnostics::SpanKind::AgentExec, None)
-                .map(|mut h| {
-                    h.set_attributes(serde_json::json!({
-                        "backend": backend_name_for_timeout,
-                        "iteration": iteration,
-                        "executor": if use_pty { "pty" } else { "cli" },
-                    }));
-                    h
-                })
         };
 
         let outcome = tokio::select! {

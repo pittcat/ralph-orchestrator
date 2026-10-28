@@ -125,6 +125,7 @@ cli:
             0,    // iteration
             "executor",
             "claude",
+            None, // no ExecTiming
         ),
     )
     .await
@@ -227,6 +228,7 @@ cli:
             0,
             "executor",
             "claude",
+            None, // no ExecTiming
         ),
     )
     .await
@@ -345,6 +347,7 @@ cli:
             0,
             "executor",
             "claude",
+            None, // no ExecTiming
         ),
     )
     .await

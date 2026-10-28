@@ -201,6 +201,19 @@ pub fn prepare_tui_iteration(
     state.latest_iteration_lines_handle()
 }
 
+/// Backend-observation inputs for `execute_pty` (plan 2026-10-29-0104
+/// U3). When `Some`, the streaming handler is wrapped in
+/// [`ralph_adapters::timing_handler::TimingHandler`], which passes
+/// every display event through unchanged while emitting `timing.jsonl`
+/// span rows through `sink`.
+pub struct ExecTiming {
+    pub identity: ralph_core::diagnostics::ExecutionIdentity,
+    /// Parent span (the runner's AgentExec span) tool rows link under.
+    pub parent_span_id: Option<String>,
+    pub sink: ralph_adapters::timing_handler::SpanSink,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_pty(
     executor: Option<&mut PtyExecutor>,
     backend: &CliBackend,
@@ -214,6 +227,7 @@ pub async fn execute_pty(
     iteration: u32,
     hat: &str,
     backend_name: &str,
+    mut timing: Option<ExecTiming>,
 ) -> Result<ExecutionOutcome> {
     use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
@@ -274,6 +288,31 @@ pub async fn execute_pty(
         }
     });
 
+    // Wrap a streaming handler in TimingHandler when observations are
+    // armed. Only one match arm runs, so `timing.take()` moves at most
+    // once; display behavior is identical either way.
+    macro_rules! stream {
+        ($handler:expr) => {{
+            match timing.take() {
+                Some(t) => {
+                    let mut h = ralph_adapters::TimingHandler::new(
+                        $handler,
+                        t.identity,
+                        t.parent_span_id,
+                        t.sink,
+                    );
+                    exec.run_observe_streaming(prompt, interrupt_rx, &mut h)
+                        .await
+                }
+                None => {
+                    let mut h = $handler;
+                    exec.run_observe_streaming(prompt, interrupt_rx, &mut h)
+                        .await
+                }
+            }
+        }};
+    }
+
     // Run PTY executor with shared interrupt channel
     let result = if interactive && tui_lines.is_none() && rpc_stdout.is_none() {
         // Raw interactive mode only when not using TUI or RPC (TUI/RPC handle their own I/O)
@@ -281,19 +320,15 @@ pub async fn execute_pty(
     } else if let Some(lines) = tui_lines {
         // TUI mode: use TuiStreamHandler to capture output for TUI display
         let verbose = verbosity == Verbosity::Verbose;
-        let mut handler = TuiStreamHandler::with_lines(verbose, lines);
-        exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
-            .await
+        stream!(TuiStreamHandler::with_lines(verbose, lines))
     } else if let Some(stdout_writer) = rpc_stdout {
         // RPC mode: use JsonRpcStreamHandler for JSON-lines output
-        let mut handler = JsonRpcStreamHandler::new(
+        stream!(JsonRpcStreamHandler::new(
             stdout_writer,
             iteration,
             Some(hat.to_string()),
             Some(backend_name.to_string()),
-        );
-        exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
-            .await
+        ))
     } else {
         // Use streaming handler for non-interactive mode (respects verbosity)
         // Use PrettyStreamHandler for StreamJson backends (Claude) on TTY for markdown rendering
@@ -302,31 +337,19 @@ pub async fn execute_pty(
             backend.output_format == BackendOutputFormat::StreamJson && stdout().is_terminal();
 
         match verbosity {
-            Verbosity::Quiet => {
-                let mut handler = QuietStreamHandler;
-                exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
-                    .await
-            }
+            Verbosity::Quiet => stream!(QuietStreamHandler),
             Verbosity::Normal => {
                 if use_pretty {
-                    let mut handler = PrettyStreamHandler::new(false);
-                    exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
-                        .await
+                    stream!(PrettyStreamHandler::new(false))
                 } else {
-                    let mut handler = ConsoleStreamHandler::new(false);
-                    exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
-                        .await
+                    stream!(ConsoleStreamHandler::new(false))
                 }
             }
             Verbosity::Verbose => {
                 if use_pretty {
-                    let mut handler = PrettyStreamHandler::new(true);
-                    exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
-                        .await
+                    stream!(PrettyStreamHandler::new(true))
                 } else {
-                    let mut handler = ConsoleStreamHandler::new(true);
-                    exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
-                        .await
+                    stream!(ConsoleStreamHandler::new(true))
                 }
             }
         }

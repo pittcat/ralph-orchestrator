@@ -163,6 +163,53 @@ pub fn render_html(report: &PerformanceReport) -> String {
     }
     html.push_str("</tbody>\n</table>\n</section>\n");
 
+    // ── Bottleneck candidates (U5) ────────────────────────────────
+    if !report.bottlenecks.is_empty() {
+        html.push_str("<section class=\"card\">\n<h2>Bottleneck candidates</h2>\n");
+        html.push_str(
+            "<p class=\"note\">Directions backed by evidence or explicit gaps — \
+             not verified root causes.</p>\n<ol class=\"bottleneck-list\">\n",
+        );
+        for b in &report.bottlenecks {
+            let kind = format!("{:?}", b.kind).to_lowercase();
+            let _ = writeln!(
+                html,
+                "<li class=\"bottleneck\"><span class=\"pill kind-{}\">{}</span> {}",
+                esc(&kind),
+                esc(&kind.replace('_', "-")),
+                esc(&b.finding)
+            );
+            if let Some(pct) = b.wall_clock_share_pct {
+                let _ = writeln!(html, "<span class=\"share\">{}% of wall clock</span>", pct);
+            }
+            if !b.evidence.is_empty() {
+                html.push_str("<ul class=\"evidence\">\n");
+                for e in &b.evidence {
+                    let where_ = e
+                        .span_id
+                        .as_deref()
+                        .map(|id| format!("{:?}#{}", e.artifact, id))
+                        .unwrap_or_else(|| format!("{:?}", e.artifact));
+                    let _ = writeln!(
+                        html,
+                        "<li>{} <code>{}</code></li>",
+                        esc(&e.note),
+                        esc(&where_.to_lowercase())
+                    );
+                }
+                html.push_str("</ul>\n");
+            }
+            if let Some(rec) = &b.recommendation {
+                let _ = writeln!(html, "<p class=\"direction\">Direction: {}</p>", esc(rec));
+            }
+            if let Some(gap) = &b.gap {
+                let _ = writeln!(html, "<p class=\"gap-note\">Gap: {}</p>", esc(gap));
+            }
+            html.push_str("</li>\n");
+        }
+        html.push_str("</ol>\n</section>\n");
+    }
+
     html.push_str("<footer class=\"foot\">Offline report — all data embedded; \
         JS is interaction-only (no eval, no network, no artifact code execution).</footer>\n");
     html.push_str("</main>\n");
@@ -324,6 +371,17 @@ font-weight:600;letter-spacing:.3px;background:#26304d}
 .bar{display:inline-block;height:8px;border-radius:4px;background:var(--acc);
 margin-right:8px;vertical-align:middle;opacity:.85;min-width:2px}
 .note{color:var(--muted);font-size:13px;margin:0 0 10px}
+.bottleneck-list{padding-left:22px}
+.bottleneck{margin:10px 0;padding:10px 12px;background:#141b2c;border-radius:10px;
+border:1px solid #202943;list-style-position:inside}
+.bottleneck .share{color:var(--muted);font-size:12.5px;margin-left:8px}
+.bottleneck .evidence{margin:8px 0 2px;padding-left:16px;color:var(--muted);font-size:12.5px}
+.bottleneck .evidence code{color:#93c5fd}
+.bottleneck .direction{color:#6ee7b7;font-size:13px;margin:6px 0 0}
+.bottleneck .gap-note{color:var(--warn);font-size:13px;margin:6px 0 0}
+.kind-slow_stage{background:#4d1e2b;color:#fda4af}
+.kind-wait_release{background:#4d3a1e;color:#fbbf24}
+.kind-coverage_gap{background:#3d2a4d;color:#d8b4fe}
 .tl-row{display:flex;align-items:center;gap:10px;padding:3px 0}
 .tl-label{width:170px;flex:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
 .tl-track{position:relative;flex:1;height:14px;background:#0b0f18;border-radius:7px}
@@ -387,6 +445,7 @@ mod tests {
             slowest_spans: vec![],
             spans: vec![SpanView {
                 span_id: "sp-a".into(),
+                parent_span_id: None,
                 kind: SpanKind::AgentExec,
                 status: SpanStatus::Completed,
                 identity: ExecutionIdentity::for_hat("executor"),
@@ -399,6 +458,7 @@ mod tests {
             }],
             wall_clock_ms: span.duration_ms(),
             cumulative_work_ms: span.duration_ms().unwrap_or(0),
+            bottlenecks: vec![],
         }
     }
 

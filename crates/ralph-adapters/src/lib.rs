@@ -34,6 +34,7 @@ mod pi_stream;
 mod pty_executor;
 pub mod pty_handle;
 mod stream_handler;
+pub mod timing_handler;
 pub mod tool_policy;
 pub mod tool_preview;
 mod trae_stream;
@@ -63,6 +64,7 @@ pub use stream_handler::{
     ConsoleStreamHandler, PrettyStreamHandler, QuietStreamHandler, SessionResult, StreamHandler,
     TuiStreamHandler,
 };
+pub use timing_handler::TimingHandler;
 pub use tool_policy::apply_hat_tool_policy;
 pub use trae_stream::{
     TraeAssistantMessage, TraeAssistantToolCall, TraeSessionState, TraeStreamEvent,

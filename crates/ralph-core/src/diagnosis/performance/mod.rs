@@ -14,6 +14,9 @@
 //! - bottleneck candidates are presented as *observed* slow spans,
 //!   explicitly NOT verified root causes (R7/R8).
 
+pub mod bottleneck;
+pub mod evidence;
+
 use std::collections::BTreeMap;
 use std::io::BufRead;
 use std::path::Path;
@@ -30,6 +33,9 @@ use crate::diagnostics::{
 #[derive(Debug, Clone, Serialize)]
 pub struct SpanView {
     pub span_id: String,
+    /// Parent span when the row declared one (tool inside agent exec).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_span_id: Option<String>,
     pub kind: SpanKind,
     pub status: SpanStatus,
     pub identity: crate::diagnostics::ExecutionIdentity,
@@ -80,6 +86,10 @@ pub struct PerformanceReport {
     pub wall_clock_ms: Option<u64>,
     /// Sum of completed work-kind durations (waits excluded — R5).
     pub cumulative_work_ms: u64,
+    /// Evidence-backed bottleneck candidates (U5, R7/R8) — directions,
+    /// not verified causes; every entry carries evidence or an
+    /// explicit gap.
+    pub bottlenecks: Vec<bottleneck::BottleneckCandidate>,
 }
 
 /// Read `timing.jsonl` + `diagnosis-input.json` under `session_dir`
@@ -182,7 +192,7 @@ pub fn analyze(session_dir: &Path) -> PerformanceReport {
         gaps.push(format!("{censored} span(s) censored (no closing record)"));
     }
 
-    PerformanceReport {
+    let mut report = PerformanceReport {
         schema_version: PERFORMANCE_ANALYSIS_SCHEMA_VERSION.to_string(),
         generated_at: chrono::Utc::now().to_rfc3339(),
         session_dir: session_dir.display().to_string(),
@@ -200,12 +210,18 @@ pub fn analyze(session_dir: &Path) -> PerformanceReport {
             .zip(max_end)
             .and_then(|(s, e)| (e - s).num_milliseconds().try_into().ok()),
         cumulative_work_ms,
-    }
+        bottlenecks: Vec::new(),
+    };
+    // U5: derive candidates after all facts are settled so every
+    // candidate can point at the same merged view the report renders.
+    report.bottlenecks = bottleneck::analyze_bottlenecks(&report);
+    report
 }
 
 fn merge_row(spans: &mut BTreeMap<String, SpanView>, row: TimingSpan) {
     let view = spans.entry(row.span_id.clone()).or_insert_with(|| SpanView {
         span_id: row.span_id.clone(),
+        parent_span_id: row.parent_span_id.clone(),
         kind: row.kind,
         status: SpanStatus::Open,
         identity: row.identity.clone(),
@@ -296,6 +312,30 @@ pub fn render_markdown(report: &PerformanceReport) -> String {
                 s.identity.unit_key.as_str().unwrap_or("-"),
                 s.duration_ms.map(|d| d.to_string()).unwrap_or_else(|| "censored".into())
             );
+        }
+        out.push('\n');
+    }
+    if !report.bottlenecks.is_empty() {
+        out.push_str("## Bottleneck candidates\n\n");
+        out.push_str(
+            "_Directions backed by evidence or explicit gaps — not verified root causes._\n\n",
+        );
+        for (i, b) in report.bottlenecks.iter().enumerate() {
+            let _ = writeln!(out, "{}. **{:?}** — {}", i + 1, b.kind, b.finding);
+            for e in &b.evidence {
+                let where_ = e
+                    .span_id
+                    .as_deref()
+                    .map(|id| format!("{:?}#{}", e.artifact, id))
+                    .unwrap_or_else(|| format!("{:?}", e.artifact));
+                let _ = writeln!(out, "   - evidence: {} ({})", e.note, where_);
+            }
+            if let Some(rec) = &b.recommendation {
+                let _ = writeln!(out, "   - direction: {rec}");
+            }
+            if let Some(gap) = &b.gap {
+                let _ = writeln!(out, "   - gap: {gap}");
+            }
         }
     }
     out
