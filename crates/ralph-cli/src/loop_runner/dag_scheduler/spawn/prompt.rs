@@ -58,6 +58,10 @@ pub(super) fn build_job_prompt(
          - Forbidden paths for this Unit: {forbidden_paths}\n\
          - The runtime points RALPH_EVENTS_FILE at `{events}`; `ralph emit` writes there. \
          Emit EXACTLY ONE business event.\n\
+         - Forge business artifacts live on the HOST workspace (`.ralph/` is untracked and not \
+         visible inside this worktree): read plan artifacts under `RALPH_DAG_FORGE_ROOT` and write \
+         this unit's reports under `RALPH_DAG_ARTIFACT_DIR`. Emit repo-relative \
+         `.ralph/forge/<plan_key>/...` paths in payloads, never absolute paths.\n\
          - On success emit `{success}` with a JSON payload containing: {required}. The runtime \
          overwrites unit_id/plan_key/task_id/task_key; you MUST supply the remaining fields.\n\
          - On failure emit `{failure}` instead (same identity fields; {failure_contract}).\n",

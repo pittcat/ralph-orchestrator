@@ -53,10 +53,123 @@ use crate::loop_runner::wave::dispatcher::coordination::append_supervisor_coord_
 /// schema marks both as runtime-sourced.
 pub(crate) const UNIT_INTEGRATED: &str = "forge.unit.integrated";
 pub(crate) const DEVELOPMENT_DONE: &str = "forge.exec.development.done";
+/// Runtime-injected terminal block (adversarial review R5/R7): the
+/// runtime emits `forge.plan.blocked` itself when a plan-level
+/// precondition is violated or the execution face wedges.
+pub(crate) const PLAN_BLOCKED: &str = "forge.plan.blocked";
+
+/// Loop-scoped integration lane (adversarial review R4): every unit
+/// squash lands on `ralph/<loop>/integration`, a branch that is NEVER
+/// checked out by any worktree. The finalizer fast-forwards the lane
+/// into the operator's target branch at the delivery boundary, which
+/// keeps the host index/worktree consistent — the pre-R4 lane CAS'd
+/// the host's own checked-out branch via `update-ref` and left a
+/// stale index behind (every subsequent worktree acquisition then
+/// failed `HostDirty`).
+pub(crate) fn integration_branch(loop_id: &str) -> String {
+    format!("ralph/{loop_id}/integration")
+}
+
+/// Create the integration lane at `base` when it does not already
+/// exist (idempotent across restarts). `git update-ref` only fires on
+/// the missing-ref path; an existing lane is left untouched.
+pub(crate) fn ensure_integration_branch(
+    workspace: &std::path::Path,
+    loop_id: &str,
+    base: &str,
+) -> Result<(), String> {
+    let reference = format!("refs/heads/{}", integration_branch(loop_id));
+    let exists = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["show-ref", "--verify", "--quiet", &reference])
+        .status()
+        .map_err(|err| format!("git show-ref integration lane: {err}"))?
+        .success();
+    if exists {
+        return Ok(());
+    }
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["update-ref", &reference, base])
+        .status()
+        .map_err(|err| format!("git update-ref integration lane: {err}"))?;
+    if !status.success() {
+        return Err(format!(
+            "integration lane {reference} could not be created at {base}: exit {:?}",
+            status.code()
+        ));
+    }
+    Ok(())
+}
 
 /// CAS-stale retries before the unit is failed: a moving target head
 /// is transient (sibling FF), a persistent one is an operator race.
 const MAX_STALE_RETRIES: u32 = 3;
+
+/// Canonical host-status fingerprint (adversarial review O2): the
+/// same contract the `forge.audit.done` gate recomputes —
+/// `git status --porcelain=v1 --untracked-files=all` with every
+/// `.ralph/` line dropped, kept lines joined by `\n` plus one
+/// trailing `\n` when non-empty, hex(SHA-256) of the UTF-8 bytes.
+/// Recorded in `worktree-map.yml` at development-done time so the
+/// auditor can detect target-worktree drift between integration
+/// completion and the final audit.
+fn host_status_fingerprint(repo_root: &std::path::Path) -> String {
+    let Ok(out) = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .output()
+    else {
+        return String::new();
+    };
+    if !out.status.success() {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut kept: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        if line.len() < 3 {
+            continue;
+        }
+        let path = line[3..].trim_matches('"');
+        let path = path.rsplit(" -> ").next().unwrap_or(path);
+        if path == ".ralph" || path.starts_with(".ralph/") {
+            continue;
+        }
+        kept.push(line);
+    }
+    let joined = if kept.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", kept.join("\n"))
+    };
+    format!("{:x}", sha2::Sha256::digest(joined.as_bytes()))
+}
+
+/// Resolve a branch tip (`git rev-parse <ref>`), empty string when
+/// unresolvable. Used to pin `integration_head_sha` into the
+/// delivery projection.
+fn branch_tip(repo_root: &std::path::Path, reference: &str) -> String {
+    let Ok(out) = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args([
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/{reference}^{{commit}}"),
+        ])
+        .output()
+    else {
+        return String::new();
+    };
+    if !out.status.success() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
 
 /// A verified unit waiting for its integration slot.
 #[derive(Debug)]
@@ -74,8 +187,12 @@ impl DagSchedulerRuntime {
     /// is blocked instead of being acknowledged speculatively.
     #[cfg(feature = "supervisor-db")]
     pub(super) fn reconcile_after_restart(&mut self) {
-        let Some(main_events_file) = self.exec.as_ref().map(|exec| exec.main_events_file.clone())
-        else {
+        let Some((main_events_file, lane)) = self.exec.as_ref().map(|exec| {
+            (
+                exec.main_events_file.clone(),
+                integration_branch(&exec.loop_id),
+            )
+        }) else {
             return;
         };
         let ledger = crate::loop_runner::wave::io::read_worker_events(&main_events_file);
@@ -89,7 +206,7 @@ impl DagSchedulerRuntime {
             .map(|(key, plan)| {
                 (
                     key.clone(),
-                    plan.target_branch.clone(),
+                    lane.clone(),
                     plan.units.iter().map(|unit| unit.unit_id.clone()).collect(),
                 )
             })
@@ -180,7 +297,14 @@ impl DagSchedulerRuntime {
 
     /// Queue a verified unit for integration. Deduped against the
     /// pending queue and the already-integrated set.
+    ///
+    /// `unit_id` may arrive plan-namespaced (`forge:{plan}:{unit}`)
+    /// from the accepted-event seam; the durable record, the unit
+    /// branch name (`ralph/<loop>/<unit>` — a `:` would make the ref
+    /// invalid), and `plan.integrated` all key on the BARE id, so the
+    /// namespace is stripped once at this boundary.
     pub(crate) fn queue_integration(&mut self, plan_key: &str, unit_id: &str) {
+        let unit_id = super::spawn::strip_plan_namespace(plan_key, unit_id);
         let already_pending = self
             .pending_integrations
             .iter()
@@ -256,7 +380,14 @@ impl DagSchedulerRuntime {
             );
             return;
         }
-        let target_branch = plan.target_branch.clone();
+        // The durable record keys on the lane branch the orchestrator
+        // CAS'd (adversarial review R4), not the plan's declared
+        // target_branch.
+        let lane = self
+            .exec
+            .as_ref()
+            .map(|exec| integration_branch(&exec.loop_id))
+            .unwrap_or_else(|| plan.target_branch.clone());
         let Some(store) = self.integration_store() else {
             // Non-durable builds never reach here (spawn refuses
             // without a journal); stay fail-closed anyway.
@@ -266,10 +397,10 @@ impl DagSchedulerRuntime {
             );
             return;
         };
-        if let Err(err) = store.ack(unit_id, &target_branch) {
+        if let Err(err) = store.ack(unit_id, &lane) {
             warn!(
                 unit_id,
-                target_branch,
+                target_branch = %lane,
                 error = %err,
                 "DAG integration: record ack failed; unit stays unacked (no development.done)"
             );
@@ -280,6 +411,7 @@ impl DagSchedulerRuntime {
             .expect("plan present")
             .integrated
             .insert(unit_id.to_string());
+        self.write_forge_projection(plan_key);
     }
 
     /// S15: when every unit of a plan is integrated AND acknowledged,
@@ -347,11 +479,37 @@ impl DagSchedulerRuntime {
                                 })
                     });
             if !already_in_ledger {
+                self.write_forge_projection(&plan_key);
+                let (target_branch, target_start_sha, integration_lane) = self
+                    .plans
+                    .get(&plan_key)
+                    .map(|plan| {
+                        (
+                            plan.target_branch.clone(),
+                            plan.verified_base_commit.clone().unwrap_or_default(),
+                            self.exec
+                                .as_ref()
+                                .map(|exec| integration_branch(&exec.loop_id))
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .unwrap_or_default();
                 let payload = serde_json::json!({
                     "execution_plan_path": artifact_path,
                     "completed_unit_count": unit_count,
                     "failed_unit_count": 0,
                     "plan_key": plan_key,
+                    // Adversarial review O2: downstream hats (auditor /
+                    // finalizer / cleanup / reporter) read the delivery
+                    // coordinates from this payload and from
+                    // `.ralph/forge/<plan>/worktree-map.yml` instead of a
+                    // wave-era `forge.worktrees.ready` projection.
+                    "target_branch": target_branch,
+                    "target_start_sha": target_start_sha,
+                    "integration_branch": integration_lane.clone(),
+                    "integration_head_sha": branch_tip(&self.workspace, &integration_lane),
+                    "target_status_fingerprint": host_status_fingerprint(&self.workspace),
+                    "worktree_map_path": format!(".ralph/forge/{plan_key}/worktree-map.yml"),
                 });
                 if let Err(err) =
                     append_supervisor_coord_event(&main_events_file, DEVELOPMENT_DONE, &payload)
@@ -422,7 +580,7 @@ impl DagSchedulerRuntime {
                 unit.forbidden_paths.clone(),
             ))
         });
-        let Some((target_branch, base_commit, tests, allowed_paths, forbidden_paths)) = lookup
+        let Some((_plan_target_branch, plan_base, tests, allowed_paths, forbidden_paths)) = lookup
         else {
             self.fail_integration(
                 &pending,
@@ -431,6 +589,30 @@ impl DagSchedulerRuntime {
             );
             return;
         };
+        // Adversarial review R4/R6: the lane target is the dedicated
+        // `ralph/<loop>/integration` branch (never the host's checked-out
+        // branch), and the unit-diff anchor is the first-admission base
+        // pin — for a dependent unit that pin already contains every
+        // acked dependency, so the diff covers only this unit's work.
+        let loop_id = self
+            .exec
+            .as_ref()
+            .expect("checked by caller")
+            .loop_id
+            .clone();
+        let target_branch = integration_branch(&loop_id);
+        let base_commit = self
+            .ensure_stores()
+            .ok()
+            .and_then(|stores| {
+                stores
+                    .plans
+                    .get_unit_base(&plan_key, &unit_id)
+                    .ok()
+                    .flatten()
+            })
+            .map(|pin| pin.base_commit)
+            .unwrap_or(plan_base);
         let integration_order = self
             .plans
             .get(&plan_key)
@@ -484,12 +666,15 @@ impl DagSchedulerRuntime {
             return;
         }
 
-        let loop_id = self
-            .exec
-            .as_ref()
-            .expect("checked by caller")
-            .loop_id
-            .clone();
+        // The lane is created at plan approval, but a restart can
+        // lose the window between approval and the first CAS. Ensure
+        // it here too — idempotent, one `git show-ref` probe per
+        // integration — so the lane invariant holds at the CAS seam
+        // regardless of which boundary ran first.
+        if let Err(err) = ensure_integration_branch(&self.workspace, &loop_id, &base_commit) {
+            self.fail_integration(&pending, "integration_lane_unavailable", &err);
+            return;
+        }
         let unit_commit = match read_unit_branch_tip(&self.workspace, &loop_id, &unit_id) {
             Ok(sha) => sha,
             Err(reason) => {
@@ -645,6 +830,117 @@ impl DagSchedulerRuntime {
                 unit_id: unit_id.to_string(),
                 stale_retries: pending.stale_retries,
             });
+        }
+    }
+
+    /// Persist the DAG forge projection (adversarial review O2): the
+    /// machine-readable replacement for the wave-era
+    /// `forge.worktrees.ready` artifact. Downstream hats
+    /// (tester/auditor/finalizer/cleanup/reporter) read
+    /// `.ralph/forge/<plan>/worktree-map.yml` for delivery
+    /// coordinates — the integration lane, unit branches/worktrees,
+    /// and the verified start SHA — instead of reconstructing them
+    /// from wave payloads.
+    pub(super) fn write_forge_projection(&self, plan_key: &str) {
+        let Some(exec) = self.exec.as_ref() else {
+            return;
+        };
+        let Some(plan) = self.plans.get(plan_key) else {
+            return;
+        };
+        let relative = format!(".ralph/forge/{plan_key}/worktree-map.yml");
+        let path = self.workspace.join(&relative);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let lane = integration_branch(&exec.loop_id);
+        let mut doc = String::from("version: 1\n");
+        doc.push_str(&format!("plan_key: {plan_key}\n"));
+        doc.push_str(&format!("target_branch: {}\n", plan.target_branch));
+        doc.push_str(&format!("integration_branch: {lane}\n"));
+        doc.push_str(&format!(
+            "target_start_sha: {}\n",
+            plan.verified_base_commit.clone().unwrap_or_default()
+        ));
+        doc.push_str(&format!(
+            "target_status_fingerprint: {}\n",
+            host_status_fingerprint(&self.workspace)
+        ));
+        doc.push_str(&format!(
+            "integration_head_sha: {}\n",
+            branch_tip(&self.workspace, &lane)
+        ));
+        doc.push_str("units:\n");
+        for unit in &plan.units {
+            let branch = format!("ralph/{}/{}", exec.loop_id, unit.unit_id);
+            let worktree = super::worktree::UnitWorktree::worktree_path_for(
+                &self.workspace,
+                &exec.loop_id,
+                &unit.unit_id,
+            );
+            let rel_worktree = worktree
+                .strip_prefix(&self.workspace)
+                .unwrap_or(&worktree)
+                .to_string_lossy()
+                .replace('\\', "/");
+            doc.push_str(&format!(
+                "  - unit_id: {}\n    branch: {branch}\n    worktree: {rel_worktree}\n    integrated: {}\n",
+                unit.unit_id,
+                plan.integrated.contains(&unit.unit_id)
+            ));
+        }
+        if let Err(err) = std::fs::write(&path, doc) {
+            warn!(
+                plan_key,
+                error = %err,
+                "DAG projection: worktree-map write failed"
+            );
+        }
+    }
+
+    /// Emit `forge.plan.blocked` as a runtime-injected coordination
+    /// event (adversarial review R5/R7). The block note lands under
+    /// the plan's forge artifact root first so
+    /// `context_artifact_path` is a real file downstream hats can
+    /// read. Callers are responsible for `blocked_plans` fencing via
+    /// `block_plan` so the same wedge emits once.
+    pub(crate) fn emit_plan_blocked(&mut self, plan_key: &str, reason: &str) {
+        let Some(exec) = self.exec.as_ref() else {
+            warn!(
+                plan_key, %reason,
+                "DAG runtime: plan blocked before execution context; event not emitted"
+            );
+            return;
+        };
+        let context_rel = format!(".ralph/forge/{plan_key}/blocks/runtime-blocked.md");
+        let context_path = self.workspace.join(&context_rel);
+        if let Some(parent) = context_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(
+            &context_path,
+            format!("# DAG runtime block\n\n- plan_key: {plan_key}\n- reason: {reason}\n"),
+        );
+        let plan_path = self
+            .plans
+            .get(plan_key)
+            .map(|plan| plan.artifact_path.clone())
+            .unwrap_or_default();
+        let payload = serde_json::json!({
+            "reason": reason,
+            "plan_path": plan_path,
+            "context_artifact_path": context_rel,
+            "forge_artifact_root": format!(".ralph/forge/{plan_key}/"),
+            "plan_key": plan_key,
+        });
+        if let Err(err) =
+            append_supervisor_coord_event(&exec.main_events_file, PLAN_BLOCKED, &payload)
+        {
+            warn!(
+                plan_key,
+                error = %err,
+                "DAG runtime: forge.plan.blocked append failed"
+            );
         }
     }
 
@@ -811,6 +1107,7 @@ fn diff_entries(
 mod tests {
     use super::*;
     use crate::loop_runner::dag_scheduler::spawn::DagExecutionContext;
+    use crate::loop_runner::dag_scheduler::{PlanTopology, UnitTopology};
     use ralph_adapters::CliBackend;
     use ralph_core::config::{CliConfig, HatConfig, RalphConfig, ResolvedDagPools, SchedulerMode};
     use std::path::Path;
@@ -839,74 +1136,31 @@ units:
     tests:
       - "true"
 "#;
-    /// U2 declares no gate commands (PMI-0041 fail-closed probe).
-    const PLAN_ARTIFACT_U2_NO_TESTS: &str = r#"version: 1
-plan_key: pf-test
-units:
-  - id: U1
-    title: Foundation
-    depends_on: []
-    execution_wave: 1
-    integration_order: 1
-    target_branch: feat/u1-foundation
-    allowed_paths: [u1.txt]
-    tests:
-      - "true"
-  - id: U2
-    title: Feature
-    depends_on: []
-    execution_wave: 1
-    integration_order: 2
-    target_branch: feat/u2-feature
-    allowed_paths: [u2.txt]
-"#;
+    /// U2 declares no gate commands (PMI-0041 fail-closed probe) —
+    /// expressed as a directly-injected topology because `forge.plan.ready`
+    /// now rejects such artifacts before they can reach integration.
+    fn u2_no_tests_units() -> Vec<UnitTopology> {
+        vec![
+            unit_topology("U1", 1, &["u1.txt"], &["true"]),
+            unit_topology("U2", 2, &["u2.txt"], &[]),
+        ]
+    }
 
-    const PLAN_ARTIFACT_NO_PATH_POLICY: &str = r#"version: 1
-plan_key: pf-test
-units:
-  - id: U1
-    title: Foundation
-    depends_on: []
-    execution_wave: 1
-    integration_order: 1
-    target_branch: feat/u1-foundation
-    tests:
-      - "true"
-  - id: U2
-    title: Feature
-    depends_on: []
-    execution_wave: 1
-    integration_order: 2
-    target_branch: feat/u2-feature
-    tests:
-      - "true"
-"#;
+    fn no_path_policy_units() -> Vec<UnitTopology> {
+        vec![
+            unit_topology("U1", 1, &[], &["true"]),
+            unit_topology("U2", 2, &["u2.txt"], &["true"]),
+        ]
+    }
 
     /// U2 has one valid-looking gate and one malformed entry. The malformed
     /// entry must not be silently discarded while the valid gate runs.
-    const PLAN_ARTIFACT_U2_INVALID_TEST: &str = r#"version: 1
-plan_key: pf-test
-units:
-  - id: U1
-    title: Foundation
-    depends_on: []
-    execution_wave: 1
-    integration_order: 1
-    target_branch: feat/u1-foundation
-    allowed_paths: [u1.txt]
-    tests:
-      - "true"
-  - id: U2
-    title: Feature
-    depends_on: []
-    execution_wave: 1
-    integration_order: 2
-    target_branch: feat/u2-feature
-    allowed_paths: [u2.txt]
-    tests:
-      - "true"
-      - "cargo test 'unterminated"
-"#;
+    fn u2_invalid_test_units() -> Vec<UnitTopology> {
+        vec![
+            unit_topology("U1", 1, &["u1.txt"], &["true"]),
+            unit_topology("U2", 2, &["u2.txt"], &["true", "cargo test 'unterminated"]),
+        ]
+    }
 
     fn exec_context(workspace: &Path) -> DagExecutionContext {
         let mut config = RalphConfig::default();
@@ -982,10 +1236,61 @@ units:
         assert!(status.success(), "git {:?} failed", args);
     }
 
+    /// Direct topology registration for second-line defense tests:
+    /// `forge.plan.ready` (O1) legitimately rejects artifacts whose
+    /// units lack `tests`/`allowed_paths`, so a fixture probing the
+    /// integration-time guard must bypass the plan boundary and
+    /// inject the topology straight into `runtime.plans`.
+    fn unit_topology(
+        unit_id: &str,
+        integration_order: u32,
+        allowed: &[&str],
+        tests: &[&str],
+    ) -> UnitTopology {
+        UnitTopology {
+            unit_id: unit_id.to_string(),
+            integration_order,
+            depends_on: Vec::new(),
+            tests: tests.iter().map(|s| (*s).to_string()).collect(),
+            resource_claims: Vec::new(),
+            allowed_paths: allowed.iter().map(std::path::PathBuf::from).collect(),
+            forbidden_paths: Vec::new(),
+        }
+    }
+
+    fn runtime_with_units(
+        workspace: &Path,
+        units: Vec<UnitTopology>,
+        verified_base: Option<String>,
+    ) -> DagSchedulerRuntime {
+        let pools = ResolvedDagPools {
+            global: 4,
+            executor: 2,
+            reviewer: 2,
+            verifier: 2,
+            fixer: 2,
+        };
+        let mut runtime =
+            DagSchedulerRuntime::new(SchedulerMode::Dag, pools, workspace.to_path_buf());
+        runtime.plans.insert(
+            "pf-test".to_string(),
+            PlanTopology {
+                artifact_path: ARTIFACT_REL.to_string(),
+                artifact_digest: "fixture".to_string(),
+                target_branch: "main".to_string(),
+                verified_base_commit: verified_base,
+                units,
+                resource_capacities: Vec::new(),
+                integrated: std::collections::HashSet::new(),
+            },
+        );
+        runtime
+    }
+
     /// Git workspace on `main` with a base commit; optionally a unit
     /// branch `ralph/loop-test/U1` carrying one business commit.
-    /// Activation captures the base as `verified_base_commit`.
-    fn git_fixture(artifact_text: &str, with_u1_branch: bool) -> (TempDir, DagSchedulerRuntime) {
+    /// Returns the base SHA so callers can pin `verified_base_commit`.
+    fn git_workspace(with_u1_branch: bool) -> (TempDir, String) {
         let tmp = TempDir::new().expect("temp workspace");
         let ws = tmp.path();
         git(ws, &["init", "-b", "main"]);
@@ -994,9 +1299,14 @@ units:
         std::fs::write(ws.join("base.txt"), "base\n").expect("write base");
         git(ws, &["add", "base.txt"]);
         git(ws, &["commit", "-m", "base"]);
-        write_artifact(ws, artifact_text);
-        let mut runtime = runtime_with_plan(ws);
-        runtime.attach_execution_context(exec_context(ws));
+        let base = Command::new("git")
+            .arg("-C")
+            .arg(ws)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("rev-parse")
+            .stdout;
+        let base = String::from_utf8_lossy(&base).trim().to_string();
         if with_u1_branch {
             git(ws, &["checkout", "-b", "ralph/loop-test/U1"]);
             std::fs::write(ws.join("u1.txt"), "u1\n").expect("write u1");
@@ -1004,6 +1314,27 @@ units:
             git(ws, &["commit", "-m", "u1 work"]);
             git(ws, &["checkout", "main"]);
         }
+        (tmp, base)
+    }
+
+    fn git_fixture(artifact_text: &str, with_u1_branch: bool) -> (TempDir, DagSchedulerRuntime) {
+        let (tmp, _base) = git_workspace(with_u1_branch);
+        let ws = tmp.path();
+        write_artifact(ws, artifact_text);
+        let mut runtime = runtime_with_plan(ws);
+        runtime.attach_execution_context(exec_context(ws));
+        (tmp, runtime)
+    }
+
+    /// Same git workspace, but the plan topology is injected directly
+    /// (see `unit_topology`'s comment about the O1 plan boundary).
+    fn git_fixture_with_units(
+        units: Vec<UnitTopology>,
+        with_u1_branch: bool,
+    ) -> (TempDir, DagSchedulerRuntime) {
+        let (tmp, base) = git_workspace(with_u1_branch);
+        let mut runtime = runtime_with_units(tmp.path(), units, Some(base));
+        runtime.attach_execution_context(exec_context(tmp.path()));
         (tmp, runtime)
     }
 
@@ -1029,7 +1360,7 @@ units:
     /// effect: one synthesised execution_failed, nothing integrated.
     #[test]
     fn empty_gate_set_fails_closed() {
-        let (_tmp, mut runtime) = git_fixture(PLAN_ARTIFACT_U2_NO_TESTS, false);
+        let (_tmp, mut runtime) = git_fixture_with_units(u2_no_tests_units(), false);
         runtime.queue_integration("pf-test", "U2");
         runtime.maybe_integrate_one();
 
@@ -1045,7 +1376,7 @@ units:
     /// failure, not permission to integrate every changed path.
     #[test]
     fn missing_path_policy_fails_closed() {
-        let (_tmp, mut runtime) = git_fixture(PLAN_ARTIFACT_NO_PATH_POLICY, true);
+        let (_tmp, mut runtime) = git_fixture_with_units(no_path_policy_units(), true);
         runtime.queue_integration("pf-test", "U1");
         runtime.maybe_integrate_one();
 
@@ -1064,7 +1395,7 @@ units:
     /// contract.
     #[test]
     fn malformed_gate_entry_fails_closed() {
-        let (_tmp, mut runtime) = git_fixture(PLAN_ARTIFACT_U2_INVALID_TEST, false);
+        let (_tmp, mut runtime) = git_fixture_with_units(u2_invalid_test_units(), false);
         runtime.queue_integration("pf-test", "U2");
         runtime.maybe_integrate_one();
 
@@ -1149,12 +1480,7 @@ units:
     #[test]
     fn recovery_reemits_unacked_integration_without_prior_event() {
         let (tmp, mut runtime) = git_fixture(PLAN_ARTIFACT, false);
-        let target_branch = runtime
-            .plans
-            .get("pf-test")
-            .expect("plan")
-            .target_branch
-            .clone();
+        let target_branch = integration_branch("loop-test");
         let store = runtime
             .journal()
             .expect("durable journal")
@@ -1185,12 +1511,7 @@ units:
     #[test]
     fn recovery_blocks_event_present_but_unacked_integration() {
         let (tmp, mut runtime) = git_fixture(PLAN_ARTIFACT, false);
-        let target_branch = runtime
-            .plans
-            .get("pf-test")
-            .expect("plan")
-            .target_branch
-            .clone();
+        let target_branch = integration_branch("loop-test");
         let store = runtime
             .journal()
             .expect("durable journal")
@@ -1233,12 +1554,7 @@ units:
     #[test]
     fn recovery_blocks_acked_integration_without_ledger_event() {
         let (tmp, mut first) = git_fixture(PLAN_ARTIFACT, false);
-        let target_branch = first
-            .plans
-            .get("pf-test")
-            .expect("plan")
-            .target_branch
-            .clone();
+        let target_branch = integration_branch("loop-test");
         let store = first
             .journal()
             .expect("durable journal")
@@ -1285,12 +1601,7 @@ units:
     #[test]
     fn blocked_plan_with_full_acks_never_emits_development_done() {
         let (tmp, mut first) = git_fixture(PLAN_ARTIFACT, false);
-        let target_branch = first
-            .plans
-            .get("pf-test")
-            .expect("plan")
-            .target_branch
-            .clone();
+        let target_branch = integration_branch("loop-test");
         let store = first
             .journal()
             .expect("durable journal")

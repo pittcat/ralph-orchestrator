@@ -165,10 +165,12 @@ event_loop:
     db_path: .ralph/supervisor.db
     max_concurrent_workers: 8
     aggregate_timeout_secs: 7200
-    # A unit gets three executor attempts in total (one initial run plus
-    # two retries). Every attempt is a fresh backend process resuming the
-    # same worktree, and only the third failure surfaces as a typed Unit
-    # failure for the correction path.
+    # Wave-era supervisor knob retained for config compatibility — the DAG
+    # execution face does NOT read it. In `scheduler_mode: dag` a single
+    # stage failure is a typed `forge.unit.execution_failed` /
+    # `forge.unit.verification_failed` that goes straight to the
+    # forge-failure-handler; correction rounds are owned by the runtime's
+    # MAX_FIX_ATTEMPTS (3) counter, not by this field.
     slot_retry_budget: 2
     # 2026-09-08: the DAG execution face is active. The runtime is authoritative
     # for dependency admission, worker launch/recovery, per-Unit integration,
@@ -652,6 +654,13 @@ hats:
       candidate branches, or task ids. The runtime owns the verified base,
       worktree, attempt number, and fixer admission.
 
+      **Round counting is runtime-owned:** read the trigger's `attempt` field
+      (0-based counter the runtime injects on every `forge.unit.*` event). The
+      correction artifact for this request is `round-<attempt+1>`; a trigger
+      carrying `attempt >= 3` means the bounded budget is already exhausted —
+      do NOT emit `forge.correction.requested`; take the terminal path below.
+      Never count your own artifact files as the round authority.
+
       Emit one `forge.correction.requested` with `plan_key`,
       `affected_unit_ids`, and `correction_request_path`. Run the policy check
       first. The runtime reads this accepted event and starts the bounded fixer
@@ -669,9 +678,17 @@ hats:
       - Write `.ralph/forge/<plan-key>/failures/forge-failure-handler-failed.md`
         summarizing the tester's `reason`, `failure_fingerprint`, and
         `verification_report_path` from the trigger.
-      - Emit exactly one `work.failed` with `reason` (copy the trigger's
-        reason), `plan_path`, `context_artifact_path` (the failure note just
-        written), `forge_artifact_root`, and `plan_key`. Run
+      - Emit exactly one `work.failed` with ALL schema fields: `reason` (copy
+        the trigger's reason), `plan_path`, `context_artifact_path` (the
+        failure note just written), `forge_artifact_root`, `plan_key`, plus
+        the six dead-end fields — for a full-gate failure the honest values
+        are `dead_end_confidence`/`dead_end_evidence_coverage` scored from
+        the fail-confidence rubric, `dead_end_evidence_file` (the tester's
+        `verification_report_path` or your failure note),
+        `failure_evidence_status: complete`,
+        `correction_status: not_applicable` (a permanent post-development
+        failure, not a correction-budget exhaustion), and
+        `dead_end_gate_passed: true`. Run
         `ralph emit work.failed --policy-check -j '<payload>'` first, then
         emit for real. Cleanup and the reporter take over from there.
 
@@ -681,15 +698,17 @@ hats:
          projection to confirm the Unit exists.
       2. Read the Unit's prior correction artifacts and choose the next bounded
          round; do not repeat an identical failure without new evidence.
-      3. Write `.ralph/forge/<plan-key>/corrections/<unit-id>-round-<n>.md`.
+      3. Write `.ralph/forge/<plan-key>/corrections/<unit-id>-round-<n>.md`
+         where `<n>` = trigger `attempt` + 1 (the runtime-owned counter).
       4. Emit exactly one `forge.correction.requested` with the three schema
          fields above. Do not close a task or emit a second business event.
 
       ### Final correction (3 rounds exhausted)
 
-      When the round counter is 3 the budget is exhausted. You have
-      exactly one decision to make, and the two terminal emits are
-      mutually exclusive (at most one of them per activation):
+      The runtime `attempt` counter reaching 3 means the budget is exhausted
+      (the trigger's `attempt` field is the authority — not your artifact
+      count). You have exactly one decision to make, and the two terminal
+      emits are mutually exclusive (at most one of them per activation):
 
       - **Hand off to the final full tester** (preferred path when
         the failure is not a dead-end): emit exactly one
@@ -697,12 +716,19 @@ hats:
         + `plan_key` + `unit_key` + `verification_log_path`. The
         `correction_round` field is runtime-validated to be exactly
         `3` (the budget-exhausted final round); emitting it at an
-        earlier round is rejected. Use `ralph tools task list` (or
-        the trigger payload) for the live `unit_key` / `plan_key`.
+        earlier round is rejected. `verification_log_path` is the
+        last correction round's verification evidence (the unit's
+        verification log or your round-3 correction artifact — the
+        tester has not run yet; it writes its own
+        `full-verification.md` after this event triggers it). Use
+        `ralph tools task list` (or the trigger payload) for the live
+        `unit_key` / `plan_key`.
       - **Dead-end escape** (only when the fail-confidence-rubric
         scores confidence ≥90 + coverage ≥75 AND the dead-end
-        precheck passes): emit exactly one `work.failed` with
-        `dead_end_confidence` + `dead_end_evidence_*` + `reason` +
+        precheck passes): emit exactly one `work.failed` with ALL
+        schema fields — `dead_end_confidence`, `dead_end_evidence_coverage`,
+        `dead_end_evidence_file`, `failure_evidence_status`,
+        `correction_status`, `dead_end_gate_passed`, plus `reason` +
         `plan_path` + `context_artifact_path` + `forge_artifact_root`
         + `plan_key`. Do NOT also emit `forge.final.correction.settled`.
 
@@ -751,7 +777,7 @@ hats:
       same one**, and its code, commits, completion report, and test evidence remain.
 
       1. Inspect existing work with `git status` and `git log --oneline -10`.
-      2. Read `.ralph/forge/<plan_key>/units/<unit-id>-completion.md` if present.
+      2. Read `$RALPH_DAG_ARTIFACT_DIR/<unit-id>-completion.md` if present.
       3. Rerun the Unit acceptance tests and use measured results to identify gaps.
       4. Complete only the remaining work. **Do not** run `git reset`,
          `git checkout --`, `git clean`, or otherwise roll back or overwrite work;
@@ -761,14 +787,16 @@ hats:
 
       ### Step 1 — Observe (read paths only from the trigger)
 
-      Read these required fields from the runtime job context:
-      `unit_id`、`task_id`、`task_key`、`plan_key`、`unit_key`、
-      `plan_key`、`execution_plan_path`、`worktree`。
+      Read the runtime job context env: `RALPH_DAG_UNIT_KEY`, `RALPH_DAG_TASK_ID`,
+      `RALPH_DAG_TASK_KEY`, `RALPH_DAG_PLAN_KEY`, `RALPH_DAG_WORKTREE`,
+      `RALPH_DAG_FORGE_ROOT`, `RALPH_DAG_ARTIFACT_DIR`, `RALPH_DAG_ARTIFACT_REFS`.
 
       1. Use `ralph tools task list` to verify the live `task_id` / `task_key`.
-      2. Read this Unit's entry from `execution_plan_path`.
-      3. Use `worktree` to locate the Unit worktree and work there.
-      4. Read the matching Scenario in `.ralph/forge/<plan_key>/development-plan.md`.
+      2. Read this Unit's entry from `$RALPH_DAG_FORGE_ROOT/execution-plan.yml`
+         (the verified plan lives on the HOST workspace — `.ralph/` is
+         untracked and is NOT visible inside your unit worktree).
+      3. Work inside the current directory (the `RALPH_DAG_WORKTREE` path).
+      4. Read the matching Scenario in `$RALPH_DAG_FORGE_ROOT/development-plan.md`.
       5. If templates are missing, run `ralph preset materialize-artifacts parallel-forge --plan-key <plan_key>`.
 
       ### Steps 2–6 — RED → GREEN → REFACTOR → REGRESSION → self-review
@@ -799,12 +827,14 @@ hats:
 
       ### Step 7 — Unit Completion Report
 
-      Copy `.ralph/forge/<plan_key>/templates/unit-completion.template.md` to
-      `.ralph/forge/<plan_key>/units/<unit-id>-completion.md` and fill every section.
+      Copy `$RALPH_DAG_FORGE_ROOT/templates/unit-completion.template.md` to
+      `$RALPH_DAG_ARTIFACT_DIR/<unit-id>-completion.md` and fill every section.
+      The file lands on the host workspace under `.ralph/forge/<plan_key>/units/`;
+      nothing under `.ralph/` belongs inside your worktree diff.
 
       ### Step 8 — Emit
 
-      **Precheck:** before emitting, run `test -f .ralph/forge/<plan_key>/units/<unit-id>-completion.md`.
+      **Precheck:** before emitting, run `test -f "$RALPH_DAG_ARTIFACT_DIR/<unit-id>-completion.md"`.
       If the completion report is absent, emit `forge.unit.execution_failed` with
       `reason: "completion report missing for unit <unit_id>"`; do not cite the path,
       create a workaround, or fabricate the file. This is the **only** failure path
@@ -815,7 +845,9 @@ hats:
       **Never** send the real event without the precheck.
 
       Success: emit `forge.unit.executed`, passing through the job's `task_id`, `task_key`,
-      `unit_key`, `unit_id`, and `plan_key`, plus `unit_report_path` and `content_hash`.
+      `unit_key`, `unit_id`, and `plan_key`, plus `unit_report_path` (the repo-relative
+      `.ralph/forge/<plan_key>/units/<unit-id>-completion.md` — not the absolute env
+      path) and `content_hash`.
       Failure: emit `forge.unit.execution_failed` with `reason` and `plan_key`.
 
       **Do not close tasks in this activation.** Do **not** call
@@ -853,12 +885,16 @@ hats:
          The runtime has already isolated this Unit's worktree and selected the
          current attempt; review only the Unit named by the trigger.
       2. List Units from the execution plan and `ralph tools task list`.
-      3. Read the named Unit's completion report and inspect the isolated worktree diff at the path from the job context.
-      4. Write `.ralph/forge/<plan_key>/units/<unit_id>-review.md` and record
+      3. Read the named Unit's completion report via `RALPH_DAG_ARTIFACT_REFS`
+         (`executor_completion_artifact_path` →
+         `$RALPH_DAG_ARTIFACT_DIR/<unit-id>-completion.md` on the host) and
+         inspect the isolated worktree diff at the path from the job context.
+      4. Write `$RALPH_DAG_ARTIFACT_DIR/<unit_id>-review.md` and record
          the reviewed commit as the worktree HEAD at review time (`git rev-parse`).
       5. Emit `forge.unit.reviewed` with the Unit identity, `verdict` (`ACCEPTED` or
-         `REJECTED`), review artifact path, and content hash. The runtime routes
-         rejected verdicts through the bounded correction path.
+         `REJECTED`), the repo-relative `review_report_path`
+         (`.ralph/forge/<plan_key>/units/<unit_id>-review.md`), and content hash.
+         The runtime routes rejected verdicts through the bounded correction path.
 
       Emit only one business event per activation.
 
@@ -893,14 +929,19 @@ hats:
          verification is serial after integration, check for fixed ports, databases,
          Docker projects, temp files, and external services; if safety is unknown,
          stop and record the resource, command, and conflict risk in
-         `failures/verifier-failed.md`.
+         `$RALPH_DAG_FORGE_ROOT/failures/verifier-failed.md`.
       3. Use temp directories, caches, and test-data namespaces derived from
          `plan_key` + `unit_key`; never reuse fixed resources from another Unit or loop.
-      4. Write `.ralph/forge/<plan_key>/incremental-verification.md`.
+      4. Write `$RALPH_DAG_ARTIFACT_DIR/<unit-id>-verification.md` listing every
+         gate command and its outcome.
       5. On success, emit `forge.unit.verified` with the Unit identity,
-         `verification_log_path`, and the tested content hash.
-      6. On failure, write the per-Unit failure artifact and emit
-         `forge.unit.verification_failed`; the failure handler takes over.
+         `verification_log_path` (repo-relative
+         `.ralph/forge/<plan_key>/units/<unit-id>-verification.md`), and the
+         tested content hash.
+      6. On failure, write the per-Unit failure artifact at
+         `$RALPH_DAG_ARTIFACT_DIR/<unit-id>-verification-failure.md` and emit
+         `forge.unit.verification_failed` with `verification_failure_path`
+         (repo-relative); the failure handler takes over.
 
   tester:
     name: "Tester"
@@ -923,10 +964,13 @@ hats:
 
       ### Steps
       1. Read `plan_key` from the trigger. The trigger is
-         `forge.exec.development.done` for the first full run — also read its
-         `execution_plan_path`; per-wave verification logs, when needed for
-         context, live at `.ralph/forge/<plan_key>/waves/*/verification.md` —
-         or `forge.final.correction.settled` after three correction rounds,
+         `forge.exec.development.done` for the first full run — it also carries
+         `execution_plan_path`, `integration_branch`, `target_branch`,
+         `target_start_sha`, `integration_head_sha`, and `worktree_map_path`
+         (`.ralph/forge/<plan_key>/worktree-map.yml`, the DAG delivery
+         projection); per-unit verification logs, when needed for context,
+         live under `.ralph/forge/<plan_key>/units/` — or
+         `forge.final.correction.settled` after three correction rounds,
          which carries `verification_log_path` and `unit_key` in its schema.
       2. This hat owns full verification for the loop. Before starting, check
          whether an equivalent full verification is already running; wait for it
@@ -977,9 +1021,13 @@ hats:
       3. Verify linear git history, clean worktree, no skipped tests.
       4. Write `.ralph/forge/<plan_key>/final-audit.md`.
       5. For an accepted audit, also copy `target_branch`, `target_start_sha`,
-         `target_status_fingerprint`, and `integration_head_sha` from the
-         projection and verify the integration head is a descendant of the
-         target start SHA. Emit `forge.audit.done` with all fields, or write
+         `target_status_fingerprint`, `integration_branch`, and
+         `integration_head_sha` from the projection
+         (`.ralph/forge/<plan_key>/worktree-map.yml`), then verify the
+         integration head is a descendant of the target start SHA. The
+         fingerprint in the payload is the projection-time value — the emit
+         precheck recomputes the live fingerprint and rejects on drift.
+         Emit `forge.audit.done` with all fields, or write
          `blocks/auditor-blocked.md` and emit `forge.plan.blocked` with context paths.
          A non-ACCEPTED verdict must never emit `forge.audit.done`.
 
@@ -1019,11 +1067,13 @@ hats:
          `forge.plan.blocked`; never reset, force-push, or overwrite the target.
       3. Before cleanup, materialize every required artifact into the main
          repository artifact root: `final-audit.md`, `full-verification.md`,
-         `integration-log.md`, one `waves/<unit_key>/review.md` for every
-         settled wave, and one
-         `units/<unit_id>-completion.md` for every settled Unit. If an artifact
-         exists only in an integration or executor worktree, copy it to the
-         corresponding main-repository path and verify it with `test -f`.
+         `worktree-map.yml`, one `units/<unit_id>-review.md` and one
+         `units/<unit_id>-completion.md` for every settled Unit, plus each
+         `units/<unit_id>-verification.md`. Runtime-driven stage hats already
+         write these into the HOST artifact dir (`RALPH_DAG_ARTIFACT_DIR`),
+         so they should exist; if an artifact exists only inside a unit
+         worktree, copy it to the corresponding main-repository path and
+         verify it with `test -f`.
       4. Write `finalization.md` containing target branch, integration branch,
          pre-merge target SHA, integration SHA, and resulting target SHA.
       5. From `target_worktree` run `git merge --ff-only <integration_branch>`.
@@ -1063,9 +1113,10 @@ hats:
       ### Trigger and policy
 
       1. Read `plan_key`, `worktree`, `integration_branch`, and
-         `target_branch` from the trigger/projection. Prefer the
-         `forge.worktrees.ready` projection for the map; if absent, use
-         `.ralph/forge/<plan_key>/worktree-map.yml`.
+         `target_branch` from the trigger/projection. The DAG delivery
+         projection is `.ralph/forge/<plan_key>/worktree-map.yml` (also
+         carried as `worktree_map_path` on `forge.exec.development.done`);
+         there is no wave-era `forge.worktrees.ready` event in dag mode.
       2. On `forge.finalized`, remove the Unit worktrees, Unit branches, and
          integration branch created by this plan. Never remove `target_branch`.
       3. On `forge.plan.blocked` or `work.failed`, remove safely removable
@@ -1149,8 +1200,8 @@ hats:
 
       Then read the complete artifacts referenced by the trigger/projection:
       - `<forge_artifact_root>/development-plan.md` and `execution-plan.yml`
-      - `units/*-completion.md` and `waves/*/review.md` if present
-      - `integration-log.md`, `full-verification.md`, and `final-audit.md` if present
+      - `units/*-completion.md`, `units/*-review.md`, and `units/*-verification.md` if present
+      - `worktree-map.yml`, `full-verification.md`, and `final-audit.md` if present
       - the complete `context_artifact_path`
 
       For `forge.finalized`, the finalizer should have verified terminal artifacts

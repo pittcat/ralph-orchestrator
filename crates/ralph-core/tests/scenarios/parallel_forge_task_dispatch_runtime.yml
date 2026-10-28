@@ -88,18 +88,24 @@ fixture_files:
           execution_wave: 1
           integration_order: 1
           target_branch: "feat/unit-u1"
+          allowed_paths: ["src/u1.txt"]
+          tests: ["true"]
         - id: U2
           title: Parallel foundation
           depends_on: []
           execution_wave: 1
           integration_order: 2
           target_branch: "feat/unit-u2"
+          allowed_paths: ["src/u2.txt"]
+          tests: ["true"]
         - id: U3
           title: Feature
           depends_on: [U1]
           execution_wave: 2
           integration_order: 3
           target_branch: "feat/unit-u3"
+          allowed_paths: ["src/u3.txt"]
+          tests: ["true"]
 
 mock_responses:
   - text: |

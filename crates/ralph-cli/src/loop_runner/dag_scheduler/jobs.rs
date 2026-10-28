@@ -677,7 +677,9 @@ impl JobPipeline {
         self.state.units.get(unit_key).map(|u| u.stage)
     }
 
-    #[cfg(test)]
+    /// Current fix-attempt counter — read by the correction seam so a
+    /// blocked admission can report the exhausted budget in its typed
+    /// failure payload (adversarial review R3).
     pub fn attempt_of(&self, unit_key: &str) -> Option<u64> {
         self.state.units.get(unit_key).map(|u| u.attempt)
     }

@@ -364,6 +364,14 @@ impl DagSchedulerRuntime {
         if self.mode != SchedulerMode::Dag || self.exec.is_none() || !self.db_path.exists() {
             return;
         }
+        // Adversarial review R4: durable integration records key on
+        // the loop-scoped lane branch, not the plan's declared
+        // target_branch.
+        let lane = self
+            .exec
+            .as_ref()
+            .map(|exec| integrate::integration_branch(&exec.loop_id))
+            .unwrap_or_default();
         let active = match self
             .ensure_stores()
             .and_then(|s| s.plans.list_active_plans())
@@ -424,9 +432,9 @@ impl DagSchedulerRuntime {
                         &integration_store,
                         unit_id,
                     )
-                    && records.iter().any(|record| {
-                        record.target_branch == registration.target_branch && record.acked
-                    })
+                    && records
+                        .iter()
+                        .any(|record| record.target_branch == lane && record.acked)
                     && let Some(plan) = self.plans.get_mut(&plan_key)
                 {
                     plan.integrated.insert(unit_id.clone());
@@ -455,9 +463,7 @@ impl DagSchedulerRuntime {
                         .list_for_unit(unit_id)
                         .ok()
                         .is_some_and(|records| {
-                            records
-                                .iter()
-                                .any(|record| record.target_branch == registration.target_branch)
+                            records.iter().any(|record| record.target_branch == lane)
                         });
                 if verified && !has_record {
                     self.queue_integration(&plan_key, unit_id);
@@ -477,7 +483,12 @@ impl DagSchedulerRuntime {
                     u64::from(job.identity.attempt),
                 );
                 if job.identity.stage == "execute" {
-                    self.executors_launched.insert(job.identity.unit_id.clone());
+                    // The dedup set is keyed by the plan-namespaced
+                    // unit key (same shape `maybe_spawn_executor`
+                    // checks); a bare unit_id would never match and a
+                    // recovered unit could be re-admitted into
+                    // Execute.
+                    self.executors_launched.insert(job.identity.unit_key());
                 }
                 let events_file = self
                     .workspace
@@ -718,11 +729,23 @@ impl DagSchedulerRuntime {
         };
         let known_units: HashSet<String> =
             plan.units.iter().map(|unit| unit.unit_id.clone()).collect();
+        let integrated_units: HashSet<String> = plan.integrated.iter().cloned().collect();
         for unit_id in unit_ids.iter().filter_map(Value::as_str) {
             if !known_units.contains(unit_id) {
                 warn!(
                     plan_key,
                     unit_id, "DAG correction request references an unknown unit"
+                );
+                continue;
+            }
+            // Adversarial review O4 (success-chain leak): a unit whose
+            // integration acknowledgement already landed is delivered —
+            // a stale correction request must not re-enter it (no
+            // attempt bump, no synthesized failure on a settled unit).
+            if integrated_units.contains(unit_id) {
+                debug!(
+                    plan_key,
+                    unit_id, "DAG correction request skipped: unit already integrated"
                 );
                 continue;
             }
@@ -732,6 +755,19 @@ impl DagSchedulerRuntime {
             // the unit by `unit_key`, and a bare `unit_id` would miss
             // the registered entry.
             let unit_key = format!("forge:{plan_key}:{unit_id}");
+            // Adversarial review O4 (dual counting): the pipeline
+            // `advance` is an idempotent replay while a slot is in
+            // flight — bumping the attempt there consumes a correction
+            // round WITHOUT spawning a fixer, so the real budget would
+            // exhaust early. A live slot settles through its own
+            // terminal; the stale request is satisfied by that round.
+            if self.pipeline.live_unit_ids().contains(&unit_key) {
+                debug!(
+                    plan_key,
+                    unit_id, "DAG correction request skipped: unit job still in flight"
+                );
+                continue;
+            }
             let outcome = self
                 .pipeline
                 .bump_attempt_and_advance(&unit_key, Stage::Review);
@@ -749,6 +785,32 @@ impl DagSchedulerRuntime {
                     ?outcome,
                     "DAG correction admission deferred or blocked"
                 );
+                // Adversarial review R3: a hard admission block
+                // (attempt budget exhausted or an illegal stage
+                // transition) must surface a typed terminal the
+                // failure-handler can settle on — otherwise the unit
+                // wedges with no pending work and the plan silently
+                // terminates.
+                if let self::jobs::AdvanceOutcome::Blocked(error) = outcome {
+                    let attempt = self.pipeline.attempt_of(&unit_key).unwrap_or_default();
+                    let identity = ralph_core::supervisor::dag_store_rusqlite::jobs::JobIdentity {
+                        plan_key: plan_key.clone(),
+                        unit_id: unit_id.to_string(),
+                        job_id: format!("dag-{unit_id}-fix-a{attempt}"),
+                        hat: spawn::SpawnKind::Fix.hat().to_string(),
+                        stage: spawn::SpawnKind::Fix.stage_str().to_string(),
+                        attempt: u32::try_from(attempt).unwrap_or(u32::MAX),
+                        token: format!("tok-{unit_id}-fix-a{attempt}"),
+                    };
+                    let reason =
+                        format!("correction admission blocked for unit {unit_id}: {error}");
+                    self.fail_job(
+                        &identity,
+                        spawn::SpawnKind::Fix,
+                        &reason,
+                        crate::loop_runner::runtime_job::FailureClass::ContractViolation,
+                    );
+                }
             }
         }
     }
@@ -821,6 +883,23 @@ impl DagSchedulerRuntime {
                     error = %err,
                     "DAG seam: forge.plan.ready artifact verification failed; receipt not recorded"
                 );
+                // Adversarial review O1/R7: a structurally invalid
+                // plan artifact is a typed plan-level failure, not a
+                // silent skip — emit `forge.plan.blocked` so
+                // cleanup/report terminate the loop deterministically
+                // instead of the plan never existing for the runtime.
+                let plan_key = payload
+                    .get("plan_key")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if !plan_key.is_empty() {
+                    self.emit_plan_blocked(
+                        &plan_key,
+                        &format!("execution-plan artifact rejected: {err}"),
+                    );
+                    self.block_plan(plan_key, "plan artifact failed handoff validation");
+                }
                 return;
             }
         };
@@ -973,6 +1052,41 @@ impl DagSchedulerRuntime {
             self.block_plan(&plan_key, "verified base could not be durably pinned");
             warn!(plan_key, error = %err, "DAG approval: verified base persistence failed");
         }
+        // Adversarial review R5: the host checkout is verified clean
+        // exactly once — here at the plan boundary — instead of on
+        // every worktree acquisition. A dirty host fails closed into
+        // `forge.plan.blocked` so cleanup/report still run; per-spawn
+        // `UnitWorktree::acquire` no longer re-checks it. The gate
+        // only runs where the execution face actually launches jobs
+        // (exec attached): the shadow-observation path and detached
+        // fixtures never spawn worktrees.
+        if self.mode == SchedulerMode::Dag
+            && self.exec.is_some()
+            && let Some(base) = verified_base.as_deref()
+        {
+            // `verified_base` resolved → the workspace is a real git
+            // checkout; dirt here is operator state the runtime must
+            // refuse. An unresolvable base means git itself is broken
+            // — every spawn already fails closed on the missing base.
+            if let Err(reason) = worktree::ensure_host_clean(&self.workspace) {
+                let reason = reason.to_string();
+                self.emit_plan_blocked(&plan_key, &reason);
+                self.block_plan(&plan_key, "host workspace dirty at plan activation");
+                return;
+            }
+            // Adversarial review R4: seed the dedicated integration
+            // lane at the verified base so the first CAS fast-forward
+            // lands on `ralph/<loop>/integration` — never the host's
+            // checked-out branch.
+            let loop_id = self.exec.as_ref().expect("checked").loop_id.clone();
+            if let Err(err) = integrate::ensure_integration_branch(&self.workspace, &loop_id, base)
+            {
+                let reason = err.to_string();
+                self.emit_plan_blocked(&plan_key, &reason);
+                self.block_plan(&plan_key, "integration lane could not be created");
+                return;
+            }
+        }
         // Seed the in-memory pipeline so per-unit events route. The
         // job id is a deterministic observation label — Step 4 never
         // launches a process under it.
@@ -1024,6 +1138,11 @@ impl DagSchedulerRuntime {
                 plan.integrated.extend(acked);
             }
         }
+        // Adversarial review O2: publish the machine-readable forge
+        // projection for downstream hats (tester/auditor/finalizer/
+        // cleanup/reporter) — the DAG replacement for the wave-era
+        // `forge.worktrees.ready` projection.
+        self.write_forge_projection(&plan_key);
     }
 
     /// Look up the plan key for an artifact path: in-memory topology
@@ -1204,10 +1323,16 @@ impl DagSchedulerRuntime {
             return;
         }
         // The integration target head is the loop workspace's current
-        // tip: parallel-forge integrates onto the branch the loop
-        // checked out. Unresolvable git state degrades to `None`,
+        // tip: parallel-forge integrates onto the dedicated
+        // `ralph/<loop>/integration` lane (adversarial review R4) —
+        // the branch the lane CAS actually moves. The host HEAD is
+        // the fallback for the pre-approval window before the lane
+        // exists. Unresolvable git state degrades to `None`,
         // which the admission engine reports as `BlockedNoTargetHead`.
-        let target_head = ralph_core::get_head_sha(&self.workspace).ok();
+        let target_head = self
+            .integration_head()
+            .ok()
+            .or_else(|| ralph_core::get_head_sha(&self.workspace).ok());
         // U1 / U3 (2026-09-09-0917): ownership of the live pipeline
         // pressure moves into `admission::compute_admission_snapshot`,
         // which fuses candidate filtering + live counts + target head
@@ -1356,6 +1481,42 @@ impl DagSchedulerRuntime {
         }
     }
 
+    /// Fail-closed wedge detector (adversarial review R7): a tracked,
+    /// un-blocked plan whose units are not all integrated while the
+    /// whole execution face reports no pending work would otherwise be
+    /// abandoned to the loop's generic fallback termination with no
+    /// typed event. Convert the stall into `forge.plan.blocked` so
+    /// cleanup/report see a deterministic terminal instead of silence.
+    fn maybe_block_stalled_plans(&mut self) {
+        if self.mode != SchedulerMode::Dag || self.exec.is_none() || self.has_pending_work() {
+            return;
+        }
+        let stalled: Vec<String> = self
+            .plans
+            .iter()
+            .filter(|(plan_key, plan)| {
+                !self.blocked_plans.contains(plan_key.as_str())
+                    && !plan.units.is_empty()
+                    && plan
+                        .units
+                        .iter()
+                        .any(|unit| !plan.integrated.contains(&unit.unit_id))
+            })
+            .map(|(plan_key, _)| plan_key.clone())
+            .collect();
+        for plan_key in stalled {
+            warn!(
+                plan_key,
+                "DAG runtime: plan stalled with un-integrated units and no pending work; emitting forge.plan.blocked"
+            );
+            self.emit_plan_blocked(
+                &plan_key,
+                "dag_stalled: units remain un-integrated with no pending DAG work",
+            );
+            self.block_plan(&plan_key, "dag stalled with no pending work");
+        }
+    }
+
     /// Mark a plan blocked after recovery finds an ambiguous launch or
     /// projection state. This is intentionally monotonic for the lifetime of
     /// the runtime; an operator must resolve the durable evidence before a
@@ -1493,6 +1654,7 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1-foundation
+    allowed_paths: [u1.txt]
     tests:
       - cargo nextest run -p ralph-core -- u1
   - id: U2
@@ -1501,12 +1663,16 @@ units:
     execution_wave: 1
     integration_order: 2
     target_branch: feat/u2-feature
+    allowed_paths: [u2.txt]
+    tests: ["true"]
   - id: U3
     title: Dependent
     depends_on: [U1]
     execution_wave: 2
     integration_order: 3
     target_branch: feat/u3-dependent
+    allowed_paths: [u3.txt]
+    tests: ["true"]
 "#;
 
     const ARTIFACT_REL: &str = ".ralph/forge/pf-test/execution-plan.yml";
@@ -1523,6 +1689,8 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1
+    allowed_paths: [u1.txt]
+    tests: ["true"]
     resource_claims:
       - key: gpu
         permits: 1
@@ -1532,6 +1700,8 @@ units:
     execution_wave: 1
     integration_order: 2
     target_branch: feat/u2
+    allowed_paths: [u2.txt]
+    tests: ["true"]
     resource_claims:
       - key: gpu
         permits: 1
@@ -2329,12 +2499,16 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/b-u1
+    allowed_paths: [b-u1.txt]
+    tests: ["true"]
   - id: U2
     title: B Feature
     depends_on: []
     execution_wave: 1
     integration_order: 2
     target_branch: feat/b-u2
+    allowed_paths: [b-u2.txt]
+    tests: ["true"]
 "#,
         )
         .unwrap();
@@ -2410,12 +2584,16 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/b-u1
+    allowed_paths: [b-u1.txt]
+    tests: ["true"]
   - id: U2
     title: B Feature
     depends_on: []
     execution_wave: 1
     integration_order: 2
     target_branch: feat/b-u2
+    allowed_paths: [b-u2.txt]
+    tests: ["true"]
 "#,
         )
         .unwrap();

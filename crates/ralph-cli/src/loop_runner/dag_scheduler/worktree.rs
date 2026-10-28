@@ -183,11 +183,12 @@ impl UnitWorktree {
     /// at plan admission. The worktree branch tip is set
     /// (or asserted) to that SHA.
     ///
-    /// Host repo's `repo_root` must be clean (no uncommitted
-    /// changes, no untracked files OTHER than registered
-    /// git worktrees that this module creates). Otherwise
-    /// the lane refuses — operator must resolve the dirty
-    /// state before any unit worktrees are bound.
+    /// Host cleanliness is enforced ONCE at the plan-activation
+    /// boundary (`on_concurrency_approved` → `forge.plan.blocked`,
+    /// adversarial review R5) — not here. Re-checking per spawn made
+    /// every operator edit mid-run a per-unit execution failure and,
+    /// worse, the pre-R4 lane CAS left the host index dirty so each
+    /// subsequent acquire self-destructed on `HostDirty`.
     pub fn acquire(
         repo_root: &Path,
         loop_id: &str,
@@ -213,7 +214,6 @@ impl UnitWorktree {
         // second `acquire` call, and the host-clean check
         // would falsely reject the operation.
         ensure_worktree_dir_excluded(repo_root)?;
-        ensure_host_clean(repo_root)?;
 
         let branch = format!("ralph/{}/{}", loop_id, unit_id);
         let worktree_root = repo_root.join(".ralph").join("worktrees");
@@ -290,7 +290,10 @@ impl UnitWorktree {
     }
 }
 
-fn ensure_host_clean(repo_root: &Path) -> UnitWorktreeResult<()> {
+/// Plan-boundary host-clean gate (adversarial review R5). The caller
+/// is `dag_scheduler::on_concurrency_approved` — per-spawn acquires
+/// intentionally do not repeat this check.
+pub(crate) fn ensure_host_clean(repo_root: &Path) -> UnitWorktreeResult<()> {
     let out = Command::new("git")
         .arg("-C")
         .arg(repo_root)
@@ -594,23 +597,24 @@ mod tests {
         }
     }
 
-    /// U7 contract: a host repo with uncommitted changes
-    /// fails acquire with `HostDirty`.
+    /// U7 contract (post-R5 shape): host dirt is rejected by the
+    /// plan-boundary `ensure_host_clean` check, while `acquire`
+    /// itself no longer re-checks the host checkout.
     #[test]
     fn unit_worktree_acquire_rejects_host_dirty() {
-        let (_tmp, repo, base) = init_repo_with_initial_commit();
+        let (_tmp, repo, _base) = init_repo_with_initial_commit();
         std::fs::write(repo.join("README.md"), "modified\n").expect("write");
-        let err = UnitWorktree::acquire(&repo, "loop-1", "U1", &base).expect_err("must reject");
+        let err = ensure_host_clean(&repo).expect_err("must reject");
         assert!(matches!(err, UnitWorktreeError::HostDirty(_)));
     }
 
-    /// U7 contract: a host repo with untracked files fails
-    /// acquire with `HostUntracked`.
+    /// U7 contract: a host repo with untracked files fails the
+    /// plan-boundary check with `HostUntracked`.
     #[test]
     fn unit_worktree_acquire_rejects_host_untracked() {
-        let (_tmp, repo, base) = init_repo_with_initial_commit();
+        let (_tmp, repo, _base) = init_repo_with_initial_commit();
         std::fs::write(repo.join("new_file.txt"), "x").expect("write untracked");
-        let err = UnitWorktree::acquire(&repo, "loop-1", "U1", &base).expect_err("must reject");
+        let err = ensure_host_clean(&repo).expect_err("must reject");
         assert!(matches!(err, UnitWorktreeError::HostUntracked(_)));
     }
 
@@ -1025,21 +1029,21 @@ mod tests {
     /// files OUTSIDE it are still refused.
     #[test]
     fn unit_worktree_acquire_still_rejects_dirt_outside_ralph_dir() {
-        let (_tmp, repo, base) = init_repo_with_initial_commit();
+        let (_tmp, repo, _base) = init_repo_with_initial_commit();
         std::fs::create_dir_all(repo.join(".ralph")).unwrap();
         std::fs::write(repo.join(".ralph/dag.db"), b"\x00").unwrap();
 
         // Untracked operator file outside .ralph/ → HostUntracked.
         std::fs::write(repo.join("new_file.txt"), "x").unwrap();
-        let err = UnitWorktree::acquire(&repo, "loop-1", "U1", &base)
-            .expect_err("untracked file outside .ralph/ must be refused");
+        let err =
+            ensure_host_clean(&repo).expect_err("untracked file outside .ralph/ must be refused");
         assert!(matches!(err, UnitWorktreeError::HostUntracked(_)));
         std::fs::remove_file(repo.join("new_file.txt")).unwrap();
 
         // Modified tracked file outside .ralph/ → HostDirty.
         std::fs::write(repo.join("README.md"), "modified\n").unwrap();
-        let err = UnitWorktree::acquire(&repo, "loop-1", "U1", &base)
-            .expect_err("modified file outside .ralph/ must be refused");
+        let err =
+            ensure_host_clean(&repo).expect_err("modified file outside .ralph/ must be refused");
         assert!(matches!(err, UnitWorktreeError::HostDirty(_)));
     }
 }

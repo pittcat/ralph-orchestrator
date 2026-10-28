@@ -142,10 +142,15 @@ schemas:
         source: forge-failure-handler correction counter.
         fill_rule: Must be 3 — the budget-exhausted final round. Earlier rounds (0..2) belong to forge.correction.requested/done; the FINAL settled is only valid at the exhaustion round, and runtime allowed_values enforces this.
       verification_log_path:
-        meaning: Path to the final-correction verification log written by the tester.
-        source: File under .ralph/forge/<plan-key>/final-correction/verification.log.
+        meaning: >-
+          Verification evidence from the FINAL correction round (the
+          settled event triggers the tester — the tester's own
+          full-verification.md cannot exist yet). The handler points at
+          the unit's latest verification log or its round-3 correction
+          artifact.
+        source: File under .ralph/forge/<plan-key>/units/ or .ralph/forge/<plan-key>/corrections/.
         fill_rule: Must exist before emit.
-        examples: [".ralph/<plan>/final-correction/verification.log"]
+        examples: [".ralph/<plan>/units/<unit>-verification.md"]
 
   forge.exec.development.done:
     required_fields:
@@ -172,6 +177,30 @@ schemas:
         meaning: Forge plan key basename (artifact root segment under .ralph/forge/).
         source: Basename of operator plan without .md, or path parent of execution_plan_path.
         fill_rule: Must match .ralph/forge/<plan-key>/ directory name.
+      target_branch:
+        meaning: Operator's delivery branch (the checkout that launched the loop).
+        source: DAG runtime plan record.
+        fill_rule: Runtime-injected; read-only for hats.
+      target_start_sha:
+        meaning: Verified base commit pinned at plan approval.
+        source: DAG runtime plan record.
+        fill_rule: Runtime-injected; read-only for hats.
+      integration_branch:
+        meaning: Runtime integration lane ralph/<loop>/integration holding every integrated unit commit.
+        source: DAG runtime integration records.
+        fill_rule: Runtime-injected; read-only for hats.
+      integration_head_sha:
+        meaning: Lane tip after the last unit CAS fast-forward.
+        source: DAG runtime git rev-parse of integration_branch.
+        fill_rule: Runtime-injected; read-only for hats.
+      target_status_fingerprint:
+        meaning: Canonical host status fingerprint at development-done.
+        source: DAG runtime (git status --porcelain, .ralph/ filtered, SHA-256).
+        fill_rule: Runtime-injected; read-only for hats.
+      worktree_map_path:
+        meaning: Repo-relative path to the DAG delivery projection.
+        source: File at .ralph/forge/<plan-key>/worktree-map.yml written by the runtime before this event.
+        fill_rule: Runtime-injected; read-only for hats.
 
   # ──────────────────────────────────────────────────────────────────────
   # DAG 模式 per-unit typed topic 族(2026-09-03-0959 plan DAG 接线
@@ -481,20 +510,20 @@ schemas:
         source: Trigger / forge artifact root.
         fill_rule: Must match directory name.
       target_branch:
-        meaning: Target branch captured at initial fan-out.
-        source: forge.worktrees.ready.target_branch.
+        meaning: Target branch captured at development-done.
+        source: .ralph/forge/<plan-key>/worktree-map.yml target_branch (the DAG delivery projection written by the runtime).
         fill_rule: Must match the current target branch.
       target_start_sha:
-        meaning: Target HEAD captured at initial fan-out.
-        source: forge.worktrees.ready.target_start_sha.
+        meaning: Verified base commit pinned at plan approval.
+        source: worktree-map.yml target_start_sha (or forge.exec.development.done.target_start_sha).
         fill_rule: Must equal the current target HEAD.
       target_status_fingerprint:
-        meaning: Target status captured at initial fan-out.
-        source: forge.worktrees.ready.target_status_fingerprint.
-        fill_rule: Must equal the current canonical status fingerprint.
+        meaning: Canonical host status fingerprint captured at development-done.
+        source: worktree-map.yml target_status_fingerprint (or the same field on forge.exec.development.done).
+        fill_rule: Emit the projection-time value; the precheck recomputes the live fingerprint and rejects on drift.
       integration_head_sha:
-        meaning: HEAD of the verified integration branch.
-        source: git rev-parse of the integration branch.
+        meaning: HEAD of the runtime integration lane (ralph/<loop>/integration).
+        source: worktree-map.yml integration_head_sha or git rev-parse of integration_branch.
         fill_rule: Must be a descendant of target_start_sha.
 
   forge.audit.done.proposed:
@@ -525,12 +554,12 @@ schemas:
         examples: [".ralph/<plan>/final-audit.md"]
       target_branch:
         meaning: Branch that received the final fast-forward.
-        source: forge.worktrees.ready.target_branch.
+        source: worktree-map.yml target_branch (DAG delivery projection).
         fill_rule: Must be a real branch and must not equal integration_branch.
       integration_branch:
-        meaning: Forge branch whose verified commits were delivered.
-        source: forge.worktrees.ready.integration_branch.
-        fill_rule: Must be the same branch used by the wave integrator.
+        meaning: Runtime integration lane whose verified commits were delivered.
+        source: worktree-map.yml integration_branch (ralph/<loop>/integration).
+        fill_rule: Must be the same lane the DAG runtime CAS fast-forwarded.
       target_commit_sha:
         meaning: Target branch HEAD after the final fast-forward.
         source: "git rev-parse after merge."

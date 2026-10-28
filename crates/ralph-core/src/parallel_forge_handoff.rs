@@ -739,13 +739,27 @@ fn derive_plan_handoff(
     let mut wave_sizes: HashMap<u32, usize> = HashMap::new();
     for unit in plan.units {
         let execution_wave = execution_waves[&unit.id];
-        if !unit.tests.is_empty() {
-            unit_tests.insert(unit.id.clone(), unit.tests.clone());
+        // Adversarial review O1: a Unit without an explicit path
+        // policy has no authorization boundary, and a Unit without
+        // targeted gate commands would fail closed at integration
+        // time anyway — reject both deterministically here, at the
+        // plan.ready boundary, with a readable reason instead of a
+        // late `integration_*` failure.
+        let allowed_paths = normalize_path_policy(&unit.id, "allowed_paths", &unit.allowed_paths)?;
+        if allowed_paths.is_empty() {
+            return Err(HandoffError::ParseError {
+                source: format!("unit '{}' declares no allowed_paths path policy", unit.id),
+            });
         }
+        if unit.tests.is_empty() {
+            return Err(HandoffError::ParseError {
+                source: format!("unit '{}' declares no tests gate commands", unit.id),
+            });
+        }
+        unit_tests.insert(unit.id.clone(), unit.tests.clone());
         if !unit.resource_claims.is_empty() {
             unit_resource_claims.insert(unit.id.clone(), unit.resource_claims.clone());
         }
-        let allowed_paths = normalize_path_policy(&unit.id, "allowed_paths", &unit.allowed_paths)?;
         if !allowed_paths.is_empty() {
             unit_allowed_paths.insert(unit.id.clone(), allowed_paths);
         }
@@ -961,12 +975,16 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1-foundation
+    allowed_paths: [src/u1/**]
+    tests: ["true"]
   - id: U2
     title: Feature
     depends_on: []
     execution_wave: 1
     integration_order: 2
     target_branch: feat/u2-feature
+    allowed_paths: [src/u2/**]
+    tests: ["true"]
 "#;
 
     const SERIAL_PLAN_ARTIFACT: &[u8] = br#"version: 1
@@ -978,12 +996,16 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1-foundation
+    allowed_paths: [src/u1/**]
+    tests: ["true"]
   - id: U2
     title: Feature
     depends_on: [U1]
     execution_wave: 2
     integration_order: 2
     target_branch: feat/u2-feature
+    allowed_paths: [src/u2/**]
+    tests: ["true"]
 "#;
 
     const SERIAL_LAYOUT_ARTIFACT: &[u8] = br#"version: 1
@@ -995,12 +1017,16 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1-a
+    allowed_paths: [src/u1/**]
+    tests: ["true"]
   - id: U2
     title: Feature B
     depends_on: []
     execution_wave: 2
     integration_order: 2
     target_branch: feat/u2-b
+    allowed_paths: [src/u2/**]
+    tests: ["true"]
 "#;
 
     const UNKNOWN_DEPENDENCY_ARTIFACT: &[u8] = br#"version: 1
@@ -1012,12 +1038,16 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1-a
+    allowed_paths: [src/u1/**]
+    tests: ["true"]
   - id: U2
     title: Feature B
     depends_on: [U9]
     execution_wave: 2
     integration_order: 2
     target_branch: feat/u2-b
+    allowed_paths: [src/u2/**]
+    tests: ["true"]
 "#;
 
     const DEPENDENCY_CYCLE_ARTIFACT: &[u8] = br#"version: 1
@@ -1029,12 +1059,16 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1-a
+    allowed_paths: [src/u1/**]
+    tests: ["true"]
   - id: U2
     title: Feature B
     depends_on: [U1]
     execution_wave: 2
     integration_order: 2
     target_branch: feat/u2-b
+    allowed_paths: [src/u2/**]
+    tests: ["true"]
 "#;
 
     #[test]
@@ -1054,12 +1088,12 @@ units:
         assert_eq!(handoff.tasks[1].depends_on_task_keys, Vec::<String>::new());
     }
 
-    /// E1 (2026-09-03-0959 DAG 接线): the artifact's optional
-    /// per-unit `tests` list lands on `CanonicalPlanHandoff::unit_tests`
-    /// keyed by unit id; units without it are absent (never an empty
-    /// entry), and pre-E1 artifacts without the field keep parsing.
+    /// E1 (2026-09-03-0959 DAG 接线): the artifact's per-unit `tests`
+    /// list lands on `CanonicalPlanHandoff::unit_tests` keyed by unit
+    /// id. O1 (adversarial review) made the field mandatory — a unit
+    /// without gate commands is rejected at the plan.ready boundary.
     #[test]
-    fn unit_tests_field_lands_on_handoff_and_is_optional() {
+    fn unit_tests_field_lands_on_handoff_and_is_required() {
         let artifact: &[u8] = br#"version: 1
 plan_key: pf-test
 units:
@@ -1069,6 +1103,7 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1-foundation
+    allowed_paths: [src/u1/**]
     tests:
       - cargo nextest run -p ralph-core -- dag
   - id: U2
@@ -1077,6 +1112,8 @@ units:
     execution_wave: 1
     integration_order: 2
     target_branch: feat/u2-feature
+    allowed_paths: [src/u2/**]
+    tests: ["true"]
 "#;
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("execution-plan.yml"), artifact).expect("write plan");
@@ -1090,9 +1127,9 @@ units:
             handoff.unit_tests.get("U1").map(Vec::as_slice),
             Some(&["cargo nextest run -p ralph-core -- dag".to_string()][..])
         );
-        assert!(
-            !handoff.unit_tests.contains_key("U2"),
-            "a unit without `tests` must be absent, not an empty entry"
+        assert_eq!(
+            handoff.unit_tests.get("U2").map(Vec::as_slice),
+            Some(&["true".to_string()][..])
         );
         // The task spec stream is untouched (wave-mode byte
         // stability): no `tests` leak into `CanonicalTaskSpec`.
@@ -1100,18 +1137,80 @@ units:
         assert!(!serialized.to_string().contains("\"tests\""));
     }
 
-    /// Pre-E1 artifacts (no `tests` key anywhere) still parse and
-    /// yield an empty `unit_tests` map.
+    /// O1 (adversarial review): a unit without `tests` gate commands
+    /// is rejected deterministically at the plan.ready boundary —
+    /// never allowed to reach integration and fail closed there.
     #[test]
-    fn artifact_without_tests_yields_empty_unit_tests() {
+    fn artifact_without_tests_is_rejected() {
+        let artifact: &[u8] = br#"version: 1
+plan_key: pf-test
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1-foundation
+    allowed_paths: [src/u1/**]
+  - id: U2
+    title: Feature
+    depends_on: []
+    execution_wave: 1
+    integration_order: 2
+    target_branch: feat/u2-feature
+    allowed_paths: [src/u2/**]
+    tests: ["true"]
+"#;
         let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("execution-plan.yml"), PLAN_ARTIFACT).expect("write plan");
+        std::fs::write(temp.path().join("execution-plan.yml"), artifact).expect("write plan");
         let payload = json!({
             "execution_plan_path": "execution-plan.yml",
             "plan_key": "pf-test",
         });
-        let handoff = load_plan_handoff(&payload, temp.path()).expect("valid handoff");
-        assert!(handoff.unit_tests.is_empty());
+        let error = load_plan_handoff(&payload, temp.path())
+            .expect_err("unit without tests must be rejected");
+        assert!(
+            error.to_string().contains("declares no tests"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// O1 (adversarial review): a unit without `allowed_paths` has no
+    /// authorization boundary — rejected deterministically at
+    /// plan.ready.
+    #[test]
+    fn artifact_without_allowed_paths_is_rejected() {
+        let artifact: &[u8] = br#"version: 1
+plan_key: pf-test
+units:
+  - id: U1
+    title: Foundation
+    depends_on: []
+    execution_wave: 1
+    integration_order: 1
+    target_branch: feat/u1-foundation
+    tests: ["true"]
+  - id: U2
+    title: Feature
+    depends_on: []
+    execution_wave: 1
+    integration_order: 2
+    target_branch: feat/u2-feature
+    allowed_paths: [src/u2/**]
+    tests: ["true"]
+"#;
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("execution-plan.yml"), artifact).expect("write plan");
+        let payload = json!({
+            "execution_plan_path": "execution-plan.yml",
+            "plan_key": "pf-test",
+        });
+        let error = load_plan_handoff(&payload, temp.path())
+            .expect_err("unit without allowed_paths must be rejected");
+        assert!(
+            error.to_string().contains("declares no allowed_paths"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -1128,6 +1227,8 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1-foundation
+    allowed_paths: [src/u1/**]
+    tests: ["true"]
     resource_claims:
       - key: gpu
         permits: 1
@@ -1137,6 +1238,8 @@ units:
     execution_wave: 1
     integration_order: 2
     target_branch: feat/u2-feature
+    allowed_paths: [src/u2/**]
+    tests: ["true"]
 "#;
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("execution-plan.yml"), artifact).expect("write plan");
@@ -1370,6 +1473,8 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1
+    allowed_paths: [src/u1/**]
+    tests: ["true"]
     resource_claims:
       - key: gpu
         permits: 1
@@ -1379,6 +1484,8 @@ units:
     execution_wave: 1
     integration_order: 2
     target_branch: feat/u2
+    allowed_paths: [src/u2/**]
+    tests: ["true"]
 "#;
 
     /// v1-shaped artifact (no resource_capacities, no target_branch, no claims):
@@ -1431,6 +1538,7 @@ units:
     target_branch: feat/u1
     allowed_paths: [src/**, tests/**]
     forbidden_paths: [secrets/**]
+    tests: ["true"]
   - id: U2
     title: Feature
     depends_on: []
@@ -1438,6 +1546,7 @@ units:
     integration_order: 2
     target_branch: feat/u2
     allowed_paths: [src/**]
+    tests: ["true"]
 "#;
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("execution-plan.yml"), raw).expect("write plan");
@@ -1478,6 +1587,8 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1
+    allowed_paths: [src/u1/**]
+    tests: ["true"]
     resource_claims:
       - key: gpu
         permits: 1
@@ -1513,6 +1624,8 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1
+    allowed_paths: [src/u1/**]
+    tests: ["true"]
 "#;
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("execution-plan.yml"), raw).expect("write plan");
@@ -1543,6 +1656,8 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1
+    allowed_paths: [src/u1/**]
+    tests: ["true"]
     resource_claims:
       - key: cpu
         permits: 1
@@ -1580,6 +1695,8 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1
+    allowed_paths: [src/u1/**]
+    tests: ["true"]
     resource_claims:
       - key: cpu
         permits: 0
@@ -1613,6 +1730,8 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1
+    allowed_paths: [src/u1/**]
+    tests: ["true"]
 "#;
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("execution-plan.yml"), raw).expect("write plan");
@@ -1647,6 +1766,8 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1
+    allowed_paths: [src/u1/**]
+    tests: ["true"]
     resource_claims:
       - key: cpu
         permits: 4294967295
@@ -1656,6 +1777,8 @@ units:
     execution_wave: 1
     integration_order: 2
     target_branch: feat/u2
+    allowed_paths: [src/u2/**]
+    tests: ["true"]
 "#;
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("execution-plan.yml"), raw).expect("write plan");
@@ -1758,6 +1881,8 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1
+    allowed_paths: [src/u1/**]
+    tests: ["true"]
     resource_claims:
       - key: gpu
         permits: 1
@@ -1767,6 +1892,8 @@ units:
     execution_wave: 1
     integration_order: 2
     target_branch: feat/u2
+    allowed_paths: [src/u2/**]
+    tests: ["true"]
     resource_claims:
       - key: cpu
         permits: 2
@@ -1785,6 +1912,8 @@ units:
     execution_wave: 1
     integration_order: 1
     target_branch: feat/u1
+    allowed_paths: [src/u1/**]
+    tests: ["true"]
     resource_claims:
       - key: gpu
         permits: 1
@@ -1794,6 +1923,8 @@ units:
     execution_wave: 1
     integration_order: 2
     target_branch: feat/u2
+    allowed_paths: [src/u2/**]
+    tests: ["true"]
     resource_claims:
       - key: cpu
         permits: 2

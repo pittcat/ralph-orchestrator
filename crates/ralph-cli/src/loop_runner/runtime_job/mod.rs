@@ -56,10 +56,13 @@ use std::path::PathBuf;
 
 /// Stages the runtime drives a Unit through in `scheduler_mode: dag`.
 ///
-/// The transition rule is strict: `Execute → Review → Verify`.
-/// `Review → Execute` and `Execute → Verify` are illegal — both
-/// are fail-closed in `Stage::can_advance_to` and in
-/// `JobPipeline::advance` (see `dag_scheduler::jobs`).
+/// The transition rule is strict: `Execute → Review → Verify`, plus
+/// the correction re-entry `Verify → Review` (a verify- or
+/// integration-stage failure re-mints the review slot for the next
+/// fixer→reviewer round — adversarial review R3). `Review → Execute`
+/// and `Execute → Verify` are illegal — both are fail-closed in
+/// `Stage::can_advance_to` and in `JobPipeline::advance` (see
+/// `dag_scheduler::jobs`).
 ///
 /// Step 1+2(2026-09-03-0959 DAG 接线):promote 为生产可见。当前无
 /// bin 侧生产调用方(EventLoop 接线属后续 Step),故用 item 级
@@ -77,13 +80,18 @@ pub enum Stage {
 #[allow(dead_code)] // 同 `Stage` 的 Step 1+2 promote 注释。
 impl Stage {
     /// Strict next-stage gate. `Execute → Review` and
-    /// `Review → Verify` are the only legal forward moves; same
-    /// stage, backward moves, and skip moves (`Execute → Verify`)
-    /// are rejected.
+    /// `Review → Verify` are the only legal forward moves;
+    /// `Verify → Review` is the single legal backward move (the
+    /// correction pipeline re-enters at Review after a fixer round —
+    /// adversarial review R3). Same stage is handled by the caller's
+    /// equality check; skip moves (`Execute → Verify`) and
+    /// `Review → Execute` are rejected.
     pub fn can_advance_to(self, other: Stage) -> bool {
         matches!(
             (self, other),
-            (Stage::Execute, Stage::Review) | (Stage::Review, Stage::Verify)
+            (Stage::Execute, Stage::Review)
+                | (Stage::Review, Stage::Verify)
+                | (Stage::Verify, Stage::Review)
         )
     }
 

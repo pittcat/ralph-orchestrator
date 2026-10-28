@@ -71,9 +71,6 @@ pub(crate) enum ArtifactConsumeError {
         recorded: String,
         live: String,
     },
-    /// No execution context is attached (the runtime has not
-    /// observed a `forge.plan.ready` event).
-    NoExecutionContext,
 }
 
 impl fmt::Display for ArtifactConsumeError {
@@ -131,7 +128,6 @@ impl fmt::Display for ArtifactConsumeError {
                 "DAG artifact digest drift: stage={stage} field={field} \
                  recorded={recorded} live={live}"
             ),
-            Self::NoExecutionContext => write!(f, "DAG artifact: no execution context"),
         }
     }
 }
