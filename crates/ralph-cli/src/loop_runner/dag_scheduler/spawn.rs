@@ -35,6 +35,7 @@ use std::time::{Duration, Instant};
 use ralph_adapters::CliBackend;
 use ralph_core::EventLoop;
 use ralph_core::config::{EventSchema, HatConfig, RalphConfig, SchedulerMode};
+use ralph_core::diagnostics::{ExecutionIdentity, IdentityValue, SpanKind};
 use ralph_core::supervisor::dag_store::StageEvidenceRecord;
 use ralph_core::supervisor::dag_store_rusqlite::jobs::JobIdentity;
 use ralph_core::supervisor::{EventMergeSink, FileEventMergeSink};
@@ -2425,6 +2426,40 @@ impl DagSchedulerRuntime {
         // takes ownership of `job_id` so its panic boundary can
         // surface it on the catch_unwind error path.
         let active_jobs_id = job_id.clone();
+        // Plan 2026-10-29-0104 U2: the job's execution interval is
+        // an AgentExec/ReviewVerify span keyed by real job identity
+        // — job_id + attempt keep retries and restart-adopted
+        // attempts distinct. The handle moves into the spawned
+        // task so the close row lands with the real exit/timeout
+        // outcome; the panic boundary's Drop records `interrupted`
+        // rather than fabricating a completion.
+        let mut job_span = self.diag.as_ref().and_then(|diag| {
+            diag.begin_timing_span(
+                ExecutionIdentity {
+                    loop_id: self.exec.as_ref().map(|e| e.loop_id.clone()),
+                    session_id: diag.session_id(),
+                    job_id: Some(identity.job_id.clone()),
+                    attempt: Some(identity.attempt),
+                    stage: Some(identity.stage.clone()),
+                    hat: Some(identity.hat.clone()),
+                    plan_key: IdentityValue::value(&identity.plan_key),
+                    unit_key: IdentityValue::value(identity.unit_id.clone()),
+                    task_key: IdentityValue::value(identity.unit_key()),
+                    ..Default::default()
+                },
+                match kind {
+                    SpawnKind::Review | SpawnKind::Verify => SpanKind::ReviewVerify,
+                    SpawnKind::Execute | SpawnKind::Fix => SpanKind::AgentExec,
+                },
+                None,
+            )
+        });
+        if let Some(span) = job_span.as_mut() {
+            span.set_attributes(serde_json::json!({
+                "observed_by": "dag_scheduler.spawn",
+                "worker_index": worker_index,
+            }));
+        }
         tokio::spawn(async move {
             // F6 (U14): a panic inside `drive_pty_lease_loop` would
             // otherwise leak this job — `tx.send` never runs, so
@@ -2450,10 +2485,18 @@ impl DagSchedulerRuntime {
                 )
                 .await;
                 let status = finish_pty_job(handle).await.ok();
+                let exit_code = status.map(|s| s.exit_code() as i32);
+                if let Some(mut span) = job_span {
+                    span.set_attributes(serde_json::json!({
+                        "timed_out": outcome.timed_out,
+                        "exit_code": exit_code,
+                    }));
+                    span.complete();
+                }
                 let _ = tx.send(JobCompletion {
                     identity: completion_identity,
                     events_file: completion_events_file,
-                    exit_code: status.map(|s| s.exit_code() as i32),
+                    exit_code,
                     timed_out: outcome.timed_out,
                 });
             })

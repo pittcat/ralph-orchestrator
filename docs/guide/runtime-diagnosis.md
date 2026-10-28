@@ -422,6 +422,7 @@ ralph diagnose --session latest --format html --output report.html # 独立离�
 ```
 
 - **输入**：session 目录下的 `timing.jsonl`（`run-analysis-timing/v1` span 行）+ `diagnosis-input.json` 的 `timing_capture` 覆盖状态。采集由 `telemetry.timing_capture.enabled`（默认 `true`）控制，只在已有 diagnostics session 内生效——它**不会**自己创建 session。
+- **span 来源**：hat 激活路径记录 `agent_exec` + adapter 观测（`startup` / `tool_exec` / usage）；DAG 模式（`scheduler_mode: dag`）另外记录 admission 等待（`dependency_wait` / `capacity_wait`，跨 tick 的真实墙钟等待）、`integration`（lane lease→squash→gate→merge，CAS stale/busy 记 `interrupted`）以及 per-job `agent_exec`/`review_verify`（真实 `job_id`+`attempt`）。`dag_shadow` 只观察不记录——wave 路径没有执行那些等待，不能伪造。job 内部的 tool 级观测目前只在 hat 激活路径有；pty_kernel 流解析尚未接入。
 - **报告内容**：wall-clock 窗口、按 `SpanKind` 聚合的阶段耗时、最慢 span 表、时间线，以及 **bottleneck candidates**——每条候选要么带 `timing.jsonl` 证据引用，要么显式标注 `gap`（例如"无 tool_exec 观测，无法拆分模型/工具耗时"）。候选是优化方向，不是根因结论。
 - **诚实性规则**：未采集显示 `not_collected`；censored span（只有 open 无 close）单列计数、不补零；malformed 行计入 `malformed_rows` 不致命；跨 `clock_epoch` 的行不做单调钟减法。
 - **HTML 报告**：单文件、全内联 CSS/JS，无外部资源、无网络请求、无 `eval`；支持按 kind/状态筛选、占比切换、证据展开。operator 侧用它做"哪里慢、瓶颈是否有证据、下一步优化什么"的交付件；skill 规程见 `skills/ralph-run-diagnosis/references/run-analysis-report.md`。
