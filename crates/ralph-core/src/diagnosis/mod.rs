@@ -35,6 +35,8 @@ mod bundle;
 mod causal;
 mod envelope;
 mod journal;
+pub mod performance;
+pub mod performance_html;
 mod reporter;
 mod responder;
 
@@ -58,6 +60,7 @@ pub use envelope::{
     RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
 };
 pub use journal::{DriftJournalEntry, DriftMetric, RecoveryJournalEntry};
+pub use performance::{CaptureCoverage, KindAggregate, PerformanceReport, SpanView, analyze, report_json};
 pub use reporter::{
     DIAGNOSE_JSON_SCHEMA_VERSION, DIAGNOSIS_LEDGER_SCHEMA_VERSION, DiagnosisReport,
     LedgerReportError, LedgerSummary, RankedFinding, RejectionSummary, Report, ReporterError,

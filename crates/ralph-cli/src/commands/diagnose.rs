@@ -127,6 +127,19 @@ pub struct DiagnoseArgs {
     /// for a one-line-per-field summary.
     #[arg(long, value_enum, default_value_t = SupervisorFormat::Off)]
     pub supervisor: SupervisorFormat,
+
+    /// Plan 2026-10-29-0104 U8: emit the deterministic run-analysis
+    /// performance report computed from `timing.jsonl` + the session
+    /// manifest. All numbers are produced by fixed program logic —
+    /// never agent prose (R11). Combine with `--format html` for the
+    /// standalone offline report (R9) or `--format json` for the
+    /// machine-readable `run-analysis-performance/v1` document.
+    /// `--format html` implies this flag.
+    #[arg(
+        long,
+        conflicts_with_all = ["from_ledger", "legacy", "causal", "source"]
+    )]
+    pub performance: bool,
 }
 
 /// U11 (fix-plan U11 / R-11): output format for the
@@ -153,6 +166,10 @@ pub enum DiagnoseFormat {
     Markdown,
     /// Render a stable JSON document on stdout.
     Json,
+    /// Plan 2026-10-29-0104 U8: render the standalone offline HTML
+    /// run-analysis report. Implies `--performance` (the HTML view is
+    /// the performance report's presentation).
+    Html,
 }
 
 /// Exit codes. Match the spec from the U7 plan: missing session
@@ -246,6 +263,13 @@ pub fn try_diagnose(
     // clap `conflicts_with_all` already blocks
     // `--causal --from-ledger` and `--causal --legacy`, so the
     // only remaining case is "default mode + --causal".
+    // Plan 2026-10-29-0104 U8: `--performance` (or `--format html`)
+    // routes to the deterministic run-analysis report — the ledger /
+    // legacy distinction does not apply because the analysis reads
+    // `timing.jsonl` + `diagnosis-input.json` directly.
+    if args.performance || matches!(args.format, DiagnoseFormat::Html) {
+        return try_performance(&args, &diagnostics_root, use_colors);
+    }
     let report_kind = if args.causal {
         ReportKind::LegacyOnly
     } else {
@@ -343,6 +367,68 @@ fn pick_report_kind(args: &DiagnoseArgs) -> ReportKind {
     } else {
         ReportKind::LedgerOrLegacy
     }
+}
+
+/// Plan 2026-10-29-0104 U8: emit the deterministic run-analysis
+/// report. Session resolution reuses `build_report`'s selector so
+/// the missing/invalid-session error contract matches the legacy
+/// path exactly; the analysis itself reads `timing.jsonl` and the
+/// manifest via [`ralph_core::diagnosis::performance::analyze`].
+fn try_performance(
+    args: &DiagnoseArgs,
+    diagnostics_root: &Path,
+    use_colors: bool,
+) -> std::result::Result<(), DiagnoseExit> {
+    let selector = if args.session.eq_ignore_ascii_case("latest") || args.session.is_empty() {
+        SessionSelector::Latest
+    } else {
+        SessionSelector::Explicit(args.session.as_str())
+    };
+    let report = match build_report(selector, diagnostics_root) {
+        Ok(report) => report,
+        Err(ReporterError::NoSession(path)) => {
+            print_no_session_hint(diagnostics_root, &path, use_colors);
+            return Err(DiagnoseExit::NoSession(path));
+        }
+        Err(ReporterError::InvalidSession(path)) => {
+            print_invalid_session(&path, use_colors);
+            return Err(DiagnoseExit::InvalidSession(path));
+        }
+        Err(ReporterError::Io(path, err)) => {
+            print_io_error(&path, &err, use_colors);
+            return Err(DiagnoseExit::Io(path, err));
+        }
+    };
+    let perf = ralph_core::diagnosis::analyze(&report.session_path);
+    let body = match args.format {
+        DiagnoseFormat::Html => {
+            ralph_core::diagnosis::performance_html::render_html(&perf)
+        }
+        DiagnoseFormat::Json => serde_json::to_string_pretty(
+            &ralph_core::diagnosis::report_json(&perf),
+        )
+        .unwrap_or_else(|_| "{}".to_string()),
+        DiagnoseFormat::Markdown => {
+            ralph_core::diagnosis::performance::render_markdown(&perf)
+        }
+    };
+    if let Some(path) = args.output.as_ref() {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && let Err(err) = std::fs::create_dir_all(parent)
+        {
+            print_io_error(parent, &err, use_colors);
+            return Err(DiagnoseExit::Io(parent.to_path_buf(), err));
+        }
+        if let Err(err) = std::fs::write(path, body.as_bytes()) {
+            print_io_error(path, &err, use_colors);
+            return Err(DiagnoseExit::Io(path.clone(), err));
+        }
+        println!("wrote run-analysis report to {}", path.display());
+    } else {
+        println!("{body}");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,7 +568,11 @@ fn emit_ledger_report(
     report: DiagnosisReport,
 ) -> std::result::Result<(), DiagnoseExit> {
     let body = match args.format {
-        DiagnoseFormat::Markdown => render_diagnosis_report_markdown(&report),
+        // Html implies `--performance` upstream; unreachable here —
+        // fall back to the markdown body for programmatic callers.
+        DiagnoseFormat::Markdown | DiagnoseFormat::Html => {
+            render_diagnosis_report_markdown(&report)
+        }
         DiagnoseFormat::Json => {
             let value = render_diagnosis_report_json(&report);
             serde_json::to_string_pretty(&value)
@@ -519,7 +609,7 @@ fn emit_ledger_report(
                 )
             })?;
         let summary = match args.format {
-            DiagnoseFormat::Markdown => {
+            DiagnoseFormat::Markdown | DiagnoseFormat::Html => {
                 format!("wrote ledger markdown report to {}", path.display())
             }
             DiagnoseFormat::Json => format!(
@@ -629,7 +719,12 @@ fn emit_report(
     causal: Option<&CausalAttributionReport>,
 ) -> Result<()> {
     let body = match args.format {
-        DiagnoseFormat::Markdown => render_markdown_with_causal(report, causal),
+        // Html is handled by `try_performance` before `emit_report` is
+        // reached; the arm exists for exhaustiveness on programmatic
+        // use and falls back to the Markdown body.
+        DiagnoseFormat::Markdown | DiagnoseFormat::Html => {
+            render_markdown_with_causal(report, causal)
+        }
         DiagnoseFormat::Json => {
             let value = render_json_with_causal(report, causal);
             serde_json::to_string_pretty(&value)
@@ -647,7 +742,9 @@ fn emit_report(
         std::fs::write(path, body.as_bytes())
             .with_context(|| format!("failed to write report to {}", path.display()))?;
         let summary = match args.format {
-            DiagnoseFormat::Markdown => format!("wrote markdown report to {}", path.display()),
+            DiagnoseFormat::Markdown | DiagnoseFormat::Html => {
+                format!("wrote markdown report to {}", path.display())
+            }
             DiagnoseFormat::Json => {
                 format!("wrote json report to {} (schema v1)", path.display())
             }

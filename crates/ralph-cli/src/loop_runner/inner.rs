@@ -3242,6 +3242,37 @@ pub(super) async fn run_loop_impl_inner(
             }
         };
 
+        // Plan 2026-10-29-0104 U2: record the agent-exec interval as a
+        // `timing.jsonl` span. The open row lands before the future
+        // starts so a crash still leaves a censored record; an
+        // interrupt arm (which returns early below) relies on the
+        // handle's Drop to record `interrupted`. plan/unit/task keys
+        // are `NotApplicable` at the hat-activation level — DAG job
+        // spans in `runtime_job/` carry real keys. `attempt` is not
+        // tracked at this layer and stays missing rather than guessed.
+        let mut agent_span = {
+            let diag = event_loop.diagnostics();
+            let identity = ralph_core::diagnostics::ExecutionIdentity {
+                loop_id: Some(loop_id.clone()),
+                session_id: diag.session_id(),
+                activation_id: Some(format!("{loop_id}:{display_hat}:{iteration}")),
+                hat: Some(display_hat.to_string()),
+                plan_key: ralph_core::diagnostics::IdentityValue::NotApplicable,
+                unit_key: ralph_core::diagnostics::IdentityValue::NotApplicable,
+                task_key: ralph_core::diagnostics::IdentityValue::NotApplicable,
+                ..Default::default()
+            };
+            diag.begin_timing_span(identity, ralph_core::diagnostics::SpanKind::AgentExec, None)
+                .map(|mut h| {
+                    h.set_attributes(serde_json::json!({
+                        "backend": backend_name_for_timeout,
+                        "iteration": iteration,
+                        "executor": if use_pty { "pty" } else { "cli" },
+                    }));
+                    h
+                })
+        };
+
         let outcome = tokio::select! {
             result = execute_future => result?,
             _ = interrupt_rx_clone.changed() => {
@@ -3327,6 +3358,13 @@ pub(super) async fn run_loop_impl_inner(
                 return Ok(reason);
             }
         };
+
+        // U2: the exec future resolved — close the agent-exec span as
+        // `completed` regardless of business success (the backend call
+        // itself finished; watchdog/failure semantics live downstream).
+        if let Some(handle) = agent_span.take() {
+            handle.complete();
+        }
 
         // Activity ledger end record — pairs with the `start` written
         // before the select. `execute_future` errors bubble via `?`
