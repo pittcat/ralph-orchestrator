@@ -1,0 +1,33 @@
+{
+  "name": "@ralph-monitor/server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ralph monitor service — multi-project run observation (Fastify + SQLite)",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "start": "node --import tsx src/server.ts",
+    "test": "tsx --test $(find test -name '*.test.ts' | sort)",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "better-sqlite3": "^12.6.2",
+    "fastify": "^5.7.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "ralph",
+    "monitor",
+    "orchestrator"
+  ]
+}

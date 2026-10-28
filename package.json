@@ -11,13 +11,16 @@
     "build": "npm run build --workspaces",
     "build:server": "npm run build -w @ralph-web/server",
     "build:web": "npm run build -w @ralph-web/dashboard",
+    "build:monitor": "npm run build -w @ralph-monitor/server",
     "dev": "npm run dev:web",
     "dev:api": "cargo run -p ralph-api",
     "dev:web": "npm run dev -w @ralph-web/dashboard",
     "dev:legacy-server": "npm run dev -w @ralph-web/server",
+    "dev:monitor": "npm run dev -w @ralph-monitor/server",
     "start": "cargo run -p ralph-api",
     "test": "npm run test --workspaces --if-present",
     "test:server": "npm run test -w @ralph-web/server",
+    "test:monitor": "npm test -w @ralph-monitor/server",
     "clean": "npm run clean --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present"
   },
@@ -31,5 +34,8 @@
     "ralph"
   ],
   "author": "",
-  "license": "MIT"
+  "license": "MIT",
+  "allowScripts": {
+    "better-sqlite3@12.6.2": true
+  }
 }
