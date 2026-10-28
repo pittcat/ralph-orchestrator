@@ -37,6 +37,7 @@ fn make_enabled_collector(temp: &TempDir) -> DiagnosticsCollector {
         causal_evidence: false,
 
         causal_evidence_window_capacity: None,
+        timing_capture: true,
     };
     DiagnosticsCollector::with_options(temp.path(), &opts).expect("collector")
 }

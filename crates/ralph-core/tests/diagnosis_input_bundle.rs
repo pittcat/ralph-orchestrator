@@ -44,6 +44,7 @@ fn enabled_run_writes_input_bundle() {
         causal_evidence: false,
 
         causal_evidence_window_capacity: None,
+        timing_capture: true,
     };
     let collector = DiagnosticsCollector::with_options(base, &opts).expect("collector constructs");
     let session = collector
@@ -235,6 +236,7 @@ fn collector_update_and_finalize_round_trip() {
         causal_evidence: false,
 
         causal_evidence_window_capacity: None,
+        timing_capture: true,
     };
     let collector = DiagnosticsCollector::with_options(base, &opts).expect("collector");
     let session = collector.session_dir().unwrap().to_path_buf();

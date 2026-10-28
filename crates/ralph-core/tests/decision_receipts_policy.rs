@@ -45,6 +45,7 @@ fn causal_evidence_options(session_dir: &Path) -> DiagnosticsOptions {
         causal_evidence: true,
 
         causal_evidence_window_capacity: None,
+        timing_capture: true,
     }
 }
 

@@ -69,6 +69,7 @@ fn enabled_collector_creates_feedback_file() {
         causal_evidence: false,
 
         causal_evidence_window_capacity: None,
+        timing_capture: true,
     };
     let collector = DiagnosticsCollector::with_options(tmp.path(), &opts).expect("collector");
     collector.log_feedback(

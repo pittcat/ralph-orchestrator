@@ -36,6 +36,7 @@ mod recovery;
 mod runtime_trace;
 pub mod session;
 mod stream_handler;
+pub mod timing;
 mod trace_layer;
 
 #[cfg(test)]
@@ -53,8 +54,8 @@ pub use hook_runs::{HookDisposition, HookRunLogger, HookRunTelemetryEntry};
 pub use input_bundle::{
     ArtifactIntegrity, ArtifactStatus, BoundaryCounter, BoundaryCoverageEntry,
     BoundaryCoverageStatus, CausalBoundary, CodeBaseline, DIAGNOSIS_INPUT_SCHEMA_VERSION,
-    DiagnosisInputBundle, ManifestStatus, RunMetadata, kind_to_boundary, read_manifest,
-    write_manifest,
+    DiagnosisInputBundle, ManifestStatus, RunMetadata, TimingCaptureStatus, kind_to_boundary,
+    read_manifest, write_manifest,
 };
 pub use log_rotation::{create_log_file, rotate_logs};
 pub use orchestration::{
@@ -73,6 +74,11 @@ pub use runtime_trace::{
 // lives in this module.
 pub use session::probe_session_dir_writable;
 pub use stream_handler::DiagnosticStreamHandler;
+pub use timing::{
+    ClockEpoch, ExecutionIdentity, IdentityValue, ObservationPrecision,
+    PERFORMANCE_ANALYSIS_SCHEMA_VERSION, SpanKind, SpanStatus, TIMING_SCHEMA_VERSION,
+    TIMING_SIDECAR_FILENAME, TimingSpan, TimingSpanHandle, TimingWriter,
+};
 pub use trace_layer::{DiagnosticTraceLayer, TraceEntry};
 // `DiagnosisSummary` is declared at module root below, so callers can
 // refer to it as `crate::diagnostics::DiagnosisSummary` without a
@@ -471,7 +477,7 @@ use tempfile::NamedTempFile;
 /// the tracing-layer setup in `main.rs`) has already created the timestamped
 /// directory and we want the `EventLoop` to write to the same dir instead
 /// of generating a second one.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticsOptions {
     /// `RALPH_DIAGNOSTICS=1` enables the historical full diagnostic set:
     /// orchestration, performance, errors, hook-runs, agent-output, prompt-log.
@@ -534,6 +540,32 @@ pub struct DiagnosticsOptions {
     /// (U01a). The collector clamps to at least 1 so a misconfigured
     /// zero does not silently disable the ring buffer.
     pub causal_evidence_window_capacity: Option<usize>,
+
+    /// Plan 2026-10-29-0104 U1: whether the session writes
+    /// `timing.jsonl` span records. Defaults to `true` — capture
+    /// follows the existing diagnostics session switches and never
+    /// creates a session on its own, so a disabled collector stays a
+    /// no-op regardless of this flag. Set `false` via
+    /// `telemetry.timing_capture.enabled: false` to opt out inside an
+    /// otherwise-active diagnostics session.
+    pub timing_capture: bool,
+}
+
+impl Default for DiagnosticsOptions {
+    fn default() -> Self {
+        Self {
+            full_diagnostics: false,
+            runtime_diagnosis_artifacts: false,
+            session_dir: None,
+            trace_only: false,
+            workspace_root: None,
+            causal_evidence: false,
+            causal_evidence_window_capacity: None,
+            // U1: capture follows the diagnostics session switches by
+            // default; a disabled collector never reaches this flag.
+            timing_capture: true,
+        }
+    }
 }
 
 impl DiagnosticsOptions {
@@ -571,6 +603,7 @@ impl DiagnosticsOptions {
             // bypass the operator's opt-in toggle in `ralph.yml`.
             causal_evidence: false,
             causal_evidence_window_capacity: None,
+            timing_capture: true,
         }
     }
 
@@ -604,6 +637,7 @@ impl DiagnosticsOptions {
             // `DiagnosticsOptions` explicitly.
             causal_evidence: false,
             causal_evidence_window_capacity: None,
+            timing_capture: true,
         }
     }
 
@@ -707,6 +741,19 @@ pub struct DiagnosticsCollector {
     /// rows.
     boundary_counters:
         Arc<Mutex<std::collections::BTreeMap<CausalBoundary, input_bundle::BoundaryCounter>>>,
+    /// Plan 2026-10-29-0104 U1: `timing.jsonl` span writer. `None`
+    /// when timing capture is disabled, the session is trace-only,
+    /// or writer construction failed. Best-effort: never blocks the
+    /// orchestration main path (R4).
+    timing_logger: Option<Arc<Mutex<timing::TimingWriter>>>,
+    /// Whether timing capture was requested for this session. Tracked
+    /// separately from `timing_logger.is_some()` so the manifest can
+    /// distinguish `not_collected` (off) from `degraded` (attempted
+    /// but failed).
+    timing_capture: bool,
+    /// Process clock epoch used to stamp every span's `clock_epoch`
+    /// and monotonic readings (KTD2).
+    clock_epoch: timing::ClockEpoch,
 }
 
 impl std::fmt::Debug for DiagnosticsCollector {
@@ -960,6 +1007,30 @@ impl DiagnosticsCollector {
             None
         };
 
+        // Plan 2026-10-29-0104 U1: timing span sidecar. Active on
+        // full or minimal sessions when `options.timing_capture` is
+        // set (default true — capture follows the diagnostics
+        // session switches). Trace-only sessions never record loop
+        // timing. Construction failure flips the slot to None; the
+        // manifest then reports `degraded` instead of
+        // `not_collected` (the flag was on).
+        let timing_logger = if options.timing_capture && (effective_full || effective_runtime) {
+            match timing::TimingWriter::new(&session_dir) {
+                Ok(logger) => Some(Arc::new(Mutex::new(logger))),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "ralph_core::diagnostics",
+                        session_dir = %session_dir.display(),
+                        error = %err,
+                        "failed to create timing writer; sidecar disabled for this session",
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Plan 2026-08-26-1104 Unit 6: bounded frozen evidence
         // window writer. Same activation rule as the runtime
         // trace logger (full or minimal session); the ring
@@ -1009,6 +1080,9 @@ impl DiagnosticsCollector {
             cached_contract_digest: Arc::new(Mutex::new(None)),
             evidence_window_writer,
             boundary_counters: Arc::new(Mutex::new(Self::initial_boundary_counters())),
+            timing_logger,
+            timing_capture: options.timing_capture,
+            clock_epoch: timing::ClockEpoch::new(),
         })
     }
 
@@ -1034,6 +1108,9 @@ impl DiagnosticsCollector {
             cached_contract_digest: Arc::new(Mutex::new(None)),
             evidence_window_writer: None,
             boundary_counters: Arc::new(Mutex::new(Self::initial_boundary_counters())),
+            timing_logger: None,
+            timing_capture: false,
+            clock_epoch: timing::ClockEpoch::new(),
         }
     }
 
@@ -1136,6 +1213,73 @@ impl DiagnosticsCollector {
     /// Returns the session directory if diagnostics are enabled.
     pub fn session_dir(&self) -> Option<&Path> {
         self.session_dir.as_deref()
+    }
+
+    /// Whether the `timing.jsonl` span writer is live (plan
+    /// 2026-10-29-0104 U1). `false` when timing capture is disabled,
+    /// the session is trace-only/disabled, or writer construction
+    /// failed.
+    pub fn timing_capture_active(&self) -> bool {
+        self.timing_logger.is_some()
+    }
+
+    /// The process clock epoch stamped onto every span (KTD2).
+    pub fn clock_epoch(&self) -> &timing::ClockEpoch {
+        &self.clock_epoch
+    }
+
+    /// Open a timing span: persists the `open` row immediately and
+    /// returns a [`timing::TimingSpanHandle`] whose closing methods
+    /// (or Drop) write the closing row. Returns `None` when timing
+    /// capture is not active — callers must treat span measurement
+    /// as optional.
+    ///
+    /// `parent_span_id` links this span into the containment tree
+    /// (e.g. a tool call inside an agent-exec span).
+    pub fn begin_timing_span(
+        &self,
+        identity: timing::ExecutionIdentity,
+        kind: timing::SpanKind,
+        parent_span_id: Option<&str>,
+    ) -> Option<timing::TimingSpanHandle> {
+        let logger = self.timing_logger.as_ref()?;
+        let mut span = timing::TimingSpan::open(
+            self.clock_epoch.next_span_id(),
+            identity,
+            kind,
+            &self.clock_epoch,
+        );
+        if let Some(parent) = parent_span_id {
+            span.parent_span_id = Some(parent.to_string());
+        }
+        if let Ok(mut guard) = logger.lock() {
+            guard.append(span.clone());
+        }
+        Some(timing::TimingSpanHandle::new(span, self.clone()))
+    }
+
+    /// Append a span row directly (closing rows, adapter-side
+    /// observations built without a handle). No-op when capture is
+    /// not active.
+    pub fn record_timing_span(&self, span: timing::TimingSpan) {
+        if let Some(ref logger) = self.timing_logger {
+            if let Ok(mut guard) = logger.lock() {
+                guard.append(span);
+            }
+        }
+    }
+
+    /// Timing-capture state for the manifest finalize (R4 coverage):
+    /// distinguishes "never attempted" from "attempted but failed".
+    pub fn timing_capture_status(&self) -> TimingCaptureStatus {
+        if self.timing_logger.is_some() {
+            return TimingCaptureStatus::Collected;
+        }
+        if self.timing_capture {
+            TimingCaptureStatus::Degraded
+        } else {
+            TimingCaptureStatus::NotCollected
+        }
     }
 
     /// Writes a session pointer to
@@ -1582,7 +1726,13 @@ impl DiagnosticsCollector {
         // structured reason and re-write the manifest so the
         // reporter can surface the underlying writer failure.
         let mut boundary_coverage = self.snapshot_boundary_coverage(None);
-        *guard = guard.with_finalized(artifacts, execution_capabilities, boundary_coverage.clone());
+        // Plan 2026-10-29-0104 U1: stamp the timing-capture state so
+        // the report can distinguish "timing was off" from "capture
+        // was attempted but degraded" (R4 coverage accounting).
+        let timing_capture = self.timing_capture_status();
+        *guard = guard
+            .with_finalized(artifacts, execution_capabilities, boundary_coverage.clone())
+            .with_timing_capture(timing_capture);
         match input_bundle::write_manifest(session_dir, &guard) {
             Ok(Some(_)) => {}
             Ok(None) => {
@@ -2685,6 +2835,7 @@ mod tests {
             // (no loop-level loggers, session dir only).
             causal_evidence: false,
             causal_evidence_window_capacity: None,
+            timing_capture: true,
         };
         let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
         assert!(collector.is_trace_only());

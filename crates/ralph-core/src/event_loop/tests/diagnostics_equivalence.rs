@@ -117,6 +117,7 @@ fn collector_disables_input_bundle_when_initial_write_fails() {
         causal_evidence: false,
 
         causal_evidence_window_capacity: None,
+        timing_capture: true,
     };
     let collector =
         DiagnosticsCollector::with_options(tmp.path(), &opts).expect("with_options succeeds");

@@ -64,6 +64,15 @@ pub struct TelemetryConfig {
     /// traces) and how large the per-session window is.
     #[serde(default)]
     pub causal_evidence: CausalEvidenceConfig,
+
+    /// Timing-capture configuration block (plan
+    /// `2026-10-29-0104-feat-run-analysis-memory-plan` U1). Controls
+    /// whether an active diagnostics session also writes
+    /// `timing.jsonl` span records. Defaults to enabled — capture
+    /// follows the existing session switches and never creates a
+    /// session on its own.
+    #[serde(default)]
+    pub timing_capture: TimingCaptureConfig,
 }
 
 impl TelemetryConfig {
@@ -168,6 +177,11 @@ impl TelemetryConfig {
             session_dir: None,
             workspace_root: None,
             causal_evidence: causal_evidence_enabled,
+            // U1: `telemetry.timing_capture.enabled` (default true)
+            // gates the `timing.jsonl` sidecar inside whichever
+            // session switches activated above; it never activates
+            // a session on its own.
+            timing_capture: self.timing_capture.enabled,
             ..Default::default()
         }
     }
@@ -575,6 +589,36 @@ fn default_causal_evidence_enabled() -> bool {
 
 fn default_causal_evidence_window_capacity() -> usize {
     200
+}
+
+/// Timing-capture configuration block (plan
+/// `2026-10-29-0104-feat-run-analysis-memory-plan` U1).
+///
+/// Sits under `telemetry.timing_capture` in `ralph.yml`. `enabled`
+/// defaults to `true`: when a diagnostics session is active (full
+/// `RALPH_DIAGNOSTICS=1` or `runtime_diagnosis.write_artifacts`),
+/// `timing.jsonl` span records are written without any further
+/// configuration. The flag only gates the sidecar — it never creates
+/// a session on its own, so a run with no diagnostics stays
+/// sidecar-free regardless of this setting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimingCaptureConfig {
+    /// Master switch for `timing.jsonl` span capture inside an
+    /// active diagnostics session.
+    #[serde(default = "default_timing_capture_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for TimingCaptureConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_timing_capture_enabled(),
+        }
+    }
+}
+
+fn default_timing_capture_enabled() -> bool {
+    true
 }
 
 fn is_unit_interval(value: f64) -> bool {
@@ -998,6 +1042,7 @@ event_loop:
                 enabled: true,
                 window_capacity: 0,
             },
+            timing_capture: TimingCaptureConfig::default(),
         };
         let err = cfg.validate().unwrap_err();
         assert!(

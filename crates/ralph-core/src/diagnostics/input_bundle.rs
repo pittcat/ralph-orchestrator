@@ -360,6 +360,24 @@ impl BoundaryCoverageEntry {
     }
 }
 
+/// Plan 2026-10-29-0104 U1: timing sidecar (`timing.jsonl`)
+/// capture state for this session (R4 coverage reporting).
+///
+/// `Collected` — writer live, span rows were accepted.
+/// `Degraded` — capture was requested but the writer failed at
+/// construction or mid-run; the report must show an evidence gap.
+/// `NotCollected` — capture was off (disabled collector,
+/// trace-only session, or `telemetry.timing_capture.enabled:
+/// false`); absence of `timing.jsonl` is expected, not a failure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimingCaptureStatus {
+    #[default]
+    NotCollected,
+    Collected,
+    Degraded,
+}
+
 /// Self-describing manifest written to
 /// `<session_dir>/diagnosis-input.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -397,6 +415,12 @@ pub struct DiagnosisInputBundle {
     /// must surface this as a `missing` bundle.
     #[serde(default)]
     pub write_blocked: bool,
+    /// Plan 2026-10-29-0104 U1: whether `timing.jsonl` was
+    /// captured this session. `None` on legacy manifests — the
+    /// reader maps `None` to `not_collected` semantics (no
+    /// retroactive claim that capture ran).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing_capture: Option<TimingCaptureStatus>,
 }
 
 impl DiagnosisInputBundle {
@@ -424,6 +448,7 @@ impl DiagnosisInputBundle {
             created_at: now.clone(),
             updated_at: now,
             write_blocked: false,
+            timing_capture: None,
         }
     }
 
@@ -487,6 +512,16 @@ impl DiagnosisInputBundle {
         next.artifacts = artifacts;
         next.execution_capabilities = execution_capabilities;
         next.boundary_coverage = boundary_coverage;
+        next.updated_at = chrono::Utc::now().to_rfc3339();
+        next
+    }
+
+    /// Record the U1 timing-capture state (plan 2026-10-29-0104).
+    /// Returns a new bundle; callers fold it into `with_finalized`
+    /// output before persisting.
+    pub fn with_timing_capture(&self, status: TimingCaptureStatus) -> Self {
+        let mut next = self.clone();
+        next.timing_capture = Some(status);
         next.updated_at = chrono::Utc::now().to_rfc3339();
         next
     }

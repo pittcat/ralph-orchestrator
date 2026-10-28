@@ -58,6 +58,7 @@ fn causal_evidence_creates_minimal_session_with_runtime_trace_logger() {
         causal_evidence: true,
 
         causal_evidence_window_capacity: None,
+        timing_capture: true,
     };
     let collector = DiagnosticsCollector::with_options(temp.path(), &opts).expect("collector");
 
@@ -106,6 +107,7 @@ fn causal_evidence_disabled_with_no_other_flags_creates_no_session() {
         causal_evidence: false,
 
         causal_evidence_window_capacity: None,
+        timing_capture: true,
     };
     let collector = DiagnosticsCollector::with_options(temp.path(), &opts).expect("collector");
 
@@ -135,6 +137,7 @@ fn full_diagnostics_subsumes_causal_evidence_into_single_session() {
         causal_evidence: true,
 
         causal_evidence_window_capacity: None,
+        timing_capture: true,
     };
     let collector = DiagnosticsCollector::with_options(temp.path(), &opts).expect("collector");
 
