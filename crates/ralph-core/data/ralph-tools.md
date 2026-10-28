@@ -29,23 +29,25 @@ metadata:
 
 ### DAG typed `JobContext`
 
-DAG 模式（`event_loop.supervisor.scheduler_mode: dag`）下，runtime 为每个 job 额外注入以下 13 个环境变量，构成本轮 activation 的 typed `JobContext`。构造事件 payload 时**直接读这些变量**，不要自己推断或复用上一轮的值：
+DAG 模式（`event_loop.supervisor.scheduler_mode: dag`）下，runtime 为每个 job 额外注入以下 15 个环境变量，构成本轮 activation 的 typed `JobContext`。构造事件 payload 时**直接读这些变量**，不要自己推断或复用上一轮的值：
 
 | 变量 | 含义 | 何时为空 |
 |------|------|----------|
 | `RALPH_DAG_PLAN_KEY` | 本次执行所属计划的稳定 key | 非 DAG 模式 |
-| `RALPH_DAG_UNIT_KEY` | 当前 Unit 的稳定 key，例如 `U3` | 同上 |
-| `RALPH_DAG_TASK_KEY` | 当前 Unit 对应 task 的注册 key（含 `:step-<n>:` 段） | 同上 |
+| `RALPH_DAG_UNIT_KEY` | 当前 Unit 的稳定 key，plan-namespaced：`forge:<plan_key>:<unit_id>`，例如 `forge:pf-demo:U3` | 同上 |
+| `RALPH_DAG_TASK_KEY` | 当前 Unit 对应 task 的注册 key——与 `RALPH_DAG_UNIT_KEY` 同值（`forge:<plan_key>:<unit_id>`），没有 `:step-<n>:` 段 | 同上 |
 | `RALPH_DAG_TASK_ID` | 当前 loop 的真实 live task id | 同上 |
 | `RALPH_DAG_JOB_ID` | 本次 job 的唯一 id；与 `job_token` 一起锚定 job 身份 | 同上 |
 | `RALPH_DAG_JOB_TOKEN` | 本次 job 的一次性令牌；发终态事件时必须原样带上 | 同上 |
-| `RALPH_DAG_STAGE` | 本轮所处阶段，例如 `execution` / `review` / `verification` | 同上 |
-| `RALPH_DAG_ATTEMPT` | 本 Unit 的第几次尝试（从 1 开始的整数） | 同上 |
+| `RALPH_DAG_STAGE` | 本轮所处阶段：`execute` / `review` / `verify` / `fix` | 同上 |
+| `RALPH_DAG_ATTEMPT` | 本 Unit 的第几次尝试（0-based 整数；首次 spawn 为 `0`，每次 correction 重入 +1） | 同上 |
 | `RALPH_DAG_WORKTREE` | 本 job 应该在其中工作的 worktree 绝对路径 | 同上 |
 | `RALPH_DAG_BASE` | 本 job 的基线 commit sha；据此判断你的改动范围 | 同上 |
 | `RALPH_DAG_EXPECTED_HEAD` | 本 job 启动时用于校验工作树的期望 HEAD；与 `RALPH_DAG_BASE` 一起核对 | 同上 |
-| `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH` | 已核验执行计划的 repo-relative 路径 | 尚未产出该 artifact 时 |
+| `RALPH_DAG_VERIFIED_EXECUTION_PLAN_PATH` | 已核验执行计划的 repo-relative 路径（`.ralph/forge/<plan>/execution-plan.yml`；在 unit worktree 内请通过 `RALPH_DAG_FORGE_ROOT` 定位） | 尚未产出该 artifact 时 |
 | `RALPH_DAG_ARTIFACT_REFS` | 本 stage 的所有交付物引用（JSON 字符串：`{"refs": {key: {path, digest}, ...}}`）；`path` 是 spawn 前的绝对路径，`digest` 是文件字节 SHA-256；spawn 时 runtime 已复核（缺失 / 漂移 / 逃逸 → 拒启动当前 job） | 当前 stage 没有任何上游交付物时仍注入 `{"refs": {}}`，代表无可消费证据 |
+| `RALPH_DAG_ARTIFACT_DIR` | 本 Unit 业务产物的宿主绝对路径（`<host>/.ralph/forge/<plan_key>/units/`）——completion/review/verification 报告写在这里；`.ralph/` 未被跟踪，worktree 内看不到 | 同上 |
+| `RALPH_DAG_FORGE_ROOT` | 本计划的 forge 根目录宿主绝对路径（`<host>/.ralph/forge/<plan_key>/`）——execution-plan.yml / development-plan.md / worktree-map.yml / blocks / corrections / failures 都从这里定位 | 同上 |
 
 **已弃用/移除**：`wave_id` / `slot_index` / `worktree_map`——runtime 不再注入这三个值，带这三个字段的 payload 会被拒收；job 身份一律由 `RALPH_DAG_JOB_ID` + `RALPH_DAG_JOB_TOKEN` 锚定。
 

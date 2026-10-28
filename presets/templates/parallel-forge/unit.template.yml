@@ -49,6 +49,14 @@ forbidden_paths:
   - src/unrelated/**
   - build/global-config.*
 
+# DAG verify 阶段的确定性 gate 命令（2026-10-29 对抗性审查 O1：必填、非空）。
+# verifier job 逐条执行这些命令；每条必须能在本 Unit worktree 内独立运行，
+# 资源（端口/数据库/临时目录/容器项目/缓存）按 plan_key + unit_key 命名空间化。
+# 与 acceptance_test.command / tdd.regression.commands 同源——这里只列
+# runtime 逐条执行的命令行。
+tests:
+  - "cargo test -p example-crate -- u01"
+
 shared_contracts:
   - ExampleInterface
 

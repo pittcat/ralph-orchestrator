@@ -69,7 +69,11 @@ fn stage_transition_rejects_illegal_jumps() {
     assert!(!Stage::Review.can_advance_to(Stage::Execute));
     assert!(!Stage::Review.can_advance_to(Stage::Review));
     assert!(!Stage::Verify.can_advance_to(Stage::Execute));
-    assert!(!Stage::Verify.can_advance_to(Stage::Review));
+    // Correction re-entry (adversarial review R3): a verify- or
+    // integration-stage failure re-mints the review slot so the next
+    // fixer round can be reviewed.
+    assert!(Stage::Verify.can_advance_to(Stage::Review));
+    assert!(!Stage::Verify.can_advance_to(Stage::Verify));
 }
 
 /// A `JobToken` minted for one descriptor must NOT match a

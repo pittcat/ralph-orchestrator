@@ -285,7 +285,7 @@ pub(crate) struct PendingAdvance {
 /// single place that bridges the two views; fall back to the input
 /// when the prefix does not match (legacy callers still pass bare
 /// unit_ids in non-namespaced modes).
-fn strip_plan_namespace<'a>(plan_key: &str, unit_key: &'a str) -> &'a str {
+pub(super) fn strip_plan_namespace<'a>(plan_key: &str, unit_key: &'a str) -> &'a str {
     let prefix = format!("forge:{plan_key}:");
     unit_key.strip_prefix(&prefix).unwrap_or(unit_key)
 }
@@ -698,6 +698,11 @@ impl DagSchedulerRuntime {
             }
         }
         self.tick();
+        // Adversarial review R7: a plan that cannot make progress and
+        // has no pending work must fail closed into a typed
+        // `forge.plan.blocked` — never drift into generic fallback
+        // termination with only debug logs.
+        self.maybe_block_stalled_plans();
         self.has_pending_work()
     }
 
@@ -739,6 +744,36 @@ impl DagSchedulerRuntime {
             let digest = sha256_hex(&payload.to_string());
             self.write_terminal(&completion.identity, "failed", &digest);
             self.queue_failure_event(kind, &completion.identity, payload);
+            return;
+        }
+
+        // A `forge.plan.blocked` terminal from a job whose hat may publish
+        // it (reviewer and other planning/review hats) is a legal stage
+        // result: forward it verbatim through the merge path so the loop's
+        // normal blocked chain (cleanup → report) runs, instead of
+        // collapsing the outcome into a contract-violation execution
+        // failure. Hats that may not publish the topic have their event
+        // dropped downstream by the origin guard — the unit then stalls
+        // and the wedge detector emits its own plan.blocked.
+        if success.is_none()
+            && let Some(blocked) = events.iter().find(|e| e.topic == "forge.plan.blocked")
+        {
+            let payload = blocked
+                .payload
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                .unwrap_or(Value::Null);
+            let digest = sha256_hex(&payload.to_string());
+            self.write_terminal(&completion.identity, "failed", &digest);
+            // Same settle-time release as `queue_failure_event`: the
+            // blocked job's reservation ends with its journal terminal.
+            self.pipeline.release(&completion.identity.unit_key());
+            self.queue_result_event(
+                "forge.plan.blocked",
+                completion.identity.hat.clone(),
+                payload,
+                None,
+            );
             return;
         }
 
@@ -920,6 +955,21 @@ impl DagSchedulerRuntime {
             .collect()
     }
 
+    /// Host-side forge units directory
+    /// (`.ralph/forge/<plan>/units`, adversarial review O3). The
+    /// runtime creates it lazily so a plan hat can write report
+    /// artifacts immediately; it lives outside every unit worktree.
+    fn forge_units_dir(&self, plan_key: &str) -> PathBuf {
+        let dir = self
+            .workspace
+            .join(".ralph")
+            .join("forge")
+            .join(plan_key)
+            .join("units");
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
     /// Live task id for a `forge:<plan>:<unit>` task key; "unresolved"
     /// when the store lookup fails so the failure stays visible
     /// instead of wedging silently.
@@ -951,7 +1001,7 @@ impl DagSchedulerRuntime {
     /// &'static str`, so downstream recovery / telemetry see the same
     /// strings they did under the historical `"unknown"` / `"timeout"`
     /// / `"orphan_or_empty_result"` literals.
-    fn fail_job(
+    pub(crate) fn fail_job(
         &mut self,
         identity: &JobIdentity,
         kind: SpawnKind,
@@ -1007,7 +1057,30 @@ impl DagSchedulerRuntime {
         identity: &JobIdentity,
         payload: Value,
     ) {
-        self.queue_result_event(kind.failure_topic(), identity.hat.clone(), payload, None);
+        // A failed job no longer holds live work: release its
+        // pipeline reservation at settle time. Success paths
+        // release at event acceptance instead — the slot stays
+        // reserved until the ledger commit lands. Failure events
+        // are synthesized AFTER the journal terminal write, so
+        // the accepted-event worker-identity guard can never
+        // match them to a live job; without settle-time release
+        // the reservation leaked, the unit wedged, and a stale
+        // `live_unit_ids` hit starved the legitimate correction
+        // re-entry (adversarial review O4/R7).
+        self.pipeline.release(&identity.unit_key());
+        // Origin/scope attribution follows the hat that may publish the
+        // failure topic, not the job's stage hat. `forge.unit.execution_failed`
+        // is publishable only by `executor` in this preset family, so a
+        // review- or fix-stage failure must carry executor attribution or
+        // the isolated publish-scope guard drops the event and the unit
+        // wedges mid-pipeline (adversarial review R2). `identity.hat` is
+        // kept in the payload's `stage`/`job_id` fields so the failure
+        // record still identifies which stage actually failed.
+        let hat = match kind {
+            SpawnKind::Verify => SpawnKind::Verify.hat().to_string(),
+            _ => SpawnKind::Execute.hat().to_string(),
+        };
+        self.queue_result_event(kind.failure_topic(), hat, payload, None);
     }
 
     pub(crate) fn queue_result_event(
@@ -1091,12 +1164,16 @@ impl DagSchedulerRuntime {
         payload: &Value,
         source: Option<&str>,
     ) {
-        let acceptance_key = payload
-            .get("plan_key")
-            .and_then(Value::as_str)
-            .filter(|plan_key| !plan_key.trim().is_empty())
-            .map(|plan_key| format!("forge:{plan_key}:{unit_key}"))
-            .unwrap_or_else(|| unit_key.to_string());
+        // `awaiting_acceptance` is keyed by `JobIdentity::unit_key()`
+        // = `forge:{plan_key}:{unit_id}` — the SAME namespaced shape
+        // the caller passes in `unit_key`. Re-prefixing here would
+        // produce `forge:{plan}:forge:{plan}:{unit}`, which can never
+        // match a durable reservation: the completing job's journal
+        // terminal would never be written, `post` would leak, and the
+        // `current_job_matches_payload` fallback would admit replays
+        // of already-settled jobs (adversarial review R2/R7 class —
+        // a silently broken post-acceptance contract).
+        let acceptance_key = unit_key.to_string();
         if let Some(post) = self.awaiting_acceptance.get(&acceptance_key)
             && !accepted_identity_matches(post, payload, source)
         {
@@ -1109,6 +1186,7 @@ impl DagSchedulerRuntime {
         if !self.awaiting_acceptance.contains_key(&acceptance_key)
             && has_worker_identity(payload, source)
             && !self.current_job_matches_payload(payload, source)
+            && topic != topics_ext::UNIT_VERIFICATION_FAILED
         {
             warn!(
                 unit_key,
@@ -1354,13 +1432,22 @@ impl DagSchedulerRuntime {
         unit_key: &str,
         kind: SpawnKind,
     ) -> std::result::Result<String, String> {
-        let prior_stage = match kind {
-            SpawnKind::Execute => None,
-            SpawnKind::Review => Some("execute"),
-            SpawnKind::Verify => Some("review"),
-            SpawnKind::Fix => Some("execute"),
+        // Candidate prior-stage evidence rows, newest-authoritative
+        // first (adversarial review R3): a stage may run several
+        // times during correction, and the next stage must anchor on
+        // the LATEST accepted commit, not the oldest. `fix` evidence
+        // outranks `execute` for a unit re-entering Review. Review
+        // and verify are verdict stages — Fix is the executor hat
+        // re-running on code, so it anchors on the last
+        // code-producing evidence (`fix`, then `execute`), never on
+        // a review verdict row.
+        let prior_candidates: &[&str] = match kind {
+            SpawnKind::Execute => &[],
+            SpawnKind::Review => &["fix", "execute"],
+            SpawnKind::Verify => &["review", "fix", "execute"],
+            SpawnKind::Fix => &["fix", "execute"],
         };
-        if let Some(prior) = prior_stage {
+        for prior in prior_candidates {
             if let Ok(stores) = self.ensure_stores() {
                 if let Ok(Some(ev)) = stores
                     .plans
@@ -1385,15 +1472,47 @@ impl DagSchedulerRuntime {
                 );
             }
         }
+        // A fix after an execute-stage failure has no accepted
+        // evidence anywhere, but the executor may have left partial
+        // work on the unit branch. Resume from the live branch tip
+        // so the fixer continues the abandoned work instead of
+        // failing closed with BaseMismatch on the stale
+        // admission-time pin (adversarial review R3).
+        if kind == SpawnKind::Fix
+            && let Ok(tip) = self.read_unit_branch_tip(unit_key)
+        {
+            return Ok(tip);
+        }
         if let Ok(stores) = self.ensure_stores()
             && let Ok(Some(pin)) = stores.plans.get_unit_base(plan_key, unit_key)
         {
             return Ok(pin.base_commit);
         }
-        let plan_base = self
+        let unit_has_deps = self
             .plans
             .get(plan_key)
-            .and_then(|p| p.verified_base_commit.clone());
+            .and_then(|p| p.units.iter().find(|u| u.unit_id == unit_key))
+            .is_some_and(|u| !u.depends_on.is_empty());
+        let plan_base = if unit_has_deps {
+            // admission_base_pin (adversarial review R6): a dependent
+            // Unit admitted after its dependencies integrated must
+            // fork from the integration lane tip, which already
+            // contains every acked dependency commit — not from the
+            // approval-time verified base. An unresolvable lane is a
+            // fail-closed admission error.
+            match self.integration_head() {
+                Ok(head) => Some(head),
+                Err(err) => {
+                    return Err(format!(
+                        "dependent unit {unit_key} cannot pin a base: {err}"
+                    ));
+                }
+            }
+        } else {
+            self.plans
+                .get(plan_key)
+                .and_then(|p| p.verified_base_commit.clone())
+        };
         match plan_base {
             Some(base) => {
                 if let Ok(stores) = self.ensure_stores() {
@@ -1405,6 +1524,37 @@ impl DagSchedulerRuntime {
             }
             None => Err("no verified base commit recorded at approval".to_string()),
         }
+    }
+
+    /// Tip of the loop-scoped integration lane
+    /// (`refs/heads/ralph/<loop>/integration`). The lane holds every
+    /// acked-integrated unit commit; a dependent unit's first-admission
+    /// base pins to this tip (adversarial review R4/R6).
+    pub(crate) fn integration_head(&self) -> Result<String, String> {
+        let exec = self
+            .exec
+            .as_ref()
+            .ok_or_else(|| "DAG base pin: no execution context".to_string())?;
+        let reference = format!(
+            "refs/heads/{}^{{commit}}",
+            super::integrate::integration_branch(&exec.loop_id)
+        );
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.workspace)
+            .arg("rev-parse")
+            .arg("--verify")
+            .arg(&reference)
+            .output()
+            .map_err(|err| format!("git rev-parse integration lane: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "integration lane {} not resolvable: {}",
+                super::integrate::integration_branch(&exec.loop_id),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
     /// Record the per-stage accepted evidence (U3,
@@ -1536,7 +1686,7 @@ impl DagSchedulerRuntime {
             .ok_or_else(|| "DAG evidence: no execution context".to_string())?;
         let reference = format!(
             "refs/heads/ralph/{}/{}{}",
-            exec.loop_id, unit_key, "{commit}"
+            exec.loop_id, unit_key, "^{commit}"
         );
         let output = std::process::Command::new("git")
             .arg("-C")
@@ -1630,6 +1780,51 @@ impl DagSchedulerRuntime {
         Ok((file, canonical))
     }
 
+    /// Resolve an artifact `*_path` against the correct root
+    /// (adversarial review O3). Forge business artifacts live under
+    /// `<forge_artifact_root>` = `.ralph/forge/<plan>/` on the HOST
+    /// workspace — every stage hat writes reports into
+    /// `$RALPH_DAG_ARTIFACT_DIR` (the host-side units directory), so a
+    /// recorded `.ralph/...` path resolves against the host checkout,
+    /// never the unit worktree. Non-`.ralph` paths (source files under
+    /// `allowed_paths`) keep resolving inside the unit worktree.
+    ///
+    /// `.ralph/` paths try the host workspace first, then fall back to
+    /// the unit worktree so artifacts recorded by a pre-artifact-dir
+    /// contract (a hat that wrote `.ralph/forge/...` inside its own
+    /// worktree) are still consumable; the host path wins when both
+    /// exist, and the recorded digest check stays authoritative either
+    /// way.
+    fn open_artifact(
+        &self,
+        relative: &str,
+        unit_key: &str,
+        stage: &str,
+        field_name: &str,
+    ) -> Result<(std::fs::File, PathBuf), String> {
+        let Some(exec) = self.exec.as_ref() else {
+            return Err("DAG artifact: no execution context".to_string());
+        };
+        if relative == ".ralph" || relative.starts_with(".ralph/") {
+            match Self::open_under_canonical_worktree(&self.workspace, relative, stage, field_name)
+            {
+                Ok(pair) => return Ok(pair),
+                Err(host_err) => {
+                    let worktree =
+                        UnitWorktree::worktree_path_for(&self.workspace, &exec.loop_id, unit_key);
+                    return Self::open_under_canonical_worktree(
+                        &worktree, relative, stage, field_name,
+                    )
+                    .map_err(|worktree_err| {
+                        format!("{host_err}; worktree fallback: {worktree_err}")
+                    });
+                }
+            }
+        }
+        let worktree = UnitWorktree::worktree_path_for(&self.workspace, &exec.loop_id, unit_key);
+        Self::open_under_canonical_worktree(&worktree, relative, stage, field_name)
+    }
+
     /// 2026-09-13-001 plan U2: read a single artifact row for the
     /// `(plan_key, unit_key, stage)` triple from the durable
     /// `dag_stage_artifacts` store, resolve its repo-relative path
@@ -1684,11 +1879,6 @@ impl DagSchedulerRuntime {
                 path: relative.to_string(),
             });
         }
-        let exec = self
-            .exec
-            .as_ref()
-            .ok_or(ArtifactConsumeError::NoExecutionContext)?;
-        let worktree = UnitWorktree::worktree_path_for(&self.workspace, &exec.loop_id, unit_key);
         // 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U1
         // (adversarial:A1): open the file by fd via the
         // canonicalize-then-open helper so the TOCTOU window
@@ -1696,8 +1886,7 @@ impl DagSchedulerRuntime {
         // the kernel's open-vs-unlink resolution. The platform-
         // specific fd-recheck inside the helper provides defense
         // in depth on Linux and macOS.
-        let open_result =
-            Self::open_under_canonical_worktree(&worktree, relative, stage, field_name);
+        let open_result = self.open_artifact(relative, unit_key, stage, field_name);
         let (_file, canonical) = match open_result {
             Ok(pair) => pair,
             Err(err_str) => {
@@ -1810,11 +1999,6 @@ impl DagSchedulerRuntime {
                 );
                 continue;
             }
-            let Some(exec) = self.exec.as_ref() else {
-                continue;
-            };
-            let worktree =
-                UnitWorktree::worktree_path_for(&self.workspace, &exec.loop_id, &unit_key);
             // 2026-09-13-001-fix-forge-dag-artifact-handoff-plan U1
             // (adversarial:A1): reuse the same open-by-fd helper
             // as the consume side so the recording path inherits
@@ -1822,12 +2006,7 @@ impl DagSchedulerRuntime {
             // the file is missing / unreadable / escapes the
             // worktree — the existing fail-soft `continue;` keeps
             // the surface tight.
-            let bytes = match Self::open_under_canonical_worktree(
-                &worktree,
-                path_str,
-                &stage_storage,
-                field_name,
-            ) {
+            let bytes = match self.open_artifact(path_str, &unit_key, stage_storage, field_name) {
                 Ok((mut file, _canonical)) => {
                     use std::io::Read;
                     let mut buf = Vec::new();
@@ -2362,6 +2541,35 @@ impl DagSchedulerRuntime {
                     .unwrap_or_default(),
             ),
             ("RALPH_DAG_ARTIFACT_REFS".to_string(), artifact_refs_env),
+            // Adversarial review O3: forge business artifacts
+            // (`<plan>/units/*-completion|review|verification*.md`)
+            // are written on the HOST workspace, not inside the unit
+            // worktree — worktree copies would be invisible to
+            // downstream stage hats and would contaminate the unit
+            // diff with `.ralph/` files the path allowlist must then
+            // excuse. The runtime pins the absolute host directory so
+            // hats never have to guess where their checkout lives.
+            (
+                "RALPH_DAG_ARTIFACT_DIR".to_string(),
+                self.forge_units_dir(&identity.plan_key)
+                    .display()
+                    .to_string(),
+            ),
+            // Plan-level forge root (`.ralph/forge/<plan_key>`) on the
+            // host workspace: the verified execution plan,
+            // development plan, concurrency approval, and
+            // worktree-map live here. Hats resolve them by absolute
+            // path; `.ralph/` is untracked so it is not visible from
+            // inside the unit worktree.
+            (
+                "RALPH_DAG_FORGE_ROOT".to_string(),
+                self.workspace
+                    .join(".ralph")
+                    .join("forge")
+                    .join(&identity.plan_key)
+                    .display()
+                    .to_string(),
+            ),
         ]);
 
         let (cmd, args, stdin_input, _temp_file_guard) = backend.build_command(&prompt, false);
@@ -2575,6 +2783,7 @@ units:
     integration_order: 2
     target_branch: feat/u2-feature
     allowed_paths: [u2.txt]
+    tests: ["true"]
 "#;
 
     fn exec_context(workspace: &Path) -> DagExecutionContext {
@@ -2857,6 +3066,180 @@ units:
         assert!(
             tmp.path().join(".ralph/worktrees/loop-test-U1").is_dir(),
             "executor must run in its isolated unit worktree"
+        );
+    }
+
+    /// Two-stage chain context: one `sh` backend shared by the
+    /// executor and reviewer hats, dispatching on `RALPH_DAG_STAGE`.
+    /// The executor commits a real change on the unit branch (so its
+    /// tip differs from the plan base — the adversarial review R1
+    /// failure surface) and writes its completion artifact into the
+    /// host-side units dir. The reviewer asserts the runtime handed
+    /// it the executor's accepted tip as `RALPH_DAG_BASE` inside the
+    /// resumed worktree plus the recorded executor artifact ref.
+    fn real_chain_exec_context(workspace: &Path) -> DagExecutionContext {
+        let mut config = RalphConfig::default();
+        for hat in [HAT_EXECUTOR, HAT_REVIEWER] {
+            config.hats.insert(
+                hat.to_string(),
+                HatConfig {
+                    name: hat.to_string(),
+                    instructions: format!("run the {hat} stage of one fixture unit"),
+                    timeout: Some(10),
+                    ..HatConfig::default()
+                },
+            );
+        }
+        let mut cli = CliConfig::default();
+        cli.backend = "custom".to_string();
+        cli.command = Some("sh".to_string());
+        cli.prompt_mode = "stdin".to_string();
+        cli.args = vec![
+            "-c".to_string(),
+            r#"set -eu
+UNIT="${RALPH_DAG_UNIT_KEY##*:}"
+UNIT_LC="$(printf '%s' "$UNIT" | tr 'A-Z' 'a-z')"
+case "$RALPH_DAG_STAGE" in
+execute)
+    echo "${UNIT} work" > "${UNIT_LC}.txt"
+    git add "${UNIT_LC}.txt"
+    git commit -qm "${UNIT} work"
+    printf 'unit report\n' > "$RALPH_DAG_ARTIFACT_DIR/${UNIT}-completion.md"
+    printf '{"topic":"forge.unit.executed","payload":"{\\"unit_report_path\\":\\"%s\\"}"}\n' \
+        ".ralph/forge/pf-test/units/${UNIT}-completion.md" >> "$RALPH_EVENTS_FILE"
+    ;;
+review)
+    test "$RALPH_DAG_BASE" = "$(git rev-parse HEAD)"
+    printf '%s' "$RALPH_DAG_ARTIFACT_REFS" | grep -F 'executor_completion_artifact_path' >/dev/null
+    printf 'review report\n' > "$RALPH_DAG_ARTIFACT_DIR/${UNIT}-review.md"
+    printf '{"topic":"forge.unit.reviewed","payload":"{\\"verdict\\":\\"ACCEPTED\\",\\"review_report_path\\":\\"%s\\"}"}\n' \
+        ".ralph/forge/pf-test/units/${UNIT}-review.md" >> "$RALPH_EVENTS_FILE"
+    ;;
+*)
+    exit 43
+    ;;
+esac"#
+                .to_string(),
+        ];
+        let backend = CliBackend::from_config(&cli).expect("chain fixture backend builds");
+        DagExecutionContext::new(
+            &config,
+            &backend,
+            "loop-test",
+            workspace.join("events.jsonl"),
+            None,
+        )
+    }
+
+    /// Execute → Review regression canary (adversarial review R1/R3):
+    /// the executor's real commit moves the unit branch tip past the
+    /// plan base, so the review spawn MUST read the accepted tip via
+    /// `^{commit}` evidence and resume the existing worktree at that
+    /// tip — the original bug resolved to the plan base and the
+    /// reviewer acquisition failed closed with BaseMismatch. The
+    /// reviewer child additionally asserts `RALPH_DAG_BASE` equals
+    /// the worktree HEAD and that the executor artifact ref was
+    /// handed over; the merged result must be `forge.unit.reviewed`,
+    /// never a synthesised `forge.unit.execution_failed`.
+    #[tokio::test]
+    async fn real_dag_execute_to_review_canary() {
+        let (tmp, mut runtime) = dag_fixture();
+        let base = init_git_fixture(tmp.path());
+        runtime
+            .plans
+            .get_mut("pf-test")
+            .expect("fixture plan registered")
+            .verified_base_commit = Some(base.clone());
+        runtime.attach_execution_context(real_chain_exec_context(tmp.path()));
+
+        runtime.maybe_spawn_executor("pf-test", "U1");
+        let mut executed_event = None;
+        for _ in 0..100 {
+            runtime.drain_completions();
+            if let Some(merge) = runtime.merge_queue.front() {
+                executed_event = Some(merge.event.clone());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let executed = executed_event.expect("executor completion reached merge queue");
+        assert_eq!(executed.topic.as_str(), "forge.unit.executed");
+
+        // Production order (pump_idle): the merged receipt is appended
+        // to the main ledger FIRST — that write registers the
+        // post-acceptance record — and only then does the EventLoop's
+        // accepted seam route it back into the DAG runtime.
+        runtime.merge_one();
+
+        let executor_tip = {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(tmp.path())
+                .args(["rev-parse", "--verify", "refs/heads/ralph/loop-test/U1"])
+                .output()
+                .expect("rev-parse unit branch");
+            assert!(output.status.success(), "executor must leave a unit branch");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        assert_ne!(
+            executor_tip, base,
+            "executor must commit beyond the plan base for the canary to bind"
+        );
+
+        // The merged receipt goes back through the real accepted
+        // seam — post-acceptance identity check, journal terminal,
+        // slot release, driver routing to the Review stage spawn.
+        // (U2 is an independent unit in the fixture plan: its own
+        // executor may legitimately admit and merge a second
+        // `forge.unit.executed` while we wait — skip non-review
+        // events rather than asserting queue order.)
+        runtime.observe_accepted_events(&[executed]);
+
+        let mut reviewed_event = None;
+        let mut seen: Vec<String> = Vec::new();
+        for _ in 0..200 {
+            runtime.drain_completions();
+            while let Some(merge) = runtime.merge_queue.pop_front() {
+                if merge.event.topic.as_str() == "forge.unit.reviewed" {
+                    reviewed_event = Some(merge.event);
+                    break;
+                }
+                seen.push(format!("{} -> {}", merge.event.topic, merge.event.payload));
+            }
+            if reviewed_event.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let reviewed = reviewed_event.unwrap_or_else(|| {
+            panic!("reviewer completion never reached merge queue; seen: {seen:#?}")
+        });
+        assert_eq!(
+            reviewed.topic.as_str(),
+            "forge.unit.reviewed",
+            "a BaseMismatch or artifact handoff failure would surface as \
+             forge.unit.execution_failed instead"
+        );
+        assert_eq!(
+            reviewed.source.as_ref().map(ToString::to_string).as_deref(),
+            Some(HAT_REVIEWER)
+        );
+        let payload: Value = serde_json::from_str(&reviewed.payload).expect("JSON result");
+        assert_eq!(payload["stage"], "review");
+        assert_eq!(payload["attempt"], 0);
+        assert_eq!(payload["verdict"], "ACCEPTED");
+        // Drain U2's independent executor (admitted concurrently)
+        // before asserting the runtime is fully settled.
+        for _ in 0..100 {
+            runtime.drain_completions();
+            if runtime.active_jobs.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            runtime.active_jobs.is_empty(),
+            "every spawned job must be reaped"
         );
     }
 
@@ -3153,7 +3536,7 @@ units:
 
         runtime.observe_unit_event_dag(
             "forge.unknown.accepted",
-            "U1",
+            "forge:pf-test:U1",
             &serde_json::json!({
                 "plan_key": "pf-test",
                 "unit_id": "U1",
@@ -3199,7 +3582,7 @@ units:
 
         runtime.observe_unit_event_dag(
             "forge.unknown.accepted",
-            "U1",
+            "forge:pf-test:U1",
             &serde_json::json!({
                 "plan_key": "pf-test",
                 "unit_id": "U1",
@@ -3249,7 +3632,7 @@ units:
 
         runtime.observe_unit_event_dag(
             "forge.unit.executed",
-            "U1",
+            "forge:pf-test:U1",
             &serde_json::json!({
                 "plan_key": "pf-test",
                 "unit_id": "U1",
@@ -3289,7 +3672,7 @@ units:
 
         runtime.observe_unit_event_dag(
             "forge.unit.executed",
-            "U1",
+            "forge:pf-test:U1",
             &serde_json::json!({
                 "plan_key": "pf-test",
                 "unit_id": "U1",

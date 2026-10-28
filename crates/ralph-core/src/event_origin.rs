@@ -208,8 +208,16 @@ pub const DAG_RUNTIME_UNIT_TOPICS: &[&str] = &[
 /// the origin guard accepts them only when `system_injected == Some(true)`
 /// and agents remain unable to publish them (no hat declares them in
 /// `publishes`).
-pub const DAG_RUNTIME_COORD_TOPICS: &[&str] =
-    &["forge.unit.integrated", "forge.exec.development.done"];
+pub const DAG_RUNTIME_COORD_TOPICS: &[&str] = &[
+    "forge.unit.integrated",
+    "forge.exec.development.done",
+    // Adversarial review R5/R7: the runtime emits `forge.plan.blocked`
+    // itself when a plan-level precondition (host dirt, missing lane)
+    // is violated or the execution face wedges — the topic stays
+    // hat-publishable on the agent path; this entry only authorizes
+    // the system-injected variant.
+    "forge.plan.blocked",
+];
 
 /// `true` when `topic` is a runtime-emitted DAG coordination topic.
 pub fn is_dag_runtime_coordination_topic(topic: &str) -> bool {
