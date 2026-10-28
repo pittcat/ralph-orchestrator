@@ -68,6 +68,9 @@ telemetry:
       field_completeness_threshold: 0.9   # (topic, field) 出现率阈值
       coord_join_rate_threshold:  0.6    # (from_topic, to_topic) 边出现率阈值
       emit_cadence_sigma:         2.0    # emit 间隔的标准差倍数阈值（>0）
+
+  timing_capture:               # plan 2026-10-29-0104：timing.jsonl span 采集
+    enabled: true                # 默认开；只在已有 diagnostics session 内生效
 ```
 
 ### 字段级说明
@@ -87,6 +90,7 @@ telemetry:
 | `drift.field_completeness_threshold` | `0.9` | (topic, field) 出现率 < 阈值 → 写一条 `field_completeness` finding。 |
 | `drift.coord_join_rate_threshold` | `0.6` | declared `(from_topic, to_topic)` 边的出现率 < 阈值 → 写 `coord_join_rate` finding。 |
 | `drift.emit_cadence_sigma` | `2.0` | topic 的 emit 间隔偏离历史均值超过 N 个标准差 → 写 `emit_cadence` finding。 |
+| `timing_capture.enabled` | `true` | `timing.jsonl` span 采集开关。**只门控已激活 session 内的采集**——它不会自己创建 session；关闭时 manifest 记 `timing_capture: not_collected`，性能报告如实显示缺口。 |
 
 ### 验证规则
 
@@ -406,6 +410,21 @@ emit 后 tracker 调用 `close_wave`，避免同 wave 在下一 iteration 重复
 ### 7.9 Warnings
 
 `recovery.jsonl` / `drift.jsonl` / `orchestration.jsonl` / `errors.jsonl` 任一缺失或某行 JSON 解析失败都会在这里列出来；报告本身仍然渲染成功。
+
+### 7.10 Run-analysis 性能报告（`--performance` / `--format html`）
+
+plan 2026-10-29-0104 起，`ralph diagnose` 多了条**确定性时间分析**路径，与上面的 recovery/drift 报告是不同数据源：
+
+```bash
+ralph diagnose --session latest --performance --format markdown   # 终端可读
+ralph diagnose --session latest --performance --format json       # schema run-analysis-performance/v1
+ralph diagnose --session latest --format html --output report.html # 独立离线 HTML
+```
+
+- **输入**：session 目录下的 `timing.jsonl`（`run-analysis-timing/v1` span 行）+ `diagnosis-input.json` 的 `timing_capture` 覆盖状态。采集由 `telemetry.timing_capture.enabled`（默认 `true`）控制，只在已有 diagnostics session 内生效——它**不会**自己创建 session。
+- **报告内容**：wall-clock 窗口、按 `SpanKind` 聚合的阶段耗时、最慢 span 表、时间线，以及 **bottleneck candidates**——每条候选要么带 `timing.jsonl` 证据引用，要么显式标注 `gap`（例如"无 tool_exec 观测，无法拆分模型/工具耗时"）。候选是优化方向，不是根因结论。
+- **诚实性规则**：未采集显示 `not_collected`；censored span（只有 open 无 close）单列计数、不补零；malformed 行计入 `malformed_rows` 不致命；跨 `clock_epoch` 的行不做单调钟减法。
+- **HTML 报告**：单文件、全内联 CSS/JS，无外部资源、无网络请求、无 `eval`；支持按 kind/状态筛选、占比切换、证据展开。operator 侧用它做"哪里慢、瓶颈是否有证据、下一步优化什么"的交付件；skill 规程见 `skills/ralph-run-diagnosis/references/run-analysis-report.md`。
 
 ---
 

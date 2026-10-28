@@ -14,8 +14,9 @@ ralph tools memory add "content" -t pattern --tags tag1,tag2
 ralph tools memory add "content" --private    # Hat-scoped (agent context only)
 ralph tools memory list [-t type] [--last N] [--format FORMAT]
 ralph tools memory search "query" [-t type] [--tags TAGS] [--all] [--format FORMAT]
-ralph tools memory prime [-t type] [--tags TAGS] [--recent N] [--budget N] [--format FORMAT]
+ralph tools memory prime [-t type] [--tags TAGS] [--recent N] [--budget N] [--query TEXT] [--receipt PATH] [--format FORMAT]
 ralph tools memory show <mem-id>
+ralph tools memory update <mem-id> [--applicability TEXT] [--evidence TEXT] [--verified-at DATE] [--invalidate|--validate] [--superseded-by ID]
 ralph tools memory delete <mem-id>
 ralph tools memory init [--force]
 ```
@@ -27,10 +28,24 @@ ralph tools memory init [--force]
 | `add` | `-t/--type`, `--tags`, `--private`, `--format`, `--root` |
 | `list` | `-t/--type`, `--last`, `--format`, `--root` |
 | `search` | `-t/--type`, `--tags`, `--all`, `--format`, `--root` |
-| `prime` | `-t/--type`, `--tags`, `--recent`, `--budget`, `--format`, `--root` |
+| `prime` | `-t/--type`, `--tags`, `--recent`, `--budget`, `--query`, `--receipt`, `--format`, `--root` |
 | `show` | `--format`, `--root` |
+| `update` | `--applicability`, `--evidence`, `--verified-at`, `--invalidate`, `--validate`, `--superseded-by`, `--root` |
 | `delete` | `--root` |
 | `init` | `--force`, `--root` |
+
+**Lifecycle (plan 2026-10-29-0104):** a memory may carry optional
+lifecycle metadata — `applicability`（何时适用）、`evidence`（依据来源）、
+`verified`（最近验证日期）、`invalidated`、`superseded_by`。通过
+`memory update` 修改；权限边界与 `delete` 相同（agent context 只能改自己
+的 private 条目，shared 只能由 human CLI 修改）。`invalidated` 或被
+`superseded_by` 替代的条目**保留可查**（`list`/`show`/`search` 可见），但
+自动注入与 `prime` 一律不再选中。
+
+**`prime --query`：** 提供任务相关文本后（或给了 `--budget`），prime 改走
+共享选择器：按 query 词命中 content/tags 打分排序，整块条目装入预算，
+不做条内截断；`--receipt PATH` 写出 `memory-selection-receipt/v1` JSON
+（含各候选 id、得分、排除原因，不含正文内容）。
 
 > `--root` 是 `ralph tools` 命名空间下所有子命令共享的工作目录选项；`-c/--config`、`-H/--hats`、`-v/--verbose`、`--color` 为全局选项，不在上表重复。
 
