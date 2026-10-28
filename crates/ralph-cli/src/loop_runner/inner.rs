@@ -1286,6 +1286,10 @@ pub(super) async fn run_loop_impl_inner(
                     hats_source_label.clone(),
                 ),
             );
+            // Plan 2026-10-29-0104 U2: wire the timing collector so
+            // admission waits and integration attempts land in
+            // timing.jsonl. No-op when capture is inactive.
+            dag.attach_diagnostics(event_loop.diagnostics().clone());
         }
         if resume {
             dag.recover_after_restart();

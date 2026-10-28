@@ -82,6 +82,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ralph_core::config::{ResolvedDagPools, SchedulerMode};
+use ralph_core::diagnostics::{
+    DiagnosticsCollector, ExecutionIdentity, IdentityValue, SpanKind, TimingSpanHandle,
+};
 use ralph_core::parallel_forge_handoff::{ResourceCapacity, ResourceClaim};
 use ralph_core::supervisor::dag_plan_receipt::{
     DagPlanReceipt, DagPlanReceiptRegistry, InMemoryDagPlanReceiptStore,
@@ -242,6 +245,16 @@ pub struct DagSchedulerRuntime {
     blocked_plans: HashSet<String>,
     /// Monotonic worker index for kernel log lines.
     job_seq: u32,
+    /// Timing capture collector (plan 2026-10-29-0104 U2). `None`
+    /// until `attach_diagnostics` wires the loop collector in
+    /// `dag` mode; wait/integration spans are observational
+    /// sidecar rows only and never affect scheduling.
+    diag: Option<DiagnosticsCollector>,
+    /// Open wait spans keyed by `{plan_key}/{unit_id}`. A span
+    /// stays open across ticks while the admission engine keeps
+    /// reporting a blocked reason and closes on `Admitted` or
+    /// when the unit leaves the decision set.
+    wait_spans: HashMap<String, (SpanKind, TimingSpanHandle)>,
 }
 
 impl DagSchedulerRuntime {
@@ -281,6 +294,8 @@ impl DagSchedulerRuntime {
             fixer_in_flight: 0,
             blocked_plans: HashSet::new(),
             job_seq: 0,
+            diag: None,
+            wait_spans: HashMap::new(),
         }
     }
 
@@ -289,6 +304,18 @@ impl DagSchedulerRuntime {
     pub fn attach_execution_context(&mut self, ctx: DagExecutionContext) {
         if self.mode == SchedulerMode::Dag {
             self.exec = Some(ctx);
+        }
+    }
+
+    /// Wire the loop diagnostics collector so wait/integration
+    /// spans land in `timing.jsonl` (plan 2026-10-29-0104 U2).
+    /// `dag`-mode only: in `dag_shadow` the admission engine is a
+    /// pure observer over wave decisions, so recording wait spans
+    /// there would fabricate waiting the wave path never
+    /// performed.
+    pub fn attach_diagnostics(&mut self, diag: DiagnosticsCollector) {
+        if self.mode == SchedulerMode::Dag && diag.timing_capture_active() {
+            self.diag = Some(diag);
         }
     }
 
@@ -1191,6 +1218,7 @@ impl DagSchedulerRuntime {
         // continuous-slot-refill contract: a job completion in tick N
         // is reflected in the snapshot for tick N+1.
         let mut admitted: Vec<(String, String)> = Vec::new();
+        let mut wait_observations: Vec<(String, Vec<(String, String)>)> = Vec::new();
         for (plan_key, plan) in &self.plans {
             if self.blocked_plans.contains(plan_key) {
                 continue;
@@ -1233,8 +1261,15 @@ impl DagSchedulerRuntime {
                         .filter(|(_, reason)| reason == "Admitted")
                         .map(|(unit_id, _)| (plan_key.clone(), unit_id.clone())),
                 );
+                wait_observations.push((plan_key.clone(), observation.decisions.clone()));
             }
             self.sink.record(observation);
+        }
+        // U2 wait-span bookkeeping runs after the plan loop: each
+        // call needs `&mut self`, which conflicts with iterating
+        // `self.plans`.
+        for (plan_key, decisions) in wait_observations {
+            self.observe_waits(&plan_key, &decisions);
         }
         // E1 execution passes (dag mode only): retry deferred
         // follow-ups, then admit Ready units into Execute. Both are
@@ -1247,6 +1282,77 @@ impl DagSchedulerRuntime {
                 self.maybe_spawn_executor(&plan_key, &unit_id);
             }
             self.maybe_emit_development_done();
+        }
+    }
+
+    /// Plan 2026-10-29-0104 U2: turn per-tick blocked admission
+    /// decisions into `DependencyWait`/`CapacityWait` spans. A
+    /// span opens on the first tick a unit is seen blocked and
+    /// closes when it is admitted or leaves the decision set, so
+    /// the duration is real wall-clock waiting rather than a
+    /// synthesized estimate. A kind change (e.g. dependencies
+    /// satisfied but capacity still exhausted) closes the old
+    /// span and opens a new one so per-kind totals stay honest.
+    fn observe_waits(&mut self, plan_key: &str, decisions: &[(String, String)]) {
+        let Some(diag) = self.diag.clone() else {
+            return;
+        };
+        let prefix = format!("{plan_key}/");
+        let mut seen: HashSet<String> = HashSet::with_capacity(decisions.len());
+        for (unit_id, reason) in decisions {
+            let key = format!("{prefix}{unit_id}");
+            seen.insert(key.clone());
+            let kind = match reason.as_str() {
+                "Admitted" => {
+                    if let Some((_, span)) = self.wait_spans.remove(&key) {
+                        span.complete();
+                    }
+                    continue;
+                }
+                "BlockedDependencies" | "BlockedNoTargetHead" => SpanKind::DependencyWait,
+                r if r.starts_with("Blocked") => SpanKind::CapacityWait,
+                _ => continue,
+            };
+            if self
+                .wait_spans
+                .get(&key)
+                .is_some_and(|(open, _)| *open == kind)
+            {
+                continue;
+            }
+            if let Some((_, span)) = self.wait_spans.remove(&key) {
+                span.complete();
+            }
+            let identity = ExecutionIdentity {
+                loop_id: self.exec.as_ref().map(|exec| exec.loop_id.clone()),
+                session_id: diag.session_id(),
+                stage: Some("admission".to_string()),
+                plan_key: IdentityValue::value(plan_key),
+                unit_key: IdentityValue::value(unit_id),
+                ..Default::default()
+            };
+            if let Some(mut span) = diag.begin_timing_span(identity, kind, None) {
+                span.set_attributes(serde_json::json!({
+                    "admission_reason": reason,
+                    "observed_by": "dag_scheduler.tick",
+                }));
+                self.wait_spans.insert(key, (kind, span));
+            }
+        }
+        // A unit that left the decision set without an `Admitted`
+        // row was spawned on a previous tick, integrated, or its
+        // plan was evicted — the wait ended either way; close the
+        // span instead of leaving a dangling open row.
+        let stale: Vec<String> = self
+            .wait_spans
+            .keys()
+            .filter(|k| k.starts_with(prefix.as_str()) && !seen.contains(*k))
+            .cloned()
+            .collect();
+        for key in stale {
+            if let Some((_, span)) = self.wait_spans.remove(&key) {
+                span.complete();
+            }
         }
     }
 
@@ -1865,6 +1971,101 @@ units:
         assert_eq!(reason_of("U1"), "BlockedNoTargetHead");
         assert_eq!(reason_of("U2"), "BlockedNoTargetHead");
         assert_eq!(reason_of("U3"), "BlockedDependencies");
+    }
+
+    /// Plan 2026-10-29-0104 U2: blocked admission decisions open
+    /// `DependencyWait`/`CapacityWait` spans keyed by plan/unit;
+    /// `Admitted` or leaving the decision set closes them
+    /// `completed`. A persistent blocked reason keeps the same
+    /// span open (no duplicate open rows per tick).
+    #[test]
+    fn observe_waits_records_span_lifecycle() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let diag_dir = tempfile::TempDir::new().unwrap();
+        let mut runtime = DagSchedulerRuntime::new(
+            SchedulerMode::Dag,
+            resolved_pools(),
+            tmp.path().to_path_buf(),
+        );
+        let diag = DiagnosticsCollector::with_options(
+            diag_dir.path(),
+            &ralph_core::diagnostics::DiagnosticsOptions {
+                full_diagnostics: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        runtime.attach_diagnostics(diag.clone());
+
+        let pair = || {
+            vec![
+                ("U1".to_string(), "BlockedDependencies".to_string()),
+                ("U2".to_string(), "BlockedGlobalCap".to_string()),
+            ]
+        };
+        runtime.observe_waits("pf", &pair());
+        // Same decisions again: spans persist, no duplicate opens.
+        runtime.observe_waits("pf", &pair());
+        // U1 admitted → completed; U2 stays capacity-blocked under
+        // a different reason → same span keeps waiting.
+        runtime.observe_waits(
+            "pf",
+            &[
+                ("U1".to_string(), "Admitted".to_string()),
+                ("U2".to_string(), "BlockedExecutorPoolCap".to_string()),
+            ],
+        );
+        // U2 leaves the decision set → its wait ends too.
+        runtime.observe_waits("pf", &[]);
+
+        let session_dir = diag.session_dir().unwrap().to_path_buf();
+        drop(diag);
+        let timing = std::fs::read_to_string(
+            session_dir.join(ralph_core::diagnostics::TIMING_SIDECAR_FILENAME),
+        )
+        .unwrap();
+        let rows: Vec<serde_json::Value> = timing
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 4, "open+close per unit: {timing}");
+
+        let closes: Vec<&serde_json::Value> =
+            rows.iter().filter(|r| r["status"] == "completed").collect();
+        assert_eq!(closes.len(), 2);
+        let closed_of = |unit: &str| {
+            closes
+                .iter()
+                .find(|r| r["identity"]["unit_key"] == unit)
+                .copied()
+                .unwrap_or_else(|| panic!("no completed row for {unit}: {timing}"))
+        };
+        assert_eq!(closed_of("U1")["kind"], "dependency_wait");
+        assert_eq!(closed_of("U1")["identity"]["plan_key"], "pf");
+        assert_eq!(closed_of("U1")["identity"]["stage"], "admission");
+        assert_eq!(closed_of("U2")["kind"], "capacity_wait");
+        assert_eq!(
+            closed_of("U2")["attributes"]["admission_reason"],
+            "BlockedGlobalCap"
+        );
+    }
+
+    /// Timing capture is a no-op when diagnostics were never
+    /// attached — decision bookkeeping must not panic or affect
+    /// admission (R4: observational only).
+    #[test]
+    fn observe_waits_without_diagnostics_is_noop() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut runtime = DagSchedulerRuntime::new(
+            SchedulerMode::Dag,
+            resolved_pools(),
+            tmp.path().to_path_buf(),
+        );
+        runtime.observe_waits(
+            "pf",
+            &[("U1".to_string(), "BlockedDependencies".to_string())],
+        );
+        assert!(runtime.wait_spans.is_empty());
     }
 
     #[test]

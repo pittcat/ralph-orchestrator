@@ -33,6 +33,7 @@
 
 use std::process::Command;
 
+use ralph_core::diagnostics::{ExecutionIdentity, IdentityValue, SpanKind};
 use ralph_core::supervisor::changed_path_guard::parse_name_status_z;
 use ralph_core::supervisor::dag_integration::IntegrationStore;
 use ralph_core::supervisor::dag_store_rusqlite::RusqliteIntegrationStore;
@@ -526,7 +527,42 @@ impl DagSchedulerRuntime {
                 return;
             }
         };
-        match orchestrator.integrate(request) {
+        // Plan 2026-10-29-0104 U2: measure lane lease + squash +
+        // gate + merge as an `Integration` span. `stale_retries + 1`
+        // is the honest attempt index so CAS retries never blend.
+        let integration_span = self.diag.as_ref().and_then(|diag| {
+            diag.begin_timing_span(
+                ExecutionIdentity {
+                    loop_id: self.exec.as_ref().map(|e| e.loop_id.clone()),
+                    session_id: diag.session_id(),
+                    stage: Some("integrate".to_string()),
+                    attempt: Some(pending.stale_retries.saturating_add(1)),
+                    plan_key: IdentityValue::value(&plan_key),
+                    unit_key: IdentityValue::value(&unit_id),
+                    ..Default::default()
+                },
+                SpanKind::Integration,
+                None,
+            )
+            .map(|mut span| {
+                span.set_attributes(serde_json::json!({
+                    "observed_by": "dag_scheduler.integrate",
+                    "integration_order": integration_order,
+                }));
+                span
+            })
+        });
+        let outcome = orchestrator.integrate(request);
+        if let Some(span) = integration_span {
+            match &outcome {
+                // Stale CAS / busy lane means this attempt never
+                // reached a verdict — the retry gets a fresh span.
+                Ok(IntegrationOutcome::StaleExpected { .. })
+                | Err(IntegrationError::Lane(LaneError::TargetBusy)) => span.interrupt(),
+                _ => span.complete(),
+            }
+        }
+        match outcome {
             Ok(IntegrationOutcome::Integrated { record, .. }) => {
                 self.emit_integrated(&plan_key, &unit_id, &record.integrated_commit, &pending);
             }
