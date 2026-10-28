@@ -8,8 +8,14 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import { AppShell } from "./components/layout";
 import { TasksPage, PlanPage, BuilderPage, TaskDetailPage, SettingsPage } from "./pages";
+import { MonitorLayout } from "./features/monitor/MonitorLayout";
+import { MonitorOverview } from "./features/monitor/MonitorOverview";
+import { RunDetailPage } from "./features/monitor/RunDetailPage";
+import { useThemeEffect } from "./features/monitor/theme";
 
 export function App() {
+  useThemeEffect();
+
   return (
     <Routes>
       {/* AppShell provides the layout, Outlet renders the matched route */}
@@ -19,6 +25,22 @@ export function App() {
         <Route path="/builder" element={<BuilderPage />} />
         <Route path="/plan" element={<PlanPage />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route
+          path="/monitor"
+          element={
+            <MonitorLayout>
+              <MonitorOverview />
+            </MonitorLayout>
+          }
+        />
+        <Route
+          path="/monitor/runs/:globalId"
+          element={
+            <MonitorLayout>
+              <RunDetailPage />
+            </MonitorLayout>
+          }
+        />
         {/* Redirect root to tasks */}
         <Route path="/" element={<Navigate to="/tasks" replace />} />
         {/* Catch-all redirect to tasks */}

@@ -28,6 +28,13 @@ export default defineConfig({
                 target: backendTarget,
                 changeOrigin: true,
             },
+            // Monitor service (backend/ralph-monitor, default :3200).
+            // Same-origin proxy keeps the session cookie + CSRF dance inside
+            // the dev origin — no CORS, no cross-site writes.
+            "/api/monitor": {
+                target: process.env.RALPH_MONITOR_TARGET || "http://127.0.0.1:3200",
+                changeOrigin: true,
+            },
         },
     },
     test: {

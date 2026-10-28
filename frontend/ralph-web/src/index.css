@@ -51,6 +51,47 @@
   --color-chart-3: oklch(0.45 0.1 210);
   --color-chart-4: oklch(0.75 0.15 85);
   --color-chart-5: oklch(0.7 0.18 45);
+
+  /* Monitor run-state semantic colors (dark defaults) */
+  --color-status-running: oklch(0.65 0.18 230);
+  --color-status-success: oklch(0.7 0.17 150);
+  --color-status-failed: oklch(0.65 0.22 25);
+  --color-status-merged: oklch(0.68 0.18 300);
+  --color-status-unknown: oklch(0.65 0 0);
+  --color-status-stale: oklch(0.75 0.15 75);
+}
+
+/* Light theme — toggled via `data-theme` on <html> (index.html sets it
+   synchronously from localStorage to avoid FOUC). Utilities resolve
+   through the same CSS variables, so overriding them here retints the
+   whole app. */
+:root[data-theme="light"] {
+  --color-background: oklch(0.98 0 0);
+  --color-foreground: oklch(0.2 0 0);
+  --color-card: oklch(0.96 0 0);
+  --color-card-foreground: oklch(0.2 0 0);
+  --color-popover: oklch(0.98 0 0);
+  --color-popover-foreground: oklch(0.2 0 0);
+  --color-primary: oklch(0.78 0.15 80);
+  --color-primary-foreground: oklch(0.2 0 0);
+  --color-secondary: oklch(0.9 0 0);
+  --color-secondary-foreground: oklch(0.25 0 0);
+  --color-muted: oklch(0.93 0 0);
+  --color-muted-foreground: oklch(0.45 0 0);
+  --color-accent: oklch(0.88 0.13 85);
+  --color-accent-foreground: oklch(0.25 0 0);
+  --color-destructive: oklch(0.55 0.2 27);
+  --color-destructive-foreground: oklch(0.98 0 0);
+  --color-border: oklch(0.87 0 0);
+  --color-input: oklch(0.87 0 0);
+  --color-ring: oklch(0.7 0.15 80);
+
+  --color-status-running: oklch(0.5 0.18 240);
+  --color-status-success: oklch(0.5 0.15 155);
+  --color-status-failed: oklch(0.5 0.2 27);
+  --color-status-merged: oklch(0.5 0.2 300);
+  --color-status-unknown: oklch(0.45 0 0);
+  --color-status-stale: oklch(0.45 0.14 70);
 }
 
 @layer base {
