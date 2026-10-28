@@ -9,7 +9,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import { AppShell } from "./components/layout";
 import { TasksPage, PlanPage, BuilderPage, TaskDetailPage, SettingsPage } from "./pages";
 import { MonitorLayout } from "./features/monitor/MonitorLayout";
-import { MonitorOverview } from "./features/monitor/MonitorOverview";
+import { OverviewPage } from "./features/monitor/OverviewPage";
 import { RunDetailPage } from "./features/monitor/RunDetailPage";
 import { useThemeEffect } from "./features/monitor/theme";
 
@@ -29,7 +29,7 @@ export function App() {
           path="/monitor"
           element={
             <MonitorLayout>
-              <MonitorOverview />
+              <OverviewPage />
             </MonitorLayout>
           }
         />

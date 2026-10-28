@@ -4,7 +4,7 @@
  * `refetchInterval` matches the collector's 3s poll cadence (U3).
  */
 
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQueries, useQuery } from "@tanstack/react-query";
 import {
   apiGetProjectHealth,
   apiGetProjects,
@@ -28,6 +28,10 @@ export function useMonitorRuns(query: RunsQuery = {}) {
     queryKey: ["monitor", "runs", query],
     queryFn: () => apiGetRuns(query),
     refetchInterval: MONITOR_REFETCH_MS,
+    // Keep showing the previous page while a filter change refetches —
+    // otherwise a new query key flashes the loading skeleton and the
+    // filter bar unmounts mid-keystroke.
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -47,4 +51,19 @@ export function useMonitorProjectHealth(projectId: string | undefined) {
     enabled: !!projectId,
     refetchInterval: MONITOR_REFETCH_MS,
   });
+}
+
+/** Health across all registered projects → ids whose collector errored. */
+export function useMonitorProjectsHealth(projectIds: string[]) {
+  const results = useQueries({
+    queries: projectIds.map((id) => ({
+      queryKey: ["monitor", "health", id] as const,
+      queryFn: () => apiGetProjectHealth(id),
+      refetchInterval: MONITOR_REFETCH_MS,
+    })),
+  });
+  return results
+    .map((r, i) => ({ id: projectIds[i], health: r.data }))
+    .filter((x) => x.health?.collector === "error")
+    .map((x) => x.id);
 }

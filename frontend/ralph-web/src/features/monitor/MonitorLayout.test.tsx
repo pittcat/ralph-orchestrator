@@ -9,7 +9,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { createElement, type ReactNode } from "react";
 import { MonitorLayout } from "./MonitorLayout";
-import { MonitorOverview } from "./MonitorOverview";
+import { OverviewPage } from "./OverviewPage";
 import { useThemeStore } from "./theme";
 
 const fetchMock = vi.fn();
@@ -50,7 +50,7 @@ describe("MonitorLayout + Overview", () => {
   it("renders the shell with a Monitor heading and empty-state guidance", async () => {
     render(
       <MonitorLayout>
-        <MonitorOverview />
+        <OverviewPage />
       </MonitorLayout>,
       { wrapper: wrapper() },
     );
@@ -74,7 +74,7 @@ describe("MonitorLayout + Overview", () => {
     expect(raw.state.theme).toBe("light");
   });
 
-  it("renders run count summary when runs exist", async () => {
+  it("renders the runs table when runs exist", async () => {
     fetchMock.mockImplementation((url: string) => {
       const body = url.includes("/projects")
         ? { projects: [{ id: "p1", canonicalPath: "/w", displayName: "w", createdAt: "t" }] }
@@ -113,13 +113,13 @@ describe("MonitorLayout + Overview", () => {
     });
     render(
       <MonitorLayout>
-        <MonitorOverview />
+        <OverviewPage />
       </MonitorLayout>,
       { wrapper: wrapper() },
     );
     await waitFor(() =>
-      expect(screen.getByTestId("overview-summary")).toBeInTheDocument(),
+      expect(screen.getByTestId("runs-table")).toBeInTheDocument(),
     );
-    expect(screen.getByText(/1 run observed/)).toBeInTheDocument();
+    expect(screen.getByText("r1")).toBeInTheDocument();
   });
 });
