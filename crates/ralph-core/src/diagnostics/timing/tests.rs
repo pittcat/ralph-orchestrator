@@ -108,10 +108,7 @@ fn same_iteration_two_jobs_have_independent_identities() {
     let span_b = TimingSpan::open(epoch.next_span_id(), b, SpanKind::AgentExec, &epoch);
     assert_ne!(span_a.span_id, span_b.span_id);
     assert_ne!(span_a.identity.job_id, span_b.identity.job_id);
-    assert_ne!(
-        span_a.identity.activation_id,
-        span_b.identity.activation_id
-    );
+    assert_ne!(span_a.identity.activation_id, span_b.identity.activation_id);
 }
 
 #[test]
@@ -160,7 +157,10 @@ fn writer_round_trips_spans() {
     let decoded: TimingSpan = serde_json::from_value(rows[1].clone()).unwrap();
     assert_eq!(decoded.identity.loop_id.as_deref(), Some("loop-9"));
     assert_eq!(decoded.kind, SpanKind::ReviewVerify);
-    assert_eq!(decoded.source_ref.as_deref(), Some("runtime-trace.jsonl#42"));
+    assert_eq!(
+        decoded.source_ref.as_deref(),
+        Some("runtime-trace.jsonl#42")
+    );
 }
 
 #[test]

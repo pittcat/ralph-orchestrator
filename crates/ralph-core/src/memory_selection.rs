@@ -115,7 +115,11 @@ pub fn select_memories(
                 reason = "stale".into();
             }
         }
-        scored.push((score(m, filters.query.as_deref(), filters.recent_days), m, reason));
+        scored.push((
+            score(m, filters.query.as_deref(), filters.recent_days),
+            m,
+            reason,
+        ));
     }
     // Order: eligible first by score desc (stable by id for ties),
     // excluded last.
@@ -191,38 +195,37 @@ mod tests {
         let mut old = mem("mem-2-b2c3", "use Y", &[]);
         old.superseded_by = Some("mem-3-d4e5".into());
         let live = mem("mem-3-d4e5", "use Z", &[]);
-        let (sel, receipt) = select_memories(
-            &[dead, old, live],
-            &SelectionFilters::default(),
-            10_000,
-        );
+        let (sel, receipt) =
+            select_memories(&[dead, old, live], &SelectionFilters::default(), 10_000);
         assert_eq!(sel.len(), 1);
         assert_eq!(sel[0].id, "mem-3-d4e5");
-        assert!(receipt
-            .candidates
-            .iter()
-            .any(|c| c.exclusion_reason == "invalidated"));
-        assert!(receipt
-            .candidates
-            .iter()
-            .any(|c| c.exclusion_reason == "superseded"));
+        assert!(
+            receipt
+                .candidates
+                .iter()
+                .any(|c| c.exclusion_reason == "invalidated")
+        );
+        assert!(
+            receipt
+                .candidates
+                .iter()
+                .any(|c| c.exclusion_reason == "superseded")
+        );
     }
 
     #[test]
     fn budget_packs_whole_entries_only() {
         let big = mem("mem-1-a1b2", &"x".repeat(900), &[]);
         let small = mem("mem-2-b2c3", "tiny", &[]);
-        let (sel, receipt) = select_memories(
-            &[big, small],
-            &SelectionFilters::default(),
-            200,
-        );
+        let (sel, receipt) = select_memories(&[big, small], &SelectionFilters::default(), 200);
         assert_eq!(sel.len(), 1);
         assert_eq!(sel[0].content, "tiny");
-        assert!(receipt
-            .candidates
-            .iter()
-            .any(|c| c.exclusion_reason == "over-budget"));
+        assert!(
+            receipt
+                .candidates
+                .iter()
+                .any(|c| c.exclusion_reason == "over-budget")
+        );
     }
 
     #[test]
@@ -250,8 +253,7 @@ mod tests {
     #[test]
     fn receipt_carries_no_content() {
         let secret = mem("mem-9-z9z9", "PRIVATE-SECRET-TEXT", &[]);
-        let (_sel, receipt) =
-            select_memories(&[secret], &SelectionFilters::default(), 10_000);
+        let (_sel, receipt) = select_memories(&[secret], &SelectionFilters::default(), 10_000);
         let json = serde_json::to_string(&receipt).unwrap();
         assert!(!json.contains("PRIVATE-SECRET-TEXT"));
     }

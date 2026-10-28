@@ -53,7 +53,11 @@ pub fn render_html(report: &PerformanceReport) -> String {
     let mut html = String::with_capacity(32 * 1024);
     html.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
     html.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
-    let _ = writeln!(html, "<title>Ralph Run Analysis — {}</title>", esc(&report.session_dir));
+    let _ = writeln!(
+        html,
+        "<title>Ralph Run Analysis — {}</title>",
+        esc(&report.session_dir)
+    );
     html.push_str(STYLE);
     html.push_str("</head>\n<body>\n<main class=\"page\">\n");
 
@@ -68,8 +72,18 @@ pub fn render_html(report: &PerformanceReport) -> String {
     );
     html.push_str("<div class=\"stat-grid\">\n");
     stat(&mut html, "Wall clock", &opt_ms(report.wall_clock_ms), "");
-    stat(&mut html, "Cumulative work", &fmt_ms(report.cumulative_work_ms), "");
-    stat(&mut html, "Span rows", &report.capture.span_rows.to_string(), "");
+    stat(
+        &mut html,
+        "Cumulative work",
+        &fmt_ms(report.cumulative_work_ms),
+        "",
+    );
+    stat(
+        &mut html,
+        "Span rows",
+        &report.capture.span_rows.to_string(),
+        "",
+    );
     let cap_label = match report.capture.status {
         TimingCaptureStatus::Collected => "collected",
         TimingCaptureStatus::Degraded => "degraded",
@@ -104,9 +118,11 @@ pub fn render_html(report: &PerformanceReport) -> String {
 
     // ── By-kind table (heatmap) ──────────────────────────────────
     html.push_str("<section class=\"card\">\n<h2>Time by stage kind</h2>\n");
-    html.push_str("<table class=\"grid\" id=\"kind-table\">\n<thead><tr>\
+    html.push_str(
+        "<table class=\"grid\" id=\"kind-table\">\n<thead><tr>\
         <th>Kind</th><th>Spans</th><th>Censored</th><th>Total</th><th class=\"pctcol\">%</th>\
-        </tr></thead>\n<tbody>\n");
+        </tr></thead>\n<tbody>\n",
+    );
     let max_total = report
         .by_kind
         .iter()
@@ -118,7 +134,10 @@ pub fn render_html(report: &PerformanceReport) -> String {
         let kind = k.kind.map(SpanKind::as_str).unwrap_or("other");
         let heat = (k.total_ms as f64 / max_total as f64 * 100.0).round() as u32;
         let pct = if report.cumulative_work_ms > 0 && k.kind.map_or(false, SpanKind::is_work) {
-            format!("{:.0}%", k.total_ms as f64 / report.cumulative_work_ms as f64 * 100.0)
+            format!(
+                "{:.0}%",
+                k.total_ms as f64 / report.cumulative_work_ms as f64 * 100.0
+            )
         } else {
             "—".to_string()
         };
@@ -155,9 +174,11 @@ pub fn render_html(report: &PerformanceReport) -> String {
         "<p class=\"note\">Observed facts only — a slow span is a candidate for \
          investigation, not a verified root cause (plan R7/R8).</p>\n",
     );
-    html.push_str("<table class=\"grid\" id=\"spans-table\">\n<thead><tr>\
+    html.push_str(
+        "<table class=\"grid\" id=\"spans-table\">\n<thead><tr>\
         <th>Span</th><th>Kind</th><th>Status</th><th>Hat</th><th>Unit</th><th>Attempt</th>\
-        <th>Duration</th><th>Start (UTC)</th></tr></thead>\n<tbody>\n");
+        <th>Duration</th><th>Start (UTC)</th></tr></thead>\n<tbody>\n",
+    );
     for s in &report.spans {
         row(&mut html, s);
     }
@@ -210,8 +231,10 @@ pub fn render_html(report: &PerformanceReport) -> String {
         html.push_str("</ol>\n</section>\n");
     }
 
-    html.push_str("<footer class=\"foot\">Offline report — all data embedded; \
-        JS is interaction-only (no eval, no network, no artifact code execution).</footer>\n");
+    html.push_str(
+        "<footer class=\"foot\">Offline report — all data embedded; \
+        JS is interaction-only (no eval, no network, no artifact code execution).</footer>\n",
+    );
     html.push_str("</main>\n");
     html.push_str(SCRIPT);
     html.push_str("</body>\n</html>\n");
@@ -265,7 +288,11 @@ fn row(html: &mut String, s: &SpanView) {
         status,
         esc(s.identity.hat.as_deref().unwrap_or("")),
         ident_str(&s.identity.unit_key),
-        if s.identity.attempt.is_some() { "num" } else { "unknown" },
+        if s.identity.attempt.is_some() {
+            "num"
+        } else {
+            "unknown"
+        },
         s.identity
             .attempt
             .map(|a| a.to_string())
@@ -316,11 +343,7 @@ fn render_timeline(html: &mut String, report: &PerformanceReport) {
             if censored { " tl-censored" } else { "" },
             left,
             width,
-            esc(&format!(
-                "{} · {}",
-                s.span_id,
-                opt_ms(s.duration_ms)
-            )),
+            esc(&format!("{} · {}", s.span_id, opt_ms(s.duration_ms))),
         );
     }
     html.push_str("</div>\n");

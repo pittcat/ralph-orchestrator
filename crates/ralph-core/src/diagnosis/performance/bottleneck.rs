@@ -114,7 +114,9 @@ pub fn analyze_bottlenecks(report: &PerformanceReport) -> Vec<BottleneckCandidat
     // 2. Span-level candidates ordered by duration.
     let wall = report.wall_clock_ms.unwrap_or(0);
     for span in &report.slowest_spans {
-        let Some(dur) = span.duration_ms else { continue };
+        let Some(dur) = span.duration_ms else {
+            continue;
+        };
         if dur < MIN_DURATION_MS {
             continue;
         }
@@ -158,9 +160,7 @@ fn span_candidate(
             wall_clock_share_pct: Some(share_u8),
             evidence: vec![
                 EvidenceRef::span(span, "wait interval bounded by open/close rows"),
-                EvidenceRef::sidecar(
-                    "work spans completing concurrently while this wait was open",
-                ),
+                EvidenceRef::sidecar("work spans completing concurrently while this wait was open"),
             ],
             recommendation: Some(
                 "scheduling candidate: revisit admission/dependency release ordering; \
@@ -200,9 +200,7 @@ fn span_candidate(
                 (
                     vec![
                         EvidenceRef::span(span, "exec interval"),
-                        EvidenceRef::manifest(
-                            "no tool_exec observations in this session at all",
-                        ),
+                        EvidenceRef::manifest("no tool_exec observations in this session at all"),
                     ],
                     None,
                     Some(

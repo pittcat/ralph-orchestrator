@@ -7,9 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use ralph_adapters::{SessionResult, StreamHandler, TimingHandler};
-use ralph_core::diagnostics::{
-    ExecutionIdentity, SpanKind, SpanStatus, TimingSpan,
-};
+use ralph_core::diagnostics::{ExecutionIdentity, SpanKind, SpanStatus, TimingSpan};
 
 /// Handler that records the display events it receives, so tests can
 /// prove the wrapper preserves inner-handler behavior exactly.
@@ -74,8 +72,10 @@ fn kinds(spans: &[TimingSpan], kind: SpanKind) -> Vec<&TimingSpan> {
 fn interleaved_tool_ids_pair_correctly() {
     let mut r = replay();
     r.handler.on_text("planning");
-    r.handler.on_tool_call("Bash", "t-1", &serde_json::json!({}));
-    r.handler.on_tool_call("Read", "t-2", &serde_json::json!({}));
+    r.handler
+        .on_tool_call("Bash", "t-1", &serde_json::json!({}));
+    r.handler
+        .on_tool_call("Read", "t-2", &serde_json::json!({}));
     // Results arrive out of order — pairing must be by id.
     r.handler.on_tool_result("t-2", "file");
     r.handler.on_tool_result("t-1", "ok");
@@ -102,8 +102,10 @@ fn interleaved_tool_ids_pair_correctly() {
 #[test]
 fn missing_result_keeps_span_censored_until_session_end() {
     let mut r = replay();
-    r.handler.on_tool_call("Bash", "t-1", &serde_json::json!({}));
-    r.handler.on_tool_call("Read", "t-2", &serde_json::json!({}));
+    r.handler
+        .on_tool_call("Bash", "t-1", &serde_json::json!({}));
+    r.handler
+        .on_tool_call("Read", "t-2", &serde_json::json!({}));
     r.handler.on_tool_result("t-1", "ok");
     // t-2 never returns; session completes anyway.
     r.handler.on_complete(&result(300, 1, 10, 10));
@@ -173,23 +175,30 @@ fn text_only_session_has_startup_and_exec_duration() {
 #[test]
 fn interrupted_session_never_fabricates_completion() {
     let mut r = replay();
-    r.handler.on_tool_call("Bash", "t-1", &serde_json::json!({}));
+    r.handler
+        .on_tool_call("Bash", "t-1", &serde_json::json!({}));
     // Session dies mid-tool (drop without on_complete).
     drop(r.handler);
 
     let spans = r.spans.lock().unwrap();
     // No tool or exec span may be completed (startup completing on
     // first observed output is correct — the tool call WAS observed).
-    assert!(spans
-        .iter()
-        .filter(|s| matches!(s.kind, SpanKind::ToolExec | SpanKind::AgentExec))
-        .all(|s| s.status != SpanStatus::Completed));
-    assert!(spans
-        .iter()
-        .any(|s| s.kind == SpanKind::ToolExec && s.status == SpanStatus::Interrupted));
-    assert!(spans
-        .iter()
-        .any(|s| s.kind == SpanKind::AgentExec && s.status == SpanStatus::Interrupted));
+    assert!(
+        spans
+            .iter()
+            .filter(|s| matches!(s.kind, SpanKind::ToolExec | SpanKind::AgentExec))
+            .all(|s| s.status != SpanStatus::Completed)
+    );
+    assert!(
+        spans
+            .iter()
+            .any(|s| s.kind == SpanKind::ToolExec && s.status == SpanStatus::Interrupted)
+    );
+    assert!(
+        spans
+            .iter()
+            .any(|s| s.kind == SpanKind::AgentExec && s.status == SpanStatus::Interrupted)
+    );
 }
 
 #[test]

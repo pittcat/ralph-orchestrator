@@ -166,20 +166,18 @@ pub fn analyze(session_dir: &Path) -> PerformanceReport {
     slowest.truncate(20);
 
     // Coverage: manifest field wins; fall back to file presence.
-    let capture_status = manifest
-        .and_then(|m| m.timing_capture)
-        .unwrap_or_else(|| {
-            if timing_path.exists() {
-                TimingCaptureStatus::Collected
-            } else {
-                TimingCaptureStatus::NotCollected
-            }
-        });
+    let capture_status = manifest.and_then(|m| m.timing_capture).unwrap_or_else(|| {
+        if timing_path.exists() {
+            TimingCaptureStatus::Collected
+        } else {
+            TimingCaptureStatus::NotCollected
+        }
+    });
     let mut gaps = Vec::new();
     match capture_status {
-        TimingCaptureStatus::NotCollected => gaps.push(
-            "timing capture was not collected this session".to_string(),
-        ),
+        TimingCaptureStatus::NotCollected => {
+            gaps.push("timing capture was not collected this session".to_string())
+        }
         TimingCaptureStatus::Degraded => {
             gaps.push("timing writer degraded; span data may be partial".to_string())
         }
@@ -219,19 +217,21 @@ pub fn analyze(session_dir: &Path) -> PerformanceReport {
 }
 
 fn merge_row(spans: &mut BTreeMap<String, SpanView>, row: TimingSpan) {
-    let view = spans.entry(row.span_id.clone()).or_insert_with(|| SpanView {
-        span_id: row.span_id.clone(),
-        parent_span_id: row.parent_span_id.clone(),
-        kind: row.kind,
-        status: SpanStatus::Open,
-        identity: row.identity.clone(),
-        ts_start_utc: row.ts_start_utc.clone(),
-        ts_end_utc: None,
-        duration_ms: None,
-        clock_epoch: row.clock_epoch.clone(),
-        attributes: row.attributes.clone(),
-        rows: 0,
-    });
+    let view = spans
+        .entry(row.span_id.clone())
+        .or_insert_with(|| SpanView {
+            span_id: row.span_id.clone(),
+            parent_span_id: row.parent_span_id.clone(),
+            kind: row.kind,
+            status: SpanStatus::Open,
+            identity: row.identity.clone(),
+            ts_start_utc: row.ts_start_utc.clone(),
+            ts_end_utc: None,
+            duration_ms: None,
+            clock_epoch: row.clock_epoch.clone(),
+            attributes: row.attributes.clone(),
+            rows: 0,
+        });
     view.rows += 1;
     if row.status != SpanStatus::Open {
         view.status = row.status;
@@ -261,13 +261,24 @@ pub fn render_markdown(report: &PerformanceReport) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     let _ = writeln!(out, "# Run Analysis — {}", report.session_dir);
-    let _ = writeln!(out, "\nGenerated: `{}` · schema `{}`\n", report.generated_at, report.schema_version);
+    let _ = writeln!(
+        out,
+        "\nGenerated: `{}` · schema `{}`\n",
+        report.generated_at, report.schema_version
+    );
     let _ = writeln!(
         out,
         "- **Wall clock:** {}",
-        report.wall_clock_ms.map(|m| format!("{m}ms")).unwrap_or_else(|| "unknown".into())
+        report
+            .wall_clock_ms
+            .map(|m| format!("{m}ms"))
+            .unwrap_or_else(|| "unknown".into())
     );
-    let _ = writeln!(out, "- **Cumulative work:** {}ms", report.cumulative_work_ms);
+    let _ = writeln!(
+        out,
+        "- **Cumulative work:** {}ms",
+        report.cumulative_work_ms
+    );
     let _ = writeln!(
         out,
         "- **Capture:** {:?} ({} span rows, {} malformed, {} censored)\n",
@@ -284,7 +295,9 @@ pub fn render_markdown(report: &PerformanceReport) -> String {
         out.push('\n');
     }
     if !report.by_kind.is_empty() {
-        out.push_str("## Time by stage kind\n\n| Kind | Spans | Censored | Total ms |\n|---|---|---|---|\n");
+        out.push_str(
+            "## Time by stage kind\n\n| Kind | Spans | Censored | Total ms |\n|---|---|---|---|\n",
+        );
         for k in &report.by_kind {
             let _ = writeln!(
                 out,
@@ -300,7 +313,9 @@ pub fn render_markdown(report: &PerformanceReport) -> String {
     if !report.slowest_spans.is_empty() {
         out.push_str("## Slowest observed spans\n\n");
         out.push_str("_Observed facts only — candidates, not verified causes._\n\n");
-        out.push_str("| Span | Kind | Status | Hat | Unit | Duration ms |\n|---|---|---|---|---|---|\n");
+        out.push_str(
+            "| Span | Kind | Status | Hat | Unit | Duration ms |\n|---|---|---|---|---|---|\n",
+        );
         for s in &report.slowest_spans {
             let _ = writeln!(
                 out,
@@ -310,7 +325,9 @@ pub fn render_markdown(report: &PerformanceReport) -> String {
                 s.status,
                 s.identity.hat.as_deref().unwrap_or("-"),
                 s.identity.unit_key.as_str().unwrap_or("-"),
-                s.duration_ms.map(|d| d.to_string()).unwrap_or_else(|| "censored".into())
+                s.duration_ms
+                    .map(|d| d.to_string())
+                    .unwrap_or_else(|| "censored".into())
             );
         }
         out.push('\n');
@@ -408,10 +425,6 @@ mod tests {
         .unwrap();
         let report = analyze(tmp.path());
         assert!(report.capture.malformed_rows >= 1);
-        assert!(report
-            .capture
-            .gaps
-            .iter()
-            .any(|g| g.contains("malformed")));
+        assert!(report.capture.gaps.iter().any(|g| g.contains("malformed")));
     }
 }

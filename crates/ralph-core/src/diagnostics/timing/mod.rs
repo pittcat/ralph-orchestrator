@@ -22,8 +22,8 @@ pub mod writer;
 
 pub use model::{
     ClockEpoch, ExecutionIdentity, IdentityValue, ObservationPrecision,
-    PERFORMANCE_ANALYSIS_SCHEMA_VERSION, SpanKind, SpanStatus, TimingSpan,
-    TIMING_SCHEMA_VERSION, TIMING_SIDECAR_FILENAME,
+    PERFORMANCE_ANALYSIS_SCHEMA_VERSION, SpanKind, SpanStatus, TIMING_SCHEMA_VERSION,
+    TIMING_SIDECAR_FILENAME, TimingSpan,
 };
 pub use writer::TimingWriter;
 

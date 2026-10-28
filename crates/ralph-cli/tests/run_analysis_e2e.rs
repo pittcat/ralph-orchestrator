@@ -210,7 +210,9 @@ fn memory_update_lifecycle_and_prime_query_roundtrip() {
     assert!(store2.contains("invalidated: true"));
     // …but `prime` must never auto-inject it.
     let out = common::ralph_bin()
-        .args(["tools", "memory", "prime", "--query", "retry", "--format", "json"])
+        .args([
+            "tools", "memory", "prime", "--query", "retry", "--format", "json",
+        ])
         .arg("--root")
         .arg(tmp.path())
         .output()
@@ -226,9 +228,7 @@ fn memory_update_lifecycle_and_prime_query_roundtrip() {
     // Receipt records the exclusion without leaking content.
     let receipt = tmp.path().join("receipt.json");
     let out = common::ralph_bin()
-        .args([
-            "tools", "memory", "prime", "--query", "retry", "--receipt",
-        ])
+        .args(["tools", "memory", "prime", "--query", "retry", "--receipt"])
         .arg(&receipt)
         .arg("--root")
         .arg(tmp.path())
@@ -238,7 +238,9 @@ fn memory_update_lifecycle_and_prime_query_roundtrip() {
     let r: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&receipt).unwrap()).unwrap();
     assert_eq!(r["schema_version"], "memory-selection-receipt/v1");
-    assert!(!fs::read_to_string(&receipt)
-        .unwrap()
-        .contains("alpha content about retries"));
+    assert!(
+        !fs::read_to_string(&receipt)
+            .unwrap()
+            .contains("alpha content about retries")
+    );
 }

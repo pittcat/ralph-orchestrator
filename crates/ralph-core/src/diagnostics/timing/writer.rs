@@ -11,7 +11,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use super::model::{TimingSpan, TIMING_SIDECAR_FILENAME};
+use super::model::{TIMING_SIDECAR_FILENAME, TimingSpan};
 
 /// On-disk writer for `timing.jsonl`.
 pub struct TimingWriter {

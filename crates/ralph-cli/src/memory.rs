@@ -719,7 +719,11 @@ fn prime_command(
             tags: Vec::new(),
             recent_days: None,
         };
-        let budget_chars = args.budget.filter(|b| *b > 0).map(|b| b * 4).unwrap_or(usize::MAX);
+        let budget_chars = args
+            .budget
+            .filter(|b| *b > 0)
+            .map(|b| b * 4)
+            .unwrap_or(usize::MAX);
         let (selected, receipt) =
             ralph_core::memory_selection::select_memories(&memories, &filters, budget_chars);
         if let Some(path) = args.receipt.as_ref() {
@@ -739,7 +743,12 @@ fn prime_command(
             OutputFormat::Markdown => format_memories_as_markdown(&memories),
             OutputFormat::Table => format_memories_as_text(&memories),
             OutputFormat::Quiet => {
-                memories.iter().map(|m| m.id.clone()).collect::<Vec<_>>().join("\n") + "\n"
+                memories
+                    .iter()
+                    .map(|m| m.id.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n"
             }
         };
         print!("{output}");
@@ -820,10 +829,19 @@ fn update_command(
 
     // Rewrite: remove the old block and append the updated entry at
     // its section (the store's append path preserves the id).
-    store.delete(&memory.id).context("Failed to update memory")?;
-    store.append(&memory).context("Failed to write updated memory")?;
+    store
+        .delete(&memory.id)
+        .context("Failed to update memory")?;
+    store
+        .append(&memory)
+        .context("Failed to write updated memory")?;
     if use_colors {
-        println!("{}Memory updated:{} {}", colors::GREEN, colors::RESET, memory.id);
+        println!(
+            "{}Memory updated:{} {}",
+            colors::GREEN,
+            colors::RESET,
+            memory.id
+        );
     } else {
         println!("Memory updated: {}", memory.id);
     }

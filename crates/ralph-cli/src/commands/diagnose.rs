@@ -401,16 +401,12 @@ fn try_performance(
     };
     let perf = ralph_core::diagnosis::analyze(&report.session_path);
     let body = match args.format {
-        DiagnoseFormat::Html => {
-            ralph_core::diagnosis::performance_html::render_html(&perf)
+        DiagnoseFormat::Html => ralph_core::diagnosis::performance_html::render_html(&perf),
+        DiagnoseFormat::Json => {
+            serde_json::to_string_pretty(&ralph_core::diagnosis::report_json(&perf))
+                .unwrap_or_else(|_| "{}".to_string())
         }
-        DiagnoseFormat::Json => serde_json::to_string_pretty(
-            &ralph_core::diagnosis::report_json(&perf),
-        )
-        .unwrap_or_else(|_| "{}".to_string()),
-        DiagnoseFormat::Markdown => {
-            ralph_core::diagnosis::performance::render_markdown(&perf)
-        }
+        DiagnoseFormat::Markdown => ralph_core::diagnosis::performance::render_markdown(&perf),
     };
     if let Some(path) = args.output.as_ref() {
         if let Some(parent) = path.parent()

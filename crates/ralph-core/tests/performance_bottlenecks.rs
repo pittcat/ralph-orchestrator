@@ -55,10 +55,9 @@ fn slow_tool_exec_produces_evidence_backed_candidate() {
     let tmp = tempfile::TempDir::new().unwrap();
     let epoch = ClockEpoch::new();
     let exec = completed_span("sp-exec", ident("executor"), SpanKind::AgentExec, &epoch);
-    let mut tool =
-        TimingSpan::open("sp-tool", ident("executor"), SpanKind::ToolExec, &epoch)
-            .with_parent("sp-exec")
-            .with_attributes(serde_json::json!({"tool": "Bash"}));
+    let mut tool = TimingSpan::open("sp-tool", ident("executor"), SpanKind::ToolExec, &epoch)
+        .with_parent("sp-exec")
+        .with_attributes(serde_json::json!({"tool": "Bash"}));
     tool.complete(&epoch);
     tool.mono_end_ms = Some(tool.mono_end_ms.unwrap() + 6_000);
     let end = chrono::DateTime::parse_from_rfc3339(&tool.ts_start_utc).unwrap()
@@ -127,19 +126,22 @@ fn wait_span_yields_wait_release_candidate() {
         .find(|b| b.span_id.as_deref() == Some("sp-wait"))
         .expect("wait span should be a candidate");
     assert_eq!(cand.kind, CandidateKind::WaitRelease);
-    assert!(cand
-        .recommendation
-        .as_deref()
-        .unwrap_or("")
-        .contains("scheduling"));
+    assert!(
+        cand.recommendation
+            .as_deref()
+            .unwrap_or("")
+            .contains("scheduling")
+    );
 }
 
 #[test]
 fn not_collected_capture_surfaces_gap_candidate() {
     let tmp = tempfile::TempDir::new().unwrap();
     let report = analyze(tmp.path());
-    assert!(report
-        .bottlenecks
-        .iter()
-        .any(|b| b.kind == CandidateKind::CoverageGap && b.gap.is_some()));
+    assert!(
+        report
+            .bottlenecks
+            .iter()
+            .any(|b| b.kind == CandidateKind::CoverageGap && b.gap.is_some())
+    );
 }

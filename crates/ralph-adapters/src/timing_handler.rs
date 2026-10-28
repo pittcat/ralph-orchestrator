@@ -28,9 +28,7 @@
 
 use std::collections::HashMap;
 
-use ralph_core::diagnostics::{
-    ClockEpoch, ExecutionIdentity, SpanKind, SpanStatus, TimingSpan,
-};
+use ralph_core::diagnostics::{ClockEpoch, ExecutionIdentity, SpanKind, SpanStatus, TimingSpan};
 use serde_json::json;
 
 use crate::stream_handler::{SessionResult, StreamHandler};
@@ -196,9 +194,8 @@ impl<H: StreamHandler> StreamHandler for TimingHandler<H> {
         self.finished = true;
         if let Some(mut s) = self.exec.take() {
             s.complete(&self.epoch);
-            let usage_present = result.num_turns > 0
-                || result.input_tokens > 0
-                || result.output_tokens > 0;
+            let usage_present =
+                result.num_turns > 0 || result.input_tokens > 0 || result.output_tokens > 0;
             s.attributes = Some(json!({
                 "observed_by": "stream",
                 "usage_present": usage_present,
