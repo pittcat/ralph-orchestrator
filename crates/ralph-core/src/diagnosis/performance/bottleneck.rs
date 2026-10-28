@@ -120,7 +120,7 @@ pub fn analyze_bottlenecks(report: &PerformanceReport) -> Vec<BottleneckCandidat
         if dur < MIN_DURATION_MS {
             continue;
         }
-        let share = if wall > 0 { dur * 100 / wall } else { 0 };
+        let share = dur.saturating_mul(100).checked_div(wall).unwrap_or(0);
         if share < MIN_SHARE_PCT {
             continue;
         }
@@ -143,7 +143,7 @@ fn span_candidate(
         .identity
         .hat
         .as_deref()
-        .or_else(|| span.identity.loop_id.as_deref())
+        .or(span.identity.loop_id.as_deref())
         .unwrap_or("unknown-scope");
 
     match span.kind {

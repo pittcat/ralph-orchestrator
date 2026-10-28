@@ -133,7 +133,7 @@ pub fn render_html(report: &PerformanceReport) -> String {
     for k in &report.by_kind {
         let kind = k.kind.map(SpanKind::as_str).unwrap_or("other");
         let heat = (k.total_ms as f64 / max_total as f64 * 100.0).round() as u32;
-        let pct = if report.cumulative_work_ms > 0 && k.kind.map_or(false, SpanKind::is_work) {
+        let pct = if report.cumulative_work_ms > 0 && k.kind.is_some_and(SpanKind::is_work) {
             format!(
                 "{:.0}%",
                 k.total_ms as f64 / report.cumulative_work_ms as f64 * 100.0

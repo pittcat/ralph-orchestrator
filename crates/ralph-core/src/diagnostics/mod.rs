@@ -1262,10 +1262,10 @@ impl DiagnosticsCollector {
     /// observations built without a handle). No-op when capture is
     /// not active.
     pub fn record_timing_span(&self, span: timing::TimingSpan) {
-        if let Some(ref logger) = self.timing_logger {
-            if let Ok(mut guard) = logger.lock() {
-                guard.append(span);
-            }
+        if let Some(ref logger) = self.timing_logger
+            && let Ok(mut guard) = logger.lock()
+        {
+            guard.append(span);
         }
     }
 

@@ -70,7 +70,7 @@ fn score(m: &Memory, query: Option<&str>, recent_days: Option<u32>) -> i64 {
             if term.len() < 2 {
                 continue;
             }
-            if content.contains(&term) {
+            if content.contains(term) {
                 s += 10;
             }
             if m.tags.iter().any(|t| t.to_lowercase() == term) {
