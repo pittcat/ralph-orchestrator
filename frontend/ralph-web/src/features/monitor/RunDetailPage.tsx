@@ -10,18 +10,27 @@ import { Link, useLocation, useParams, useSearchParams } from "react-router-dom"
 import { ArrowLeft } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { useMonitorRunDetail, useRunEvents, useRunProgress } from "./hooks";
+import {
+  useMonitorRunDetail,
+  useRunEvents,
+  useRunGraph,
+  useRunProgress,
+} from "./hooks";
 import { DetailHeader } from "./detail/DetailHeader";
 import { StageStrip } from "./detail/StageStrip";
 import { OverviewTab } from "./detail/OverviewTab";
 import { TimelineTab } from "./detail/TimelineTab";
 import { LogsTab } from "./detail/LogsTab";
+import { GraphTab } from "./detail/GraphTab";
+import { ArtifactsTab } from "./detail/ArtifactsTab";
 
-type TabId = "overview" | "timeline" | "logs";
+type TabId = "overview" | "timeline" | "logs" | "graph" | "artifacts";
 const TABS: { id: TabId; label: string }[] = [
   { id: "overview", label: "概览" },
   { id: "timeline", label: "事件时间线" },
   { id: "logs", label: "日志" },
+  { id: "graph", label: "图" },
+  { id: "artifacts", label: "产物" },
 ];
 
 /// Overview filter keys that ride in on the inbound URL — everything
@@ -50,10 +59,14 @@ export function RunDetailPage() {
   const tab = (searchParams.get("tab") as TabId) || "overview";
   const seqParam = searchParams.get("seq");
   const selectedSeq = seqParam ? Number(seqParam) : null;
+  const unitFilter = searchParams.get("unit");
+  const artifactParam = searchParams.get("artifact");
   const [logsPaused, setLogsPaused] = useState(false);
   const events = useRunEvents(decoded, {
     paused: tab === "logs" ? logsPaused : false,
+    filter: unitFilter ? { q: unitFilter } : undefined,
   });
+  const graph = useRunGraph(decoded, true);
 
   const setTab = useCallback(
     (t: TabId) => {
@@ -100,13 +113,33 @@ export function RunDetailPage() {
     );
   }, [detail.data]);
 
-  // S9: timeline entry → artifacts tab anchor (U5 lands the tab;
-  // placeholder jump records the artifact id in the URL for now).
+  // S9: timeline entry → 产物 tab anchored at the artifact id.
   const jumpToArtifact = useCallback(
     (id: string) => {
       const p = new URLSearchParams(searchParams);
-      p.set("tab", "overview");
+      p.set("tab", "artifacts");
       p.set("artifact", id);
+      setSearchParams(p, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
+  // S5: graph node/list click → timeline filtered to that unit's events.
+  const filterByUnit = useCallback(
+    (unit: string) => {
+      const p = new URLSearchParams(searchParams);
+      p.set("tab", "timeline");
+      p.set("unit", unit);
+      setSearchParams(p, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
+  const selectArtifact = useCallback(
+    (id: string | null) => {
+      const p = new URLSearchParams(searchParams);
+      if (id) p.set("artifact", id);
+      else p.delete("artifact");
       setSearchParams(p, { replace: true });
     },
     [searchParams, setSearchParams],
@@ -161,7 +194,13 @@ export function RunDetailPage() {
       <StageStrip stages={stages} progress={progress.data} />
 
       <div role="tablist" aria-label="Run detail tabs" className="flex gap-1 border-b border-border">
-        {TABS.map((t) => (
+        {TABS.filter(
+          // 图 tab 仅在 dag 数据存在时出现（无 nodes/scheduler → 隐藏）。
+          (t) =>
+            t.id !== "graph" ||
+            (graph.data !== undefined &&
+              (graph.data.nodes.length > 0 || graph.data.source === "scheduler")),
+        ).map((t) => (
           <button
             key={t.id}
             role="tab"
@@ -213,6 +252,16 @@ export function RunDetailPage() {
             onPausedChange={setLogsPaused}
             onLoadEarlier={() => void events.loadEarlier()}
             canLoadEarlier={events.events.length > 0}
+          />
+        )}
+        {tab === "graph" && (
+          <GraphTab globalRunId={decoded!} onUnitSelect={filterByUnit} />
+        )}
+        {tab === "artifacts" && (
+          <ArtifactsTab
+            globalRunId={decoded!}
+            selectedId={artifactParam}
+            onSelect={selectArtifact}
           />
         )}
       </div>

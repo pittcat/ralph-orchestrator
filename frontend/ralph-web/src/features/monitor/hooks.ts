@@ -6,6 +6,8 @@
 
 import { keepPreviousData, useQueries, useQuery } from "@tanstack/react-query";
 import {
+  apiGetArtifactContent,
+  apiGetArtifacts,
   apiGetEvents,
   apiGetGraph,
   apiGetProgress,
@@ -100,6 +102,25 @@ export function useRunGraph(globalRunId: string | undefined, enabled: boolean) {
     queryKey: ["monitor", "graph", globalRunId],
     queryFn: () => apiGetGraph(globalRunId!),
     enabled: !!globalRunId && enabled,
+  });
+}
+
+export function useArtifacts(globalRunId: string | undefined, enabled: boolean) {
+  return useQuery({
+    queryKey: ["monitor", "artifacts", globalRunId],
+    queryFn: () => apiGetArtifacts(globalRunId!),
+    enabled: !!globalRunId && enabled,
+  });
+}
+
+export function useArtifactContent(
+  globalRunId: string | undefined,
+  artifactId: string | null,
+) {
+  return useQuery({
+    queryKey: ["monitor", "artifact-content", globalRunId, artifactId],
+    queryFn: () => apiGetArtifactContent(globalRunId!, artifactId!),
+    enabled: !!globalRunId && !!artifactId,
   });
 }
 

@@ -224,6 +224,31 @@ export interface EventsQuery {
   q?: string;
 }
 
+// ── Plan2-U3 artifacts contract ──
+
+export const artifactEntrySchema = z.object({
+  id: z.string(),
+  kind: z.string(),
+  path: z.string().optional(),
+  status: z.enum(["present", "not_generated", "outside_allowed"]),
+  size: z.number().optional(),
+  mtime: z.string().optional(),
+});
+export type ArtifactEntry = z.infer<typeof artifactEntrySchema>;
+
+export const artifactsResponseSchema = z.object({
+  artifacts: z.array(artifactEntrySchema),
+});
+export type ArtifactsResponse = z.infer<typeof artifactsResponseSchema>;
+
+export const artifactContentSchema = z.object({
+  id: z.string(),
+  kind: z.string(),
+  content: z.string(),
+  truncated: z.boolean(),
+});
+export type ArtifactContent = z.infer<typeof artifactContentSchema>;
+
 // ── Typed calls ──
 
 export interface RunsQuery {
@@ -286,6 +311,23 @@ export function apiGetGraph(globalRunId: string): Promise<RunGraph> {
   return request(
     `/runs/${encodeURIComponent(globalRunId)}/graph`,
     graphSchema,
+  );
+}
+
+export function apiGetArtifacts(globalRunId: string): Promise<ArtifactEntry[]> {
+  return request(
+    `/runs/${encodeURIComponent(globalRunId)}/artifacts`,
+    artifactsResponseSchema,
+  ).then((r) => r.artifacts);
+}
+
+export function apiGetArtifactContent(
+  globalRunId: string,
+  artifactId: string,
+): Promise<ArtifactContent> {
+  return request(
+    `/runs/${encodeURIComponent(globalRunId)}/artifacts/${encodeURIComponent(artifactId)}/content`,
+    artifactContentSchema,
   );
 }
 
