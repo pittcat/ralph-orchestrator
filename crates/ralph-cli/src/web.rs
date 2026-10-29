@@ -35,6 +35,10 @@ const DAEMON_STATE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// State file name inside the web state dir (`~/.ralph/` by default).
 const STATE_FILE_NAME: &str = "web.json";
+/// Records the last workspace that actually hosted the monitor package,
+/// so a bare `ralph web` from an unrelated project dir can fall back to
+/// it instead of failing on cwd.
+const HOME_FILE_NAME: &str = "web-home";
 
 /// Daemon log file name inside the web state dir.
 const LOG_FILE_NAME: &str = "web.log";
@@ -793,12 +797,39 @@ fn port_in_use(port: u16) -> bool {
     std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
 }
 
-fn resolve_workspace(workspace: Option<&Path>) -> Result<PathBuf> {
+fn home_file_path(dir: &Path) -> PathBuf {
+    dir.join(HOME_FILE_NAME)
+}
+
+fn monitor_package_exists(root: &Path) -> bool {
+    root.join("backend/ralph-monitor/package.json").exists()
+}
+
+/// Workspace remembered from the last successful monitor launch — None
+/// unless the recorded path still hosts the package.
+fn remembered_monitor_home(state_dir: &Path) -> Option<PathBuf> {
+    let saved = std::fs::read_to_string(home_file_path(state_dir)).ok()?;
+    let home = PathBuf::from(saved.trim());
+    monitor_package_exists(&home).then_some(home)
+}
+
+fn resolve_workspace(workspace: Option<&Path>, state_dir: &Path) -> Result<PathBuf> {
     match workspace {
         Some(path) => path
             .canonicalize()
             .with_context(|| format!("Invalid workspace path: {}", path.display())),
-        None => env::current_dir().context("Failed to get current directory"),
+        None => {
+            let cwd = env::current_dir().context("Failed to get current directory")?;
+            // `ralph web` is a machine-global service, but the monitor
+            // package lives inside the orchestrator source tree — when
+            // cwd is some other project, reuse the last location that
+            // worked instead of failing on cwd.
+            if monitor_package_exists(&cwd) {
+                Ok(cwd)
+            } else {
+                Ok(remembered_monitor_home(state_dir).unwrap_or(cwd))
+            }
+        }
     }
 }
 
@@ -825,7 +856,7 @@ fn print_unmanaged_monitor(port: u16, machine_id: &str) {
 /// status instead of dying on the port check. `state_dir` is injected so
 /// tests can point at a tempdir instead of `~/.ralph`.
 async fn start_command(run: &RunArgs, foreground: bool, state_dir: &Path) -> Result<()> {
-    let workspace_root = resolve_workspace(run.workspace.as_deref())?;
+    let workspace_root = resolve_workspace(run.workspace.as_deref(), state_dir)?;
     if let StateProbe::Live(state) = inspect_state(state_dir) {
         print_already_running(&state);
         return Ok(());
@@ -888,6 +919,14 @@ async fn start_command(run: &RunArgs, foreground: bool, state_dir: &Path) -> Res
             started: Utc::now(),
         },
     )?;
+    // Persist this workspace as the monitor home only when it actually
+    // hosts the package — never overwrite a good record with a bad dir.
+    if monitor_package_exists(&workspace_root) {
+        let _ = std::fs::write(
+            home_file_path(state_dir),
+            workspace_root.to_string_lossy().as_bytes(),
+        );
+    }
     let _state_guard = StateGuard::new(state_dir, std::process::id());
 
     match mode {
@@ -1174,7 +1213,8 @@ async fn execute_monitor(run: &RunArgs, workspace_root: &Path, port: u16) -> Res
     let monitor_dir = workspace_root.join("backend/ralph-monitor");
     if !monitor_dir.join("package.json").exists() {
         anyhow::bail!(
-            "Monitor package not found at {}",
+            "Monitor package not found at {} — pass --workspace pointing \
+             at the ralph-orchestrator checkout",
             monitor_dir.join("package.json").display()
         );
     }
@@ -2242,6 +2282,37 @@ exit 1",
         std::fs::write(state_file_path(temp_dir.path()), "not json").expect("write");
         assert!(matches!(inspect_state(temp_dir.path()), StateProbe::Stale));
         assert!(!state_file_path(temp_dir.path()).exists());
+    }
+
+    #[test]
+    fn remembered_monitor_home_returns_recorded_workspace_with_package() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let home = temp_dir.path().join("orchestrator");
+        std::fs::create_dir_all(home.join("backend/ralph-monitor")).expect("monitor dir");
+        std::fs::write(home.join("backend/ralph-monitor/package.json"), "{}")
+            .expect("package.json");
+        std::fs::write(
+            home_file_path(temp_dir.path()),
+            home.to_string_lossy().as_bytes(),
+        )
+        .expect("write web-home");
+        assert_eq!(remembered_monitor_home(temp_dir.path()), Some(home));
+    }
+
+    #[test]
+    fn remembered_monitor_home_ignores_absent_or_stale_record() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        assert_eq!(remembered_monitor_home(temp_dir.path()), None);
+
+        // Recorded dir exists but no longer hosts the monitor package.
+        let other = temp_dir.path().join("elsewhere");
+        std::fs::create_dir_all(&other).expect("other dir");
+        std::fs::write(
+            home_file_path(temp_dir.path()),
+            other.to_string_lossy().as_bytes(),
+        )
+        .expect("write web-home");
+        assert_eq!(remembered_monitor_home(temp_dir.path()), None);
     }
 
     #[test]

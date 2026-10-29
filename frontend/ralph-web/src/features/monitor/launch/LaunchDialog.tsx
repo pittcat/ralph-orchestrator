@@ -22,6 +22,7 @@ import {
   type PresetEntry,
 } from "../api";
 import { useCreateOperation, useMonitorProjects, useOperation, usePresets } from "../hooks";
+import { newIdempotencyKey } from "@/lib/utils";
 
 const PROMPT_MAX = 4000;
 
@@ -51,7 +52,7 @@ export function LaunchDialog({
   // Per-open intent key + reset (S8/D6).
   useEffect(() => {
     if (open) {
-      idemKey.current = crypto.randomUUID();
+      idemKey.current = newIdempotencyKey();
       setStep(0);
       setProject(null);
       setPreset(null);

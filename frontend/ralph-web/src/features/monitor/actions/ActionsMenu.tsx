@@ -12,16 +12,21 @@ const KIND_LABEL: Record<string, string> = {
   stop: "停止",
   retry: "重试",
   merge: "合并",
-  emit: "发送事件",
 };
+
+// emit (发送事件) is deliberately not rendered — the backend op stays
+// available for API/CLI callers, but the raw topic-injection affordance
+// is too low-level for the dashboard.
+const HIDDEN_ACTIONS = new Set(["emit"]);
 
 export function ActionsMenu({ run }: { run: MonitorRun }) {
   const [active, setActive] = useState<ActionDecl | null>(null);
-  if (run.actions.length === 0) return null;
+  const actions = run.actions.filter((a) => !HIDDEN_ACTIONS.has(a.id));
+  if (actions.length === 0) return null;
 
   return (
     <div className="flex flex-wrap items-center gap-2" data-testid="actions-menu">
-      {run.actions.map((a) => (
+      {actions.map((a) => (
         <button
           key={a.id}
           type="button"
@@ -35,7 +40,7 @@ export function ActionsMenu({ run }: { run: MonitorRun }) {
           {KIND_LABEL[a.id] ?? a.id}
         </button>
       ))}
-      {run.actions
+      {actions
         .filter((a) => !a.available && a.reason)
         .map((a) => (
           <span key={`reason-${a.id}`} id={`action-reason-${a.id}`} className="sr-only">

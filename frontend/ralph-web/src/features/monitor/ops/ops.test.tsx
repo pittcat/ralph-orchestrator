@@ -291,21 +291,12 @@ describe("ActionsMenu + ConfirmDialog", () => {
     expect(err).toHaveTextContent(/revision 冲突/);
   });
 
-  it("emit dialog offers only whitelisted topics", async () => {
+  it("emit actions are hidden — backend op stays but no button renders", async () => {
     render(
-      createElement(
-        wrapper(),
-        null,
-        createElement(ConfirmDialog, {
-          run: RUN,
-          action: RUN.actions[2],
-          onClose: () => {},
-        }),
-      ),
+      createElement(wrapper(), null, createElement(ActionsMenu, { run: RUN })),
     );
-    const select = screen.getByTestId("confirm-topic") as HTMLSelectElement;
-    const options = [...select.options].map((o) => o.value);
-    expect(options).toEqual(["loop.cancel", "task.resume"]);
+    expect(screen.getByTestId("action-stop")).toBeInTheDocument();
+    expect(screen.queryByTestId("action-emit")).not.toBeInTheDocument();
   });
 });
 

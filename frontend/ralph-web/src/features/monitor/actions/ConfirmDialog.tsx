@@ -14,7 +14,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toast";
 import {
   MonitorApiError,
@@ -23,12 +22,12 @@ import {
   type MonitorRun,
 } from "../api";
 import { useCreateOperation } from "../hooks";
+import { newIdempotencyKey } from "@/lib/utils";
 
 const KIND_LABEL: Record<string, string> = {
   stop: "停止",
   retry: "重试",
   merge: "合并",
-  emit: "发送事件",
 };
 
 export function ConfirmDialog({
@@ -42,8 +41,6 @@ export function ConfirmDialog({
 }) {
   const [force, setForce] = useState(false);
   const [steering, setSteering] = useState("");
-  const [topic, setTopic] = useState(action.input_schema?.topics?.[0] ?? "");
-  const [payload, setPayload] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   const [result, setResult] = useState<MonitorOperation | null>(null);
@@ -51,7 +48,7 @@ export function ConfirmDialog({
   const create = useCreateOperation();
 
   useEffect(() => {
-    idemKey.current = crypto.randomUUID();
+    idemKey.current = newIdempotencyKey();
   }, [action.id]);
 
   const submit = () => {
@@ -62,13 +59,10 @@ export function ConfirmDialog({
       if (force) params.force = true;
     } else if (action.id === "retry") {
       if (steering.trim()) params.steering = steering.trim();
-    } else if (action.id === "emit") {
-      params.topic = topic;
-      if (payload.trim()) params.payload = payload;
     }
     create.mutate(
       {
-        kind: action.id as "stop" | "retry" | "merge" | "emit",
+        kind: action.id as "stop" | "retry" | "merge",
         project_id: run.projectId,
         run_gid: run.globalRunId,
         idempotency_key: idemKey.current,
@@ -95,8 +89,6 @@ export function ConfirmDialog({
       },
     );
   };
-
-  const emitTopics = action.input_schema?.topics ?? [];
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
@@ -162,35 +154,6 @@ export function ConfirmDialog({
                 />
               </label>
             )}
-            {action.id === "emit" && (
-              <div className="space-y-2">
-                <label className="block space-y-1 text-sm">
-                  <span>topic</span>
-                  <select
-                    value={topic}
-                    onChange={(e) => setTopic(e.target.value)}
-                    data-testid="confirm-topic"
-                    className="w-full rounded border border-border bg-background px-2 py-1.5 text-sm"
-                  >
-                    {emitTopics.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="block space-y-1 text-sm">
-                  <span>payload（可选）</span>
-                  <Textarea
-                    value={payload}
-                    onChange={(e) => setPayload(e.target.value)}
-                    rows={3}
-                    data-testid="confirm-payload"
-                  />
-                </label>
-              </div>
-            )}
-
             {error && (
               <p className="text-sm text-red-600" role="alert" data-testid="confirm-error">
                 {conflict
@@ -210,7 +173,7 @@ export function ConfirmDialog({
               <button
                 type="button"
                 onClick={submit}
-                disabled={create.isPending || (action.id === "emit" && !topic)}
+                disabled={create.isPending}
                 data-testid="confirm-submit"
                 className="rounded bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50"
               >

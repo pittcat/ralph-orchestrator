@@ -34,3 +34,21 @@ export function formatDuration(ms: number): string {
 export function formatDate(isoDate: string): string {
   return new Date(isoDate).toLocaleString();
 }
+
+/**
+ * Idempotency key for operation intents. `crypto.randomUUID` is a
+ * secure-context API — absent on http:// LAN origins, where calling
+ * it throws and crashes the dialog. Fall back to a random key.
+ */
+export function newIdempotencyKey(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const rand =
+    typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function"
+      ? Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) =>
+          b.toString(16).padStart(2, "0"),
+        ).join("")
+      : Math.random().toString(36).slice(2) + Date.now().toString(36);
+  return `op-${rand}`;
+}
