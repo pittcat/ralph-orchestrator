@@ -1241,6 +1241,7 @@ exit 1",
             frontend_port: 5173,
             workspace: Some(missing),
             legacy_node_api: false,
+            monitor: false,
             no_open: true,
         };
 
