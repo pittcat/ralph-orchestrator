@@ -1,6 +1,6 @@
 # ce-executor-pipeline 通用编排契约
 
-本文件是给所有使用 ce-executor-pipeline / ce-executor-pipeline-loop
+本文件是给所有使用 ce-executor-pipeline
 preset 的项目复用的固定 prompt。它只说明**本轮执行哪份 plan**与
 **所有 hat 共用的安全边界**。
 

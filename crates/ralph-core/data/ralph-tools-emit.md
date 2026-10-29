@@ -266,7 +266,7 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 - `{all: [{field: scope_status, eq: "resolved"}, {field: resolved_count, eq: 0}]}` —— 当声称 resolved 但已解决计划为 0 时拒绝；
 - `{field: predecessor_event, ne: "<illegal-literal>"}` —— 当 predecessor 不是合法字面量时拒绝（合法字面量在 schema `allowed_values` / `required_fields` 声明，由 schema gate 负责 missing/错值；preset rule 只承担「值不等于合法字面量」的反向表达）。
 
-`ce-executor-pipeline` / `ce-executor-pipeline-loop` 等非 scope topic 的「负向矛盾」rule 不受影响——本 finding 只保护四个 scope topic。
+`ce-executor-pipeline` 等非 scope topic 的「负向矛盾」rule 不受影响——本 finding 只保护四个 scope topic。
 
 通用 SOFT 自洽提醒（与上述 payload_consistency gate 互补，由 schema.required_fields 与 trigger_context 评估，不由 payload_consistency gate 评估）：
 

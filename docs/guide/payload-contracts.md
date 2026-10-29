@@ -324,12 +324,11 @@ work.done:
 ### `known_fields` 形状
 
 ```yaml
-review.synthesized:
-  required_fields: [plan_name, task_path, review_round, ...]
+review.start:
+  required_fields: []
   known_fields:
-    - "round_base_sha"
-    - "diff_patch_file"
-    - "synthesized_review_file"
+    - "plan_path"
+    - "plan_name"
 ```
 
 - `known_fields` 中的字段是 schema 作者**明确知道存在**的 optional / pass-through
@@ -338,10 +337,9 @@ review.synthesized:
   引用的字段必须在 `required_fields ∪ known_fields ∪ field_docs.keys() ∪
   allowed_values.keys()` 之内，未声明的引用会触发
   `trigger_context_unknown_field` Error。
-- 试用例：见 `presets/schemas/ce-executor-pipeline-loop.yml` 中
-  `review.synthesized.known_fields`（`round_base_sha` / `diff_patch_file` /
-  `synthesized_review_file` 都是 pass-through 字段，不作 gate 决策但供下游 hint
-  引用）。
+- 试用例：见 `presets/schemas/implementation-review.yml` 中
+  `review.start.known_fields`（`plan_path` / `plan_name` 都是 pass-through
+  字段，不作 gate 决策但供下游 hint 引用）。
 
 ---
 
@@ -494,59 +492,64 @@ isolated prompt 顶部的相对位置：
 | 当前 hat 不订阅 source topic | 不注入（即使 preset 其它地方声明了 trigger_context） |
 | preset / schema 没声明 trigger_context | 不注入（与旧行为 byte-equivalent） |
 
-### 真实示例（来自 `ce-executor-pipeline-loop`）
+### 真实示例（来自 `implementation-review`）
 
-`review-gate` hat 订阅 `review.synthesized`，payload 为
+`fix-planner` hat 订阅 `review.synthesized`，payload 为
 
 ```json
 {
   "plan_name": "...",
-  "review_round": 3,
-  "blocking_main_conflict_count": 0,
-  "must_fix_now_count": 0,
-  "residual_findings_count": 1,
-  "verdict": "pass"
+  "findings_count": 4,
+  "p0_count": 0,
+  "p1_count": 1,
+  "p2_count": 2,
+  "p3_count": 1,
+  "handoff_precheck_failed_count": 0,
+  "synthesized_review_file": ".ralph/review/<plan>/synthesized-review.md",
+  "scope_digest": "..."
 }
 ```
 
-注入到 `review-gate` prompt 的 `## TRIGGER CONTEXT`：
+注入到 `fix-planner` prompt 的 `## TRIGGER CONTEXT`：
 
 ```text
 ## TRIGGER CONTEXT
 source topic: review.synthesized
 source hat: review-synthesizer
 summary fields:
-  review_round: 3
-  must_fix_now_count: 0
-  blocking_main_conflict_count: 0
-  residual_findings_count: 1
-  loop_decision_basis: "review round accepted"
-  verdict: "pass"
-  synthesized_review_file: ".ralph/runtime/ce-executor-pipeline-loop/review-synthesized-3.md"
+  plan_name: "..."
+  findings_count: 4
+  p0_count: 0
+  p1_count: 1
+  p2_count: 2
+  p3_count: 1
+  handoff_precheck_failed_count: 0
+  synthesized_review_file: ".ralph/review/<plan>/synthesized-review.md"
+  scope_digest: "..."
 matched routing hints:
-  - [accept_or_residual_report_only] If blocking_main_conflict_count == 0:
-    emit only review.accepted. Any residual P0/P1 findings are report-only; do not
-    open another fix round for them.
+  - [has_p0_p1_p2] If findings_count > 0: P0/P1/P2 -> actionable
+    Implementation Units; P3 -> residual; result=residual_only or
+    fixes_required.
 ```
 
-`review-gate` hat instructions 应**只引用** `## TRIGGER CONTEXT` 区块，不再
+`fix-planner` hat instructions 应**只引用** `## TRIGGER CONTEXT` 区块，不再
 复述条件值。例如：
 
 ```yaml
-- hat_id: review-gate
+- hat_id: fix-planner
   subscribes_to: ["review.synthesized"]
-  publishes: ["review.accepted", "review.loop.blocked"]
+  publishes: ["fix.plan.ready"]
   instructions: |
     ## TRIGGER CONTEXT
     阅读 prompt 顶部 ## TRIGGER CONTEXT 区块（schema 声明的 summary fields +
     matched routing hints）。
     - 取 hint 中的"本轮你应该如何处理"作为本 hat 行动。
-    - 决定 accept / fix / block；构造 emit payload 时再次走 schema-aware
-      publish section + `ralph emit --policy-check`。
+    - 决定 clean / residual_only / fixes_required；构造 emit payload 时再次走
+      schema-aware publish section + `ralph emit --policy-check`。
     - 不要从完整 payload 推断本节信息，不要读 runtime ledger 还原。
 ```
 
-禁止：把 `must_fix_now_count == 0` / `> 0` 这种条件复制到 instructions；
+禁止：把 `findings_count == 0` / `> 0` 这种条件复制到 instructions；
 这样写会与 schema hints 双写漂移。
 
 ### 缺失字段的渲染规则（`<missing>` 语义）
@@ -556,9 +559,9 @@ schema 在 `summary_fields` 中声明但 payload 没有该字段时，Trigger Co
 
 ```text
 summary fields:
-  review_round: 3
-  blocking_main_conflict_count: 0
-  residual_findings_count: <missing>
+  plan_name: "..."
+  findings_count: 4
+  p0_count: <missing>
 ```
 
 - **不**推断为 `0` / `false` / 空字符串 / `null`。
@@ -585,8 +588,8 @@ summary fields:
 
 ### 试点与扩展
 
-当前只有 `ce-executor-pipeline-loop` 的 `review.synthesized` / `review.accepted`
-/ `fix.requested` 配置了 `trigger_context`；其它 preset 未声明时不注入——与
+当前 `implementation-review` 的 `scope.ready` / `review.synthesized` /
+`fix.plan.ready` 配置了 `trigger_context`；其它 preset 未声明时不注入——与
 未启用 `--policy-check feedback` 等价的向后兼容。
 
 要为自己的 preset 加 trigger context，参见

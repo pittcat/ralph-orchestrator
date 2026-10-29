@@ -59,7 +59,11 @@ unset _ralph_fn
 # invariant.
 _RALPH_BUILTIN_HAT_VALUES=(
   "builtin:ce-executor-pipeline"
-  "builtin:ce-executor-pipeline-loop"
+  # Plan 2026-10-30-001: removed ce-executor-pipeline-loop builtin.
+  # The review/fix ring variant of the CE executor was retired; the
+  # linear builtin:ce-executor-pipeline remains the single CE executor
+  # entry point. The name is retired and must not be reused.
+  # builtin:ce-executor-pipeline-loop  # removed 2026-10-30
   # Plan 2026-08-09-001: removed ce-executor-supervisor builtin.
   # Universal supervisor runtime and the surviving supervisor-enabled
   # builtin parallel-forge [which still ships with
@@ -84,7 +88,8 @@ _RALPH_BUILTIN_HAT_VALUES=(
 
 _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
   "Ralph primary CE executor: linear single-chain plan-driven execution; TDD executor (subagents internal), 6 serial dimension reviewers, synthesize, fix, align, report"
-  "Review-loop CE executor: pipeline execution plus convergence-gated fix/re-review rounds, max 6 review rounds"
+  # Plan 2026-10-30-001: removed ce-executor-pipeline-loop builtin.
+  # Review-loop CE executor: pipeline execution plus convergence-gated fix/re-review rounds, max 6 review rounds  # removed 2026-10-30
   # Plan 2026-08-09-001: removed ce-executor-supervisor builtin.
   # Universal supervisor runtime and the surviving supervisor-enabled
   # builtin parallel-forge [which still ships with

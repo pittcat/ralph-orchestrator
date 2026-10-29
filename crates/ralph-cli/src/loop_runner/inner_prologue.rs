@@ -31,7 +31,7 @@ use super::preset_lint_gate::{
 /// emit-feedback lint gate to the preset whitelist; without it
 /// `preset_name` resolves to `""` inside the gate and the lint
 /// silently bypasses the rule on
-/// `ralph run -H builtin:ce-executor-pipeline-loop`.
+/// `ralph run -H builtin:ce-executor-pipeline`.
 pub(super) fn run_startup_gates(
     config: &RalphConfig,
     source_is_builtin_embedded: bool,

@@ -658,8 +658,8 @@ pub const FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE: &str =
 /// Severity: `Warn` in default mode, `Error` in strict (matches the
 /// existing `FINDING_PAYLOAD_CONSISTENCY_*` family). Does not parse
 /// rule `message` text; only structural predicates and the protected
-/// field / topic / operator unions. `ce-executor-pipeline`,
-/// `ce-executor-pipeline-loop` and other non-scope rules are not in
+/// field / topic / operator unions. `ce-executor-pipeline` and other
+/// non-scope rules are not in
 /// any protected scope topic and never trigger this finding.
 pub const FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION: &str =
     "preset.payload_consistency_scope_positive_assertion";

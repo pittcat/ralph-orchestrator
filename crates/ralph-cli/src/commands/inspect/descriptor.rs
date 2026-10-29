@@ -42,13 +42,6 @@ const BUILTIN_DESCRIPTORS: &[(&str, &str)] = &[
         )),
     ),
     (
-        "ce-executor-pipeline-loop",
-        include_str!(concat!(
-            env!("OUT_DIR"),
-            "/monitor-descriptors/ce-executor-pipeline-loop.yml"
-        )),
-    ),
-    (
         "parallel-forge",
         include_str!(concat!(
             env!("OUT_DIR"),
@@ -335,6 +328,26 @@ mod tests {
         assert_eq!(res.descriptor.unwrap().stages[0].id, "a");
     }
 
+    /// Plan 2026-10-30-001 U1: `ce-executor-pipeline-loop` builtin removal.
+    /// 退役 preset 不得再出现在 builtin descriptor 表里,且 `inspect run`
+    /// 的 descriptor 查找必须回退(不 panic、不静默命中其它 builtin)。
+    #[test]
+    fn removed_pipeline_loop_preset_has_no_builtin_descriptor() {
+        assert!(
+            !BUILTIN_DESCRIPTORS
+                .iter()
+                .any(|(n, _)| *n == "ce-executor-pipeline-loop"),
+            "Plan 2026-10-30-001 U1: retired preset must NOT keep a builtin descriptor entry"
+        );
+        let res = resolve(
+            Some("builtin:ce-executor-pipeline-loop"),
+            Path::new("/nonexistent"),
+        );
+        assert_eq!(res.resolved_from, "none");
+        assert!(res.descriptor.is_none());
+        assert!(res.diagnostic.is_none());
+    }
+
     #[test]
     fn unsupported_schema_version_diagnoses() {
         let ws = tempfile::tempdir().unwrap();
@@ -388,10 +401,6 @@ mod tests {
             (
                 "ce-executor-pipeline",
                 "../../presets/en/ce-executor-pipeline.yml",
-            ),
-            (
-                "ce-executor-pipeline-loop",
-                "../../presets/en/ce-executor-pipeline-loop.yml",
             ),
             ("parallel-forge", "../../presets/en/parallel-forge.yml"),
             ("autoresearch", "../../presets/en/autoresearch.yml"),

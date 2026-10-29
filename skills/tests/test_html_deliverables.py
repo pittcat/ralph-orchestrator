@@ -47,7 +47,6 @@ def test_binding_inventory_exists_and_lists_every_entry() -> None:
     for entry in (
         "autoresearch",
         "ce-executor-pipeline",
-        "ce-executor-pipeline-loop",
         "debug",
         "implementation-review",
         "merge-batch",
@@ -74,7 +73,6 @@ def test_binding_inventory_exists_and_lists_every_entry() -> None:
     "preset_path,hat_id",
     [
         ("presets/en/ce-executor-pipeline.yml", "reporter"),
-        ("presets/en/ce-executor-pipeline-loop.yml", "reporter"),
         ("presets/en/parallel-forge.yml", "reporter"),
         ("presets/en/merge-batch.yml", "reporter"),
         ("presets/en/post-merge-converge.yml", "reporter"),

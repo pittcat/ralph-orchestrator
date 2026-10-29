@@ -60,7 +60,7 @@ Orchestrator 在最终 resolved config、当前 flow step、hat、trigger event 
 
 ### follow-on loop
 
-跨两次独立 `ralph run` 的串联：第一环终态成功且交接校验通过后，再启动第二环（另一 preset/config）。与同一 preset 内的 hat 链、以及 `ce-executor-pipeline-loop` 的 review/fix 环不同。近亲行为是 worktree 成功后的 `auto_merge → merge-loop` spawn。
+跨两次独立 `ralph run` 的串联：第一环终态成功且交接校验通过后，再启动第二环（另一 preset/config）。与同一 preset 内的 hat 链、以及 preset 内部的 review/fix 环不同。近亲行为是 worktree 成功后的 `auto_merge → merge-loop` spawn。
 
 ### chain handoff
 

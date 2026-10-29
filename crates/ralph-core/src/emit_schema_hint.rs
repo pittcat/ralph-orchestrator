@@ -400,8 +400,8 @@ mod tests {
     /// placeholder, NOT a fabricated `0`. Required: this
     /// is the KTD-4 / R9 "do not auto-fill business facts"
     /// guarantee. The hard-coded `0` is a footgun that the
-    /// `ce-executor-pipeline-loop` review gate would happily
-    /// accept (`must_fix_now_count: 0` => "no fix needed" =>
+    /// a review gate would happily
+    /// accept (`findings_count: 0` => "nothing found" =>
     /// close the loop), so the test pins the safer shape.
     #[test]
     fn u2_suggested_payload_shape_does_not_invent_zero_for_count_field() {

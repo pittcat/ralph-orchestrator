@@ -2505,48 +2505,6 @@ fn test_ce_executor_pipeline() {
     run_workflow_guard_scenario(yaml);
 }
 
-/// 2026-07-08 loop preset: first review round has no P0/P1, so
-/// review-gate emits `review.accepted` and the fix path stays absent.
-#[test]
-fn test_ce_executor_pipeline_loop() {
-    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_loop.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-07-08 loop preset regression: first review round has P1
-/// residuals, so the gate requests fixes; `fix.done` must wake
-/// `review-reentry`, which starts round 2 before any terminal
-/// completion is honored.
-#[test]
-fn test_ce_executor_pipeline_loop_fix_reentry() {
-    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_loop_fix_reentry.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// Loop topology regression: only `work.done` flows through
-/// `test-stabilizer`; `fix.done` directly re-enters review. This
-/// scenario asserts:
-/// - test-stabilizer fires once for the initial executor handoff.
-/// - review-reentry subscribes to stabilization.done and fix.done.
-/// - Round 2 review.round.ready carries source_topic=fix.done and
-///   round_base_sha == fix.head_sha.
-#[test]
-fn test_ce_executor_pipeline_loop_fix_stabilizer_reentry() {
-    let yaml =
-        load_scenario("tests/scenarios/ce_executor_pipeline_loop_fix_stabilizer_reentry.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-07-09-004 plan U3: at review_round 6 with
-/// `blocking_main_conflict_count > 0`, the gate must emit
-/// `review.loop.blocked` and its prompt must carry the
-/// `[max_round_blocked]` hint guidance from the trigger context.
-#[test]
-fn test_ce_executor_pipeline_loop_max_round_blocked() {
-    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_loop_max_round_blocked.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
 /// 2026-07-02-003 plan U2, narrowed by 2026-07-24-002 plan U3 (B2):
 /// dead-end variant. `work.failed` is reserved for runs with zero
 /// deliverable commits (`completed_units` empty). The stabilizer,
@@ -2867,49 +2825,6 @@ fn test_ce_executor_pipeline_stabilization_blocked_report() {
 #[test]
 fn test_ce_executor_pipeline_post_fix_review() {
     let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_post_fix_review.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-07-16-001 plan U6: Fixer MUST execute Fix Units strictly
-/// serially. When a non-final Fix Unit fails (UF2 in this scenario),
-/// subsequent Fix Units (UF3..UF5) MUST NOT start. `fix.done` MUST
-/// carry the complete fix-unit bill
-/// (`planned_fix_units` / `attempted_fix_units` /
-/// `completed_fix_units` / `failed_fix_units` /
-/// `skipped_fix_units`). Then the new U5 topology applies:
-/// fix.done → review-reentry round 2 → review.loop.blocked (must-fix count
-/// still > 0). Reporter consumes review.loop.blocked.
-#[test]
-fn test_ce_executor_pipeline_loop_fixer_fail_stop() {
-    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_loop_fixer_fail_stop.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-07-24-002 plan U3 (B5, loop half): a partial `work.done`
-/// (U2 failed, U1/U3 delivered) in the loop preset MUST walk
-/// stabilizer → review-reentry → 6-dim review → gate accept →
-/// alignment → reporter instead of short-circuiting via
-/// `work.failed`. Round 1 has no must-fix-now findings, so the
-/// gate emits `review.accepted` and the loop ends with
-/// verdict=pass_with_residuals; `work.failed`, `fix.requested`,
-/// and `review.loop.blocked` must stay absent.
-#[test]
-fn test_ce_executor_pipeline_loop_executor_partial_done() {
-    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_loop_executor_partial_done.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// 2026-07-24-002 plan U3 (KTD10): when a non-final Fix Unit fails
-/// (UF2) while independent Fix Units land (UF1, UF3), `fix.done`
-/// MUST report `fix_status=partial` with the full fix-unit bill —
-/// never a premature `blocked`. The partial fix.done re-enters
-/// review round 2, which accepts with the UF2 finding as residual,
-/// and the loop reports verdict=pass_with_residuals.
-/// `review.loop.blocked` must stay absent.
-#[test]
-fn test_ce_executor_pipeline_loop_fixer_partial_continue() {
-    let yaml =
-        load_scenario("tests/scenarios/ce_executor_pipeline_loop_fixer_partial_continue.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -5195,15 +5110,6 @@ fn test_ce_executor_pipeline_u9_diagnose_from_ledger_scenario() {
 #[test]
 fn test_ce_executor_pipeline_review_artifact_blocked() {
     let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_review_artifact_blocked.yml");
-    run_workflow_guard_scenario(yaml);
-}
-
-/// Loop preset：在多轮 review/fix 流程中验证同一 fail-close 契约。
-/// 阻塞路径必须直接退出 loop，不得开启下一轮 fix，也不得进入 alignment。
-#[test]
-fn test_ce_executor_pipeline_loop_review_artifact_blocked() {
-    let yaml =
-        load_scenario("tests/scenarios/ce_executor_pipeline_loop_review_artifact_blocked.yml");
     run_workflow_guard_scenario(yaml);
 }
 

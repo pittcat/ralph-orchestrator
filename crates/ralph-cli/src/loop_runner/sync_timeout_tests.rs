@@ -71,7 +71,7 @@ mod sync_timeout_tests {
 /// `run_loop_impl_inner` (line ~687) MUST route through
 /// `enforce_preset_lint_gate_with_preset_name` so the U7
 /// emit-feedback skill-reference rule actually fires on
-/// `ralph run -H builtin:ce-executor-pipeline-loop`. Without
+/// `ralph run -H builtin:ce-executor-pipeline`. Without
 /// the preset name the whitelist gate inside
 /// `check_instructions_opac_with_preset` resolves to
 /// `preset_name = ""` and the rule silently bypasses.
@@ -81,7 +81,7 @@ mod u1_preset_name_aware_lint_gate_wiring {
     use crate::loop_runner::preset_lint_gate::enforce_preset_lint_gate;
     use ralph_core::RalphConfig;
 
-    /// A minimal preset that mimics `ce-executor-pipeline-loop`'s
+    /// A minimal preset that mimics the CE pipeline's
     /// `fix-planner` hat with the U7 emit-feedback citation
     /// deliberately removed. The topology stays lint-clean
     /// (handoff / completion_promise covered) so the only
@@ -157,6 +157,8 @@ tasks:
             ralph_core::preset_lint::LintStrictness::Strict,
             false,
             Some(lint_source_yaml),
+            // U7 lint 白名单的 key(白名单本身仍保留该名字);这不是一个
+            // 可解析的 builtin preset —— 该 preset 已于 2026-10-30 退役。
             "ce-executor-pipeline-loop",
         );
         assert!(

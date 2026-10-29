@@ -4,7 +4,7 @@ type: refactor
 date: 2026-10-29
 baseline: 0a9a913f6f9d7856475fea072d5d80a8d6bc8879
 execution: code
-status: READY
+status: completed
 ---
 
 # 移除 builtin preset ce-executor-pipeline-loop

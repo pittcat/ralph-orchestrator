@@ -1371,8 +1371,8 @@ mod tests {
     /// U4: pipeline rules (non-scope topic `fix.done` /
     /// `work.done`) keep their legal same-payload contradiction shape
     /// and never trigger the polarity finding. This is the explicit
-    /// R3 / D6 isolation: `ce-executor-pipeline` and
-    /// `ce-executor-pipeline-loop` are NOT in `PROTECTED_SCOPE_TOPICS`.
+    /// R3 / D6 isolation: `ce-executor-pipeline` is NOT in
+    /// `PROTECTED_SCOPE_TOPICS`.
     #[test]
     fn pipeline_fix_done_rule_does_not_trigger_polarity() {
         let config = scope_topic_config("fix.done", vec![valid_rule()]);

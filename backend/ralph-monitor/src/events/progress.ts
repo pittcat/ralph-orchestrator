@@ -4,7 +4,7 @@
  *
  * - `stage` = the last stage (in descriptor order) whose topics have
  *   appeared; `stage_history` records the first seq each stage was
- *   entered. For loop descriptors (e.g. ce-executor-pipeline-loop) a
+ *   entered. For descriptors with re-entrant stages a
  *   stage can be re-entered — history records every transition, and
  *   `round` counts re-entries of the current stage.
  * - `units` counts distinct unit identities seen under the

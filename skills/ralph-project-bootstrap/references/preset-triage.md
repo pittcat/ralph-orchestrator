@@ -68,7 +68,7 @@ absent from the inventory does not exist for this run.
 
 | Operator intent smells like | Candidate shape to look for | Typical live fit |
 | --- | --- | --- |
-| "implement / execute this plan", plan file supplied | plan-driven executor chain (plan-reviewer → executor → review → fix → report) | `builtin:ce-executor-pipeline` (serial, primary path); `builtin:ce-executor-pipeline-loop` when the task wants convergence-gated re-review rounds |
+| "implement / execute this plan", plan file supplied | plan-driven executor chain (plan-reviewer → executor → review → fix → report) | `builtin:ce-executor-pipeline` (serial, primary path) |
 | "parallelise / split this plan across worktrees" | spec-first supervisor + DAG scheduler, worktree Units | `builtin:parallel-forge` |
 | "merge my worktrees / branches" | git-first batch merge with verify-fix self-loop and merge report | `builtin:merge-batch` (needs target branch + ordered branch list in the prompt) |
 | "stabilise / audit after merging" | post-merge system audit → findings → fix/regression → clean-env review | `builtin:post-merge-converge` |

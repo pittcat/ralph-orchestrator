@@ -487,19 +487,15 @@ pub fn check_re_emit_trap(
 ///
 /// Bound history: 4 → 8 (2026-06-24 10-hat refactor) → 9 → 10
 /// (2026-07-02-003 `ce-executor-pipeline` 13-hat flat chain) → 12
-/// (2026-07-08 `ce-executor-pipeline-loop` 15-hat chain) → 24
+/// (2026-07-08 `ce-executor-pipeline-loop` 15-hat chain; that preset
+/// was retired 2026-10-30) → 24
 /// (2026-08-21 precheck gates on six serial dimension handoffs).
 ///
-/// The 12-hop bound accommodates the `ce-executor-pipeline-loop`
-/// preset, which adds `review-reentry` and `review-gate` hats on top
-/// of the `ce-executor-pipeline` flat serial chain. The `fix-planner`
-/// hat in the loop preset is 11 hops from `report.done`:
-/// `fix-planner → fixer → review-reentry → dim:goal-alignment →
-/// dim:correctness → dim:testing → dim:maintainability →
-/// dim:project-standards → dim:adversarial → review-synthesizer →
-/// review-gate → (review.accepted) → alignment → reporter →
-/// report.done`. The BFS budget must cover 11 hops so the loop
-/// preset's chain terminates through the lint check.
+/// The 24-hop bound accommodates the `ce-executor-pipeline` flat
+/// serial chain plus the precheck gate hats attached to its
+/// `work.failed` / `fix.done` / `work.done` edges (2026-08-21). The
+/// BFS budget must cover the full handoff depth so the chain
+/// terminates through the lint check.
 ///
 /// 24 hops is still tight enough to catch genuine dead ends: a hat
 /// publishing to a topic with no consumer at all fails at hop 1, and

@@ -29,7 +29,11 @@
 embedded:
   - autoresearch
   - ce-executor-pipeline
-  - ce-executor-pipeline-loop
+  # Plan 2026-10-30-001: removed `ce-executor-pipeline-loop` builtin.
+  # The review/fix ring variant of the CE executor was retired; the
+  # linear `ce-executor-pipeline` remains the single CE executor entry
+  # point. The name is retired and must not be reused.
+  # - ce-executor-pipeline-loop  # removed 2026-10-30
   # Plan 2026-08-09-001: removed `ce-executor-supervisor` builtin.
   # Universal supervisor runtime, `supervisor-db` feature, wave
   # dispatcher, SupervisorStore, origin guard, and the surviving

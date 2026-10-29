@@ -39,7 +39,7 @@
 - **重要 artifact：** 无新业务 artifact；guidance 不落盘。
 - **execution_model：** single-chain
   **why：** 无拓扑/并行变更，沿用既有单链。
-- **非目标：** 不改 `when`/checklist；precheck 不加 `by_check`（命名 `failed_checks` 与 1-based key 不对齐）；不动 `ce-executor-pipeline-loop`；不新增 `suggested_command`。
+- **非目标：** 不改 `when`/checklist；precheck 不加 `by_check`（命名 `failed_checks` 与 1-based key 不对齐）；不动其它 preset（`ce-executor-pipeline-loop` 已于 2026-10-30 退役）；不新增 `suggested_command`。
 - **Author 推导与假设（历史增量）：** 当时用户已确认「consistency = common+by_check；precheck = 仅 common」。2026-08-21 新增的六个维度完成事件另行采用 `precheck`，不新增 consistency 谓词。
 - **用户确认：** 已确认（对话内要求 `/ralph-preset-author` 按该方案修改）
 
@@ -158,7 +158,7 @@
 7. docs/zsh: 不改 builtin 列表；hat instructions 未改，无需 inspect prompt。
 
 
-1. runtime: no change to topic/completion semantics; the `stabilization.done` / `stabilization.blocked` business events are added, with the linear preset supplying the `event_policy.schemas` block. The loop preset already injects schema via `presets/schemas/ce-executor-pipeline-loop.yml`.
+1. runtime: no change to topic/completion semantics; the `stabilization.done` / `stabilization.blocked` business events are added, with the linear preset supplying the `event_policy.schemas` block. The loop preset (`ce-executor-pipeline-loop`, retired 2026-10-30) already injected schema via its own authoring SSOT.
 2. preset_lint: the linear preset passes strict lint after adding `event_policy.schemas.stabilization.*`; the loop preset already passes.
 3. BDD: `ce_executor_pipeline_post_fix_review.yml` uses the real EventLoop runner to prove `fix.done → alignment → reporter`, and asserts that no stabilization/review/fix-plan event is re-emitted.
 4. config: no configuration fields were changed.

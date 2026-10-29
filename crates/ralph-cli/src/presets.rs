@@ -38,15 +38,10 @@ const PRESETS: &[EmbeddedPreset] = &[
         )),
         public: true,
     },
-    EmbeddedPreset {
-        name: "ce-executor-pipeline-loop",
-        description: "Review-loop CE executor: pipeline execution with serial six-dimension review, convergence-gated fix/re-review rounds, max 6 review rounds.",
-        content: include_str!(concat!(
-            env!("OUT_DIR"),
-            "/presets/ce-executor-pipeline-loop.yml"
-        )),
-        public: true,
-    },
+    // Plan 2026-10-30-001: removed `ce-executor-pipeline-loop` builtin.
+    // The review/fix ring variant was retired; the linear
+    // `ce-executor-pipeline` remains the single CE executor entry point.
+    // The name is retired and must not be reused.
     // Plan 2026-08-09-001: removed `ce-executor-supervisor` builtin.
     // Universal supervisor runtime (`crates/ralph-core/src/supervisor/**`),
     // `supervisor-db` feature, wave dispatcher, SupervisorStore, origin
@@ -414,109 +409,6 @@ mod tests {
             names.contains(&"ce-executor-pipeline"),
             "ce-executor-pipeline must be a public builtin; got {names:?}"
         );
-        assert!(
-            names.contains(&"ce-executor-pipeline-loop"),
-            "ce-executor-pipeline-loop must be a public builtin; got {names:?}"
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_pipeline_loop_routes_are_single_consumer() {
-        let preset = get_preset("ce-executor-pipeline-loop")
-            .expect("ce-executor-pipeline-loop must be embedded");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("loop preset YAML should parse");
-
-        let mut consumers: std::collections::BTreeMap<String, Vec<String>> =
-            std::collections::BTreeMap::new();
-        for (hat_id, hat) in &config.hats {
-            for topic in &hat.triggers {
-                consumers
-                    .entry(topic.clone())
-                    .or_default()
-                    .push(hat_id.clone());
-            }
-        }
-
-        for topic in [
-            "work.done",
-            "stabilization.done",
-            "stabilization.blocked",
-            "fix.done",
-            "review.round.ready",
-            "review.synthesized",
-            "review.accepted",
-            "fix.requested",
-            "review.complete",
-            "review.loop.blocked",
-            "align.done",
-        ] {
-            let actual = consumers.get(topic).cloned().unwrap_or_default();
-            assert_eq!(
-                actual.len(),
-                1,
-                "topic {topic} must have exactly one explicit consumer, got {actual:?}"
-            );
-        }
-
-        assert_eq!(
-            consumers.get("work.done").cloned().unwrap_or_default(),
-            vec!["test-stabilizer".to_string()]
-        );
-        assert_eq!(
-            consumers
-                .get("stabilization.done")
-                .cloned()
-                .unwrap_or_default(),
-            vec!["review-reentry".to_string()]
-        );
-        assert_eq!(
-            consumers
-                .get("stabilization.blocked")
-                .cloned()
-                .unwrap_or_default(),
-            vec!["reporter".to_string()]
-        );
-        assert_eq!(
-            consumers.get("fix.done").cloned().unwrap_or_default(),
-            vec!["review-reentry".to_string()]
-        );
-        assert_eq!(
-            consumers.get("fix.requested").cloned().unwrap_or_default(),
-            vec!["fix-planner".to_string()]
-        );
-        assert_eq!(
-            consumers
-                .get("review.complete")
-                .cloned()
-                .unwrap_or_default(),
-            vec!["fixer".to_string()]
-        );
-    }
-
-    #[test]
-    fn test_ce_executor_pipeline_loop_fix_reentry_contract() {
-        let preset = get_preset("ce-executor-pipeline-loop")
-            .expect("ce-executor-pipeline-loop must be embedded");
-        let config =
-            RalphConfig::parse_yaml(preset.content).expect("loop preset YAML should parse");
-
-        let schemas = &config
-            .event_loop
-            .event_policy
-            .as_ref()
-            .expect("loop preset must declare event policy")
-            .schemas;
-        let fix_done = schemas
-            .get("fix.done")
-            .expect("loop preset must schema fix.done");
-        assert!(
-            fix_done
-                .required_fields
-                .iter()
-                .any(|field| field == "next_review_plan"),
-            "fix.done must require next_review_plan so null/missing payloads are rejected"
-        );
     }
 
     /// Registry must NOT expose `ce-executor-serial` once Unit 1 is complete.
@@ -740,10 +632,12 @@ mod tests {
         // Plan 2026-08-09-001 U1: removed `ce-executor-supervisor`,
         // count goes from 10 to 9. `parallel-forge` remains as the
         // surviving supervisor-enabled builtin.
+        // Plan 2026-10-30-001 U1: removed `ce-executor-pipeline-loop`,
+        // count goes from 9 to 8.
         assert_eq!(
             presets.len(),
-            9,
-            "Expected 9 public presets (removed ce-executor-supervisor per plan 2026-08-09-001)"
+            8,
+            "Expected 8 public presets (removed ce-executor-pipeline-loop per plan 2026-10-30-001)"
         );
     }
 
@@ -815,6 +709,45 @@ mod tests {
         assert!(
             public_names.contains(&"parallel-forge"),
             "Plan 2026-08-09-001 U1: 'parallel-forge' must remain in public preset_names()"
+        );
+    }
+
+    /// Plan 2026-10-30-001 U1: `ce-executor-pipeline-loop` builtin removal.
+    /// 该环形 review/fix builtin 已退役,名字不再复用:registry lookup 必须
+    /// 显式失败(不得留 alias / fallback),`preset_names()` 必须同时丢弃它
+    /// 与 `builtin:` 前缀形式。
+    #[test]
+    fn test_ce_executor_pipeline_loop_returns_unknown_after_removal() {
+        // S2-AT1: registry lookup for the deleted name must return None.
+        assert!(
+            get_preset("ce-executor-pipeline-loop").is_none(),
+            "Plan 2026-10-30-001 U1: 'ce-executor-pipeline-loop' must NOT be resolvable. \
+             Removal must drop YAML, manifest, public index, registry entry and shell \
+             completion without aliasing to 'ce-executor-pipeline' or any other builtin."
+        );
+        assert!(
+            get_preset("builtin:ce-executor-pipeline-loop").is_none(),
+            "Plan 2026-10-30-001 U1: 'builtin:ce-executor-pipeline-loop' must NOT be resolvable."
+        );
+
+        // 线性版仍须是唯一可用的 CE executor 入口。
+        let replacement = get_preset("ce-executor-pipeline")
+            .expect("ce-executor-pipeline must remain the surviving CE executor entry point");
+        assert_eq!(replacement.name, "ce-executor-pipeline");
+        assert!(
+            !replacement.content.is_empty(),
+            "ce-executor-pipeline embedded content must remain non-empty"
+        );
+
+        // Public listing must drop the retired name and keep the linear one.
+        let public_names = preset_names();
+        assert!(
+            !public_names.contains(&"ce-executor-pipeline-loop"),
+            "Plan 2026-10-30-001 U1: 'ce-executor-pipeline-loop' must NOT appear in public preset_names()"
+        );
+        assert!(
+            public_names.contains(&"ce-executor-pipeline"),
+            "Plan 2026-10-30-001 U1: 'ce-executor-pipeline' must remain in public preset_names()"
         );
     }
 
@@ -909,10 +842,12 @@ mod tests {
         // Plan 2026-08-09-001 U1: removed `ce-executor-supervisor`,
         // count goes from 10 to 9. `parallel-forge` remains as the
         // surviving supervisor-enabled builtin.
-        assert_eq!(names.len(), 9);
+        // Plan 2026-10-30-001 U1: removed `ce-executor-pipeline-loop`,
+        // count goes from 9 to 8. `ce-executor-pipeline` remains as
+        // the single CE executor entry point.
+        assert_eq!(names.len(), 8);
         assert!(names.contains(&"autoresearch"));
         assert!(names.contains(&"ce-executor-pipeline"));
-        assert!(names.contains(&"ce-executor-pipeline-loop"));
         assert!(names.contains(&"debug"));
         assert!(names.contains(&"merge-batch"));
         assert!(names.contains(&"parallel-forge"));
@@ -1839,7 +1774,7 @@ mod tests {
     // publish set.
     #[test]
     fn test_ce_executor_test_stabilizer_terminal_authority() {
-        for name in ["ce-executor-pipeline", "ce-executor-pipeline-loop"] {
+        for name in ["ce-executor-pipeline"] {
             let preset = get_preset(name).unwrap_or_else(|| panic!("preset {name} embedded"));
             let config = RalphConfig::parse_yaml(preset.content)
                 .unwrap_or_else(|e| panic!("preset {name} parse: {e}"));
@@ -1868,49 +1803,6 @@ mod tests {
             assert_eq!(
                 terminals, publishes,
                 "{name}: terminal_events must mirror the only allowed stabilization.* topics"
-            );
-        }
-    }
-
-    /// 2026-07-09-001 plan (U8): the embedded `ce-executor-pipeline-loop`
-    /// preset must declare agent-facing `field_docs` / `examples`
-    /// metadata for the review/fix convergence topics so that the
-    /// U3 enrichment layer (policy-check errors) and the U6
-    /// schema-aware prompt section can consume them. Plan
-    /// 2026-07-09-005 replaced the previous SSOT byte-equality
-    /// assertion with a structured schema assertion that survives
-    /// legitimate prompt-wording or comment edits in the YAML.
-    #[test]
-    fn test_ce_executor_pipeline_loop_embedded_includes_u8_field_docs() {
-        let preset = get_preset("ce-executor-pipeline-loop")
-            .expect("ce-executor-pipeline-loop preset should exist");
-        let value: serde_yaml::Value =
-            serde_yaml::from_str(preset.content).expect("embedded preset must be valid YAML");
-        let schemas = value
-            .get("event_loop")
-            .and_then(|v| v.get("event_policy"))
-            .and_then(|v| v.get("schemas"))
-            .expect("ce-executor-pipeline-loop must carry event_policy.schemas");
-        for topic in [
-            "review.synthesized",
-            "review.accepted",
-            "fix.requested",
-            "review.complete",
-            "review.loop.blocked",
-        ] {
-            let schema = schemas.get(topic).unwrap_or_else(|| {
-                panic!("U8 pilot topic `{topic}` must appear in embedded schemas")
-            });
-            let field_docs = schema
-                .get("field_docs")
-                .unwrap_or_else(|| panic!("U8 pilot topic `{topic}` must declare field_docs"));
-            assert!(
-                field_docs.is_mapping(),
-                "U8 pilot topic `{topic}` field_docs must be a mapping"
-            );
-            assert!(
-                !field_docs.as_mapping().unwrap().is_empty(),
-                "U8 pilot topic `{topic}` field_docs must not be empty"
             );
         }
     }
@@ -2172,7 +2064,6 @@ mod tests {
         // surviving supervisor-enabled builtin.
         let zsh_values: std::collections::BTreeSet<String> = [
             "builtin:ce-executor-pipeline",
-            "builtin:ce-executor-pipeline-loop",
             "builtin:debug",
             "builtin:autoresearch",
             "builtin:merge-batch",
@@ -2459,12 +2350,12 @@ mod tests {
         // lint counterpart) but is its own const so the two tests can
         // diverge if needed.
         //
-        // Currently empty: `ce-executor-pipeline` and
-        // `ce-executor-pipeline-loop` used to trip three WAC findings
-        // each on the chain head whose root cause was the static-lint
-        // BFS bound (EGRESS_MAX_HOPS). The 2026-07-08 bump of
-        // EGRESS_MAX_HOPS from 10 to 12 let both presets pass strict
-        // with zero findings, so these exemptions are no longer
+        // Currently empty: `ce-executor-pipeline` and the retired
+        // `ce-executor-pipeline-loop` (removed 2026-10-30) used to trip
+        // three WAC findings each on the chain head whose root cause was
+        // the static-lint BFS bound (EGRESS_MAX_HOPS). The 2026-07-08
+        // bump of EGRESS_MAX_HOPS from 10 to 12 let both presets pass
+        // strict with zero findings, so these exemptions are no longer
         // needed.
         const AUTHORING_EXEMPT_FINDINGS: &[(&str, &str)] = &[];
 
@@ -2619,8 +2510,9 @@ mod tests {
         // merge.handled as terminal, and the redundant cleanup.done /
         // merge.complete publishes have been removed).
         //
-        // `ce-executor-pipeline` and `ce-executor-pipeline-loop` used to
-        // be exempt for three WAC findings each
+        // `ce-executor-pipeline` and the retired
+        // `ce-executor-pipeline-loop` (removed 2026-10-30) used to be
+        // exempt for three WAC findings each
         // (`activation_egress_missing`, `handoff_pairing_broken`,
         // `re_emit_trap`) caused by the static-lint BFS bound
         // (EGRESS_MAX_HOPS). The 2026-07-08 bump of EGRESS_MAX_HOPS
@@ -3480,29 +3372,16 @@ mod tests {
 
     #[test]
     fn test_ce_reporter_inputs_are_required_and_documented() {
-        for (name, topics) in [
-            (
-                "ce-executor-pipeline",
-                &[
-                    "plan.blocked",
-                    "work.failed",
-                    "stabilization.blocked",
-                    "review.artifact.blocked",
-                    "align.done",
-                ][..],
-            ),
-            (
-                "ce-executor-pipeline-loop",
-                &[
-                    "plan.blocked",
-                    "work.failed",
-                    "stabilization.blocked",
-                    "review.artifact.blocked",
-                    "review.loop.blocked",
-                    "align.done",
-                ][..],
-            ),
-        ] {
+        for (name, topics) in [(
+            "ce-executor-pipeline",
+            &[
+                "plan.blocked",
+                "work.failed",
+                "stabilization.blocked",
+                "review.artifact.blocked",
+                "align.done",
+            ][..],
+        )] {
             let preset_content = get_preset(name)
                 .unwrap_or_else(|| panic!("preset {name} embedded"))
                 .content;
@@ -3545,28 +3424,9 @@ mod tests {
 
     #[test]
     fn test_ce_builtin_stabilization_schemas_declared_inline() {
-        // 原始 loop preset 必须 inline 声明 stabilization.done / blocked，
-        // 以保证 path-based authoring view 也能独立通过 strict check。
-        let loop_content = get_preset("ce-executor-pipeline-loop")
-            .expect("ce-executor-pipeline-loop embedded")
-            .content;
-        let loop_config = RalphConfig::parse_yaml(loop_content).expect("loop preset parse");
-
-        for topic in ["stabilization.done", "stabilization.blocked"] {
-            let (required, missing) = collect_required_field_docs(&loop_config, topic);
-            assert!(
-                !required.is_empty(),
-                "loop preset must declare inline schema for '{topic}'"
-            );
-            assert!(
-                missing.is_empty(),
-                "loop preset '{topic}' is missing full field_docs for: {missing:?}"
-            );
-        }
-
-        // Linear preset: the inline authoring view must also declare
+        // Linear preset: the inline authoring view must declare
         // stabilization.* inline schemas (it inherits the same gate
-        // because business_topics carries them in both presets).
+        // because business_topics carries them).
         let linear_content = get_preset("ce-executor-pipeline")
             .expect("ce-executor-pipeline embedded")
             .content;
@@ -3604,7 +3464,7 @@ mod tests {
             ("stabilization.blocked", "test-stabilizer"),
         ];
 
-        for preset_name in ["ce-executor-pipeline", "ce-executor-pipeline-loop"] {
+        for preset_name in ["ce-executor-pipeline"] {
             let preset_content = get_preset(preset_name)
                 .unwrap_or_else(|| panic!("preset {preset_name} embedded"))
                 .content;

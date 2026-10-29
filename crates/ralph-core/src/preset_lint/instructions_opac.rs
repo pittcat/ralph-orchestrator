@@ -54,8 +54,9 @@ pub fn check_instructions_opac(raw_yaml: &str) -> Vec<LintFinding> {
     check_instructions_opac_with_preset(raw_yaml, "")
 }
 
-/// Preset-aware variant: pass the resolved preset name (e.g.
-/// `ce-executor-pipeline-loop`) so the U7 emit-feedback rule
+/// Preset-aware variant: pass the resolved preset name (e.g. a
+/// file preset named `ce-executor-pipeline-loop`) so the U7
+/// emit-feedback rule
 /// can gate on `U7_EMIT_FEEDBACK_LINT_PRESET_WHITELIST`.
 /// When the name is empty, the rule stays silent (matches
 /// the pre-U7 behaviour).
@@ -442,7 +443,9 @@ fn mentions_payload_construction(instructions: &str) -> bool {
 /// 2026-07-09-001 plan (U7): the rule is intentionally
 /// scoped to a short whitelist of "high-risk" preset names.
 /// The lint's first iteration only enforces on presets that
-/// the U8 pilot covers (`ce-executor-pipeline-loop`). Adding
+/// the U8 pilot covers (`ce-executor-pipeline-loop` — that
+/// builtin was retired 2026-10-30; the name stays in the list
+/// so a same-named file preset remains a valid opt-in). Adding
 /// a new preset to the whitelist is the documented way to
 /// widen the rule; adding a new finding to a preset that is
 /// not on the list is a no-op. This matches the plan's

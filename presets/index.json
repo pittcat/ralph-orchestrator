@@ -10,11 +10,6 @@
     "category": "development"
   },
   {
-    "name": "ce-executor-pipeline-loop",
-    "description": "Review-loop CE executor: pipeline execution with serial six-dimension review, convergence-gated fix/re-review rounds, and max 6 review rounds",
-    "category": "development"
-  },
-  {
     "name": "debug",
     "description": "Bug investigation, root-cause analysis, and adversarial fix verification",
     "category": "workflow"

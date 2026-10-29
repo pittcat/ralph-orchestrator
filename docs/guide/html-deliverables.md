@@ -64,7 +64,6 @@ original stop flow, never claimed as done.
 |---|---|---|---|---|---|
 | `autoresearch` | `LOOP_COMPLETE` | `report_path` | `autoresearch.html` | `strategist` (primary) / `evaluator` (stuck fallback) — emitter writes the final HTML from the session document `autoresearch.md`, which stays a working Markdown file | report |
 | `ce-executor-pipeline` | `report.done` → `LOOP_COMPLETE` | `report_path` | `.ralph/review/<plan>/report.html` (also `precheck-exhausted-<ts>/report.html`) | `reporter` | report |
-| `ce-executor-pipeline-loop` | `report.done` → `LOOP_COMPLETE` | `report_path` | `.ralph/review/<plan>/report.html` | `reporter` | report |
 | `debug` | `DEBUG_COMPLETE` | `report_path` | prompt-specified path, default `.eval-sandbox/debug/counter.html` | `fixer` writes the note; `investigator` emits | report |
 | `hatless-baseline` | — | — | **Not applicable** — single-hat baseline with no file deliverable and no path field | — | — |
 | `implementation-review` | `LOOP_COMPLETE` | `artifact_path` | success/`residual_only`/`fixes_required`: `.ralph/review/<plan>/fix-plan.html`; blocked: `scope-blocked.html` / `dispatch-blocked.html` / `review-blocked.html` / `wave-blocked.html` | `fix-planner` (fix plan), `scope-preparer`, `review-dispatcher`, `review-synthesizer`, `finalizer` | fix plan → plan profile; blocked artifacts → report profile |

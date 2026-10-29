@@ -78,49 +78,6 @@ event_loop:
 
 参考：`presets/en/ce-executor-pipeline.yml`。
 
-## ce-executor-pipeline-loop（15 hat，isolated；单链环形 review/fix；2026-07-08）
-
-`builtin:ce-executor-pipeline-loop` 是 `ce-executor-pipeline` 的环形版本。
-它不是旁路广播：每个业务 topic 仍然只有一个显式消费者。
-
-关键拓扑：
-
-```
-work.done / fix.done
-  → review-reentry（review.round.ready）
-  → 6× 串行 dimension hats
-  → review-synthesizer（review.synthesized）
-  → review-gate（三选一）
-      ├─ review.accepted → alignment → reporter → LOOP_COMPLETE
-      ├─ fix.requested → fix-planner → review.complete → fixer → fix.done → review-reentry
-      └─ review.loop.blocked → reporter → LOOP_COMPLETE
-```
-
-起草/评审检查点：
-
-- `review-gate` 必须是互斥三出口：`review.accepted`、`fix.requested`、
-  `review.loop.blocked` 同一 activation 只能发一个。
-- `fix.requested` 只给 `fix-planner`，`review.complete` 只给 `fixer`；
-  不要让两个 downstream hat 消费同一个 fix topic。
-- `work.done` 和 `fix.done` 都只给 `review-reentry`，由它统一生成
-  `review.round.ready`。
-- P0/P1 先判断是否为当前 loop 的主要矛盾；严重程度本身不自动等于
-  阻塞项。主要矛盾包括 round-1 P0/P1、上一轮 fix-plan 要求修但仍未
-  关闭的问题、以及当前 fix diff 明确引入的新 P0 回归。
-- 后续轮次新发现但不是当前修复导致的 P0/P1 进入 report-only residual，
-  不应继续扩大 fix-plan；第 6 轮仍有主要矛盾时只走
-  `review.loop.blocked`。
-- `fix.done.next_review_plan` 是下一轮 review 的输入；`review-reentry`
-  不应重新推断修复意图，也不应读取内部 ledger。
-- `fix.done.next_review_plan` 必须是非空 JSON object，不能是 `null`；
-  至少包含 `focus_areas`、`fixed_findings`、`verification_performed`、
-  `residual_risks`、`diff_ranges` 五个数组字段，即使数组为空也要发出。
-- 分裂维度 reviewer（`dim:*`）如果声明 `disallowed_tools: ["Edit"]`
-  或 `["Write"]`，就按只读 reviewer 处理：不能把 `docs/plans/` 放进
-  `allowed_write_paths`，也不能在 instructions 中要求直接改原计划文件。
-
-参考：`presets/en/ce-executor-pipeline-loop.yml`。
-
 ## review/fix convergence pattern（通用：单链环形 review/fix）
 
 适用范围：reviewer → gate 三选一 → 接受 / 修复 / 阻塞；同一业务 topic
@@ -355,9 +312,7 @@ Reviewer 先按 topology capability 独立重建关键位置，再对照 notes �
 
 1. **Entry（trigger 后立刻）**
    - `expected_head_sha` 来自 trigger payload：普通 pipeline dim 用
-     `executor_head_sha`；普通 pipeline alignment 用 `fix.done.head_sha`；
-     loop dim 用 `round_base_sha`；loop alignment 在有 fix 轮时用
-     最新 `fix.done.head_sha`，首轮无 fix 时用 `executor_head_sha`
+     `executor_head_sha`；普通 pipeline alignment 用 `fix.done.head_sha`
    - `actual_start_head_sha = git rev-parse HEAD`，必须等于 expected
    - Porcelain filter（排除 `.ralph/`）必须为空
    - Save start evidence 到
