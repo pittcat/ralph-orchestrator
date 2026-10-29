@@ -322,6 +322,96 @@ fn test_worktree_path_nonexistent_dir_fails_cleanly() {
     );
 }
 
+/// Regression (2026-10-29): a `ralph run --worktree-path <wt>` child — the
+/// subprocess-TUI RPC child spawned with cwd inside the worktree — must
+/// register the MAIN repo in the monitor dropbox, not the worktree.
+/// Before this fix the child resolved `config.core.workspace_root` from
+/// its cwd (the worktree), wrote a second projects.d file for the
+/// worktree path, and `ralph web --monitor` then collected the same
+/// running loop twice — two `running` rows under two project names.
+#[test]
+fn test_worktree_path_child_registers_main_repo_not_worktree() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let main_repo = temp_dir.path();
+    setup_git_repo(main_repo);
+    write_minimal_config(main_repo);
+
+    // Create a real linked worktree at the canonical worktree root,
+    // exactly like the parent does before spawning the child.
+    let wt_root = default_worktree_root(main_repo);
+    fs::create_dir_all(&wt_root).expect("worktree root");
+    let wt_path = wt_root.join("loop-reg-anchor");
+    let add = Command::new("git")
+        .args(["worktree", "add", "-b", "ralph/loop-reg-anchor"])
+        .arg(&wt_path)
+        .current_dir(main_repo)
+        .output()
+        .expect("git worktree add");
+    assert!(
+        add.status.success(),
+        "git worktree add failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let registry_dir = TempDir::new().expect("registry dir");
+
+    // Simulate the RPC child: cwd inside the worktree, --worktree-path
+    // pointing at it, --dry-run so no loop actually runs (registration
+    // is written before the dry-run early-exit).
+    let output = common::ralph_bin()
+        .args([
+            "run",
+            "--rpc",
+            "--worktree-path",
+            wt_path.to_str().unwrap(),
+            "--dry-run",
+            "--skip-preflight",
+            "--prompt",
+            "noop",
+            "--completion-promise",
+            "done",
+            "--max-iterations",
+            "1",
+            "--backend",
+            "claude",
+        ])
+        .current_dir(&wt_path)
+        .env("RALPH_MONITOR_AUTOREGISTER", "1")
+        .env("RALPH_MONITOR_REGISTRY_DIR", registry_dir.path())
+        .output()
+        .expect("execute ralph");
+
+    assert!(
+        output.status.success(),
+        "child run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let entries: Vec<_> = fs::read_dir(registry_dir.path())
+        .expect("registry dir readable")
+        .collect::<Result<_, _>>()
+        .expect("dir entries");
+    assert_eq!(
+        entries.len(),
+        1,
+        "exactly one registration file must be written"
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(entries[0].path()).expect("read file"))
+            .expect("registration json");
+    let main_canonical = main_repo
+        .canonicalize()
+        .expect("canonicalize main repo")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        json["path"], main_canonical,
+        "worktree-path child must register the MAIN repo, got {}",
+        json["path"]
+    );
+}
+
 /// U2 edge case: passing --worktree and --worktree-path together. The plan
 /// (KTD-5) says these should be mutually exclusive or one should take
 /// priority. This test documents the current behavior: --worktree-path

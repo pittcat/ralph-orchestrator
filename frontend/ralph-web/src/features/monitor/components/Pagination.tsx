@@ -3,6 +3,13 @@
  * fixed page size.
  */
 
+import { ChevronLeft, ChevronRight } from "lucide-react";
+
+const BTN_CLS =
+  "inline-flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-card/50 " +
+  "text-muted-foreground transition-colors hover:text-foreground hover:border-foreground/25 " +
+  "disabled:opacity-40 disabled:pointer-events-none";
+
 export function Pagination({
   page,
   total,
@@ -24,22 +31,24 @@ export function Pagination({
     >
       <button
         type="button"
+        aria-label="Previous page"
         disabled={page <= 1}
         onClick={() => onChange(page - 1)}
-        className="rounded-md border border-border px-2 py-1 disabled:opacity-40"
+        className={BTN_CLS}
       >
-        Prev
+        <ChevronLeft className="h-4 w-4" />
       </button>
-      <span className="text-muted-foreground">
+      <span className="text-xs text-muted-foreground tabular-nums">
         {page} / {pages}
       </span>
       <button
         type="button"
+        aria-label="Next page"
         disabled={page >= pages}
         onClick={() => onChange(page + 1)}
-        className="rounded-md border border-border px-2 py-1 disabled:opacity-40"
+        className={BTN_CLS}
       >
-        Next
+        <ChevronRight className="h-4 w-4" />
       </button>
     </nav>
   );

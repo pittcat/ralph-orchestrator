@@ -62,7 +62,7 @@ describe("DeleteRunButton", () => {
   it("opens the confirm dialog and issues DELETE on confirm", async () => {
     const user = userEvent.setup();
     const onDeleted = vi.fn();
-    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) => {
       if (init?.method === "DELETE") {
         return Promise.resolve(new Response(null, { status: 204 }));
       }

@@ -343,6 +343,42 @@ pub fn list_worktrees(repo_root: impl AsRef<Path>) -> Result<Vec<Worktree>, Work
     parse_worktree_list(&stdout)
 }
 
+/// Resolve the main-repository root for a path inside a git working tree.
+///
+/// `git rev-parse --git-common-dir` returns the shared `.git` directory
+/// of the main worktree for both primary checkouts and linked
+/// worktrees, so its parent directory is always the main-repo working
+/// root — regardless of where the linked worktree itself lives on disk.
+///
+/// Callers that cannot tell a main checkout from a linked worktree
+/// (e.g. a `--worktree-path` child whose cwd is the worktree) use this
+/// to anchor repo-level state — `.ralph/loops.json`, the merge queue,
+/// monitor project registration — at the main repo instead of the
+/// worktree.
+///
+/// # Errors
+///
+/// Returns `WorktreeError::Git` when `path` is not inside a git
+/// repository or the common dir has no parent.
+pub fn main_repo_root(path: impl AsRef<Path>) -> Result<PathBuf, WorktreeError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(path.as_ref())
+        .output()?;
+
+    if !output.status.success() {
+        return Err(WorktreeError::Git(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+
+    let git_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Path::new(&git_dir)
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| WorktreeError::Git(format!("git common dir has no parent: {git_dir}")))
+}
+
 /// Parse the porcelain output of `git worktree list`.
 fn parse_worktree_list(output: &str) -> Result<Vec<Worktree>, WorktreeError> {
     let mut worktrees = Vec::new();
@@ -1423,6 +1459,36 @@ mod tests {
 
         let worktrees = list_worktrees(temp_dir.path()).unwrap();
         assert_eq!(worktrees.len(), 2);
+    }
+
+    #[test]
+    fn test_main_repo_root_resolves_linked_worktree() {
+        let temp_dir = TempDir::new().unwrap();
+        init_git_repo(temp_dir.path());
+
+        let config = WorktreeConfig::default();
+        let wt = create_worktree(temp_dir.path(), "loop-mrr", &config).unwrap();
+
+        // From a linked worktree the main-repo root is the creating repo —
+        // not the worktree itself — no matter where the worktree lives.
+        let resolved = main_repo_root(&wt.path).unwrap();
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            temp_dir.path().canonicalize().unwrap()
+        );
+
+        // From the main checkout itself it resolves to the same root.
+        let resolved_main = main_repo_root(temp_dir.path()).unwrap();
+        assert_eq!(
+            resolved_main.canonicalize().unwrap(),
+            temp_dir.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_main_repo_root_rejects_non_git_path() {
+        let temp_dir = TempDir::new().unwrap();
+        assert!(main_repo_root(temp_dir.path()).is_err());
     }
 
     #[test]

@@ -877,17 +877,32 @@ pub async fn run_command(
     // Resolving the workspace root from `RALPH_WORKSPACE_ROOT` keeps profile
     // lookups anchored at the main repo even when this process was spawned
     // from a `--worktree` checkout (where `current_dir()` would point inside
-    // the worktree).
+    // the worktree). A `--worktree-path` child (spawned by
+    // `run_subprocess_tui` with cwd inside the worktree) gets the same
+    // anchor from the worktree's git common dir, since
+    // `load_config_for_preflight` resolves `config.core.workspace_root`
+    // from cwd — the worktree itself. `worktree_main_repo` also supplies
+    // `LoopContext::worktree`'s repo_root in the `--worktree-path` branch
+    // below. `None` for every non-child invocation.
+    let worktree_main_repo = args
+        .worktree_path
+        .as_deref()
+        .and_then(|wt| ralph_core::worktree::main_repo_root(wt).ok());
+
     let profile_workspace_root = std::env::var("RALPH_WORKSPACE_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| config.core.workspace_root.clone());
+        .ok()
+        .or_else(|| worktree_main_repo.clone())
+        .unwrap_or_else(|| config.core.workspace_root.clone());
     apply_active_profiles(&mut config, &args, hats_source, &profile_workspace_root)?;
 
     // Best-effort monitor auto-registration: drop a marker into
     // `~/.ralph/projects.d` so `ralph web --monitor` adopts this project
     // without a manual "Add project" step. Anchored at the main-repo root
-    // (RALPH_WORKSPACE_ROOT) so worktree child runs register the main
-    // project, not the worktree. Never fails the run.
+    // so a worktree child registers the main project, not the worktree —
+    // otherwise the monitor imports the worktree as a second project and
+    // collects the same run twice, showing duplicate running rows under
+    // two project names. Never fails the run.
     ralph_core::monitor_registration::register_project(&profile_workspace_root);
 
     // Handle --continue mode: check scratchpad exists before proceeding
@@ -1519,10 +1534,17 @@ pub async fn run_command(
             worktree_path.display(),
             loop_id
         );
+        // repo_root must be the main repository, not the worktree:
+        // `workspace_root` here resolves to the worktree itself (cwd-
+        // anchored), and repo-level state — loops.json, the merge queue,
+        // memory symlink targets — lives in the main repo. Resolved once
+        // near the top of run_command via `main_repo_root`.
         let context = LoopContext::worktree(
             loop_id.clone(),
             worktree_path.clone(),
-            workspace_root.clone(),
+            worktree_main_repo
+                .clone()
+                .unwrap_or_else(|| workspace_root.clone()),
         );
 
         // U2 (plan 2026-08-03-004): in subprocess-TUI mode the reuse

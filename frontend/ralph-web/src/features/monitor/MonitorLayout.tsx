@@ -1,11 +1,10 @@
 /**
- * Monitor page shell — topbar (title, ⌘K hint, theme toggle) +
- * content slot. Children fill the page body (U4 renders the empty
- * overview state; U5 replaces it with the runs table).
+ * Monitor page shell — sticky topbar (brand, nav, ⌘K hint, theme
+ * toggle) + centered content slot.
  */
 
 import type { ReactNode } from "react";
-import { Moon, Sun, Inbox, Activity } from "lucide-react";
+import { Moon, Sun, Inbox, Activity, Radar } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useThemeStore } from "./theme";
 import { CommandPalette } from "./CommandPalette";
@@ -26,6 +25,16 @@ const STATUS_CLASS = {
   offline: "border-red-500/40 text-red-600",
 } as const;
 
+const DOT_CLASS = {
+  connecting: "bg-amber-500",
+  connected: "bg-emerald-500",
+  reconnecting: "bg-amber-500",
+  offline: "bg-red-500",
+} as const;
+
+const NAV_PILL_CLS =
+  "inline-flex items-center gap-1.5 rounded-full border border-border bg-card/50 px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground";
+
 export function ConnectionBadge() {
   const conn = useMonitorConnection();
   return (
@@ -35,8 +44,15 @@ export function ConnectionBadge() {
       title={
         conn.lastValidAt ? `last valid ${conn.lastValidAt}` : conn.status
       }
-      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${STATUS_CLASS[conn.status]}`}
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium ${STATUS_CLASS[conn.status]}`}
     >
+      <span
+        className={`h-1.5 w-1.5 rounded-full ${DOT_CLASS[conn.status]} ${
+          conn.status === "connecting" || conn.status === "reconnecting"
+            ? "animate-pulse"
+            : ""
+        }`}
+      />
       {STATUS_LABEL[conn.status]}
     </span>
   );
@@ -49,7 +65,7 @@ export function InboxLink() {
     <Link
       to="/monitor/inbox"
       data-testid="inbox-link"
-      className="relative inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+      className={`relative ${NAV_PILL_CLS}`}
     >
       <Inbox className="h-3.5 w-3.5" />
       Inbox
@@ -70,34 +86,43 @@ export function MonitorLayout({ children }: { children: ReactNode }) {
   const toggleTheme = useThemeStore((s) => s.toggleTheme);
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="flex items-center gap-3 border-b border-border pb-3">
-        <h1 className="text-xl font-semibold tracking-tight">Monitor</h1>
-        <div className="ml-auto flex items-center gap-2">
-          <Link
-            to="/monitor/operations"
-            data-testid="operations-link"
-            className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-xs font-medium text-muted-foreground hover:text-foreground"
-          >
-            <Activity className="h-3.5 w-3.5" />
-            操作
-          </Link>
-          <InboxLink />
-          <ConnectionBadge />
-          <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
-            ⌘K
-          </kbd>
-          <button
-            type="button"
-            onClick={toggleTheme}
-            aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-            className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-          >
-            {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-          </button>
+    <div className="flex min-h-dvh flex-col">
+      <header className="sticky top-0 z-30 border-b border-border/60 bg-background/80 backdrop-blur-md">
+        <div className="mx-auto flex h-14 w-full max-w-[1400px] items-center gap-3 px-4 sm:px-6">
+          <div className="flex items-center gap-2.5">
+            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/15 ring-1 ring-primary/30">
+              <Radar className="h-4 w-4 text-primary" />
+            </span>
+            <h1 className="text-lg font-semibold tracking-tight">Monitor</h1>
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            <Link
+              to="/monitor/operations"
+              data-testid="operations-link"
+              className={NAV_PILL_CLS}
+            >
+              <Activity className="h-3.5 w-3.5" />
+              操作
+            </Link>
+            <InboxLink />
+            <ConnectionBadge />
+            <kbd className="hidden rounded-md border border-border bg-muted/60 px-1.5 py-0.5 text-xs text-muted-foreground sm:inline">
+              ⌘K
+            </kbd>
+            <button
+              type="button"
+              onClick={toggleTheme}
+              aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+              className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            >
+              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </button>
+          </div>
         </div>
       </header>
-      <div className="flex-1 overflow-auto pt-4">{children}</div>
+      <main className="mx-auto w-full max-w-[1400px] flex-1 px-4 py-6 sm:px-6">
+        {children}
+      </main>
       <CommandPalette />
     </div>
   );

@@ -21,6 +21,7 @@ import {
   apiGetRun,
   apiGetRunHealth,
   apiGetRuns,
+  apiGetSnapshot,
   type EventsQuery,
   type MonitorEvent,
   type NotificationsQuery,
@@ -52,6 +53,19 @@ export function useMonitorRuns(query: RunsQuery = {}) {
     // otherwise a new query key flashes the loading skeleton and the
     // filter bar unmounts mid-keystroke.
     placeholderData: keepPreviousData,
+  });
+}
+
+/**
+ * Full snapshot read — the connection stream seeds this same key on
+ * (re)join, so overview stats stay stream-fresh; the query adds a
+ * fetch path for when the provider isn't mounted.
+ */
+export function useMonitorSnapshot() {
+  return useQuery({
+    queryKey: ["monitor", "snapshot"],
+    queryFn: apiGetSnapshot,
+    refetchInterval: MONITOR_REFETCH_MS,
   });
 }
 
