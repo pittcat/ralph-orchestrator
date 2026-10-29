@@ -18,6 +18,7 @@ test('migrations are idempotent on an in-memory db', () => {
       '0003_events',
       '0004_activity',
       '0005_monitor_events',
+      '0006_notifications',
     ],
   );
   db.close();

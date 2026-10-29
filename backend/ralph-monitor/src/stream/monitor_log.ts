@@ -19,7 +19,9 @@ export type MonitorEventKind =
   | 'run.events'
   | 'run.health'
   | 'project.health'
-  | 'project.updated';
+  | 'project.updated'
+  | 'notification.created'
+  | 'notification.updated';
 
 export interface MonitorEventRow {
   seq: number;

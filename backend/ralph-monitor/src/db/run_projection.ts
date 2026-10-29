@@ -9,6 +9,15 @@ import {
 import { ingestRunEvents } from '../events/ingest.js';
 import { ingestRunActivity } from '../activity/ingest.js';
 import { appendEvent } from '../stream/monitor_log.js';
+import {
+  loadRules,
+  matchSessionPending,
+  matchTerminal,
+  sessionIsPending,
+  type Intent,
+} from '../notify/rules.js';
+import { applyIntents, upsertPendingInteraction } from '../notify/outbox.js';
+import type { SessionObservation } from '../notify/sessions.js';
 
 /**
  * Runs projection layer (plan U3 §5/§15).
@@ -77,8 +86,16 @@ export function ingestSnapshot(
   snapshot: RunSnapshot,
   rawSha256: string,
   observedAt: string,
+  extras: { sessions?: SessionObservation[]; machineId?: string } = {},
 ): void {
   db.transaction(() => {
+    // Plan4-U1: notification intents accumulate through the round and
+    // apply last — every write still lands in this one transaction.
+    const intents: Intent[] = [];
+    const rules = loadRules(db);
+    const globalRunId = (runId: string) =>
+      `${extras.machineId ?? 'm'}:${projectId}:${runId}`;
+
     const existing = db.prepare(
       `SELECT state, terminal, preset, plan_path, prompt_preview,
               started_at, last_event_at
@@ -193,6 +210,22 @@ export function ingestSnapshot(
         obs.activity_file ?? null,
       );
 
+      // Plan4-U1: a run crossing into terminal state is notification
+      // evidence — matched once per (rule, occurrence=terminal.at).
+      if (obs.terminal && !(prior && prior.terminal)) {
+        intents.push(
+          ...matchTerminal({
+            rules,
+            projectId,
+            runGid: globalRunId(obs.run_id),
+            runId: obs.run_id,
+            reason: obs.terminal.reason,
+            at: obs.terminal.at,
+            preset: obs.preset,
+          }),
+        );
+      }
+
       // Plan2-U2: events ingest in the same transaction — a run row
       // and its event ledger advance atomically (plan E12). Workspace
       // resolution prefers `workspace` over `cwd` (manifest runs ship
@@ -289,6 +322,70 @@ export function ingestSnapshot(
          WHERE project_id = ? AND run_id = ?`,
       ).run(projectId, obs.run_id, projectId, obs.run_id);
     }
+
+    // Plan4-U1: planning-session diff — new waiting evidence becomes
+    // a pending interaction + notification; leaving the pending
+    // status (or the file disappearing) resolves the open row.
+    if (extras.sessions) {
+      const openRows = db
+        .prepare(
+          `SELECT id, session_id, occurrence FROM pending_interactions
+           WHERE project_id = ? AND status = 'pending'`,
+        )
+        .all(projectId) as { id: string; session_id: string; occurrence: string | null }[];
+      const openBySession = new Map(openRows.map((r) => [r.session_id, r]));
+
+      for (const s of extras.sessions) {
+        const piId = `sess:${projectId}:${s.sessionId}`;
+        const open = openBySession.get(s.sessionId);
+        if (sessionIsPending(s.status)) {
+          const fresh = !open || open.occurrence !== s.updatedAt;
+          if (fresh) {
+            upsertPendingInteraction(db, {
+              id: piId,
+              projectId,
+              sessionId: s.sessionId,
+              prompt: s.prompt,
+              occurrence: s.updatedAt,
+              at: observedAt,
+            });
+            intents.push(
+              ...matchSessionPending({
+                rules,
+                projectId,
+                sessionId: s.sessionId,
+                prompt: s.prompt,
+                status: s.status,
+                updatedAt: s.updatedAt,
+              }),
+            );
+          }
+          openBySession.delete(s.sessionId);
+        } else if (open) {
+          intents.push({
+            type: 'resolve_interaction',
+            projectId,
+            sessionId: s.sessionId,
+            pendingInteractionId: open.id,
+            reason: `status:${s.status}`,
+          });
+          openBySession.delete(s.sessionId);
+        }
+      }
+      // Sessions whose files vanished while still pending resolve
+      // conservatively (§15) — a deleted session is answered-or-gone.
+      for (const leftover of openBySession.values()) {
+        intents.push({
+          type: 'resolve_interaction',
+          projectId,
+          sessionId: leftover.session_id,
+          pendingInteractionId: leftover.id,
+          reason: 'session_file_removed',
+        });
+      }
+    }
+
+    applyIntents(db, intents, observedAt);
 
     // A previously failing collector recovering this round is itself
     // a project-health transition worth streaming (Plan3-U3).

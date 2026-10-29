@@ -82,10 +82,14 @@ describe('stream + snapshot API', () => {
     // Same snapshot again → no new stream rows (idempotent diff).
     ingest([obs(ws)]);
     assert.equal(readEvents(app.db, 0).length, 2);
-    // Changed state → run.updated.
+    // Changed state → run.updated; terminal transition also notifies
+    // (Plan4-U1) — notification.created lands after run.updated.
     ingest([obs(ws, 'run1', { state: 'exited', terminal: { reason: 'completed', at: NOW } })]);
     const after = readEvents(app.db, 0);
-    assert.equal(after[after.length - 1].kind, 'run.updated');
+    assert.deepEqual(
+      after.slice(-2).map((r) => r.kind),
+      ['run.updated', 'notification.created'],
+    );
   });
 
   it('GET /stream replays from cursor then keeps the socket open', async () => {

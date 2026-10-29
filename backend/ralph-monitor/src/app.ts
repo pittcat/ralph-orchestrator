@@ -11,6 +11,7 @@ import { registerEventRoutes } from './routes/events.js';
 import { registerArtifactRoutes } from './routes/artifacts.js';
 import { registerStreamRoutes } from './routes/stream.js';
 import { registerSnapshotRoutes } from './routes/snapshot.js';
+import { registerNotificationRoutes } from './routes/notifications.js';
 
 export interface BuildAppOptions {
   /** SQLite path; `:memory:` is honored for unit tests. */
@@ -73,6 +74,7 @@ export function buildApp(options: BuildAppOptions): MonitorApp {
   registerArtifactRoutes(app, db, machineId);
   registerStreamRoutes(app, db, options.sse);
   registerSnapshotRoutes(app, db, machineId);
+  registerNotificationRoutes(app, db);
 
   app.get('/api/monitor/v1/health', async () => ({
     ok: true,

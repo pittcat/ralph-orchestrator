@@ -6,6 +6,7 @@ import {
 } from '../db/run_projection.js';
 import { inspectRun, type InspectResult } from '../ralph/client.js';
 import { parseSnapshot } from '../ralph/snapshot.js';
+import { scanPlanningSessions } from '../notify/sessions.js';
 
 /**
  * Per-project serial collector (plan D7): one `inspect run` child at
@@ -68,12 +69,16 @@ export async function collectOnce(
         failed += 1;
         continue;
       }
+      // Plan4-U1: planning-session files join the same ingest — the
+      // pending-interaction diff lands in the snapshot transaction.
+      const sessions = scanPlanningSessions(project.canonical_path);
       ingestSnapshot(
         db,
         project.id,
         parsed.snapshot,
         snapshotSha256(result.raw),
         now().toISOString(),
+        { sessions: sessions.sessions },
       );
       ok += 1;
     } catch (err) {
