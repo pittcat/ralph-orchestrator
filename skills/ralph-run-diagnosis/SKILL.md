@@ -26,6 +26,7 @@ argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file] [--incl
 **产物隔离 HARD RULE**：`docs/report/` 只允许写入最终 HTML 报告；诊断过程中的 JSON、工作笔记、sub-agent 输出、stderr、临时清单和其它中间产物，必须写入由 `mktemp -d` 创建的临时诊断目录（或用户明确指定的非 git 工作区），不得写入 target branch、`docs/report/`、`docs/plans/`、`docs/solutions/` 或 `docs/brainstorms/`。开始前记录 `DIAG_WORKDIR`，结束时清理；若清理失败，必须在最终回复中报告残留路径。
 
 > **变更日志**：
+> - 2026-10-29：新增 ralph-devtools `report` 面可选加速器说明（Phase 0 附注）；`report build/timeline/compare` 聚合 `ralph diagnose` + `ralph events`，事实来源与证据栏写法不变。
 > - 2026-10-29：plan 2026-10-29-0104 — 新增 §0.3 Run-Analysis 报告契约（`ralph diagnose --performance` / `--format html`）；报告须**视觉打磨**（内联 CSS + 安全 JS 交互），离线零外部资源；数字由固定程序计算，skill 文字分析必须单列、不得改写事实。契约见 [run-analysis-report.md](references/run-analysis-report.md)。
 > - 2026-08-26：U10 plan — `ralph diagnose --causal` 作为归因事实来源；DT7 机检 + `confidence > 85` 门禁；§0/§3/§5 改消费；移除 60/70 旧 entry-gate；新增 §4.3 Causal Attribution + frontmatter `causal_*` 字段。
 > - 2026-07-25：新增 §0.1 历史检索开关 + SSOT 常量 + §0.x 编号扩展约定。若主项目文档（CLAUDE.md / AGENTS.md / operator docs）需说明此开关，在此 `变更日志` 行追加即可（不触发 CLAUDE.md/AGENTS.md 强制同步——本 skill 不属于 `crates/ralph-core/data/`）。
@@ -203,6 +204,22 @@ ralph diagnose --causal --session latest --diagnostics-root "$RUN/.ralph/diagnos
 若命令退出码非零（典型：ledger 视图传 `--causal`、diagnostics 目录不存在、session latest 解析失败），把 stderr 暂存到 `$DIAG_WORKDIR/causal.stderr`，并将摘要写进报告 §0 的「环境异常」段，按 §0.2 legacy 兜底继续后续步骤。**禁止** 把 `ralph diagnose --causal` 退出码当 `causal_status` 判定（causal 状态以 `$CAUSAL_RESULT` 的 `causal_status` 字段为准）。
 
 若命令退出码非零（典型：diagnostics 目录不存在、session latest 解析失败），把 stderr 暂存到 `$DIAG_WORKDIR/diagnose.stderr`，并将摘要写进报告 §0 的「环境异常」段，按 §0.2 legacy 兜底继续后续步骤。**禁止** 把 `ralph diagnose` 退出码当 bundle 状态判定（bundle 状态以 `$STRUCTURED_RESULT` 的 `bundle.status` 字段为准）。
+
+### Phase 0 可选加速器：ralph-devtools `report` 面
+
+本仓 `backend/ralph-devtools`（dev 模式 `npx tsx backend/ralph-devtools/src/cli.ts`，或 `npm run build:devtools` 后 `ralph-devtools` bin）把 bundle-first / causal / events 聚合成单文档；全部 argv spawn `ralph` 二进制（`--ralph-bin <path>` 可指定，`--cwd <dir>` 可切工作目录）：
+
+```bash
+ralph-devtools report build --session latest \
+    --diagnostics-root "$RUN/.ralph/diagnostics" --legacy --causal \
+    --format json -o "$DIAG_WORKDIR/devtools-report.json"
+ralph-devtools report timeline --events-source main --file "$RUN/.ralph/events.jsonl" --last 200
+ralph-devtools report compare --session-a <A> --session-b <B>   # 或 compare <a.json> <b.json>
+```
+
+- `report build` = `ralph diagnose` + `ralph events` 时间线 + 失败归类 + 重复聚合；`-o` 落盘到 `$DIAG_WORKDIR`（不越产物隔离 HARD RULE）。
+- 失败归类与跨 run 对比（new / resolved / escalated / improved）标注为 **advisory**；事实来源仍只认 `ralph diagnose` / `ralph events` 原始输出，报告证据栏写法不变。
+- 外仓 / 无 Node 依赖 / devtools 不在 PATH 时回退上述原生 `ralph diagnose` / `ralph events` 路径，不降级证据。
 
 ### Phase 0 能力推断（execution capabilities）
 

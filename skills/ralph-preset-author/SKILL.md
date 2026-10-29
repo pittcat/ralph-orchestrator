@@ -33,6 +33,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
   - **默认强制但允许有理由的例外**：只有短暂 + 短小 + 无需恢复的信息可以不落盘；例外必须在 Payload Contract 同行标注理由（恢复 / 审计 / 下游依赖），不能仅按字符数判断。
   - **落盘位置限定在当前 `.ralph/`**：业务 artifact 落在当前 workspace / worktree 的 `.ralph/<plan>/<unit>/<file>.md` 等业务子目录；不得把 `.ralph/events.jsonl`、`.ralph/loops.json`、`.ralph/supervisor.db` 等 runtime internal ledger 当作业务 artifact 接口。
 - Command syntax lives in `crates/ralph-core/data/ralph-tools*.md` — **cite skill sections, do not copy parameter tables**.
+- **迭代工具（可选加速器）**：本仓 `backend/ralph-devtools`（`ralph-devtools` CLI）提供 file-first 迭代面（`preset show/graph/diff/check/verify/new/upgrade/run-command`）。`-H <file>` ref 运行时现读、无需 rebuild；`builtin:` ref 为编译期内嵌，改 YAML / schemas / templates 需 `cargo build`。命令表与边界见 `references/commands.md`「ralph-devtools」段；devtools 不可用时回退原生 `ralph` 命令，校验权威不变。
 
 ## Dynamic Verification Gate
 

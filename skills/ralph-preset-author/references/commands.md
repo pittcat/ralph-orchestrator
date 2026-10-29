@@ -37,6 +37,60 @@ scope topic 的 `payload_consistency` 规则还会检查 finding
 `preset.payload_consistency_scope_positive_assertion`：不要用
 `exists:true` / `non_empty:true` 表达合法字段存在，也不要用会命中合法值的正向 threshold 谓词；这些检查由 scope guard 和 schema 负责。规则只能表达同一 payload 内的非法矛盾（Hit = 拒绝）。
 
+## ralph-devtools（TS 侧迭代工具，可选加速器）
+
+`backend/ralph-devtools`（`@ralph-devtools/cli`，bin `ralph-devtools`）是 preset 开发与运行诊断的 TS 工具面。**校验权威仍在 Rust**：`check` / `verify` / `new` / `upgrade` / `diff --baseline` 全部 argv spawn `ralph` 二进制；TS 侧只做 YAML model、事件拓扑推导、结构化 diff、时间线与报告渲染。
+
+### 调用
+
+```bash
+# 本仓 dev 模式（无需 build，tsx 源码直跑；需根目录已 npm install）
+npx tsx backend/ralph-devtools/src/cli.ts <group> <sub> [args]
+
+# 或先构建（npm workspace 已在根 package.json 接线）
+npm run build:devtools
+ralph-devtools <group> <sub> [args]      # 等价 node backend/ralph-devtools/dist/cli.js
+
+# 通用全局参数（任意位置可放）
+--cwd <dir>          # ralph 调用工作目录（默认当前）
+--ralph-bin <path>   # 指定 ralph 二进制（默认 PATH 上的 ralph；指 ./target/debug/ralph 可测未发布改动）
+--format <fmt>       # human|json；graph 另有 ascii|mermaid
+```
+
+外仓 / 未安装 Node 依赖时回退本文件中的原生 `ralph` 命令——devtools 是加速器，不是新权威；报告证据栏仍写 `ralph preset check|verify`。
+
+### File 模式即改即跑 vs Builtin 编译期内嵌
+
+- `-H <file>`（devtools `<file>` ref 同理）：**运行时现读**，改 `presets/en/*.yml` 立即生效；`presets/en/<stem>.yml` 在运行时还会自动合并相邻 `presets/schemas/<stem>.yml` SSOT（与 `crates/ralph-cli/build.rs` 同一套 merge 语义），file 模式不丢 schema 层。
+- `builtin:<name>`：**编译期 `include_str!` 嵌入**（build.rs 按 `presets/manifest.yml` `embedded:` 名单拷贝 + schemas SSOT 合并），改 YAML / schemas 后必须 `cargo build` 才进二进制；`presets/templates/<preset>/*` artifact 模板同样编译期内嵌，`ralph preset materialize-artifacts` 只吃内嵌副本，改模板必须 rebuild。
+- **推荐迭代环路**：file 模式起草 → `graph` / `diff` / `check` / `verify` 反复迭代 → 定稿后登记 manifest + rebuild 进 builtin。日常循环里没有「先 rebuild 再看效果」这一步。
+
+### 子命令
+
+| 迭代动作 | devtools 命令 | 说明 |
+|---|---|---|
+| 盘点 builtin + `.ralph/hats` | `preset list` | builtin 委派 `ralph preset builtin list`；local 读 `.ralph/hats/*.yml` |
+| 模板目录 | `preset templates` | 委派 `ralph preset list` |
+| 单 preset 摘要 | `preset show <ref>` | hats + event-loop knobs；`<ref>` = file \| `builtin:<id>` |
+| 事件拓扑 | `preset graph <ref> [--format ascii\|mermaid\|json]` | hat --topic--> hat，TS 侧推导；拓扑 sketch 可直接用 |
+| 结构 diff | `preset diff <refA> <refB>` | `--baseline` 时委派 `ralph preset diff --file` |
+| 导出 builtin | `preset export <id> [-o file] [--force]` | 把内嵌合并后 YAML 写盘 |
+| 机械门禁 | `preset check <file> [--strict] [-c cfg]…` | 委派 `ralph -H <file> preset check`；FAIL 保留结构化 JSON + exit code |
+| 动态验证 | `preset verify <file> --scenario <s> [-c cfg]…` | 委派 `ralph -H <file> preset verify` |
+| 脚手架 | `preset new <template> [--name] [-o file] [--force] [--check]` | 委派 `ralph preset new` |
+| 升级预览 | `preset upgrade <file>` | 委派 `ralph preset upgrade` |
+| 启动行 | `preset run-command <file> [-p str\|--prompt-file f\|--plan p\|--backend b\|--max-iterations N\|-a]` | 渲染 shell-safe `ralph run -H <file>` 行 |
+| 跑后报告 | `report build [--session s\|--diagnostics-root d\|--from-ledger\|--legacy\|--causal\|--format md\|json -o file]` | `ralph diagnose` + `ralph events` 时间线 + 失败归类 + 重复聚合 → 单文档 |
+| hat 泳道时间线 | `report timeline [--last N --file f --events-source main\|hat-channel\|auto]` | ASCII 泳道 |
+| 跨 run 对比 | `report compare <a.json> <b.json>` 或 `--session-a A --session-b B` | new / resolved / escalated / improved + dup storm 差异 |
+
+### 边界
+
+- `check` / `verify` 判定与 JSON 完全由 `ralph` 二进制产出；devtools FAIL 输出保留结构化 JSON 与 exit code，不吞证据。
+- `report` 面的失败归类 / 跨 run 对比标注为 advisory；事实来源只认 `ralph diagnose` / `ralph events` 原始输出。
+- 子进程 env 清洗 hat agent-context（与 monitor runner 同约定）；超时 30s（verify 180s），stdout 上限 2MB。
+- 需要 Node.js 与本仓已 `npm install` 的 node_modules（tsx 为 devDependency）；`ralph` 不在 PATH 时用 `--ralph-bin` 指定。
+
 ## Schema / emit 验证
 
 ```bash
@@ -123,6 +177,8 @@ ralph preset show <template>
 ralph preset new <template> --output .ralph/hats/my.yml
 ralph preset diff --file <path>   # 与 template 基线对比
 ```
+
+devtools 等价面：`ralph-devtools preset templates` / `preset new <template>` / `preset diff <file> <ref> --baseline` / `preset run-command <file>`（见「ralph-devtools」段）。
 
 ## Builtin artifact 模板落盘（binary-only）
 

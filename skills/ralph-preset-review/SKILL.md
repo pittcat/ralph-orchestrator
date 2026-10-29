@@ -36,6 +36,7 @@ review 必须先确认 source mode：`builtin:*` 可使用仓库源码、BDD 或
 - **Shape passing ≠ payload usable.** `ralph emit --schema` / `--policy-check` prove shape only. Field visibility, value source, identity, semantic sufficiency, downstream consumption are review's job.
 - **Schema metadata is repair guidance, not truth.** `field_docs` / `examples` must match the payload audit, but they never replace visibility, value-source, or downstream semantic review.
 - **Artifact-First Handoff 不可被 lint 直接验证**:`ralph preset check --strict` 与 `ralph emit --policy-check` 只能验 shape 与 topology ownership;路径可见性、消费动作闭环、生命周期责任、`field_docs` 是否诱导伪造——这些是 review-only 缺口,按 `references/finding-rubric.md`「Artifact-First Handoff finding_id」 表入主表,**不进** `ralph preset check` JSON。
+- **迭代工具（可选加速器）**：本仓 `backend/ralph-devtools`（`ralph-devtools` CLI）提供 `preset show/graph/diff/check/verify` 迭代面；`-H <file>` ref 运行时现读、无需 rebuild，`builtin:` ref 为编译期内嵌。命令表与边界见 `references/commands.md`「ralph-devtools」段；devtools 不可用时回退原生 `ralph` 命令，lint 证据写法不变。
 
 ## Workflow
 
@@ -60,7 +61,7 @@ review 必须先确认 source mode：`builtin:*` 可使用仓库源码、BDD 或
 
 2. Record `execution_mode`, hat count, preset path (`builtin:` vs file).
 
-3. **Topology sketch** — event flow diagram (not prompt flow).
+3. **Topology sketch** — event flow diagram (not prompt flow). 本仓可直接 `ralph-devtools preset graph <ref> [--format mermaid]` 生成底稿再人工核对（见 `references/commands.md`「ralph-devtools」段）；不可用则手画。
 
 3a. **Single-chain-first audit** — mandatory:
    - Read `references/finding-rubric.md` 「Single-chain-first audit」段；按 `fallback_reaches_success_terminal` / `runtime_unit_loop_multiple_fact_sources` / `blocked_failed_promoted_to_pass` / `topic_multi_consumer` / `hidden_phase_decision` / `prompt_wall_serial_style` 六项逐项判定。
