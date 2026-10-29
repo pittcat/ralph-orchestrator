@@ -1,0 +1,5 @@
+# E2E runtime artifacts — screenshots land here for review but are not
+# checked in; regenerate via `npm run test:e2e`.
+artifacts/
+# Fixture projects + monitor db spawned by helpers/monitor-server.ts.
+helpers/.tmp-monitor/

@@ -67,6 +67,23 @@ describe('static SPA hosting (Plan5-U4)', () => {
     await app.close();
   });
 
+  it('long global run ids still match /runs/:globalId (find-my-way maxParamLength)', async () => {
+    const { app, machineId } = makeApp();
+    registerStatic(app, makeDist());
+    // ~130-char param — past find-my-way's default maxParamLength of 100.
+    const gid = `${machineId}:proj_${'a'.repeat(33)}:loop-fake-op-${'b'.repeat(36)}`;
+    assert.ok(gid.length > 100);
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/monitor/v1/runs/${encodeURIComponent(gid)}`,
+    });
+    assert.equal(res.statusCode, 404);
+    // Routing reached the runs handler (run_not_found) rather than being
+    // swallowed by the SPA wildcard (unknown endpoint).
+    assert.equal(res.json().error.code, 'run_not_found');
+    await app.close();
+  });
+
   it('path traversal cannot escape the static root', async () => {
     const dist = makeDist();
     const { app } = makeApp();

@@ -11,6 +11,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { z } from 'zod';
 import type { MonitorDb } from '../db/index.js';
+import { ensureMachineId } from '../lib/machine_id.js';
 
 export const OP_KINDS = ['launch', 'stop', 'retry', 'merge', 'emit'] as const;
 export type OpKind = (typeof OP_KINDS)[number];
@@ -102,15 +103,19 @@ function fail(
   return { ok: false, status, code, message, details };
 }
 
-/** `run_gid` three-part form `m:<projectId>:<runId>` (Plan1 D8). */
+/**
+ * `run_gid` three-part form `<machineId>:<projectId>:<runId>` (Plan1 D8).
+ * Callers decide how strict the machine segment must be — intents
+ * reject foreign-machine gids, dispatch tolerates legacy `m:` rows.
+ */
 export function parseRunGid(
   gid: string,
-): { projectId: string; runId: string } | null {
+): { machineId: string; projectId: string; runId: string } | null {
   const parts = gid.split(':');
-  if (parts.length !== 3 || parts[0] !== 'm' || !parts[1] || !parts[2]) {
+  if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) {
     return null;
   }
-  return { projectId: parts[1], runId: parts[2] };
+  return { machineId: parts[0], projectId: parts[1], runId: parts[2] };
 }
 
 /**
@@ -245,7 +250,11 @@ export function createIntent(
       return fail(400, 'invalid_body', `${b.kind} requires run_gid`);
     }
     const gid = parseRunGid(b.run_gid);
-    if (!gid || gid.projectId !== b.project_id) {
+    if (
+      !gid ||
+      gid.machineId !== ensureMachineId(db) ||
+      gid.projectId !== b.project_id
+    ) {
       return fail(422, 'invalid_run_gid', 'run_gid does not match project');
     }
     runId = gid.runId;

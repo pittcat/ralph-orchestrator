@@ -131,7 +131,9 @@ test.describe("Monitor run details", () => {
   test("journey: tabs → timeline select → graph unit filter → artifact preview", async ({ page }) => {
     await mockApi(page);
     await page.goto(`/monitor/runs/${encodeURIComponent(GID)}`);
-    await page.waitForLoadState("networkidle");
+    // SSE reconnect retries keep the network busy — networkidle never
+    // settles; semantic waits below cover readiness.
+    await page.waitForLoadState("domcontentloaded");
 
     // Header + stage strip (S1).
     await expect(page.getByTestId("run-detail-id")).toHaveText("loop-1");

@@ -12,6 +12,7 @@ import {
 } from '../../src/ops/intents.js';
 import { buildArgv, parseReceipt } from '../../src/ops/dispatch.js';
 import { confirmPendingOps } from '../../src/ops/confirm.js';
+import { ensureMachineId } from '../../src/lib/machine_id.js';
 import { tmpDir, tmpDbPath, insertProject } from '../helpers.js';
 
 function freshDb() {
@@ -43,11 +44,11 @@ function insertRun(
        last_observed_at, actions, events_file)
      VALUES (?, ?, 'primary', 'running', '{}', '2026-10-28T12:00:00Z', ?, ?)`,
   ).run(projectId, runId, JSON.stringify(actions), '/proj/.ralph/events.jsonl');
-  return `m:${projectId}:${runId}`;
+  return `${ensureMachineId(db)}:${projectId}:${runId}`;
 }
 
-test('parseRunGid accepts only m:<project>:<run> form', () => {
-  assert.deepEqual(parseRunGid('m:p:r'), { projectId: 'p', runId: 'r' });
+test('parseRunGid accepts only <machine>:<project>:<run> form', () => {
+  assert.deepEqual(parseRunGid('m:p:r'), { machineId: 'm', projectId: 'p', runId: 'r' });
   assert.equal(parseRunGid('p:r'), null);
   assert.equal(parseRunGid('m:p'), null);
   assert.equal(parseRunGid('m::r'), null);

@@ -57,7 +57,7 @@ function runningRun(dir: string, runId = 'loop-live') {
 
 test('operations API: stop → confirmed receipt; audit row visible', async () => {
   const dir = makeProjectDir();
-  const { app, db } = makeApp();
+  const { app, db, machineId } = makeApp();
   try {
     const reg = await registerProject(app, dir);
     const projectId = reg.json().project.id as string;
@@ -66,7 +66,7 @@ test('operations API: stop → confirmed receipt; audit row visible', async () =
     assert.equal(round.ok, 1);
 
     const session = await getSession(app);
-    const gid = `m:${projectId}:loop-live`;
+    const gid = `${machineId}:${projectId}:loop-live`;
     const res = await app.inject({
       method: 'POST',
       url: '/api/monitor/v1/operations',
@@ -159,7 +159,7 @@ test('operations API: launch → dispatched → collect round confirms + notifie
     });
     const updated = got.json().operation;
     assert.equal(updated.state, 'confirmed');
-    assert.match(updated.runGid, /^m:.*:loop-fake-/);
+    assert.match(updated.runGid, /^[^:]+:[^:]+:loop-fake-/);
 
     const notif = db
       .prepare("SELECT kind FROM notifications WHERE kind = 'operation.confirmed'")
@@ -172,7 +172,7 @@ test('operations API: launch → dispatched → collect round confirms + notifie
 
 test('operations API: emit writes to the run events file', async () => {
   const dir = makeProjectDir();
-  const { app, db } = makeApp();
+  const { app, db, machineId } = makeApp();
   try {
     const reg = await registerProject(app, dir);
     const projectId = reg.json().project.id as string;
@@ -188,7 +188,7 @@ test('operations API: emit writes to the run events file', async () => {
       payload: {
         kind: 'emit',
         project_id: projectId,
-        run_gid: `m:${projectId}:loop-live`,
+        run_gid: `${machineId}:${projectId}:loop-live`,
         idempotency_key: 'api-emit-1',
         params: { topic: 'loop.cancel', payload: '{"by":"test"}' },
       },
@@ -206,14 +206,14 @@ test('operations API: emit writes to the run events file', async () => {
 
 test('operations API: error matrix (capability/revision/in-flight/not-found)', async () => {
   const dir = makeProjectDir();
-  const { app, db } = makeApp();
+  const { app, db, machineId } = makeApp();
   try {
     const reg = await registerProject(app, dir);
     const projectId = reg.json().project.id as string;
     writeMonitorFixture(dir, { snapshot: makeSnapshot(dir, [runningRun(dir)]) });
     await collectOnceFake(db);
     const session = await getSession(app);
-    const gid = `m:${projectId}:loop-live`;
+    const gid = `${machineId}:${projectId}:loop-live`;
     const post = (payload: Record<string, unknown>) =>
       app.inject({
         method: 'POST',
@@ -223,7 +223,7 @@ test('operations API: error matrix (capability/revision/in-flight/not-found)', a
       });
 
     const missing = await post({
-      kind: 'stop', project_id: projectId, run_gid: `m:${projectId}:nope`,
+      kind: 'stop', project_id: projectId, run_gid: `${machineId}:${projectId}:nope`,
       idempotency_key: 'err-key-1',
     });
     assert.equal(missing.statusCode, 404);
@@ -272,7 +272,7 @@ test('operations API: error matrix (capability/revision/in-flight/not-found)', a
 
 test('operations API: dispatch failure → failed state with stderr tail', async () => {
   const dir = makeProjectDir();
-  const { app, db } = makeApp();
+  const { app, db, machineId } = makeApp();
   try {
     const reg = await registerProject(app, dir);
     const projectId = reg.json().project.id as string;
@@ -287,7 +287,7 @@ test('operations API: dispatch failure → failed state with stderr tail', async
       headers: unsafeHeaders(session),
       payload: {
         kind: 'stop', project_id: projectId,
-        run_gid: `m:${projectId}:loop-live`,
+        run_gid: `${machineId}:${projectId}:loop-live`,
         idempotency_key: 'fail-key-1', params: {},
       },
     });

@@ -123,7 +123,9 @@ test.describe("Monitor overview", () => {
   test("filters via URL, opens detail, back preserves filters", async ({ page }) => {
     const runUrls = await mockMonitorApi(page);
     await page.goto("/monitor");
-    await page.waitForLoadState("networkidle");
+    // The monitor SSE client's retry loop can keep the network busy —
+    // prefer semantic waits over networkidle.
+    await page.waitForLoadState("domcontentloaded");
 
     // Table renders all three runs.
     const table = page.getByRole("table");

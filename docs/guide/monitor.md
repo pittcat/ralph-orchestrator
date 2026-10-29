@@ -85,3 +85,37 @@ monitor DB；通用 webhook 经 SSRF 校验 + HMAC 签名投递，支持重试�
 `GET /api/monitor/v1/stream` 推送 `run.*` / `project.*` /
 `notification.*` / `operation.updated` 事件；`?cursor=` 支持断线回放，
 `/snapshot` 提供全量重同步。
+
+## 端到端验收（Playwright）
+
+`frontend/ralph-web` 下的 `e2e/monitor-journey.spec.ts` 用真实 monitor
+进程 + fake-ralph fixture 项目跑完整旅程：注册两个项目 → 概览区分历史
+run → 四步 LaunchDialog 启动 → run 详情 + 四层健康条 → stop 确认 →
+operations 表 `已确认` → 通知深链回详情 → 杀掉 monitor 子进程由
+supervisor 重拉 → 断连降级并恢复一致。运行：
+
+```bash
+cd frontend/ralph-web
+npm run test:e2e                      # 全部 spec
+npx playwright test e2e/monitor-journey.spec.ts   # 仅本旅程
+```
+
+helper（`e2e/helpers/monitor-server.ts`）在 `MONITOR_E2E_PORT`
+（默认 3310）起真 monitor，fixture/临时库落在
+`e2e/helpers/.tmp-monitor/`。截图产物写到
+`e2e/artifacts/monitor-journey/`（不入库，随每次运行重生成）：
+
+- `overview.png` — 1280×800 双项目概览
+- `run-detail.png` — run 详情 + collector/runtime/backend 健康层
+- `reconnected.png` — monitor 重启重同步后的详情页
+- `viewport-375.png` — 375×812 移动视口概览
+- `theme-current.png` / `theme-toggled.png` — 暗/亮主题对照
+- `keyboard.png` — 纯键盘 Tab 焦点流（首焦落在交互元素上）
+- `reduced-motion.png` — `prefers-reduced-motion` 模拟
+
+截图只作人工审查记录，不做像素级硬断言；验收以语义等待
+（`expect.poll` / `toBeVisible`）为准。
+
+已知限制：`/api/monitor/v1/runs/:globalId` 的三段式 gid 长度可超过
+find-my-way 默认 `maxParamLength`（100）；monitor 在 `buildApp` 中显式
+提升到 512，过长 gid 不会被 SPA 通配兜底吞掉。

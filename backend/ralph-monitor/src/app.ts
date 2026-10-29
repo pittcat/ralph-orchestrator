@@ -35,7 +35,14 @@ export interface MonitorApp {
  * via the onClose hook).
  */
 export function buildApp(options: BuildAppOptions): MonitorApp {
-  const app = Fastify({ logger: options.logger ?? false });
+  const app = Fastify({
+    logger: options.logger ?? false,
+    // Global run ids are `<machineId>:<projectId>:<runId>` (~130 chars);
+    // find-my-way's default maxParamLength (100) would drop `/runs/:globalId`
+    // matches to the SPA wildcard, so raise it with headroom for longer
+    // project/run ids.
+    routerOptions: { maxParamLength: 512 },
+  });
   const db = openDatabase(options.dbPath);
   runMigrations(db);
   const machineId = ensureMachineId(db);

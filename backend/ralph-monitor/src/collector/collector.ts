@@ -8,6 +8,7 @@ import { inspectRun, type InspectResult } from '../ralph/client.js';
 import { parseSnapshot } from '../ralph/snapshot.js';
 import { scanPlanningSessions } from '../notify/sessions.js';
 import { readRuntimeWebhookHint } from '../notify/runtime_hint.js';
+import { ensureMachineId } from '../lib/machine_id.js';
 import { confirmPendingOps } from '../ops/confirm.js';
 
 /**
@@ -44,6 +45,9 @@ export async function collectOnce(
   const projects = db
     .prepare('SELECT id, canonical_path FROM projects ORDER BY id')
     .all() as ProjectRow[];
+  // globalRunIds must carry the real machine id — `/runs/:gid`
+  // rejects the literal 'm' fallback (found by the U5 journey e2e).
+  const machineId = ensureMachineId(db);
 
   let ok = 0;
   let failed = 0;
@@ -85,7 +89,7 @@ export async function collectOnce(
         parsed.snapshot,
         snapshotSha256(result.raw),
         now().toISOString(),
-        { sessions: sessions.sessions },
+        { sessions: sessions.sessions, machineId },
       );
       // Plan5-U2: launch ops confirm off the projection the round
       // just committed (manifest client_request_id match).

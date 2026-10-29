@@ -12,6 +12,7 @@ import { appendEvent } from '../stream/monitor_log.js';
 import { applyIntents } from '../notify/outbox.js';
 import { loadRules } from '../notify/rules.js';
 import type { OperationRow } from './intents.js';
+import { ensureMachineId } from '../lib/machine_id.js';
 
 export const DEFAULT_CONFIRM_WINDOW_MS = 15_000;
 
@@ -58,6 +59,7 @@ export function confirmPendingOps(
   now: Date = new Date(),
   confirmWindowMs: number = readConfirmWindowMs(),
 ): void {
+  const machineId = ensureMachineId(db);
   const open = db
     .prepare(
       `SELECT * FROM operations
@@ -83,7 +85,7 @@ export function confirmPendingOps(
           kind: 'launch',
           run_id: match.run_id,
         });
-        const gid = `m:${op.project_id}:${match.run_id}`;
+        const gid = `${machineId}:${op.project_id}:${match.run_id}`;
         const rules = loadRules(db);
         applyIntents(
           db,
