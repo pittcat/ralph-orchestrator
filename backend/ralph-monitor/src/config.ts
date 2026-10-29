@@ -1,5 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 
 export interface MonitorConfig {
@@ -7,6 +8,14 @@ export interface MonitorConfig {
   port: number;
   dbPath: string;
   pollMs: number;
+  staticDir: string;
+}
+
+/** Default SPA bundle location inside the repo workspace. */
+export function defaultStaticDir(): string {
+  return fileURLToPath(
+    new URL('../../../frontend/ralph-web/dist', import.meta.url),
+  );
 }
 
 const envSchema = z.object({
@@ -17,6 +26,7 @@ const envSchema = z.object({
     .min(1)
     .default(path.join(os.homedir(), '.ralph', 'monitor.db')),
   pollMs: z.coerce.number().int().min(100).default(3000),
+  staticDir: z.string().min(1).optional(),
 });
 
 export function defaultDbPath(): string {
@@ -44,6 +54,7 @@ export function loadConfig(
     port: env.RALPH_MONITOR_PORT,
     dbPath: env.RALPH_MONITOR_DB_PATH,
     pollMs: env.RALPH_MONITOR_POLL_MS,
+    staticDir: env.RALPH_MONITOR_STATIC_DIR,
   });
   return {
     host: parsed.host,
@@ -53,5 +64,8 @@ export function loadConfig(
       parsed.dbPath === ':memory:'
         ? parsed.dbPath
         : path.resolve(expandHome(parsed.dbPath)),
+    staticDir: path.resolve(
+      expandHome(parsed.staticDir ?? defaultStaticDir()),
+    ),
   };
 }

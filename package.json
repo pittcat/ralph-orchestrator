@@ -18,6 +18,7 @@
     "dev:legacy-server": "npm run dev -w @ralph-web/server",
     "dev:monitor": "npm run dev -w @ralph-monitor/server",
     "start": "cargo run -p ralph-api",
+    "start:monitor": "npm run start -w @ralph-monitor/server",
     "test": "npm run test --workspaces --if-present",
     "test:server": "npm run test -w @ralph-web/server",
     "test:monitor": "npm test -w @ralph-monitor/server",

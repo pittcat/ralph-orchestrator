@@ -43,6 +43,10 @@ pub struct WebArgs {
     #[arg(long)]
     pub legacy_node_api: bool,
 
+    /// Run the monitor dashboard only (single process; no vite/api)
+    #[arg(long)]
+    pub monitor: bool,
+
     /// Don't open the dashboard in the default browser
     #[arg(long)]
     pub no_open: bool,
@@ -404,19 +408,119 @@ async fn forward_output(
     let _ = tokio::join!(stdout_task, stderr_task);
 }
 
+/// Monitor mode (Plan5-U4): spawn the monitor service alone — it
+/// serves the built SPA itself, so there is no vite dev server or
+/// ralph-api process in the tree.
+async fn execute_monitor(args: &WebArgs, workspace_root: &Path) -> Result<()> {
+    println!("Starting Ralph monitor...");
+    if args.frontend_port != 5173 {
+        println!(
+            "Note: --frontend-port is ignored in --monitor mode \
+             (the monitor serves the dashboard on --backend-port)."
+        );
+    }
+
+    let monitor_dir = workspace_root.join("backend/ralph-monitor");
+    if !monitor_dir.join("package.json").exists() {
+        anyhow::bail!(
+            "Monitor package not found at {}",
+            monitor_dir.join("package.json").display()
+        );
+    }
+    check_npm_with(OsStr::new("npm"))?;
+    check_port_available(args.backend_port)?;
+
+    let dist_dir = workspace_root.join("frontend/ralph-web/dist");
+    let mut monitor = AsyncCommand::new("npm")
+        .args(["run", "start", "-w", "@ralph-monitor/server"])
+        .current_dir(workspace_root)
+        .env("RALPH_MONITOR_PORT", args.backend_port.to_string())
+        .env("RALPH_MONITOR_STATIC_DIR", &dist_dir)
+        .env("RALPH_WORKSPACE_ROOT", workspace_root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to start monitor server. Is npm installed and deps set up?")?;
+
+    let stdout = monitor.stdout.take().expect("monitor stdout piped");
+    let stderr = monitor.stderr.take().expect("monitor stderr piped");
+    let ready = std::sync::Arc::new(Notify::new());
+    let ready_clone = ready.clone();
+    tokio::spawn(async move {
+        forward_output(stdout, stderr, "monitor", "listening", ready_clone).await;
+    });
+
+    let dashboard_url = format!("http://localhost:{}", args.backend_port);
+    match tokio::time::timeout(READY_TIMEOUT, ready.notified()).await {
+        Ok(()) => {
+            println!();
+            println!("Dashboard: {}", dashboard_url);
+            println!();
+            if !args.no_open {
+                let _ = open::that(&dashboard_url);
+            }
+        }
+        Err(_) => {
+            println!();
+            println!(
+                "Warning: monitor did not report ready within {} seconds.",
+                READY_TIMEOUT.as_secs()
+            );
+            println!("  Dashboard: {}", dashboard_url);
+        }
+    }
+    println!("Press Ctrl+C to stop");
+
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let shutdown_tx_sigint = shutdown_tx.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            println!("\nReceived Ctrl+C, shutting down monitor...");
+            let _ = shutdown_tx_sigint.send(true);
+        }
+    });
+    #[cfg(unix)]
+    {
+        let shutdown_tx_sigterm = shutdown_tx.clone();
+        tokio::spawn(async move {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to register SIGTERM handler");
+            sigterm.recv().await;
+            println!("\nReceived SIGTERM, shutting down monitor...");
+            let _ = shutdown_tx_sigterm.send(true);
+        });
+    }
+
+    tokio::select! {
+        _ = shutdown_rx.changed() => {
+            terminate_gracefully(&mut monitor, SHUTDOWN_GRACE_PERIOD).await;
+            println!("Monitor stopped.");
+        }
+        r = monitor.wait() => {
+            println!("Monitor exited: {:?}", r);
+        }
+    }
+    Ok(())
+}
+
 /// Run both backend and frontend dev servers in parallel
 pub async fn execute(args: WebArgs) -> Result<()> {
     println!("Starting Ralph web servers...");
 
     // Determine workspace root: explicit flag or current directory
     let workspace_root = match args.workspace {
-        Some(path) => {
+        Some(ref path) => {
             // Canonicalize to get absolute path
             path.canonicalize()
                 .with_context(|| format!("Invalid workspace path: {}", path.display()))?
         }
         None => env::current_dir().context("Failed to get current directory")?,
     };
+
+    if args.monitor {
+        return execute_monitor(&args, &workspace_root).await;
+    }
 
     // Compute absolute paths for backend and frontend directories
     let backend_dir = workspace_root.join("backend/ralph-web-server");
