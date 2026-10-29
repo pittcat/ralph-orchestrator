@@ -598,6 +598,17 @@ export function apiGetArtifactContent(
   );
 }
 
+/**
+ * Rendered preview URL for HTML deliverables. Served under CSP
+ * `sandbox` — safe to embed in an iframe or open in a new tab.
+ */
+export function artifactPreviewUrl(
+  globalRunId: string,
+  artifactId: string,
+): string {
+  return `${MONITOR_API_BASE}/runs/${encodeURIComponent(globalRunId)}/artifacts/${encodeURIComponent(artifactId)}/preview`;
+}
+
 export function apiRegisterProject(path: string, displayName?: string): Promise<MonitorProject> {
   return request("/projects", z.object({ project: projectSchema }), {
     method: "POST",

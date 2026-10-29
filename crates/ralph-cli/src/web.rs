@@ -27,11 +27,11 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// Arguments for the web subcommand
 #[derive(Parser, Debug)]
 pub struct WebArgs {
-    /// RPC API port (default: 3000)
-    #[arg(long, default_value = "3000")]
-    pub backend_port: u16,
+    /// Backend port (default: 3200 for the monitor, 3000 for --dev)
+    #[arg(long)]
+    pub backend_port: Option<u16>,
 
-    /// Frontend port (default: 5173)
+    /// Frontend port (--dev mode only, default: 5173)
     #[arg(long, default_value = "5173")]
     pub frontend_port: u16,
 
@@ -39,13 +39,18 @@ pub struct WebArgs {
     #[arg(long)]
     pub workspace: Option<PathBuf>,
 
-    /// Use deprecated Node tRPC backend instead of Rust RPC API
+    /// Use deprecated Node tRPC backend instead of Rust RPC API (--dev mode only)
     #[arg(long)]
     pub legacy_node_api: bool,
 
-    /// Run the monitor dashboard only (single process; no vite/api)
-    #[arg(long)]
+    /// Run the monitor dashboard only (single process; no vite/api).
+    /// This is the default; kept for backwards compatibility.
+    #[arg(long, conflicts_with = "dev")]
     pub monitor: bool,
+
+    /// Run the Vite + ralph-api development stack instead of the monitor
+    #[arg(long)]
+    pub dev: bool,
 
     /// Don't open the dashboard in the default browser
     #[arg(long)]
@@ -411,11 +416,11 @@ async fn forward_output(
 /// Monitor mode (Plan5-U4): spawn the monitor service alone — it
 /// serves the built SPA itself, so there is no vite dev server or
 /// ralph-api process in the tree.
-async fn execute_monitor(args: &WebArgs, workspace_root: &Path) -> Result<()> {
+async fn execute_monitor(args: &WebArgs, workspace_root: &Path, port: u16) -> Result<()> {
     println!("Starting Ralph monitor...");
     if args.frontend_port != 5173 {
         println!(
-            "Note: --frontend-port is ignored in --monitor mode \
+            "Note: --frontend-port is ignored in monitor mode \
              (the monitor serves the dashboard on --backend-port)."
         );
     }
@@ -428,13 +433,13 @@ async fn execute_monitor(args: &WebArgs, workspace_root: &Path) -> Result<()> {
         );
     }
     check_npm_with(OsStr::new("npm"))?;
-    check_port_available(args.backend_port)?;
+    check_port_available(port)?;
 
     let dist_dir = workspace_root.join("frontend/ralph-web/dist");
     let mut monitor = AsyncCommand::new("npm")
         .args(["run", "start", "-w", "@ralph-monitor/server"])
         .current_dir(workspace_root)
-        .env("RALPH_MONITOR_PORT", args.backend_port.to_string())
+        .env("RALPH_MONITOR_PORT", port.to_string())
         .env("RALPH_MONITOR_STATIC_DIR", &dist_dir)
         .env("RALPH_WORKSPACE_ROOT", workspace_root)
         .stdout(std::process::Stdio::piped())
@@ -450,7 +455,7 @@ async fn execute_monitor(args: &WebArgs, workspace_root: &Path) -> Result<()> {
         forward_output(stdout, stderr, "monitor", "listening", ready_clone).await;
     });
 
-    let dashboard_url = format!("http://localhost:{}", args.backend_port);
+    let dashboard_url = format!("http://localhost:{}", port);
     match tokio::time::timeout(READY_TIMEOUT, ready.notified()).await {
         Ok(()) => {
             println!();
@@ -518,9 +523,12 @@ pub async fn execute(args: WebArgs) -> Result<()> {
         None => env::current_dir().context("Failed to get current directory")?,
     };
 
-    if args.monitor {
-        return execute_monitor(&args, &workspace_root).await;
+    // Monitor is the default surface (single process, serves the built
+    // SPA itself). `--dev` selects the Vite + ralph-api development stack.
+    if !args.dev {
+        return execute_monitor(&args, &workspace_root, args.backend_port.unwrap_or(3200)).await;
     }
+    let backend_port = args.backend_port.unwrap_or(3000);
 
     // Compute absolute paths for backend and frontend directories
     let backend_dir = workspace_root.join("backend/ralph-web-server");
@@ -537,7 +545,7 @@ pub async fn execute(args: WebArgs) -> Result<()> {
     preflight(&workspace_root, &backend_dir, args.legacy_node_api).await?;
 
     // Check ports before spawning anything
-    check_port_available(args.backend_port)?;
+    check_port_available(backend_port)?;
     check_port_available(args.frontend_port)?;
 
     println!("Using workspace: {}", workspace_root.display());
@@ -559,7 +567,7 @@ pub async fn execute(args: WebArgs) -> Result<()> {
             .args(["run", "dev"])
             .current_dir(&backend_dir)
             .env("RALPH_WORKSPACE_ROOT", &workspace_root)
-            .env("PORT", args.backend_port.to_string())
+            .env("PORT", backend_port.to_string())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -574,7 +582,7 @@ pub async fn execute(args: WebArgs) -> Result<()> {
         AsyncCommand::new("cargo")
             .args(["run", "-p", "ralph-api"])
             .current_dir(&workspace_root)
-            .env("RALPH_API_PORT", args.backend_port.to_string())
+            .env("RALPH_API_PORT", backend_port.to_string())
             .env("RALPH_API_WORKSPACE_ROOT", &workspace_root)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -597,7 +605,7 @@ pub async fn execute(args: WebArgs) -> Result<()> {
             &args.frontend_port.to_string(),
         ])
         .current_dir(&frontend_dir)
-        .env("RALPH_BACKEND_PORT", args.backend_port.to_string())
+        .env("RALPH_BACKEND_PORT", backend_port.to_string())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -646,7 +654,7 @@ pub async fn execute(args: WebArgs) -> Result<()> {
 
     // Wait for both servers to become ready
     let dashboard_url = format!("http://localhost:{}", args.frontend_port);
-    let api_url = format!("http://localhost:{}", args.backend_port);
+    let api_url = format!("http://localhost:{}", backend_port);
 
     let ready_result = tokio::time::timeout(READY_TIMEOUT, async {
         tokio::join!(backend_ready.notified(), frontend_ready.notified());
@@ -1237,11 +1245,12 @@ exit 1",
         let temp_dir = TempDir::new().expect("temp dir");
         let missing = temp_dir.path().join("missing");
         let args = WebArgs {
-            backend_port: 3000,
+            backend_port: Some(3000),
             frontend_port: 5173,
             workspace: Some(missing),
             legacy_node_api: false,
             monitor: false,
+            dev: true,
             no_open: true,
         };
 

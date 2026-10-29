@@ -8,7 +8,7 @@ import { useArtifacts, useArtifactContent } from "../hooks";
 import { MarkdownViewer } from "../components/MarkdownViewer";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import type { ArtifactEntry } from "../api";
+import { artifactPreviewUrl, type ArtifactEntry } from "../api";
 
 const STATUS_LABEL: Record<ArtifactEntry["status"], string> = {
   present: "已生成",
@@ -26,7 +26,11 @@ export function ArtifactsTab({
   onSelect: (id: string | null) => void;
 }) {
   const artifacts = useArtifacts(globalRunId, true);
-  const content = useArtifactContent(globalRunId, selectedId);
+  const selected = artifacts.data?.find((a) => a.id === selectedId);
+  const isHtml = selected?.kind === "html";
+  // HTML artifacts render via the sandboxed preview endpoint — skip the
+  // 512KiB-capped text channel entirely.
+  const content = useArtifactContent(globalRunId, isHtml ? null : selectedId);
 
   if (artifacts.isLoading) {
     return <Skeleton className="h-40 w-full" />;
@@ -82,6 +86,34 @@ export function ArtifactsTab({
       <div className="min-h-40">
         {!selectedId ? (
           <p className="text-sm text-muted-foreground">选择一个产物槽位查看内容。</p>
+        ) : isHtml && selected ? (
+          <div className="space-y-2" data-testid="artifact-preview">
+            <div className="flex items-center gap-3 text-xs text-muted-foreground">
+              <span className="font-mono">{selected.id}</span>
+              <span>{selected.kind}</span>
+              {selected.path && (
+                <span className="font-mono" data-testid="artifact-path">
+                  {selected.path}
+                </span>
+              )}
+              <a
+                href={artifactPreviewUrl(globalRunId, selected.id)}
+                target="_blank"
+                rel="noopener noreferrer"
+                data-testid="artifact-open-preview"
+                className="ml-auto inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 font-medium text-primary hover:bg-muted/40"
+              >
+                新窗口预览 ↗
+              </a>
+            </div>
+            <iframe
+              title={`artifact preview: ${selected.id}`}
+              src={artifactPreviewUrl(globalRunId, selected.id)}
+              sandbox="allow-scripts allow-popups"
+              data-testid="artifact-preview-frame"
+              className="h-[36rem] w-full rounded-md border border-border bg-white"
+            />
+          </div>
         ) : content.isLoading ? (
           <Skeleton className="h-40 w-full" />
         ) : content.isError ? (

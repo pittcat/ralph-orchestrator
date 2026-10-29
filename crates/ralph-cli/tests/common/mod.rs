@@ -36,10 +36,17 @@ pub const AGENT_CONTEXT_ENV_KEYS: &[&str] = &[
 ///
 /// Call this before any intentional `.env(...)` overlays that simulate
 /// a specific agent scenario.
+///
+/// Also disables monitor auto-registration so `ralph run` fixtures do
+/// not leak drop files into the developer's real `~/.ralph/projects.d`
+/// (and a live monitor never picks up temp projects). Tests exercising
+/// auto-registration re-enable it afterwards with
+/// `RALPH_MONITOR_AUTOREGISTER` + `RALPH_MONITOR_REGISTRY_DIR`.
 pub fn scrub_agent_runtime_env(cmd: &mut Command) {
     for key in AGENT_CONTEXT_ENV_KEYS {
         cmd.env_remove(*key);
     }
+    cmd.env("RALPH_MONITOR_AUTOREGISTER", "0");
 }
 
 /// `ralph` binary command with agent-context env scrubbed.

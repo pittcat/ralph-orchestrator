@@ -199,4 +199,83 @@ describe('artifacts API', () => {
     assert.equal((await get(`/api/monitor/v1/runs/${app.machineId}:${projectId}:nope/artifacts`)).statusCode, 404);
     assert.equal((await get(`/api/monitor/v1/runs/bad/artifacts`)).statusCode, 400);
   });
+
+  // ── HTML preview (monitor auto-register plan): docs/report/*.html is
+  // enumerated as kind 'html' and served rendered under a CSP sandbox. ──
+
+  it('preview: docs/report html enumerated and served as text/html', async () => {
+    fs.mkdirSync(path.join(ws, 'docs', 'report'), { recursive: true });
+    fs.writeFileSync(
+      path.join(ws, 'docs', 'report', 'diag.html'),
+      '<html><body><h1>report</h1></body></html>',
+    );
+    const list = await get(`/api/monitor/v1/runs/${gid}/artifacts`);
+    const byId = new Map(
+      (list.json().artifacts as any[]).map((a) => [a.id, a]),
+    );
+    const entry = byId.get('docs/report/diag.html') as any;
+    assert.equal(entry.status, 'present');
+    assert.equal(entry.kind, 'html');
+
+    const res = await get(
+      `/api/monitor/v1/runs/${gid}/artifacts/${encodeURIComponent('docs/report/diag.html')}/preview`,
+    );
+    assert.equal(res.statusCode, 200);
+    assert.match(res.headers['content-type'] ?? '', /text\/html/);
+    assert.match(res.body, /<h1>report<\/h1>/);
+    assert.match(
+      res.headers['content-security-policy'] ?? '',
+      /^sandbox allow-scripts allow-popups$/,
+    );
+    assert.equal(res.headers['x-content-type-options'], 'nosniff');
+  });
+
+  it('preview: non-html artifact → 415 preview_not_html', async () => {
+    const res = await get(
+      `/api/monitor/v1/runs/${gid}/artifacts/summary/preview`,
+    );
+    assert.equal(res.statusCode, 415);
+    assert.equal(res.json().error.code, 'preview_not_html');
+  });
+
+  it('preview: unknown artifact → 404', async () => {
+    const res = await get(
+      `/api/monitor/v1/runs/${gid}/artifacts/nope-xyz/preview`,
+    );
+    assert.equal(res.statusCode, 404);
+    assert.equal(res.json().error.code, 'artifact_not_found');
+  });
+
+  it('preview: html escape via declared slot → 403', async () => {
+    fs.writeFileSync(path.join(outside, 'evil.html'), '<html>evil</html>');
+    const snap2 = {
+      schema_version: 'run-observation/v1',
+      workspace: ws,
+      generated_at: '2026-10-28T12:03:00Z',
+      runs: [
+        {
+          run_id: RUN,
+          kind: 'primary',
+          state: 'running',
+          workspace: ws,
+          cwd: ws,
+          repo_root: ws,
+          preset: 'x',
+          preset_descriptor: {
+            schema_version: 'monitor-descriptor/v1',
+            artifacts: [
+              { id: 'evil', path_glob: `${outside}/evil.html`, kind: 'html' },
+            ],
+          },
+          evidence: {},
+        },
+      ],
+    } as unknown as RunSnapshot;
+    ingestSnapshot(app.db, projectId, snap2, 'sha4', '2026-10-28T12:03:00Z');
+    const res = await get(
+      `/api/monitor/v1/runs/${gid}/artifacts/evil/preview`,
+    );
+    assert.equal(res.statusCode, 403);
+    assert.equal(res.json().error.code, 'path_outside_allowed_roots');
+  });
 });

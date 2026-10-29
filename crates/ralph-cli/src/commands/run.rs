@@ -883,6 +883,13 @@ pub async fn run_command(
         .unwrap_or_else(|_| config.core.workspace_root.clone());
     apply_active_profiles(&mut config, &args, hats_source, &profile_workspace_root)?;
 
+    // Best-effort monitor auto-registration: drop a marker into
+    // `~/.ralph/projects.d` so `ralph web --monitor` adopts this project
+    // without a manual "Add project" step. Anchored at the main-repo root
+    // (RALPH_WORKSPACE_ROOT) so worktree child runs register the main
+    // project, not the worktree. Never fails the run.
+    ralph_core::monitor_registration::register_project(&profile_workspace_root);
+
     // Handle --continue mode: check scratchpad exists before proceeding
     let resume = args.continue_mode;
     if resume {

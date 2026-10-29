@@ -84,7 +84,7 @@ cargo doc --no-deps                          # Documentation
 ### Web Dashboard
 
 ```bash
-ralph web                 # Launch both servers (backend:3000, frontend:5173)
+ralph web                 # Monitor dashboard (single process, :3200); --dev for vite+api (:5173/:3000)
 npm install               # Install all dependencies
 npm run dev               # Dev mode (both)
 npm run dev:server        # Backend only

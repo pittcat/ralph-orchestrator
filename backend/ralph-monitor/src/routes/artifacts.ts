@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { MonitorDb } from '../db/index.js';
 import { sendError } from '../lib/errors.js';
@@ -99,6 +100,60 @@ export function registerArtifactRoutes(
         content: content.content,
         truncated: content.truncated,
       });
+    },
+  );
+
+  /**
+   * Rendered preview for HTML deliverables (diagnosis / preset-review
+   * reports). Streams the file as text/html — unlike `/content` there
+   * is no 512KiB text cap since the bytes go straight to the browser.
+   *
+   * `Content-Security-Policy: sandbox …` puts the document in an
+   * opaque origin: scripts run (interactive reports keep working) but
+   * the document is origin-isolated, so artifact HTML can neither
+   * reach the monitor API with session cookies nor read the DOM of
+   * the dashboard.
+   */
+  const MAX_PREVIEW_BYTES = 64 * 1024 * 1024;
+  app.get<{ Params: { globalId: string; artifactId: string } }>(
+    '/api/monitor/v1/runs/:globalId/artifacts/:artifactId/preview',
+    async (req, reply) => {
+      const row = scope(db, machineId, req.params.globalId, reply);
+      if (!row) return;
+      const artifactId = req.params.artifactId;
+      const ctx = ctxOf(row);
+      const resolved = resolveArtifact(ctx, artifactId);
+      if ('error' in resolved) {
+        const code = resolved.error;
+        if (code === 'not_found') {
+          return sendError(reply, 404, 'artifact_not_found', `artifact ${artifactId} not generated or unknown`);
+        }
+        if (code === 'outside_allowed_roots') {
+          return sendError(reply, 403, 'path_outside_allowed_roots', `artifact ${artifactId} resolves outside allowed roots`);
+        }
+        return sendError(reply, 415, 'artifact_not_text', `artifact ${artifactId} is not a regular file`);
+      }
+      if (!/\.html?$/i.test(resolved.resolved)) {
+        return sendError(
+          reply,
+          415,
+          'preview_not_html',
+          `artifact ${artifactId} is not an HTML file`,
+        );
+      }
+      const st = fs.statSync(resolved.resolved);
+      if (st.size > MAX_PREVIEW_BYTES) {
+        return sendError(reply, 413, 'content_too_large', `artifact ${artifactId} exceeds 64MiB`);
+      }
+      return reply
+        .header(
+          'content-security-policy',
+          'sandbox allow-scripts allow-popups',
+        )
+        .header('x-content-type-options', 'nosniff')
+        .header('cache-control', 'no-store')
+        .type('text/html; charset=utf-8')
+        .send(fs.createReadStream(resolved.resolved));
     },
   );
 }

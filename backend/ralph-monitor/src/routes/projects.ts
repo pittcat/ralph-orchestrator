@@ -5,6 +5,7 @@ import { z } from 'zod';
 import type { MonitorDb } from '../db/index.js';
 import { sendError } from '../lib/errors.js';
 import { isGitRepo, normalizeUserPath } from '../lib/paths.js';
+import { removeProjectRegistration } from '../collector/registry.js';
 
 interface ProjectRow {
   id: string;
@@ -148,6 +149,9 @@ export function registerProjectRoutes(
         );
         remove.run(req.params.id);
       })();
+      // Tombstone the `ralph run` auto-registration drop file so the
+      // next import round does not resurrect the deleted project.
+      removeProjectRegistration(row.canonical_path);
       return reply.code(204).send();
     },
   );

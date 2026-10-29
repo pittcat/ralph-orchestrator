@@ -96,6 +96,59 @@ exit 1",
         assert!(stderr.contains("RALPH_MONITOR_STATIC_DIR="), "{stderr}");
     }
 
+    /// Bare `ralph web` defaults to monitor mode — the `--monitor`
+    /// flag is kept only for backwards compatibility.
+    #[test]
+    fn test_web_defaults_to_monitor() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path();
+        let monitor_dir = workspace.join("backend/ralph-monitor");
+        fs::create_dir_all(&monitor_dir).expect("monitor dir");
+        fs::write(monitor_dir.join("package.json"), "{}\n").expect("pkg");
+
+        let bin_dir = workspace.join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+        write_executable(
+            &bin_dir,
+            "npm",
+            "if [ \"$1\" = \"--version\" ]; then echo 9.6.0; exit 0; fi\n\
+if [ \"$1\" = \"run\" ] && [ \"$2\" = \"start\" ]; then\n\
+  echo \"listening\"\n\
+  exit 0\n\
+fi\n\
+exit 1",
+        );
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let path = format!("{}:{}", bin_dir.display(), original_path);
+
+        let port = match TcpListener::bind(("127.0.0.1", 0)) {
+            Ok(l) => {
+                let p = l.local_addr().expect("addr").port();
+                drop(l);
+                p
+            }
+            Err(_) => return,
+        };
+
+        let output = crate::common::ralph_bin()
+            .current_dir(workspace)
+            .env("PATH", &path)
+            .args([
+                "web",
+                "--workspace",
+                workspace.to_str().expect("workspace"),
+                "--no-open",
+                "--backend-port",
+                &port.to_string(),
+            ])
+            .output()
+            .expect("execute ralph web");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}");
+        assert!(stdout.contains("Starting Ralph monitor"), "{stdout}");
+    }
+
     /// `--frontend-port` is meaningless in monitor mode — a notice is
     /// printed and startup proceeds.
     #[test]
@@ -150,7 +203,7 @@ exit 1",
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success(), "{stdout}");
         assert!(
-            stdout.contains("--frontend-port is ignored in --monitor mode"),
+            stdout.contains("--frontend-port is ignored in monitor mode"),
             "{stdout}"
         );
     }

@@ -1,13 +1,11 @@
 /**
  * App Component
  *
- * Application routing configuration using React Router.
- * Defines routes with AppShell layout and page components.
+ * Application routing — the dashboard is monitor-only: every route
+ * resolves to a monitor page or redirects to the monitor overview.
  */
 
 import { Routes, Route, Navigate } from "react-router-dom";
-import { AppShell } from "./components/layout";
-import { TasksPage, PlanPage, BuilderPage, TaskDetailPage, SettingsPage } from "./pages";
 import { MonitorLayout } from "./features/monitor/MonitorLayout";
 import { OverviewPage } from "./features/monitor/OverviewPage";
 import { RunDetailPage } from "./features/monitor/RunDetailPage";
@@ -31,50 +29,41 @@ export function App() {
 
   return (
     <Routes>
-      {/* AppShell provides the layout, Outlet renders the matched route */}
-      <Route element={<AppShell />}>
-        <Route path="/tasks" element={<TasksPage />} />
-        <Route path="/tasks/:id" element={<TaskDetailPage />} />
-        <Route path="/builder" element={<BuilderPage />} />
-        <Route path="/plan" element={<PlanPage />} />
-        <Route path="/settings" element={<SettingsPage />} />
-        <Route
-          path="/monitor"
-          element={
-            <Monitor>
-              <OverviewPage />
-            </Monitor>
-          }
-        />
-        <Route
-          path="/monitor/inbox"
-          element={
-            <Monitor>
-              <InboxPage />
-            </Monitor>
-          }
-        />
-        <Route
-          path="/monitor/operations"
-          element={
-            <Monitor>
-              <OperationsPage />
-            </Monitor>
-          }
-        />
-        <Route
-          path="/monitor/runs/:globalId"
-          element={
-            <Monitor>
-              <RunDetailPage />
-            </Monitor>
-          }
-        />
-        {/* Redirect root to tasks */}
-        <Route path="/" element={<Navigate to="/tasks" replace />} />
-        {/* Catch-all redirect to tasks */}
-        <Route path="*" element={<Navigate to="/tasks" replace />} />
-      </Route>
+      <Route
+        path="/monitor"
+        element={
+          <Monitor>
+            <OverviewPage />
+          </Monitor>
+        }
+      />
+      <Route
+        path="/monitor/inbox"
+        element={
+          <Monitor>
+            <InboxPage />
+          </Monitor>
+        }
+      />
+      <Route
+        path="/monitor/operations"
+        element={
+          <Monitor>
+            <OperationsPage />
+          </Monitor>
+        }
+      />
+      <Route
+        path="/monitor/runs/:globalId"
+        element={
+          <Monitor>
+            <RunDetailPage />
+          </Monitor>
+        }
+      />
+      {/* Everything else lands on the monitor overview. */}
+      <Route path="/" element={<Navigate to="/monitor" replace />} />
+      <Route path="*" element={<Navigate to="/monitor" replace />} />
     </Routes>
   );
 }

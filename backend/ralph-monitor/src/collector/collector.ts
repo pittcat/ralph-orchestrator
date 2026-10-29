@@ -10,6 +10,7 @@ import { scanPlanningSessions } from '../notify/sessions.js';
 import { readRuntimeWebhookHint } from '../notify/runtime_hint.js';
 import { ensureMachineId } from '../lib/machine_id.js';
 import { confirmPendingOps } from '../ops/confirm.js';
+import { importProjectRegistrations } from './registry.js';
 
 /**
  * Per-project serial collector (plan D7): one `inspect run` child at
@@ -116,13 +117,16 @@ export interface CollectorHandle {
 /**
  * Start the polling loop: an immediate round, then one round every
  * `pollMs` (rounds never overlap — the next is scheduled only after
- * the previous finishes).
+ * the previous finishes). Each round first imports any `ralph run`
+ * auto-registration files from `registryDir`, then collects every
+ * registered project.
  */
 export function startCollector(
   db: MonitorDb,
   opts: {
     pollMs?: number;
     inspect?: InspectFn;
+    registryDir?: string;
     log?: (msg: string, err?: unknown) => void;
   } = {},
 ): CollectorHandle {
@@ -133,6 +137,7 @@ export function startCollector(
 
   const tick = async () => {
     try {
+      importProjectRegistrations(db, opts.registryDir);
       await collectOnce(db, inspect);
     } catch (err) {
       opts.log?.('collector round failed', err);

@@ -1,9 +1,8 @@
 /**
  * App Routing Tests
  *
- * Tests that verify the application routing configuration is correct.
- * Specifically validates that all page components are properly exported
- * and routes are correctly wired up.
+ * The dashboard is monitor-only: monitor routes render their pages,
+ * every other path redirects to the monitor overview.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -11,98 +10,86 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { App } from "./App";
 
-// Mock all page components to isolate routing tests
-vi.mock("./pages", () => ({
-  TasksPage: () => <div data-testid="tasks-page">Tasks Page</div>,
-  PlanPage: () => <div data-testid="plan-page">Plan Page</div>,
-  BuilderPage: () => <div data-testid="builder-page">Builder Page</div>,
-  TaskDetailPage: () => <div data-testid="task-detail-page">Task Detail Page</div>,
-  SettingsPage: () => <div data-testid="settings-page">Settings Page</div>,
+// Mock monitor pages to isolate routing tests.
+vi.mock("./features/monitor/OverviewPage", () => ({
+  OverviewPage: () => <div data-testid="overview-page">Overview</div>,
+}));
+vi.mock("./features/monitor/RunDetailPage", () => ({
+  RunDetailPage: () => <div data-testid="run-detail-page">Run Detail</div>,
+}));
+vi.mock("./features/monitor/inbox/InboxPage", () => ({
+  InboxPage: () => <div data-testid="inbox-page">Inbox</div>,
+}));
+vi.mock("./features/monitor/ops/OperationsPage", () => ({
+  OperationsPage: () => <div data-testid="operations-page">Operations</div>,
+}));
+vi.mock("./features/monitor/MonitorLayout", () => ({
+  MonitorLayout: ({ children }: { children: React.ReactNode }) => (
+    <div data-testid="monitor-layout">{children}</div>
+  ),
+}));
+vi.mock("./features/monitor/connection/ConnectionProvider", () => ({
+  ConnectionProvider: ({ children }: { children: React.ReactNode }) => (
+    <>{children}</>
+  ),
+}));
+vi.mock("./features/monitor/theme", () => ({
+  useThemeEffect: () => {},
 }));
 
-// Mock the layout component - must render Outlet for routes to work
-vi.mock("./components/layout", async () => {
-  const { Outlet } = await import("react-router-dom");
-  return {
-    AppShell: () => (
-      <div data-testid="app-shell">
-        <Outlet />
-      </div>
-    ),
-  };
-});
-
-// Helper to render App with a specific route
 function renderWithRoute(route: string) {
   return render(
     <MemoryRouter initialEntries={[route]}>
       <App />
-    </MemoryRouter>
+    </MemoryRouter>,
   );
 }
 
-describe("App routing", () => {
+describe("App routing (monitor-only)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  describe("TaskDetailPage route", () => {
-    it("renders TaskDetailPage for /tasks/:id route", async () => {
-      // Given: A route to a specific task detail
-      const taskId = "task-abc-123";
-
-      // When: The app is rendered with the task detail route
-      renderWithRoute(`/tasks/${taskId}`);
-
-      // Then: The TaskDetailPage should be rendered
-      await waitFor(() => {
-        expect(screen.getByTestId("task-detail-page")).toBeInTheDocument();
-      });
-    });
-
-    it("does not match /tasks/:id when navigating to /tasks", async () => {
-      // Given: A route to the task list (not a specific task)
-
-      // When: The app is rendered with the tasks list route
-      renderWithRoute("/tasks");
-
-      // Then: The TasksPage should be rendered, not TaskDetailPage
-      await waitFor(() => {
-        expect(screen.getByTestId("tasks-page")).toBeInTheDocument();
-      });
-      expect(screen.queryByTestId("task-detail-page")).not.toBeInTheDocument();
+  it("redirects / to the monitor overview", async () => {
+    renderWithRoute("/");
+    await waitFor(() => {
+      expect(screen.getByTestId("overview-page")).toBeInTheDocument();
     });
   });
 
-  describe("existing routes still work", () => {
-    it("renders TasksPage for /tasks route", async () => {
-      renderWithRoute("/tasks");
-
-      await waitFor(() => {
-        expect(screen.getByTestId("tasks-page")).toBeInTheDocument();
-      });
-    });
-
-    it("redirects root to /tasks", async () => {
-      renderWithRoute("/");
-
-      await waitFor(() => {
-        expect(screen.getByTestId("tasks-page")).toBeInTheDocument();
-      });
+  it("renders the overview for /monitor", async () => {
+    renderWithRoute("/monitor");
+    await waitFor(() => {
+      expect(screen.getByTestId("overview-page")).toBeInTheDocument();
     });
   });
-});
 
-describe("pages barrel export", () => {
-  it("exports TaskDetailPage from pages/index.ts", async () => {
-    // Given: The pages barrel export
+  it("renders the inbox for /monitor/inbox", async () => {
+    renderWithRoute("/monitor/inbox");
+    await waitFor(() => {
+      expect(screen.getByTestId("inbox-page")).toBeInTheDocument();
+    });
+  });
 
-    // When: We import from pages (bypass the mock)
-    // Use dynamic import with query param to avoid mock
-    const pagesModule = await vi.importActual<typeof import("./pages")>("./pages");
+  it("renders operations for /monitor/operations", async () => {
+    renderWithRoute("/monitor/operations");
+    await waitFor(() => {
+      expect(screen.getByTestId("operations-page")).toBeInTheDocument();
+    });
+  });
 
-    // Then: TaskDetailPage should be exported
-    expect(pagesModule.TaskDetailPage).toBeDefined();
-    expect(typeof pagesModule.TaskDetailPage).toBe("function");
+  it("renders run detail for /monitor/runs/:globalId", async () => {
+    renderWithRoute("/monitor/runs/m1:proj_1:run_1");
+    await waitFor(() => {
+      expect(screen.getByTestId("run-detail-page")).toBeInTheDocument();
+    });
+  });
+
+  it("redirects unknown routes to the monitor overview", async () => {
+    renderWithRoute("/tasks");
+    await waitFor(() => {
+      expect(screen.getByTestId("overview-page")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("run-detail-page")).not.toBeInTheDocument();
   });
 });

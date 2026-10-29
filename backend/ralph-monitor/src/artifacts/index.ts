@@ -44,6 +44,7 @@ const BUILTIN_SLOTS: ArtifactSlot[] = [
 export function kindOf(file: string): string {
   if (file.endsWith('.md')) return 'markdown';
   if (file.endsWith('.json')) return 'json';
+  if (file.endsWith('.html') || file.endsWith('.htm')) return 'html';
   if (file.endsWith('.yml') || file.endsWith('.yaml')) return 'yaml';
   return 'text';
 }
@@ -72,7 +73,15 @@ function enumerateDir(
   workspace: string,
   subdir: 'review' | 'post-merge',
 ): ArtifactSlot[] {
-  const dir = path.join(workspace, '.ralph', subdir);
+  return enumerateAbsDir(path.join(workspace, '.ralph', subdir), subdir);
+}
+
+/**
+ * Shallow (one-level) enumeration of an absolute directory. Slot ids
+ * carry `idPrefix`; candidates stay absolute so `checkAllowed` resolves
+ * them against the realpath allowlist (escapees → `outside_allowed`).
+ */
+function enumerateAbsDir(dir: string, idPrefix: string): ArtifactSlot[] {
   let names: string[] = [];
   try {
     names = fs.readdirSync(dir);
@@ -83,10 +92,35 @@ function enumerateDir(
     .filter((n) => !n.startsWith('.'))
     .sort()
     .map((n) => ({
-      id: `${subdir}/${n}`,
+      id: `${idPrefix}/${n}`,
       kind: kindOf(n),
-      candidate: `.ralph/${subdir}/${n}`,
+      candidate: path.join(dir, n),
     }));
+}
+
+/**
+ * Report directories (`docs/report/` holds preset deliverables such as
+ * the self-contained diagnosis/preset-review HTML). Probed under both
+ * the run workspace (covers worktree runs writing into the worktree's
+ * docs/) and the main repo root (covers merged reports) when they
+ * differ.
+ */
+function reportSlots(ctx: RunArtifactContext): ArtifactSlot[] {
+  const out: ArtifactSlot[] = [
+    ...enumerateAbsDir(
+      path.join(ctx.workspace, 'docs', 'report'),
+      'docs/report',
+    ),
+  ];
+  if (ctx.repoRoot && ctx.repoRoot !== ctx.workspace) {
+    out.push(
+      ...enumerateAbsDir(
+        path.join(ctx.repoRoot, 'docs', 'report'),
+        'main/docs/report',
+      ),
+    );
+  }
+  return out;
 }
 
 /** All slots for a run, deduped by id (first declaration wins). */
@@ -98,6 +132,7 @@ export function buildSlots(ctx: RunArtifactContext): ArtifactSlot[] {
     ...BUILTIN_SLOTS,
     ...enumerateDir(ctx.workspace, 'review'),
     ...enumerateDir(ctx.workspace, 'post-merge'),
+    ...reportSlots(ctx),
   ]) {
     if (seen.has(s.id)) continue;
     seen.add(s.id);
@@ -107,11 +142,16 @@ export function buildSlots(ctx: RunArtifactContext): ArtifactSlot[] {
 }
 
 /**
- * Allowed roots (D7): `{workspace/.ralph, repo_root/docs,
- * plan_path's dir}`. plan_path may be relative to the workspace.
+ * Allowed roots (D7): `{workspace/.ralph, workspace/docs,
+ * repo_root/docs, plan_path's dir}`. plan_path may be relative to the
+ * workspace. `workspace/docs` covers report deliverables written into
+ * a worktree's own docs/; `repo_root/docs` covers merged ones.
  */
 export function allowedRoots(ctx: RunArtifactContext): string[] {
-  const roots = [path.join(ctx.workspace, '.ralph')];
+  const roots = [
+    path.join(ctx.workspace, '.ralph'),
+    path.join(ctx.workspace, 'docs'),
+  ];
   if (ctx.repoRoot) roots.push(path.join(ctx.repoRoot, 'docs'));
   if (ctx.planPath) {
     const planAbs = path.isAbsolute(ctx.planPath)

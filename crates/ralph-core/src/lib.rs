@@ -96,6 +96,7 @@ pub mod trigger_context;
 pub use emit_schema_hint::{
     build_publish_emit_section, fix_hint_for_hat_topic, format_emit_json_example,
 };
+pub mod html_skills;
 mod instructions;
 mod landing;
 pub mod loop_authorization;
@@ -111,6 +112,7 @@ pub mod memory_parser;
 pub mod memory_selection;
 mod memory_store;
 pub mod merge_queue;
+pub mod monitor_registration;
 pub mod notifications;
 pub mod payload_contract;
 pub mod plan_baseline;
@@ -137,7 +139,6 @@ pub mod runtime_contract;
 mod session_player;
 #[cfg(feature = "recording")]
 mod session_recorder;
-pub mod html_skills;
 pub mod skill;
 pub mod skill_registry;
 pub mod state;

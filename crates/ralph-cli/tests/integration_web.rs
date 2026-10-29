@@ -77,6 +77,7 @@ exit 1",
             .env("PATH", path)
             .args([
                 "web",
+                "--dev",
                 "--workspace",
                 workspace.to_str().expect("workspace path"),
                 "--legacy-node-api",

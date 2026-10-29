@@ -559,7 +559,9 @@ ralph tui [OPTIONS]
 
 ### ralph web
 
-Run the web dashboard.
+Run the web dashboard. Defaults to the cross-project **monitor** (single
+process, serves the built SPA itself). Pass `--dev` for the Vite +
+`ralph-api` development stack.
 
 ```bash
 ralph web [OPTIONS]
@@ -569,10 +571,12 @@ ralph web [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--backend-port <PORT>` | RPC API port (default: 3000). |
-| `--frontend-port <PORT>` | Frontend port (default: 5173). |
+| `--backend-port <PORT>` | Monitor port (default: 3200); `--dev` mode RPC API port (default: 3000). |
+| `--frontend-port <PORT>` | Frontend port, `--dev` mode only (default: 5173). |
 | `--workspace <WORKSPACE>` | Workspace root directory. |
-| `--legacy-node-api` | Use deprecated Node tRPC backend instead of Rust RPC API. |
+| `--monitor` | Monitor mode — the default; kept for backwards compatibility. |
+| `--dev` | Run the Vite + `ralph-api` development stack instead of the monitor. |
+| `--legacy-node-api` | Use deprecated Node tRPC backend instead of Rust RPC API (`--dev` only). |
 | `--no-open` | Do not open the dashboard in the default browser. |
 
 ### ralph mcp

@@ -56,6 +56,70 @@ fn test_run_dry_run_succeeds() {
     assert!(stdout.contains("Dry run mode"), "stdout: {stdout}");
 }
 
+/// `ralph run` drops a monitor registration file into
+/// `$RALPH_MONITOR_REGISTRY_DIR` even before the run itself proceeds —
+/// this is what lets `ralph web` adopt any directory that has hosted a
+/// run. The default `ralph_bin()` scrub sets AUTOREGISTER=0, so the
+/// test opts back in explicitly.
+#[test]
+fn test_run_drops_monitor_registration_file() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let registry_dir = TempDir::new().expect("registry dir");
+    let temp_path = temp_dir.path();
+
+    let output = common::ralph_bin()
+        .args([
+            "run",
+            "--dry-run",
+            "--skip-preflight",
+            "--prompt",
+            "hello world",
+            "--completion-promise",
+            "done",
+            "--max-iterations",
+            "1",
+            "--backend",
+            "claude",
+            "--no-tui",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_MONITOR_AUTOREGISTER", "1")
+        .env("RALPH_MONITOR_REGISTRY_DIR", registry_dir.path())
+        .output()
+        .expect("execute ralph run");
+
+    assert!(
+        output.status.success(),
+        "run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let entries: Vec<_> = std::fs::read_dir(registry_dir.path())
+        .expect("registry dir readable")
+        .collect::<Result<_, _>>()
+        .expect("dir entries");
+    assert_eq!(entries.len(), 1, "exactly one registration file");
+
+    let file = entries[0].path();
+    assert!(
+        file.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".json")
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).expect("read file"))
+            .expect("registration json");
+    let canonical = temp_path
+        .canonicalize()
+        .expect("canonicalize")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(json["path"], canonical);
+    assert_eq!(json["source"], "ralph run");
+    assert_eq!(json["version"], 1);
+}
+
 #[test]
 fn test_run_dry_run_uses_user_scoped_config_defaults() {
     let temp_dir = TempDir::new().expect("temp dir");
