@@ -168,9 +168,12 @@ test('GET /runs/:globalId → detail with evidence timestamps; 404s typed', asyn
   });
   assert.equal(res.statusCode, 200);
   const detail = res.json().run;
-  assert.equal(detail.state, 'exited_unknown');
+  // Verified dead pid + no terminal → abnormal unrecorded exit;
+  // evidence still reports the snapshot's own `unknown` vocabulary.
+  assert.equal(detail.state, 'exited_failed');
   assert.equal(detail.stateEvidence.lockPresent, true);
-  // S6: unknown shows evidence timestamps, not success flags.
+  assert.equal(detail.stateEvidence.snapshotState, 'unknown');
+  // S6: dead runs show evidence timestamps, not success flags.
   assert.equal(detail.evidenceTimestamps.lastObservedAt, T);
   assert.equal(detail.evidenceTimestamps.collectedAt, T);
   assert.equal(detail.evidenceTimestamps.terminalAt, null);

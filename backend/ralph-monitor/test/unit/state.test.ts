@@ -128,7 +128,30 @@ test('exited + non-success reasons → exited_failed (E10 vocabulary)', () => {
   }
 });
 
-test('dead pid + no terminal → exited_unknown, never fabricate success (S6)', () => {
+test('verified dead pid + no terminal → exited_failed (abnormal unrecorded exit)', () => {
+  const { state, evidence } = mapObservationState(
+    obs({
+      state: 'unknown',
+      pid: 99999999,
+      evidence: {
+        manifestPresent: true,
+        manifestCorrupt: false,
+        registryPresent: false,
+        lockPresent: false,
+        mergeState: null,
+      },
+    }),
+  );
+  assert.equal(state, 'exited_failed');
+  // The observation vocabulary stays honest in evidence — consumers
+  // can still tell "recorded failure" from "died without a record".
+  assert.equal(evidence.snapshotState, 'unknown');
+  assert.equal(evidence.terminalReason, null);
+  assert.equal(evidence.manifestPresent, true);
+  assert.equal(evidence.pid, 99999999);
+});
+
+test('dead-pid unknown via stale lock evidence → exited_failed', () => {
   const { state, evidence } = mapObservationState(
     obs({
       state: 'unknown',
@@ -142,10 +165,28 @@ test('dead pid + no terminal → exited_unknown, never fabricate success (S6)', 
       },
     }),
   );
+  assert.equal(state, 'exited_failed');
+  assert.equal(evidence.lockPresent, true);
+});
+
+test('unknown with no process identity → exited_unknown (S6)', () => {
+  const { state, evidence } = mapObservationState(
+    obs({
+      state: 'unknown',
+      pid: null,
+      evidence: {
+        manifestPresent: false,
+        manifestCorrupt: true,
+        registryPresent: false,
+        lockPresent: false,
+        mergeState: null,
+      },
+    }),
+  );
   assert.equal(state, 'exited_unknown');
   assert.equal(evidence.snapshotState, 'unknown');
-  assert.equal(evidence.lockPresent, true);
-  assert.equal(evidence.manifestPresent, false);
+  assert.equal(evidence.manifestCorrupt, true);
+  assert.equal(evidence.pid, null);
 });
 
 test('unrecognised snapshot state degrades to exited_unknown', () => {

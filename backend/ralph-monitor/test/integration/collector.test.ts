@@ -84,7 +84,7 @@ test('S4: short-lived run discovered via manifest evidence + terminal', async ()
   await app.close();
 });
 
-test('S5/S6: three-way state split — success / merged / unknown', async () => {
+test('S5/S6: three-way state split — success / merged / dead / unknown', async () => {
   const { app, db } = makeApp();
   const dir = makeProjectDir();
   const pid = insertProject(db, dir);
@@ -110,13 +110,24 @@ test('S5/S6: three-way state split — success / merged / unknown', async () => 
         started_at: '2026-10-28T10:00:00Z',
         evidence: { lock_present: true },
       },
+      // Corrupt/identity-less observation: no pid to verify → the
+      // genuinely unknowable bucket survives.
+      {
+        run_id: 'primary-w',
+        kind: 'unknown',
+        state: 'unknown',
+        started_at: '2026-10-28T10:00:00Z',
+        evidence: { manifest_corrupt: true },
+      },
     ]),
   });
 
   await collectOnceFake(db);
   assert.equal(getRun(db, pid, 'primary-x')?.state, 'exited_success');
   assert.equal(getRun(db, pid, 'loop-y')?.state, 'exited_merged');
-  assert.equal(getRun(db, pid, 'primary-z')?.state, 'exited_unknown');
+  // Dead pid verified → abnormal unrecorded exit, not "unknown".
+  assert.equal(getRun(db, pid, 'primary-z')?.state, 'exited_failed');
+  assert.equal(getRun(db, pid, 'primary-w')?.state, 'exited_unknown');
   await app.close();
 });
 

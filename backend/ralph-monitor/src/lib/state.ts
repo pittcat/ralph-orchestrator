@@ -8,9 +8,13 @@
  * Plan 3. `exited_*` rows are terminal, but only evidenced ones
  * (`exited_success`/`exited_failed` with a terminal record, or
  * `exited_merged`) are final: the projection records a
- * `state_conflict` if they regress to `running`. `exited_unknown`
- * means "no evidence" — a later live observation legitimately
- * recovers it.
+ * `state_conflict` if they regress to `running`. `exited_failed`
+ * also covers runs verified dead without a terminal record
+ * (killed/crashed before `record_terminal` ran) — an abnormal,
+ * unrecorded exit, not "we don't know". `exited_unknown` is
+ * reserved for observations with no process identity at all
+ * (corrupt manifest, unrecognised state) — a later live
+ * observation legitimately recovers it.
  */
 export const MONITOR_STATES = [
   'running',
@@ -42,6 +46,13 @@ export interface StateEvidence {
   terminalReason: string | null;
   mergeCommit: string | null;
   pid: number | null;
+  /**
+   * Set when the state was assigned by the absent-run sweep: the
+   * run vanished from the snapshot (all evidence sources gone)
+   * and the projection re-verified liveness through its stored
+   * pid instead of through a fresh observation.
+   */
+  absentFromSnapshot?: boolean;
 }
 
 export interface ObservationStateInput {
@@ -63,6 +74,8 @@ export interface ObservationStateInput {
  * only unambiguous success; `cancelled`/`interrupted`/`stopped`/
  * `restart_requested` are deliberate non-success terminations and map
  * to `exited_failed` with the raw reason preserved in evidence.
+ * A verified-dead pid with no terminal record maps the same way —
+ * the process exited abnormally before it could record anything.
  */
 const SUCCESS_REASONS = new Set(['completed']);
 
@@ -73,8 +86,11 @@ const SUCCESS_REASONS = new Set(['completed']);
  * queue recorded `merged` (or whose terminal carries a merge commit)
  * is `exited_merged` regardless of the termination reason. Next,
  * `completed` → `exited_success`, any other terminal reason →
- * `exited_failed`. A live pid → `running`. Neither → `exited_unknown`
- * (never fabricate success — R2).
+ * `exited_failed`. A live pid → `running`. A snapshot `unknown`
+ * carrying a concrete pid means the inspector verified that process
+ * dead (kill(0)) → `exited_failed`; pid-less `unknown` →
+ * `exited_unknown` (never fabricate success — R2, and never
+ * fabricate liveness either).
  */
 export function mapObservationState(input: ObservationStateInput): {
   state: MonitorState;
@@ -112,6 +128,14 @@ export function mapObservationState(input: ObservationStateInput): {
     if (terminalReason !== null && SUCCESS_REASONS.has(terminalReason)) {
       return { state: 'exited_success', evidence };
     }
+    return { state: 'exited_failed', evidence };
+  }
+  // `unknown` with a recorded pid: the inspector verified that
+  // concrete process dead (kill(0)) — a conclusive abnormal exit,
+  // not an unknowable one. Only pid-less observations (corrupt
+  // manifest, identity-less rows) and unrecognised state strings
+  // stay fail-closed `exited_unknown`.
+  if (input.state === 'unknown' && input.pid !== null) {
     return { state: 'exited_failed', evidence };
   }
   return { state: 'exited_unknown', evidence };

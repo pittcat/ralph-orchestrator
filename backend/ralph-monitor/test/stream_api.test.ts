@@ -103,7 +103,8 @@ describe('stream + snapshot API', () => {
 
   it('cursor skips earlier rows', async () => {
     ingest([obs(ws)]);
-    ingest([obs(ws, 'run2')]);
+    // run1 remains observed — a real snapshot enumerates every run.
+    ingest([obs(ws), obs(ws, 'run2')]);
     const frames = await readSse(`${base}/api/monitor/v1/stream?cursor=1`, {
       frames: 1,
     });
@@ -144,9 +145,10 @@ describe('stream + snapshot API', () => {
       frames: 2,
       timeoutMs: 4_000,
     });
-    // Let the replay land, then append live.
+    // Let the replay land, then append live. The snapshot is a
+    // complete enumeration — run1 stays observed alongside run2.
     await new Promise((r) => setTimeout(r, 400));
-    ingest([obs(ws, 'run2')]);
+    ingest([obs(ws), obs(ws, 'run2')]);
     const frames = await pending;
     assert.equal(frames.length, 2);
     assert.equal(frames[1].event, 'run.created');

@@ -90,7 +90,7 @@ test('terminal state never regresses to running → state_conflict row', () => {
   assert.match(errs[0].error, /state_conflict/);
 });
 
-test('exited_unknown recovers to running on later live observation', () => {
+test('non-evidenced terminal recovers to running on later live observation', () => {
   const d = db();
   const pid = insertProject(d, '/w/a');
   // Mid-restart observation: dead pid, no terminal evidence.
@@ -103,7 +103,9 @@ test('exited_unknown recovers to running on later live observation', () => {
     'sha1',
     NOW,
   );
-  assert.equal(getRun(d, pid, 'loop-x')?.state, 'exited_unknown');
+  // Dead pid verified → abnormal unrecorded exit, but recoverable
+  // because no terminal evidence was ever recorded.
+  assert.equal(getRun(d, pid, 'loop-x')?.state, 'exited_failed');
   // Relaunched run observed live — must not be rejected.
   ingestSnapshot(
     d,
@@ -360,4 +362,172 @@ test('queryRuns watermark reflects freshest successful collection', () => {
 
 test('snapshotSha256 is a stable hex digest', () => {
   assert.match(snapshotSha256('{"a":1}'), /^[0-9a-f]{64}$/);
+});
+
+// ── absent-run sweep ─────────────────────────────────────────────
+// A run missing from the snapshot lost every evidence source. The
+// projection must not freeze its last state — the stored pid is
+// re-probed (kill(0)) to decide.
+
+test('absent run with dead stored pid → exited_failed + run.updated', () => {
+  const d = db();
+  const pid = insertProject(d, '/w/a');
+  ingestSnapshot(
+    d,
+    pid,
+    snapshotOf('/w/a', [
+      { run_id: 'loop-x', kind: 'worktree', state: 'running', pid: 111 },
+    ]),
+    'sha1',
+    NOW,
+  );
+  assert.equal(getRun(d, pid, 'loop-x')?.state, 'running');
+
+  // Next round the run is gone from the snapshot entirely
+  // (manifest deleted, registry pruned, worktree removed).
+  ingestSnapshot(d, pid, snapshotOf('/w/a', []), 'sha2', '2026-10-28T12:01:00Z', {
+    pidAlive: () => false,
+  });
+  const row = getRun(d, pid, 'loop-x');
+  assert.equal(row?.state, 'exited_failed');
+  assert.equal(row?.last_observed_at, '2026-10-28T12:01:00Z');
+  const evidence = JSON.parse(row!.state_evidence) as {
+    snapshotState: string;
+    absentFromSnapshot?: boolean;
+  };
+  assert.equal(evidence.snapshotState, 'running');
+  assert.equal(evidence.absentFromSnapshot, true);
+  const events = d
+    .prepare(
+      `SELECT kind, payload FROM monitor_events
+       WHERE project_id = ? AND run_id = 'loop-x' ORDER BY seq`,
+    )
+    .all(pid) as { kind: string; payload: string }[];
+  const updated = events
+    .filter((e) => e.kind === 'run.updated')
+    .map((e) => JSON.parse(e.payload) as Record<string, unknown>);
+  assert.ok(
+    updated.some(
+      (p) =>
+        p.reason === 'absent_from_snapshot' &&
+        JSON.stringify(p.changed).includes('exited_failed'),
+    ),
+    'expected run.updated absent_from_snapshot event',
+  );
+});
+
+test('absent run with live stored pid keeps its state (no fabricated death)', () => {
+  const d = db();
+  const pid = insertProject(d, '/w/a');
+  ingestSnapshot(
+    d,
+    pid,
+    snapshotOf('/w/a', [
+      { run_id: 'loop-x', kind: 'worktree', state: 'running', pid: 111 },
+    ]),
+    'sha1',
+    NOW,
+  );
+  ingestSnapshot(d, pid, snapshotOf('/w/a', []), 'sha2', '2026-10-28T12:01:00Z', {
+    pidAlive: () => true,
+  });
+  // Evidence vanished under a live process — keep the last state.
+  assert.equal(getRun(d, pid, 'loop-x')?.state, 'running');
+});
+
+test('legacy exited_unknown row with dead stored pid → exited_failed', () => {
+  const d = db();
+  const pid = insertProject(d, '/w/a');
+  // Rows persisted by the old mapping (dead pid, no terminal →
+  // exited_unknown) are remediated by the sweep once their evidence
+  // is gone — no data migration needed.
+  d.prepare(
+    `INSERT INTO runs (project_id, run_id, kind, state, state_evidence,
+                       last_observed_at, pid)
+     VALUES (?, 'loop-x', 'worktree', 'exited_unknown', ?, ?, 111)`,
+  ).run(pid, JSON.stringify({ snapshotState: 'unknown', pid: 111 }), NOW);
+  ingestSnapshot(d, pid, snapshotOf('/w/a', []), 'sha2', '2026-10-28T12:01:00Z', {
+    pidAlive: () => false,
+  });
+  assert.equal(getRun(d, pid, 'loop-x')?.state, 'exited_failed');
+});
+
+test('absent run with no stored pid → exited_unknown (nothing verifiable)', () => {
+  const d = db();
+  const pid = insertProject(d, '/w/a');
+  ingestSnapshot(
+    d,
+    pid,
+    snapshotOf('/w/a', [
+      { run_id: 'loop-x', kind: 'unknown', state: 'unknown' },
+    ]),
+    'sha1',
+    NOW,
+  );
+  assert.equal(getRun(d, pid, 'loop-x')?.state, 'exited_unknown');
+  ingestSnapshot(d, pid, snapshotOf('/w/a', []), 'sha2', '2026-10-28T12:01:00Z', {
+    pidAlive: () => {
+      throw new Error('pidAlive must not run for pid-less rows');
+    },
+  });
+  assert.equal(getRun(d, pid, 'loop-x')?.state, 'exited_unknown');
+});
+
+test('terminal-evidenced rows are never swept (absent ≠ regressed)', () => {
+  const d = db();
+  const pid = insertProject(d, '/w/a');
+  ingestSnapshot(
+    d,
+    pid,
+    snapshotOf('/w/a', [
+      {
+        run_id: 'loop-x',
+        kind: 'worktree',
+        state: 'exited',
+        pid: 111,
+        terminal: { reason: 'completed', at: NOW },
+      },
+    ]),
+    'sha1',
+    NOW,
+  );
+  assert.equal(getRun(d, pid, 'loop-x')?.state, 'exited_success');
+  ingestSnapshot(d, pid, snapshotOf('/w/a', []), 'sha2', '2026-10-28T12:01:00Z', {
+    pidAlive: () => {
+      throw new Error('pidAlive must not run for terminal rows');
+    },
+  });
+  assert.equal(getRun(d, pid, 'loop-x')?.state, 'exited_success');
+});
+
+test('absent run relaunched under same id still recovers to running', () => {
+  const d = db();
+  const pid = insertProject(d, '/w/a');
+  ingestSnapshot(
+    d,
+    pid,
+    snapshotOf('/w/a', [
+      { run_id: 'loop-x', kind: 'worktree', state: 'running', pid: 111 },
+    ]),
+    'sha1',
+    NOW,
+  );
+  // Evidence vanishes, pid dead → swept to exited_failed (no
+  // terminal evidence recorded, so regression guard stays open).
+  ingestSnapshot(d, pid, snapshotOf('/w/a', []), 'sha2', '2026-10-28T12:01:00Z', {
+    pidAlive: () => false,
+  });
+  assert.equal(getRun(d, pid, 'loop-x')?.state, 'exited_failed');
+  // Relaunch re-creates the manifest — the run is observed live again.
+  ingestSnapshot(
+    d,
+    pid,
+    snapshotOf('/w/a', [
+      { run_id: 'loop-x', kind: 'worktree', state: 'running', pid: 222 },
+    ]),
+    'sha3',
+    '2026-10-28T12:02:00Z',
+    { pidAlive: () => false },
+  );
+  assert.equal(getRun(d, pid, 'loop-x')?.state, 'running');
 });

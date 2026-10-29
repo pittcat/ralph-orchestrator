@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto';
 import type { MonitorDb } from './index.js';
 import type { RunSnapshot } from '../ralph/snapshot.js';
+import { posixPidCheck } from '../health/pid_check.js';
 import {
   isMonitorState,
   mapObservationState,
   type MonitorState,
+  type StateEvidence,
 } from '../lib/state.js';
 import { ingestRunEvents } from '../events/ingest.js';
 import { ingestRunActivity } from '../activity/ingest.js';
@@ -27,8 +29,16 @@ import type { SessionObservation } from '../notify/sessions.js';
  *   a partial snapshot is never committed.
  * - Upserts are idempotent and evidenced terminal states never
  *   regress to `running` (a `state_conflict` row is recorded
- *   instead). `exited_unknown` carries no terminal evidence and may
- *   recover to `running` on a later live observation.
+ *   instead). Non-evidenced terminal states (`exited_failed` /
+ *   `exited_unknown` with no terminal record) may recover to
+ *   `running` on a later live observation — e.g. an aborted run
+ *   relaunched under the same id.
+ * - Absent-run sweep: a run the snapshot no longer reports has lost
+ *   every evidence source (manifest deleted, registry pruned,
+ *   worktree removed). Without it the row freezes at its last
+ *   stored state forever — including `running`. The sweep re-probes
+ *   the stored pid (same kill(0) semantics as the inspector): dead
+ *   → `exited_failed`, live → keep state, no pid → `exited_unknown`.
  * - `stale` is a read-time signal (project cursor has failures or an
  *   old watermark), never persisted.
  */
@@ -90,7 +100,12 @@ export function ingestSnapshot(
   snapshot: RunSnapshot,
   rawSha256: string,
   observedAt: string,
-  extras: { sessions?: SessionObservation[]; machineId?: string } = {},
+  extras: {
+    sessions?: SessionObservation[];
+    machineId?: string;
+    /** kill(0)-style liveness probe for the absent-run sweep. */
+    pidAlive?: (pid: number) => boolean;
+  } = {},
 ): void {
   db.transaction(() => {
     // Plan4-U1: notification intents accumulate through the round and
@@ -378,6 +393,66 @@ export function ingestSnapshot(
             WHERE project_id = ? AND run_id = ?)
          WHERE project_id = ? AND run_id = ?`,
       ).run(projectId, obs.run_id, projectId, obs.run_id);
+    }
+
+    // Absent-run sweep (S6-hardening): rows the snapshot no longer
+    // reports have lost every evidence source (manifest deleted,
+    // registry pruned, worktree removed). Without this pass a
+    // vanished run freezes at its last stored state forever —
+    // including `running` and `exited_unknown`. Terminal-evidenced
+    // rows are final and skipped; anything else is re-probed through
+    // its last recorded pid (the same kill(0) semantics the
+    // inspector uses):
+    //   dead pid → `exited_failed`  (conclusive abnormal exit)
+    //   live pid → keep state      (evidence vanished under a live
+    //                               process — don't fabricate death)
+    //   no pid   → `exited_unknown` (nothing left to verify)
+    const pidAlive =
+      extras.pidAlive ?? ((pid: number) => posixPidCheck(pid, null).alive);
+    const seen = new Set(snapshot.runs.map((r) => r.run_id));
+    const absent = db
+      .prepare(
+        `SELECT run_id, state, pid, state_evidence FROM runs
+         WHERE project_id = ? AND terminal IS NULL
+           AND state NOT IN ('exited_success', 'exited_failed', 'exited_merged')`,
+      )
+      .all(projectId) as {
+      run_id: string;
+      state: string;
+      pid: number | null;
+      state_evidence: string;
+    }[];
+    for (const row of absent) {
+      if (seen.has(row.run_id)) continue;
+      const next: MonitorState =
+        row.pid === null
+          ? 'exited_unknown'
+          : pidAlive(row.pid)
+            ? (row.state as MonitorState)
+            : 'exited_failed';
+      if (next === row.state) continue;
+      let evidence: StateEvidence;
+      try {
+        evidence = {
+          ...(JSON.parse(row.state_evidence) as StateEvidence),
+          absentFromSnapshot: true,
+        };
+      } catch {
+        evidence = { absentFromSnapshot: true } as StateEvidence;
+      }
+      db.prepare(
+        `UPDATE runs SET state = ?, state_evidence = ?, last_observed_at = ?
+         WHERE project_id = ? AND run_id = ?`,
+      ).run(next, JSON.stringify(evidence), observedAt, projectId, row.run_id);
+      appendEvent(
+        db,
+        'run.updated',
+        { projectId, runId: row.run_id },
+        {
+          changed: { state: { from: row.state, to: next } },
+          reason: 'absent_from_snapshot',
+        },
+      );
     }
 
     // Plan4-U1: planning-session diff — new waiting evidence becomes
