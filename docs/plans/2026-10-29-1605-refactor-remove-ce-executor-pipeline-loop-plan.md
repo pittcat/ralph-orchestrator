@@ -2,7 +2,7 @@
 title: refactor(presets): 移除 builtin preset ce-executor-pipeline-loop
 type: refactor
 date: 2026-10-29
-baseline: 84d3f531c700a1aca953e2ecb581b539a7b612ec
+baseline: 0a9a913f6f9d7856475fea072d5d80a8d6bc8879
 execution: code
 status: READY
 ---
@@ -13,12 +13,20 @@ status: READY
 
 `READY` — 所有实施关键决策置信度均 ≥ 0.85，无 BLOCKED 项。
 
-- **代码库基线**：`84d3f531c700a1aca953e2ecb581b539a7b612ec`。
-- **调查范围**：`presets/`（manifest/index/en/schemas/monitor/scenarios/zh/templates）、`crates/ralph-cli`（`presets.rs`、`build.rs`、`commands/inspect/descriptor.rs`、`loop_runner/{sync_timeout_tests,inner_prologue,workflow_activation,emit_schema_hint,payload_consistency,finding_id,tests/legacy/diagnosis.rs}`）、`crates/ralph-core`（`preset_lint/instructions_opac.rs`、tests/scenarios.rs、tests/scenarios/*.yml）、`skills/tests/test_html_deliverables.py`、`scripts/`（ralph-zsh-plugin.zsh、sync-embedded-files.sh、validate-preset-authoring.sh、validate-builtin-presets.sh、check-cli-doc-drift.sh）、`tests/a7_e2e_lint_gate_fires.sh`、文档面（README、AGENTS/CLAUDE、`.cursor/rules/agents.mdc`、`docs/guide/*`、`CONCEPTS.md`、`PROMPT.pipeline.md`、`skills/*/references/patterns.md`）、`backend/ralph-monitor/src/events/progress.ts`、`docs/achieved|report|handoff|plans` 历史档案。
-- **已执行验证命令**：`git status` / `git log`（工作树基线）；`rg "ce-executor-pipeline-loop|ce_executor_pipeline_loop"`（files_with_matches + 分批 content，共 75 个命中文件）；`rg --files presets/` 家族文件枚举；`rg "U7_|emit_feedback"`（lint 规则面）；`rg -l "trigger_context"`（验证 implementation-review 是除 loop 外唯一在用方）；`git check-ignore .claude .devin`（确认镜像副本不受 git 追踪）；`ls presets/scenarios/`（确认无 loop 场景）；`sed`/`read` 读取全部注册点与测试点上下文。
+- **代码库基线**：`0a9a913f6f9d7856475fea072d5d80a8d6bc8879`（2026-10-29 复核刷新；原基线 `84d3f531` 之上共 9 个提交，全部不触碰注册面，详见下方「基线漂移复核」）。
+- **调查范围**：`presets/`（manifest/index/en/schemas/monitor/scenarios/zh/templates）、`crates/ralph-cli`（`presets.rs`、`build.rs`、`commands/inspect/descriptor.rs`、`loop_runner/{sync_timeout_tests,inner_prologue,tests/legacy/diagnosis.rs}`）、`crates/ralph-core`（`preset_lint/{instructions_opac,workflow_activation,payload_consistency,finding_id}.rs`、`emit_schema_hint.rs`、tests/scenarios.rs、tests/scenarios/*.yml）、`skills/tests/test_html_deliverables.py`、`scripts/`（ralph-zsh-plugin.zsh、sync-embedded-files.sh、validate-preset-authoring.sh、validate-builtin-presets.sh、check-cli-doc-drift.sh）、`tests/a7_e2e_lint_gate_fires.sh`、文档面（README、AGENTS/CLAUDE、`.cursor/rules/multi-hat-isolation.mdc`、`docs/guide/*`、`CONCEPTS.md`、`PROMPT.pipeline.md`、`skills/*/references/patterns.md`）、`backend/ralph-monitor/src/events/progress.ts`、`ralph.ce-executor-pipeline.yml` 与 `PROMPT.ce-executor-pipeline.md`（本计划的 bootstrap 运行套件，E24）、`docs/achieved|report|handoff|plans` 历史档案。
+- **已执行验证命令**：`git status` / `git log`（工作树基线）；`rg "ce-executor-pipeline-loop|ce_executor_pipeline_loop"`（files_with_matches + 分批 content）；`git grep -l`（baseline↔HEAD 精确对比：tracked 命中文件 75→78，新增即本计划与 bootstrap 两文件）；`rg -l --hidden -g '!.git'`（捕获 hidden `.cursor/` 面）；`rg --files presets/` 家族文件枚举；`rg "U7_|emit_feedback"`（lint 规则面）；`rg -l "trigger_context"`（验证 implementation-review 是除 loop 外唯一在用方）；`git check-ignore .claude .devin`（确认镜像副本不受 git 追踪）；`ls presets/scenarios/`（确认无 loop 场景）；逐文件 `git diff --quiet baseline..HEAD` 复核全部注册点与测试点（均 byte-identical）；`sed`/`read` 读取全部注册点与测试点上下文。
 - **尚未执行的验证**（留给对应 Unit）：`cargo build` / `cargo nextest` 全量与 targeted 子集；`.venv/bin/python -m pytest skills/tests/`；`./scripts/validate-preset-authoring.sh`；`./scripts/validate-builtin-presets.sh`；`rg` 最终扫尾。
 - **阻塞项**：无。
-- **工作树注意**：基线上已有与本计划无关的修改 `backend/ralph-monitor/src/server.ts`、`crates/ralph-cli/src/web.rs`，执行任何 Unit 时不得触碰、回滚或混入提交。
+- **工作树注意**：当前基线工作树干净；此前基线上的未提交修改 `backend/ralph-monitor/src/server.ts`、`crates/ralph-cli/src/web.rs` 已随 `b496a761`/`0a9a913f` 入库。**执行任何 Unit 时不得触碰** `ralph.ce-executor-pipeline.yml` 与 `PROMPT.ce-executor-pipeline.md`——它们是 commit `88cecf31` 接入的、以 `builtin:ce-executor-pipeline` 执行本计划的 bootstrap 运行套件，其中唯一含 loop 字符串的是 `plan:` 字段指向本计划文件的路径（属允许残留，非 preset 引用）。
+- **基线漂移复核（`84d3f531`→`0a9a913f`，对本计划的影响）**：
+  - `88cecf31 chore(bootstrap)`：新增 `ralph.ce-executor-pipeline.yml` + `PROMPT.ce-executor-pipeline.md`（E24，允许残留+禁改）。
+  - `0a9a913f refactor(web)`：删除整个 `backend/ralph-web-server/` 与 `--legacy-node-api`；`docs/api/rest-api.md` 同步删除；均不含 loop 引用，不影响本计划删除面（`backend/ralph-monitor/` 仍在，`progress.ts` 未变）。
+  - `c8929b36 feat(skills)`：preset author/review/diagnosis skills 接入 ralph-devtools，新增 `references/commands.md` 两份——无 loop 引用；`patterns.md` 两份未变。
+  - `f0f12b73 chore(deps)` / `83a36abf docs(rules)` / monitor×2 / `b496a761 fix(web)`：不改本计划任一注册点或测试点。
+  - **路径勘误**：`.cursor/rules/agents.mdc` 在原基线即不存在（计划书写误）；loop 的 builtin 列表实际位于 `.cursor/rules/multi-hat-isolation.mdc:75`（E12 已更正）。`workflow_activation.rs`/`emit_schema_hint.rs`/`payload_consistency.rs`/`finding_id.rs` 位于 `crates/ralph-core`（非 `ralph-cli/loop_runner`），§7 各处路径已更正。
+  - **行号漂移**：README builtin 行 `:319`→`:141`；AGENTS.md/CLAUDE.md builtin 列表 `:143`→`:163`；CONCEPTS.md `:62`→`:63`。
+  - **rg 盲区**：裸 `rg` 跳过 hidden 目录 `.cursor/`（`git grep` 证实其为 tracked 命中），扫尾命令统一升级为 `rg --hidden -g '!.git'`（E25）。
 
 ## 1. 功能目标
 
@@ -29,7 +37,7 @@ status: READY
 | R1 | `builtin:ce-executor-pipeline-loop` 不再可被解析：`ralph preset builtin list` 不列出它、`get_preset("ce-executor-pipeline-loop")` 返回 `None`、`ralph run -H builtin:ce-executor-pipeline-loop` 走未知 preset 错误路径 | 现状：`presets.rs::PRESETS` 第 41-49 行登记、9 个 public builtin 之一（E3）→ 目标：条目删除，public builtin 降为 8 个 |
 | R2 | 构建产物不再携带该 preset：`presets/en/ce-executor-pipeline-loop.yml`、`-preset-author-notes.md`、`presets/schemas/ce-executor-pipeline-loop.yml`、`presets/monitor/ce-executor-pipeline-loop.yml` 全部删除；`manifest.yml` embedded 列表同步移除 | 现状：4 个专属文件 + manifest 第 31 行 embedded 条目（E4-E7）→ 目标：文件与条目均不存在，`build.rs` 自然停止拷贝（无需改构建逻辑，E8） |
 | R3 | `inspect run` 描述符查找不到该 preset：`descriptor.rs::BUILTIN_DESCRIPTORS` 条目删除，未知 preset 走既有 fallback | 现状：第 34-65 行含 loop 元组（E9）→ 目标：条目删除 |
-| R4 | 用户可见面不再出现该 preset：`presets/index.json` 条目删除、`scripts/ralph-zsh-plugin.zsh` 的 `_RALPH_BUILTIN_HAT_VALUES`/`_RALPH_BUILTIN_HAT_DESCRIPTIONS` 双数组同步减项、活文档（README/AGENTS/CLAUDE/cursor rule/guide/CONCEPTS/prompt/patterns.md）不再列出它 | 现状：index.json 条目、zsh 数组前两项、README「13 builtin」计数、AGENTS.md:143 builtin 列表、guide 表格行均引用（E10-E14）→ 目标：全部清除，残留仅限允许的历史档案区 |
+| R4 | 用户可见面不再出现该 preset：`presets/index.json` 条目删除、`scripts/ralph-zsh-plugin.zsh` 的 `_RALPH_BUILTIN_HAT_VALUES`/`_RALPH_BUILTIN_HAT_DESCRIPTIONS` 双数组同步减项、活文档（README/AGENTS/CLAUDE/cursor rule/guide/CONCEPTS/prompt/patterns.md）不再列出它 | 现状：index.json 条目、zsh 数组前两项、README:141「9 Supported Builtins」计数行、AGENTS.md:163 builtin 列表、guide 表格行均引用（E10-E14）→ 目标：全部清除，残留仅限允许的历史档案区 |
 | R5 | loop 专属测试资产整体移除：8 个 BDD scenario yml + `scenarios.rs` 对应测试函数、`presets.rs` 内 loop 专属测试、diagnosis.rs 豁免元组、`test_html_deliverables.py` 参数化项、`tests/a7_e2e_lint_gate_fires.sh` | 现状：场景注册、route single-consumer、fix.done reentry、U8 field docs 等测试锚定该 preset（E15-E17）→ 目标：删除而非迁移；linear preset 与通用 lint 的既有覆盖不减损 |
 | R6 | `lint.preset.instructions_emit_feedback_skill_reference_missing`（U7）规则与白名单保留休眠：builtin 面不再触发，但任何同名 file preset 仍是该规则的合法 opt-in | 现状：whitelist `&["ce-executor-pipeline-loop"]` 仅在 `lint_active` 且 instructions 提到 payload 构造时生效（E18）→ 目标：规则与名单原样保留，注释更新说明 builtin 试点已退役；不改挂 `ce-executor-pipeline`（其 instructions 不含 U7 要求的引用 token，挂上会打破 builtin lint gate，E19） |
 
@@ -81,7 +89,7 @@ crates/ralph-cli/src/commands/inspect/descriptor.rs::BUILTIN_DESCRIPTORS ── 
 
 | Evidence ID | 来源 | 观察结果 | 对计划的影响 | 可靠性 |
 | ----------- | ---- | ---- | ---- | --- |
-| E1 | `rg ce-executor-pipeline-loop` 全仓 | 75 个命中文件：注册点/专属资产/测试/活文档/历史档案/gitignored 镜像 | 定义移除爆炸半径与「活跃 vs 历史」分类 | 高 |
+| E1 | `rg ce-executor-pipeline-loop` 全仓 + `git grep` baseline↔HEAD | tracked 命中 78 文件（含 hidden `.cursor/` 1 个，裸 `rg` 漏报——E25）：注册点/专属资产/测试/活文档/历史档案/gitignored 镜像；新基线较原基线净增 3 个命中即本计划文件与 bootstrap 两文件 | 定义移除爆炸半径与「活跃 vs 历史」分类 | 高 |
 | E2 | `presets/en/` 目录 | `ce-executor-pipeline-loop.yml` + `-preset-author-notes.md` 两个专属文件 | U1 删除清单 | 高 |
 | E3 | `presets.rs:41-49,907-922` | `PRESETS` loop 元组；`test_preset_names_returns_all_names` 断言 public=9 且含 loop | U1 删条目+改计数+改断言 | 高 |
 | E4 | `presets/manifest.yml:29-33` | embedded 列表含 `ce-executor-pipeline-loop`；头部注释说明两边均以此为 SSOT 并 panic on mismatch | U1 删 manifest 条目（含惯例性墓碑注释） | 高 |
@@ -92,9 +100,9 @@ crates/ralph-cli/src/commands/inspect/descriptor.rs::BUILTIN_DESCRIPTORS ── 
 | E9 | `descriptor.rs:34-65` + `descriptor_topics_subset_of_preset_publishes` | `BUILTIN_DESCRIPTORS` 含 loop 元组；pairs 测试列表含 loop | U1 删元组+删 pairs 项 | 高 |
 | E10 | `presets/index.json` | 含 loop public 条目 | U1 删除；index↔PRESETS↔zsh 一致性由 presets.rs 测试兜底 | 高 |
 | E11 | `ralph-zsh-plugin.zsh` | `_RALPH_BUILTIN_HAT_VALUES`/`DESCRIPTIONS` 前两项为 loop | U1 删 value+description（保数组对齐） | 高 |
-| E12 | `README.md:319`、`.cursor/rules/agents.mdc:143`、（对称 `AGENTS.md:143`/`CLAUDE.md:143`） | builtin 计数/列表含 loop | U3 更新活文档 | 高 |
-| E13 | `docs/guide/html-deliverables.md:61-68,101-104` | 契约表含 loop 行（`report.done→LOOP_COMPLETE`）；monitor/schema/scenario 章节点名 loop | U3 删行+改写点名段 | 高 |
-| E14 | `docs/guide/payload-contracts.md:497-590` | trigger_context 工作示例与「当前只有 loop 配置」陈述 | U3 重定向到 `implementation-review`（见其 trigger_context 已声明，E19 关联） | 高 |
+| E12 | `README.md:141`（"9 Supported Builtins" 行）、`AGENTS.md:163`、`CLAUDE.md:163`、`.cursor/rules/multi-hat-isolation.mdc:75` | builtin 计数/列表含 loop；`.cursor/rules/agents.mdc` 不存在（原引用勘误，builtin 列表在 multi-hat-isolation.mdc） | U3 更新活文档 | 高 |
+| E13 | `docs/guide/html-deliverables.md:67`（全文件唯一字面命中） | 契约表含 loop 行（`report.done→LOOP_COMPLETE`）；monitor/schemas/scenarios 章节为泛指表述、无字面点名 | U3 删行；泛指章节无需改 | 高 |
+| E14 | `docs/guide/payload-contracts.md:341,497-590` | `:341`「试用例」指向 `presets/schemas/ce-executor-pipeline-loop.yml`（U1 删除后成死链）；`:497-590` trigger_context 工作示例与「当前只有 loop 配置」陈述 | U3 两处均重定向到 `implementation-review`（其 schemas 含 trigger_context/known_fields，E19 关联） | 高 |
 | E15 | `crates/ralph-core/tests/scenarios/*.yml` + `scenarios.rs` | 9 个 loop 相关 scenario：`ce_executor_pipeline_loop{,_executor_partial_done,_fixer_fail_stop,_fixer_partial_continue,_fix_reentry,_fix_stabilizer_reentry,_max_round_blocked,_review_artifact_blocked}` + `verdict_gate_fail_keeps_loop_open`（内容确认仅 loop 使用）+ scenarios.rs 对应注册/断言 | U2 整删 | 高 |
 | E16 | `presets.rs:424-520,1841-1910` 等 | loop 专属测试：route single-consumer、`fix.done` reentry `next_review_plan`、U8 field docs、loop topology/schema/trigger-context | U1 删除；`test_ce_executor_test_stabilizer_terminal_authority` 遍历 linear+loop → 保留 linear 分支 | 高 |
 | E17 | `skills/tests/test_html_deliverables.py`、`loop_runner/tests/legacy/diagnosis.rs`、`tests/a7_e2e_lint_gate_fires.sh`、`loop_runner/sync_timeout_tests.rs` | 参数化项/豁免元组/deferred no-op 脚本/U7 wiring 测试模块均锚定 loop 名 | U1/U2 删参数化项、豁免元组、脚本；sync_timeout 模块见 D3 | 高 |
@@ -103,14 +111,16 @@ crates/ralph-cli/src/commands/inspect/descriptor.rs::BUILTIN_DESCRIPTORS ── 
 | E20 | `git check-ignore .claude .devin` | 两目录 gitignored | 不在 git 变更面 | 高 |
 | E21 | `rg --files presets/` 家族枚举 | 无 `*-zh`/`scenarios`/`templates`/`extras`/`minimal` 的 loop 变体 | 删除清单完备 | 高 |
 | E22 | `scripts/sync-embedded-files.sh` | preset mirror 机制已退役（MIRRORED_FILES 不含 preset），与删除无关 | 不需改动 | 高 |
-| E23 | `PROMPT.pipeline.md`、`ralph-tools-emit.md`、`CONCEPTS.md:62`、`progress.ts`、`inner_prologue.rs`、`workflow_activation.rs`、`emit_schema_hint.rs`、`payload_consistency.rs`、`finding_id.rs` | 共享/注释级引用：多为「以 loop 为例」或兼容说明 | U3 改为 generic/linear 表述，保留通用规则语义 | 中 |
+| E23 | `PROMPT.pipeline.md`、`ralph-tools-emit.md`、`CONCEPTS.md:63`、`progress.ts:7`、`loop_runner/inner_prologue.rs`、`loop_runner/sync_timeout_tests.rs`（ralph-cli）；`preset_lint/{workflow_activation,payload_consistency,finding_id}.rs`、`emit_schema_hint.rs`（ralph-core，路径勘误后） | 共享/注释级引用：多为「以 loop 为例」或兼容说明 | U3 改为 generic/linear 表述，保留通用规则语义 | 中 |
+| E24 | `ralph.ce-executor-pipeline.yml`、`PROMPT.ce-executor-pipeline.md`（commit `88cecf31` 新增） | 以 `builtin:ce-executor-pipeline` 执行本计划的 bootstrap 运行套件；唯一 loop 命中是 `plan:` 字段的本计划文件路径 | 允许残留+禁改；不改语义不影响 loop 退役 | 高 |
+| E25 | `rg -l` vs `rg -l --hidden -g '!.git'` vs `git grep -l` 三方对比 | 裸 `rg` 跳过 hidden `.cursor/`（tracked，含 loop 命中 1 处）；`.claude`/`.devin` gitignored 需 `-u` 才可见（本就属允许残留） | 全部扫尾/验收命令改用 `rg --hidden -g '!.git'` | 高 |
 
 ### 2.3 受影响范围
 
 - **生产/构建文件**：`presets/en/ce-executor-pipeline-loop.yml`、`presets/en/ce-executor-pipeline-loop-preset-author-notes.md`、`presets/schemas/ce-executor-pipeline-loop.yml`、`presets/monitor/ce-executor-pipeline-loop.yml`（删）；`presets/manifest.yml`、`presets/index.json`、`crates/ralph-cli/src/presets.rs`、`crates/ralph-cli/src/commands/inspect/descriptor.rs`、`scripts/ralph-zsh-plugin.zsh`（改）。
 - **测试资产**：`crates/ralph-core/tests/scenarios.rs` + 9 个 scenario yml（删）；`skills/tests/test_html_deliverables.py`、`crates/ralph-cli/src/loop_runner/tests/legacy/diagnosis.rs`（改）；`tests/a7_e2e_lint_gate_fires.sh`（删）；`presets.rs` 内部 loop 专属测试块（删/缩）。
-- **活文档**：`README.md`、`AGENTS.md`、`CLAUDE.md`、`.cursor/rules/agents.mdc`、`docs/guide/{html-deliverables,payload-contracts}.md`、`CONCEPTS.md`、`PROMPT.pipeline.md`、`skills/ralph-preset-author/references/patterns.md`、`skills/ralph-preset-review/references/patterns.md`、`backend/ralph-monitor/src/events/progress.ts`、上述 ralph-cli/ralph-core 源码注释。
-- **明确不受影响**：`build.rs`、`sync-embedded-files.sh`、`presets/templates/`、`presets/scenarios/`、`presets/zh/`、`presets/{extras,minimal}/`、`merge-loop` 及其 hidden 机制、`trigger_context`/`field_docs`/schema-parity 通用机制、`docs/achieved|report|handoff|plans` 档案、gitignored `.claude`/`.devin` 镜像。
+- **活文档**：`README.md`、`AGENTS.md`、`CLAUDE.md`、`.cursor/rules/multi-hat-isolation.mdc`、`docs/guide/{html-deliverables,payload-contracts}.md`、`CONCEPTS.md`、`PROMPT.pipeline.md`、`skills/ralph-preset-author/references/patterns.md`、`skills/ralph-preset-review/references/patterns.md`、`backend/ralph-monitor/src/events/progress.ts`、上述 ralph-cli/ralph-core 源码注释。
+- **明确不受影响**：`build.rs`、`sync-embedded-files.sh`、`presets/templates/`、`presets/scenarios/`、`presets/zh/`、`presets/{extras,minimal}/`、`merge-loop` 及其 hidden 机制、`trigger_context`/`field_docs`/schema-parity 通用机制、`docs/achieved|report|handoff|plans` 档案、gitignored `.claude`/`.devin` 镜像、`ralph.ce-executor-pipeline.yml` 与 `PROMPT.ce-executor-pipeline.md`（bootstrap 套件，E24）、`backend/ralph-web-server/` 与 `docs/api/rest-api.md`（新基线上游已删除，本就无 loop 引用）。
 
 ---
 
@@ -173,8 +183,8 @@ Feature: builtin preset ce-executor-pipeline-loop 退役
 
   Scenario: 活跃引用扫尾为零
     Given 全部三个 Unit 完成
-    When 执行 rg -n "ce-executor-pipeline-loop" 全仓扫描
-    Then 命中仅剩允许的历史档案（docs/achieved|report|handoff|plans、兄弟 author-notes 历史段、gitignored 镜像）与白名单/墓碑注释处的名字本身
+    When 执行 rg -n --hidden -g '!.git' "ce-executor-pipeline-loop" 全仓扫描
+    Then 命中仅剩允许的历史档案（docs/achieved|report|handoff|plans、兄弟 author-notes 历史段、gitignored 镜像）、bootstrap 套件两文件的 plan 路径引用（E24）与白名单/墓碑注释处的名字本身
 ```
 
 ---
@@ -418,23 +428,24 @@ R3、R5、R7；BDD 场景 3/5/7；D3、D5、D7；E12-E14、E23。
 README/AGENTS/CLAUDE/cursor rule/guide/CONCEPTS/prompt 中 builtin 列表与该 preset 无涉；`payload-contracts.md` 的 trigger_context 示例改挂 `implementation-review`；`rg` 扫尾仅剩允许区。
 
 #### 4. 当前行为基线
-README:319 计数、AGENTS.md:143/CLAUDE.md:143/agents.mdc:143 builtin 列表、`html-deliverables.md` 表行+点名段、`payload-contracts.md` 示例+「只有 loop」陈述、`CONCEPTS.md:62`、`ralph-tools-emit.md:269`、`PROMPT.pipeline.md:3-4`、两份 `patterns.md`、`progress.ts` 注释、`inner_prologue.rs`/`workflow_activation.rs`/`emit_schema_hint.rs`/`payload_consistency.rs`/`finding_id.rs`/`sync_timeout_tests.rs`/`instructions_opac.rs` 注释均点名该 preset（E12-E14、E18、E23）。
+README:141 计数、AGENTS.md:163/CLAUDE.md:163/multi-hat-isolation.mdc:75 builtin 列表、`html-deliverables.md:67` 契约表行、`payload-contracts.md` `:341` 试用例 + `:497-590` 示例+「只有 loop」陈述、`CONCEPTS.md:63`、`ralph-tools-emit.md:269`、`PROMPT.pipeline.md:3-4`、两份 `patterns.md`、`progress.ts:7` 注释、ralph-cli `loop_runner/{inner_prologue,sync_timeout_tests}.rs` 与 ralph-core `preset_lint/{workflow_activation,payload_consistency,finding_id,instructions_opac}.rs`、`emit_schema_hint.rs` 注释均点名该 preset（E12-E14、E18、E23）。
 
 #### 5. 输入与输出
 输入：文档/注释编辑。输出：活文档零活跃引用。不变量：`implementation-review` 的 trigger_context 字段描述以其真实 schemas/en 声明为准（不虚构字段）；`PROMPT.pipeline.md` 保留为 linear preset 的通用 prompt（不整删）。
 
 #### 6. 修改位置
-- `README.md:319`：builtin 计数与描述（按 PRESETS 实际 9 个/8 public 的事实更新，顺手修正与事实不符的计数）。
-- `AGENTS.md:143`、`CLAUDE.md:143`、`.cursor/rules/agents.mdc:143`：builtin 列表删 loop 项。
-- `docs/guide/html-deliverables.md`：删表内 loop 行；monitor/schemas/scenarios 章节去 loop 点名。
+- `README.md:141`：builtin 计数与描述（按 PRESETS 实际 9 个/8 public 的事实更新，顺手修正与事实不符的计数）。
+- `AGENTS.md:163`、`CLAUDE.md:163`、`.cursor/rules/multi-hat-isolation.mdc:75`：builtin 列表删 loop 项。
+- `docs/guide/html-deliverables.md`：删 `:67` 契约表内 loop 行（全文件唯一字面命中，E13）。
+- `docs/guide/payload-contracts.md:341`：「试用例」对 `presets/schemas/ce-executor-pipeline-loop.yml` 的指向改挂 `presets/schemas/implementation-review.yml` 中真实的 trigger_context/known_fields 字段（U1 删除 schema 后此处成死链，E14）。
 - `docs/guide/payload-contracts.md:497-590`：示例与「当前只有 loop」陈述改写为 `implementation-review` 的真实 trigger_context（其 schemas/en 声明的 summary_fields/routing_hints，E19）。
-- `CONCEPTS.md:62`：改为对「同一 preset 内 review/fix 环」概念的泛化表述或删去 preset 名。
+- `CONCEPTS.md:63`：改为对「同一 preset 内 review/fix 环」概念的泛化表述或删去 preset 名。
 - `crates/ralph-core/data/ralph-tools-emit.md:269`：non-scope 例子改只列 linear 或 generic pipeline。
 - `PROMPT.pipeline.md:3-4`：表述改为仅服务 `ce-executor-pipeline`（文件不删）。
 - `skills/ralph-preset-author/references/patterns.md`、`skills/ralph-preset-review/references/patterns.md`：删/改 loop 引用段。
 - `backend/ralph-monitor/src/events/progress.ts`：注释中的 loop 例子改 generic/linear。
-- `crates/ralph-cli/src/loop_runner/{inner_prologue,workflow_activation,emit_schema_hint,payload_consistency,finding_id,sync_timeout_tests}.rs`、`crates/ralph-core/src/preset_lint/instructions_opac.rs`：注释中对该 builtin 的指代更新（U7 注释说明「builtin 试点已退役，名单对同名 file preset 仍生效」）。
-- 不修改：`docs/achieved|report|handoff|plans`、`presets/en/ce-executor-pipeline-preset-author-notes.md`（历史）、`.claude`/`.devin` 镜像。
+- `crates/ralph-cli/src/loop_runner/{inner_prologue,sync_timeout_tests}.rs`、`crates/ralph-core/src/emit_schema_hint.rs`、`crates/ralph-core/src/preset_lint/{workflow_activation,payload_consistency,finding_id,instructions_opac}.rs`：注释中对该 builtin 的指代更新（U7 注释说明「builtin 试点已退役，名单对同名 file preset 仍生效」）。
+- 不修改：`docs/achieved|report|handoff|plans`、`presets/en/ce-executor-pipeline-preset-author-notes.md`（历史）、`.claude`/`.devin` 镜像、`ralph.ce-executor-pipeline.yml` 与 `PROMPT.ce-executor-pipeline.md`（E24，其 plan 路径引用合法残留）。
 
 #### 7. 可依赖能力
 U1/U2 已完成的移除面；`implementation-review` 真实 trigger_context 声明。
@@ -444,7 +455,7 @@ U1/U2 已完成的移除面；`implementation-review` 真实 trigger_context 声
 
 #### 9. 验收测试
 - `.venv/bin/python -m pytest skills/tests/test_html_deliverables.py`：绿（doc 行删除后 inventory 断言仍对齐——U1 已删 loop 断言项）。
-- `rg -n "ce-executor-pipeline-loop" --glob '!docs/achieved/**' --glob '!docs/report/**' --glob '!docs/handoff/**' --glob '!docs/plans/**' --glob '!presets/en/ce-executor-pipeline-preset-author-notes.md' --glob '!.claude/**' --glob '!.devin/**'` → 命中仅剩白名单、墓碑注释、本计划文档自身（逐条人工审阅确认均为允许区）。
+- `rg -n --hidden -g '!.git' "ce-executor-pipeline-loop" --glob '!docs/achieved/**' --glob '!docs/report/**' --glob '!docs/handoff/**' --glob '!docs/plans/**' --glob '!presets/en/ce-executor-pipeline-preset-author-notes.md' --glob '!.claude/**' --glob '!.devin/**' --glob '!ralph.ce-executor-pipeline.yml' --glob '!PROMPT.ce-executor-pipeline.md'` → 命中仅剩白名单、墓碑注释（`--hidden` 必需：捕获 `.cursor/` 面，E25；逐条人工审阅确认均为允许区）。
 - `cargo doc --no-deps`（可选）：无死链警告显著增加。
 - `cargo nextest run -p ralph-cli --bin ralph -- sync_timeout` + `-- instructions_opac`/`emit_feedback`（ralph-core）：绿，证明注释改动未动逻辑。
 
@@ -479,13 +490,13 @@ rg 扫尾基线（活文档区有命中）
 
 | 位置 | 变更类型 | 变更原因 | Evidence |
 | -- | ---- | ---- | -------- |
-| `README.md`、`AGENTS.md`、`CLAUDE.md`、`.cursor/rules/agents.mdc` | 改文档 | builtin 列表/计数 | E12 |
+| `README.md`、`AGENTS.md`、`CLAUDE.md`、`.cursor/rules/multi-hat-isolation.mdc` | 改文档 | builtin 列表/计数 | E12 |
 | `docs/guide/html-deliverables.md` | 改文档 | 契约表+点名段 | E13 |
 | `docs/guide/payload-contracts.md` | 改文档 | 示例重定向 impl-review | E14,D7 |
 | `CONCEPTS.md`、`crates/ralph-core/data/ralph-tools-emit.md`、`PROMPT.pipeline.md` | 改文档 | 引用改述 | E23 |
 | `skills/ralph-preset-{author,review}/references/patterns.md` | 改文档 | patterns 引用 | E1 |
 | `backend/ralph-monitor/src/events/progress.ts` | 改注释 | 示例改述 | E23 |
-| `loop_runner/*.rs`、`instructions_opac.rs` | 改注释 | builtin 指代 | E18,E23 |
+| `loop_runner/{inner_prologue,sync_timeout_tests}.rs`、`ralph-core emit_schema_hint.rs` 与 `preset_lint/{workflow_activation,payload_consistency,finding_id,instructions_opac}.rs` | 改注释 | builtin 指代 | E18,E23 |
 
 #### 18. 完成标准
 pytest + 相关 rust 测试绿；`rg` 扫尾仅剩允许区；每处改写经复读确认；可独立提交。
@@ -524,7 +535,7 @@ Unit 1 ──→ Unit 2 ──→ Unit 3
 | `cargo nextest run -p ralph-cli --bin ralph -- diagnosis` | U2 | lint-gate 豁免缩减 | 绿 | 否 |
 | `cargo nextest run -p ralph-cli --bin ralph -- sync_timeout` | U2+U3 | U7 wiring 契约（D3 保留） | 绿 | 否 |
 | `cargo nextest run -p ralph-cli --bin ralph` | U2+U3 回归 | ralph bin 全量单测 | 绿 | 否 |
-| `rg -n "ce-executor-pipeline-loop"`（允许区过滤见 §9-U3） | U1-U3 每步 + 最终 | 活跃引用扫尾 | 每步递减，最终仅剩允许区 | 否 |
+| `rg -n --hidden -g '!.git' "ce-executor-pipeline-loop"`（允许区过滤见 U3-§9；`--hidden` 捕获 `.cursor/` 面，E25） | U1-U3 每步 + 最终 | 活跃引用扫尾 | 每步递减，最终仅剩允许区 | 否 |
 | `cargo clippy`、`cargo fmt --check`、`cargo doc --no-deps` | U3 Close | lint/format/doc 无退化 | 绿 | 否 |
 | `.venv/bin/python -m pytest skills/tests/` | U3 | skills 测试全量 | 绿 | 否 |
 | `./scripts/run-tests.sh` | 最终门禁 | 全 workspace nextest + doctest | 全绿 | 否 |
@@ -539,11 +550,11 @@ Unit 1 ──→ Unit 2 ──→ Unit 3
 - `cargo clippy` / `cargo fmt --check` 绿；
 - `.venv/bin/python -m pytest skills/tests/` 绿；
 - `./scripts/validate-preset-authoring.sh`、`./scripts/validate-builtin-presets.sh`（如适用）绿；
-- `rg -n "ce-executor-pipeline-loop"` 全仓命中仅剩：manifest 墓碑注释、U7 白名单字面量及其注释、`docs/achieved|report|handoff|plans` 历史档案、`presets/en/ce-executor-pipeline-preset-author-notes.md` 历史段、本计划文件、gitignored `.claude`/`.devin`；
+- `rg -n --hidden -g '!.git' "ce-executor-pipeline-loop"` 全仓命中仅剩：manifest 墓碑注释、U7 白名单字面量及其注释、`docs/achieved|report|handoff|plans` 历史档案、`presets/en/ce-executor-pipeline-preset-author-notes.md` 历史段、本计划文件、`ralph.ce-executor-pipeline.yml` 与 `PROMPT.ce-executor-pipeline.md` 中指向本计划的 `plan:` 路径引用（E24）、gitignored `.claude`/`.devin`；
 - `rg -n "ce_executor_pipeline_loop" crates/` 0 命中；
 - 无新增失败/skip/`.only`/无解释 snapshot 更新/削弱断言；
 - `ce-executor-pipeline` 全部既有测试与场景行为不变（由其既有测试矩阵证明）；
-- 未触碰工作树中无关修改 `backend/ralph-monitor/src/server.ts`、`crates/ralph-cli/src/web.rs`；
+- 未触碰与本计划无关的已提交改动面（`0a9a913f` web 重构、`b496a761`/`a62671dd`/`113d54e4` monitor 系列、`f0f12b73` 依赖升级、`c8929b36` skills/devtools、`83a36abf` rules SOP），以及 bootstrap 套件 `ralph.ce-executor-pipeline.yml`、`PROMPT.ce-executor-pipeline.md`（E24）；
 - 每个 Unit 可独立提交、严格按序落地。
 
 ## 11. 最终计划自检
@@ -552,7 +563,7 @@ Unit 1 ──→ Unit 2 ──→ Unit 3
 | -------------------------- | --- | ----- |
 | 这是实施计划而不是 Roadmap 吗 | 是 | 每 Unit 有真实文件、测试名、命令、Red/Green 序列 |
 | Executor 是否仍需做关键设计决策 | 否 | 唯一条件分支（verdict_gate 场景内容确认、impl-review 字段对照）均给出判定标准与停止条件 |
-| 所有文件和接口是否有代码库证据 | 是 | E1-E23 全部为实际读取结果 |
+| 所有文件和接口是否有代码库证据 | 是 | E1-E25 全部为实际读取结果 |
 | 所有关键决策置信度是否 ≥ 0.85 | 是 | D1-D8 最低 0.85 |
 | 是否存在未处理的低置信度假设 | 否 | 两个条件确认点均为可执行判定，非假设伪装 |
 | 每个 Unit 是否只有一个可观察行为 | 是 | U1=注册面不可解析、U2=测试资产不存在、U3=文档面零引用 |
