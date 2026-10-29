@@ -144,6 +144,10 @@ pub struct RunObservation {
     /// lives inside the inspected workspace, absolute otherwise).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest: Option<String>,
+    /// Plan3-U1 activity ledger — present only when the file exists
+    /// (a run that never reached a backend call has none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity_file: Option<String>,
     pub evidence: RunEvidence,
 }
 
@@ -284,6 +288,16 @@ fn manifest_display_path(workspace: &Path, path: &Path) -> String {
         .to_string()
 }
 
+/// Plan3-U1 activity ledger path for a run — the file only exists
+/// once the first backend call wrote its `start` record.
+fn activity_file_for(workspace: &Path, run_id: &str) -> Option<PathBuf> {
+    let p = workspace
+        .join(".ralph")
+        .join("runs")
+        .join(format!("{run_id}.activity.jsonl"));
+    p.exists().then_some(p)
+}
+
 /// Passthrough for `inspect loop`'s `scheduler` block, scoped to a
 /// run's workspace. Emitted only when `.ralph/dag.db` exists — the
 /// durable store is written exclusively by `scheduler_mode: dag`, so
@@ -352,6 +366,8 @@ fn observation_from_manifest(
             merge_commit: t.merge_commit.clone(),
         }),
         manifest: Some(manifest_display_path(workspace, manifest_path)),
+        activity_file: activity_file_for(&m.workspace, &m.run_id)
+            .map(|p| manifest_display_path(&m.workspace, &p)),
         evidence: RunEvidence {
             manifest_present: true,
             registry_present,
@@ -397,6 +413,7 @@ fn observation_from_registry(
         events_file,
         terminal: None,
         manifest: None,
+        activity_file: None,
         evidence: RunEvidence {
             registry_present: true,
             merge_state: ev
@@ -450,6 +467,8 @@ fn aggregate_runs(ev: &GatheredEvidence, workspace: &Path) -> Vec<RunObservation
                         events_file: None,
                         terminal: None,
                         manifest: Some(manifest_display_path(workspace, &discovered.path)),
+                        activity_file: activity_file_for(workspace, &discovered.run_id)
+                            .map(|p| manifest_display_path(workspace, &p)),
                         evidence: RunEvidence {
                             manifest_corrupt: true,
                             registry_present: registry_ids.contains(discovered.run_id.as_str()),
@@ -517,6 +536,8 @@ fn aggregate_runs(ev: &GatheredEvidence, workspace: &Path) -> Vec<RunObservation
                 events_file: ev.current_events.as_ref().map(PathBuf::from),
                 terminal: None,
                 manifest: None,
+                activity_file: activity_file_for(workspace, &loop_id)
+                    .map(|p| manifest_display_path(workspace, &p)),
                 evidence: RunEvidence {
                     lock_present: ev.lock.is_some(),
                     registry_present: registry_ids.contains(loop_id.as_str()),

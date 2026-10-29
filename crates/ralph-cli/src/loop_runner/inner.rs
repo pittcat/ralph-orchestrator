@@ -239,6 +239,12 @@ pub(super) async fn run_loop_impl_inner(
     // still interact with them.
     register_loop_owner(&loop_id, &config, resume);
 
+    // Plan3-U1 (monitor health-recovery): always-on per-run activity
+    // ledger at `.ralph/runs/<run_id>.activity.jsonl`. Best-effort —
+    // append failures warn, never abort the execution path.
+    let activity_log =
+        crate::loop_runner::activity_log::ActivityLog::open(&ctx.ralph_dir(), &loop_id);
+
     // Plan 2026-08-12-001 D11: complete the input bundle identity at the
     // runner boundary, after loop id and config resolution but before the
     // EventLoop is constructed. This is best-effort and never changes the
@@ -3186,6 +3192,11 @@ pub(super) async fn run_loop_impl_inner(
         let interrupt_rx_for_pty = interrupt_rx.clone();
         let tui_lines_for_pty = tui_lines.clone();
         let rpc_stdout_for_pty = rpc_stdout.clone();
+        // Activity ledger start record — one per backend invocation
+        // (PTY or CLI); the `end` pair lands after the select below
+        // resolves with an outcome.
+        activity_log.record_start(display_hat.as_str(), &backend_name_for_timeout);
+        let execute_started = std::time::Instant::now();
         let execute_future = async {
             if use_pty {
                 execute_pty(
@@ -3316,6 +3327,20 @@ pub(super) async fn run_loop_impl_inner(
                 return Ok(reason);
             }
         };
+
+        // Activity ledger end record — pairs with the `start` written
+        // before the select. `execute_future` errors bubble via `?`
+        // above and intentionally leave a start-only pair (crash
+        // semantics, plan §3).
+        activity_log.record_end(
+            display_hat.as_str(),
+            &backend_name_for_timeout,
+            execute_started.elapsed().as_millis() as u64,
+            outcome.backend_exit_code,
+            outcome.watchdog_timeout,
+            !outcome.success,
+            crate::loop_runner::activity_log::classify_stderr_tail(&outcome.output),
+        );
 
         // Unit 3 (plan 2026-06-06-001): surface backend watchdog timeout as a
         // diagnostic warning, then let the loop continue down the regular

@@ -12,6 +12,7 @@
 //! surface: all of the original `pub use runner::*` re-exports now
 //! point at the leaf modules.
 
+pub(crate) mod activity_log;
 mod event_logging;
 mod execution;
 mod exit_conditions;
