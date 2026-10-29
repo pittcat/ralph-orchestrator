@@ -266,3 +266,99 @@ fn test_inspect_run_human_format_lists_runs() {
     );
     assert!(stdout.contains("unknown"), "stdout: {stdout}");
 }
+
+fn write_manifest(temp_path: &std::path::Path, run_id: &str, preset: Option<&str>) {
+    let runs_dir = temp_path.join(".ralph/runs");
+    fs::create_dir_all(&runs_dir).expect("create runs dir");
+    let preset_field = preset
+        .map(|p| format!(r#", "preset": "{p}""#))
+        .unwrap_or_default();
+    fs::write(
+        runs_dir.join(format!("{run_id}.manifest.json")),
+        format!(
+            r#"{{"schema_version": "run-manifest/v1",
+  "run_id": "{run_id}",
+  "kind": "primary",
+  "pid": 99999999,
+  "cwd": "{}",
+  "workspace": "{}",
+  "repo_root": "{}",
+  "prompt_preview": "descriptor test",
+  "prompt_sha256": "{:0>64}",
+  "started_at": "2026-10-28T10:00:00Z",
+  "revision": 2{preset_field},
+  "terminal": {{"reason": "completed", "at": "2026-10-28T11:00:00Z"}}}}"#,
+            temp_path.display(),
+            temp_path.display(),
+            temp_path.display(),
+            "0"
+        ),
+    )
+    .expect("write manifest");
+}
+
+#[test]
+fn test_inspect_run_builtin_preset_descriptor_resolves() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_manifest(temp_path, "primary-desc", Some("ce-executor-pipeline"));
+
+    let json = inspect_run_json(temp_path);
+    let run = &json["runs"][0];
+    let desc = &run["preset_descriptor"];
+    assert!(
+        desc.is_object(),
+        "expected preset_descriptor object, got {desc}"
+    );
+    assert_eq!(desc["schema_version"], "monitor-descriptor/v1");
+    assert_eq!(desc["resolved_from"], "builtin");
+    assert_eq!(desc["preset"], "ce-executor-pipeline");
+    assert_eq!(desc["stages"].as_array().unwrap().len(), 8);
+    assert_eq!(desc["stages"][0]["id"], "plan");
+    assert_eq!(desc["progress"]["denominator"], "stages");
+    assert_eq!(desc["dag"]["enabled"], false);
+    assert_eq!(run["preset_descriptor_from"], "builtin");
+}
+
+#[test]
+fn test_inspect_run_unknown_preset_descriptor_null() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_manifest(temp_path, "primary-nodesc", Some("no-such-preset"));
+
+    let json = inspect_run_json(temp_path);
+    let run = &json["runs"][0];
+    assert!(run["preset_descriptor"].is_null());
+    assert_eq!(run["preset_descriptor_from"], "none");
+}
+
+#[test]
+fn test_inspect_run_workspace_descriptor_override() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_manifest(temp_path, "primary-custom", Some("custom-flow"));
+    let monitor_dir = temp_path.join(".ralph/monitor");
+    fs::create_dir_all(&monitor_dir).expect("create monitor dir");
+    fs::write(
+        monitor_dir.join("custom-flow.yml"),
+        r#"schema_version: monitor-descriptor/v1
+preset: custom-flow
+stages:
+  - id: only
+    label: Only
+    topics: [t.a]
+progress:
+  denominator: stages
+artifacts: []
+dag:
+  enabled: false
+"#,
+    )
+    .expect("write custom descriptor");
+
+    let json = inspect_run_json(temp_path);
+    let run = &json["runs"][0];
+    assert_eq!(run["preset_descriptor"]["resolved_from"], "workspace");
+    assert_eq!(run["preset_descriptor"]["stages"][0]["id"], "only");
+    assert_eq!(run["preset_descriptor_from"], "workspace");
+}

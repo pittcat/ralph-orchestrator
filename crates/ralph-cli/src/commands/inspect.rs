@@ -36,6 +36,7 @@ use ralph_core::supervisor::SchedulerInspectSummary;
 use std::io::Write;
 use std::path::PathBuf;
 
+mod descriptor;
 mod run;
 
 /// Inspect Ralph runtime state without modifying it.

@@ -1,0 +1,29 @@
+# Monitor descriptor sidecar for builtin:autoresearch.
+# Iterative experiment loop: strategist → implementer → benchmarker
+# → judge → evaluator (back to strategist until LOOP_COMPLETE).
+schema_version: monitor-descriptor/v1
+preset: autoresearch
+stages:
+  - id: strategize
+    label: Strategize
+    topics: [experiment.start, experiment.planned, experiment.blocked]
+  - id: implement
+    label: Implement
+    topics: [experiment.ready]
+  - id: benchmark
+    label: Benchmark
+    topics: [experiment.measured]
+  - id: judge
+    label: Judge
+    topics: [experiment.scored]
+  - id: evaluate
+    label: Evaluate
+    topics: [experiment.evaluated, LOOP_COMPLETE]
+progress:
+  denominator: stages
+artifacts:
+  - id: summary
+    path_glob: .ralph/agent/summary.md
+    kind: markdown
+dag:
+  enabled: false

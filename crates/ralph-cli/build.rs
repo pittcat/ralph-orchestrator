@@ -197,6 +197,66 @@ fn main() {
     );
 
     copy_artifact_templates(&manifest_dir, &out_dir);
+    copy_monitor_descriptors(&manifest_dir, &out_dir);
+}
+
+/// Copy `presets/monitor/*.yml` sidecar descriptors into
+/// `$OUT_DIR/monitor-descriptors/` for `include_str!`.
+///
+/// These are monitor-side render descriptors (stage/progress/artifact
+/// mapping consumed by `ralph inspect run`'s `preset_descriptor`
+/// field), NOT executable presets — they are deliberately outside the
+/// `presets/manifest.yml` embedded allow-list and never reach the
+/// runner. Fail-soft like the preset copy: a missing directory only
+/// means a crates.io tarball context; the resolver falls back to
+/// workspace `.ralph/monitor/` files at runtime.
+fn copy_monitor_descriptors(manifest_dir: &str, out_dir: &str) {
+    let src_dir = PathBuf::from(manifest_dir)
+        .join("..")
+        .join("..")
+        .join("presets")
+        .join("monitor");
+    let dest_dir = PathBuf::from(out_dir).join("monitor-descriptors");
+
+    if !src_dir.is_dir() {
+        eprintln!(
+            "build.rs: monitor descriptor dir not found at {}; skipping copy \
+             (expected for crates.io tarball builds)",
+            src_dir.display()
+        );
+        return;
+    }
+
+    println!("cargo:rerun-if-changed={}", src_dir.display());
+    if let Err(e) = fs::create_dir_all(&dest_dir) {
+        panic!("build.rs: failed to create {}: {}", dest_dir.display(), e);
+    }
+
+    let mut copied = 0usize;
+    for entry in fs::read_dir(&src_dir)
+        .unwrap_or_else(|e| panic!("build.rs: failed to read {}: {}", src_dir.display(), e))
+    {
+        let entry = entry.unwrap_or_else(|e| panic!("build.rs: read_dir entry: {}", e));
+        let path = entry.path();
+        if !entry.file_type().unwrap().is_file()
+            || path.extension().and_then(|e| e.to_str()) != Some("yml")
+        {
+            continue;
+        }
+        let file_name = entry.file_name();
+        println!("cargo:rerun-if-changed={}", path.display());
+        fs::copy(&path, dest_dir.join(&file_name)).unwrap_or_else(|e| {
+            panic!(
+                "build.rs: failed to copy monitor descriptor {} -> {}: {}",
+                path.display(),
+                dest_dir.join(&file_name).display(),
+                e
+            )
+        });
+        copied += 1;
+    }
+
+    eprintln!("build.rs: copied {} monitor descriptor(s)", copied);
 }
 
 /// Copy `presets/templates/<preset>/` trees into `$OUT_DIR` for `include_str!`.

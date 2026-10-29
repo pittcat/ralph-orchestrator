@@ -1,0 +1,47 @@
+# Monitor descriptor sidecar for builtin:ce-executor-pipeline.
+# topics ⊆ the preset's hat publishes (plus LOOP_COMPLETE); stage
+# order mirrors the linear chain in presets/en/ce-executor-pipeline.yml.
+schema_version: monitor-descriptor/v1
+preset: ce-executor-pipeline
+stages:
+  - id: plan
+    label: Plan review
+    topics: [work.start, plan.ready, plan.blocked]
+  - id: execute
+    label: Execute
+    topics: [work.done, work.failed]
+  - id: stabilize
+    label: Test stabilization
+    topics: [stabilization.done, stabilization.blocked]
+  - id: review
+    label: Dimension review
+    topics:
+      - review.goalalign.done
+      - review.correctness.done
+      - review.testing.done
+      - review.maintainability.done
+      - review.standards.done
+      - review.adversarial.done
+  - id: synthesize
+    label: Synthesize
+    topics: [review.synthesized, review.artifact.blocked, review.complete]
+  - id: fix
+    label: Fix
+    topics: [fix.done]
+  - id: align
+    label: Align
+    topics: [align.done]
+  - id: report
+    label: Report
+    topics: [report.done, LOOP_COMPLETE]
+progress:
+  denominator: stages
+artifacts:
+  - id: summary
+    path_glob: .ralph/agent/summary.md
+    kind: markdown
+  - id: tasks
+    path_glob: .ralph/agent/tasks.jsonl
+    kind: jsonl
+dag:
+  enabled: false

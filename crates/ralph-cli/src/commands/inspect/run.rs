@@ -29,6 +29,7 @@ use ralph_core::{LockMetadata, LoopLock};
 use serde::Serialize;
 
 use super::InspectProfilesFormat;
+use super::descriptor::{self, DescriptorResolution};
 
 /// Observation envelope schema tag.
 pub const OBSERVATION_SCHEMA_VERSION: &str = "run-observation/v1";
@@ -112,6 +113,18 @@ pub struct RunObservation {
     pub prompt_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
+    /// Resolved `monitor-descriptor/v1` sidecar for the run's preset
+    /// (`null` when none resolved). `builtin`/`workspace`/`none`/
+    /// `invalid`/`unsupported_version` provenance lives in
+    /// `preset_descriptor_from`.
+    pub preset_descriptor: Option<serde_json::Value>,
+    /// Provenance of `preset_descriptor`; `"none"` when the run has no
+    /// preset or no matching sidecar.
+    pub preset_descriptor_from: String,
+    /// Resolver diagnostic for `invalid`/`unsupported_version`
+    /// outcomes — the field that explains *why* no descriptor shipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset_descriptor_diagnostic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -272,6 +285,7 @@ fn observation_from_manifest(
 ) -> RunObservation {
     let alive = run_manifest::pid_alive(m.pid);
     let registry_present = ev.registry_entries.iter().any(|e| e.id == m.run_id);
+    let resolution: DescriptorResolution = descriptor::resolve(m.preset.as_deref(), workspace);
     RunObservation {
         run_id: m.run_id.clone(),
         kind: m.kind.as_str().to_string(),
@@ -284,6 +298,9 @@ fn observation_from_manifest(
         prompt_preview: Some(m.prompt_preview.clone()),
         prompt_sha256: Some(m.prompt_sha256.clone()),
         preset: m.preset.clone(),
+        preset_descriptor: descriptor::resolution_json(&resolution),
+        preset_descriptor_from: resolution.resolved_from.to_string(),
+        preset_descriptor_diagnostic: resolution.diagnostic.clone(),
         plan_path: m.plan_path.clone(),
         started_at: Some(m.started_at),
         events_file: m.events_file.clone(),
@@ -329,6 +346,9 @@ fn observation_from_registry(
         prompt_preview: Some(truncate_with_ellipsis(entry.prompt.trim(), 160)),
         prompt_sha256: Some(run_manifest::prompt_sha256_hex(&entry.prompt)),
         preset: None,
+        preset_descriptor: None,
+        preset_descriptor_from: "none".to_string(),
+        preset_descriptor_diagnostic: None,
         plan_path: None,
         started_at: Some(entry.started),
         events_file,
@@ -378,6 +398,9 @@ fn aggregate_runs(ev: &GatheredEvidence, workspace: &Path) -> Vec<RunObservation
                         prompt_preview: None,
                         prompt_sha256: None,
                         preset: None,
+                        preset_descriptor: None,
+                        preset_descriptor_from: "none".to_string(),
+                        preset_descriptor_diagnostic: None,
                         plan_path: None,
                         started_at: None,
                         events_file: None,
@@ -441,6 +464,9 @@ fn aggregate_runs(ev: &GatheredEvidence, workspace: &Path) -> Vec<RunObservation
                     .map(|p| truncate_with_ellipsis(p.trim(), 160)),
                 prompt_sha256: prompt.as_deref().map(run_manifest::prompt_sha256_hex),
                 preset: None,
+                preset_descriptor: None,
+                preset_descriptor_from: "none".to_string(),
+                preset_descriptor_diagnostic: None,
                 plan_path: None,
                 started_at: started,
                 events_file: ev.current_events.as_ref().map(PathBuf::from),

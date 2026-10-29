@@ -1,0 +1,57 @@
+# Monitor descriptor sidecar for builtin:parallel-forge.
+# scheduler_mode: dag — the DAG runtime coordinates forge.unit.*
+# per-Unit topics; hat publishes cover the plan-level chain.
+schema_version: monitor-descriptor/v1
+preset: parallel-forge
+stages:
+  - id: plan
+    label: Plan
+    topics:
+      - forge.start
+      - forge.plan.inspected
+      - forge.plan.ready
+      - forge.plan.blocked
+      - forge.concurrency.approved
+  - id: units
+    label: Unit execution
+    topics:
+      - forge.unit.ready
+      - forge.unit.executed
+      - forge.unit.execution_failed
+      - forge.unit.reviewed
+      - forge.unit.verified
+      - forge.unit.verification_failed
+      - forge.unit.correction
+      - forge.correction.requested
+      - forge.final.correction.settled
+      - forge.exec.development.done
+  - id: verify
+    label: Full verification
+    topics:
+      - forge.full.verified
+      - forge.full.verification.failed
+  - id: finalize
+    label: Finalize
+    topics:
+      - forge.audit.done
+      - forge.finalized
+      - forge.cleanup.done
+      - work.failed
+  - id: report
+    label: Report
+    topics: [forge.report.done, LOOP_COMPLETE]
+progress:
+  denominator: stages
+artifacts:
+  - id: summary
+    path_glob: .ralph/agent/summary.md
+    kind: markdown
+  - id: tasks
+    path_glob: .ralph/agent/tasks.jsonl
+    kind: jsonl
+  - id: verified-plan
+    path_glob: .ralph/plans/*.verified.md
+    kind: markdown
+dag:
+  enabled: true
+  unit_topic_prefix: forge.unit.

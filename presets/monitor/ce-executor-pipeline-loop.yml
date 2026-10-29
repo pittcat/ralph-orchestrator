@@ -1,0 +1,54 @@
+# Monitor descriptor sidecar for builtin:ce-executor-pipeline-loop.
+# Same chain as ce-executor-pipeline with the review-reentry /
+# review-gate loop between stabilization and fix planning.
+schema_version: monitor-descriptor/v1
+preset: ce-executor-pipeline-loop
+stages:
+  - id: plan
+    label: Plan review
+    topics: [work.start, plan.ready, plan.blocked]
+  - id: execute
+    label: Execute
+    topics: [work.done, work.failed]
+  - id: stabilize
+    label: Test stabilization
+    topics: [stabilization.done, stabilization.blocked]
+  - id: review
+    label: Dimension review
+    topics:
+      - review.round.ready
+      - review.goalalign.done
+      - review.correctness.done
+      - review.testing.done
+      - review.maintainability.done
+      - review.standards.done
+      - review.adversarial.done
+  - id: gate
+    label: Review gate
+    topics:
+      - review.synthesized
+      - review.artifact.blocked
+      - review.accepted
+      - fix.requested
+      - review.loop.blocked
+      - review.complete
+  - id: fix
+    label: Fix
+    topics: [fix.done]
+  - id: align
+    label: Align
+    topics: [align.done]
+  - id: report
+    label: Report
+    topics: [report.done, LOOP_COMPLETE]
+progress:
+  denominator: stages
+artifacts:
+  - id: summary
+    path_glob: .ralph/agent/summary.md
+    kind: markdown
+  - id: tasks
+    path_glob: .ralph/agent/tasks.jsonl
+    kind: jsonl
+dag:
+  enabled: false
