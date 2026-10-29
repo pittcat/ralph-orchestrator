@@ -139,6 +139,10 @@ site/
 .playwright-cli/
 .ralph/
 
+# Devin CLI: skills/install.py mirror copies are derived artifacts;
+# keep the rest of .devin/ (config.json, etc.) committable.
+.devin/skills/
+
 # Local environment locks / MCP config
 AGENTS.md.lock
 CLAUDE.md.lock

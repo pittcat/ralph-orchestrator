@@ -4,9 +4,11 @@
 Default source: this repository's ``skills/`` directory (the parent of
 this script).
 
-Default (local): install into both ``./.claude/skills`` and
-``./.agents/skills``. Use ``--global`` for ``~/.claude/skills`` and
-``~/.agents/skills``, or ``--dir <path>`` for a single custom directory.
+Default (local): install into ``./.claude/skills``, ``./.agents/skills``
+and ``./.devin/skills``. Use ``--global`` for ``~/.claude/skills``,
+``~/.agents/skills`` and ``~/.config/devin/skills``
+(``%APPDATA%\\devin\\skills`` on Windows), or ``--dir <path>`` for a
+single custom directory.
 
 By default, only the public operator skills listed in
 ``skills/README.md`` are exposed as installable units. Each preset-author
@@ -16,13 +18,13 @@ materialise at install time (plan 2026-08-02-001).
 
 Examples
 --------
-    # Local: ./.claude/skills + ./.agents/skills
+    # Local: ./.claude/skills + ./.agents/skills + ./.devin/skills
     ./skills/install.py
 
-    # Install a subset (still both local targets)
+    # Install a subset (still all local targets)
     ./skills/install.py ralph-preset-author ralph-run-diagnosis
 
-    # Global: ~/.claude/skills + ~/.agents/skills
+    # Global: ~/.claude/skills + ~/.agents/skills + ~/.config/devin/skills
     ./skills/install.py --global
 
     # Dry-run an install into a custom directory
@@ -35,6 +37,7 @@ Examples
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from dataclasses import dataclass
@@ -66,6 +69,23 @@ TARGET_LOCAL = Path(".claude/skills")
 TARGET_GLOBAL = Path.home() / ".claude/skills"
 TARGET_AGENTS_LOCAL = Path(".agents/skills")
 TARGET_AGENTS_GLOBAL = Path.home() / ".agents/skills"
+TARGET_DEVIN_LOCAL = Path(".devin/skills")
+
+
+def _devin_global_skills_dir() -> Path:
+    """Return Devin CLI's global skills directory.
+
+    POSIX follows the XDG convention (``~/.config/devin/skills``);
+    Windows uses ``%APPDATA%\\devin\\skills``.
+    """
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / "devin" / "skills"
+    return Path.home() / ".config" / "devin" / "skills"
+
+
+TARGET_DEVIN_GLOBAL = _devin_global_skills_dir()
 
 
 @dataclass(frozen=True)
@@ -106,9 +126,11 @@ def discover_skills(source: Path) -> dict[str, SkillSpec]:
 def resolve_targets(args: argparse.Namespace) -> list[tuple[str, Path]]:
     """Return ``[(label, path)]`` for every install target.
 
-    - default (local): ``./.claude/skills`` + ``./.agents/skills``
-    - ``--global``: ``~/.claude/skills`` + ``~/.agents/skills``
-    - ``--dir``: a single custom directory (no paired agents target)
+    - default (local): ``./.claude/skills`` + ``./.agents/skills`` +
+      ``./.devin/skills``
+    - ``--global``: ``~/.claude/skills`` + ``~/.agents/skills`` +
+      ``~/.config/devin/skills`` (``%APPDATA%\\devin\\skills`` on Windows)
+    - ``--dir``: a single custom directory (no paired harness targets)
     """
     if args.global_install and args.target_dir is not None:
         raise InstallError("--global and --dir are mutually exclusive")
@@ -118,10 +140,12 @@ def resolve_targets(args: argparse.Namespace) -> list[tuple[str, Path]]:
         return [
             ("claude-global", TARGET_GLOBAL.expanduser().resolve()),
             ("agents-global", TARGET_AGENTS_GLOBAL.expanduser().resolve()),
+            ("devin-global", TARGET_DEVIN_GLOBAL.expanduser().resolve()),
         ]
     return [
         ("claude-local", (Path.cwd() / TARGET_LOCAL).resolve()),
         ("agents-local", (Path.cwd() / TARGET_AGENTS_LOCAL).resolve()),
+        ("devin-local", (Path.cwd() / TARGET_DEVIN_LOCAL).resolve()),
     ]
 
 
@@ -304,8 +328,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="skills/install.py",
         description=(
             "Install public Ralph operator skills. "
-            "Local default writes .claude/skills + .agents/skills; "
-            "--global writes ~/.claude/skills + ~/.agents/skills."
+            "Local default writes .claude/skills + .agents/skills + "
+            ".devin/skills; --global writes ~/.claude/skills + "
+            "~/.agents/skills + ~/.config/devin/skills."
         ),
     )
     parser.add_argument(
@@ -323,8 +348,9 @@ def build_parser() -> argparse.ArgumentParser:
         dest="global_install",
         action="store_true",
         help=(
-            f"Install into {TARGET_GLOBAL} and {TARGET_AGENTS_GLOBAL} "
-            "(instead of the local .claude + .agents pair)."
+            f"Install into {TARGET_GLOBAL}, {TARGET_AGENTS_GLOBAL} and "
+            f"{TARGET_DEVIN_GLOBAL} "
+            "(instead of the local .claude + .agents + .devin set)."
         ),
     )
     target.add_argument(
@@ -332,7 +358,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="target_dir",
         help=(
             "Install into a single custom directory "
-            "(absolute path recommended; skips the paired agents target)."
+            "(absolute path recommended; skips the harness target set)."
         ),
     )
     parser.add_argument(

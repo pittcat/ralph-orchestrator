@@ -22,7 +22,8 @@ The contract is intentionally behavioural rather than textual:
   on disk with a non-empty ``SKILL.md`` and matching agent metadata.
 * ``ralph-task-discovery`` is present in the catalog (6 public skills),
   marketplace and on disk, installs as a physical symlink-free copy into
-  custom, local (paired ``.claude`` + ``.agents``) and global targets.
+  custom, local (paired ``.claude`` + ``.agents`` + ``.devin``) and
+  global targets.
 """
 from __future__ import annotations
 
@@ -290,8 +291,9 @@ def test_task_discovery_custom_install_physical_no_symlinks(fresh_target: Path) 
     assert "result:      installed" in result.stdout
 
 
-def test_task_discovery_local_install_copies_to_both_targets(tmp_path: Path) -> None:
-    """Default local install must copy into .claude/skills AND .agents/skills."""
+def test_task_discovery_local_install_copies_to_all_targets(tmp_path: Path) -> None:
+    """Default local install must copy into .claude/skills, .agents/skills
+    AND .devin/skills."""
     result = subprocess.run(
         [
             sys.executable,
@@ -305,7 +307,11 @@ def test_task_discovery_local_install_copies_to_both_targets(tmp_path: Path) -> 
         cwd=tmp_path,
     )
     assert result.returncode == 0, result.stderr
-    for target in (tmp_path / ".claude" / "skills", tmp_path / ".agents" / "skills"):
+    for target in (
+        tmp_path / ".claude" / "skills",
+        tmp_path / ".agents" / "skills",
+        tmp_path / ".devin" / "skills",
+    ):
         installed = target / "ralph-task-discovery"
         assert installed.is_dir(), f"missing install target {installed}"
         assert (installed / "SKILL.md").is_file()
@@ -313,24 +319,26 @@ def test_task_discovery_local_install_copies_to_both_targets(tmp_path: Path) -> 
 
 
 def test_task_discovery_global_dry_run_no_write() -> None:
-    """Global dry-run must print both absolute destinations without writing."""
+    """Global dry-run must print all absolute destinations without writing."""
     claude_dest = install.TARGET_GLOBAL / "ralph-task-discovery"
     agents_dest = install.TARGET_AGENTS_GLOBAL / "ralph-task-discovery"
+    devin_dest = install.TARGET_DEVIN_GLOBAL / "ralph-task-discovery"
     before = {
         dest: (dest.stat().st_mtime_ns if dest.exists() else None)
-        for dest in (claude_dest, agents_dest)
+        for dest in (claude_dest, agents_dest, devin_dest)
     }
     result = _run(["--global", "--dry-run", "ralph-task-discovery"])
     assert result.returncode == 0, result.stderr
     assert "Install mode: global" in result.stdout
-    assert "Install targets (2):" in result.stdout
+    assert "Install targets (3):" in result.stdout
     assert f"destination: {claude_dest}" in result.stdout
     assert f"destination: {agents_dest}" in result.stdout
+    assert f"destination: {devin_dest}" in result.stdout
     # An existing destination reports "would prompt before replacing"; a
     # fresh one reports "would install". Either way the action is a "would".
-    assert result.stdout.count("result:      would") == 2
-    # Dry-run must not have written either destination.
-    for dest in (claude_dest, agents_dest):
+    assert result.stdout.count("result:      would") == 3
+    # Dry-run must not have written any destination.
+    for dest in (claude_dest, agents_dest, devin_dest):
         if before[dest] is None:
             assert not dest.exists(), f"dry-run created {dest}"
         else:
@@ -440,16 +448,18 @@ def test_force_install_creates_skill(fresh_target: Path) -> None:
     )
 
 
-def test_global_dry_run_prints_both_absolute_destinations() -> None:
+def test_global_dry_run_prints_all_absolute_destinations() -> None:
     result = _run(["--global", "--dry-run", "ralph-project-bootstrap"])
     assert result.returncode == 0, result.stderr
     claude_dest = install.TARGET_GLOBAL / "ralph-project-bootstrap"
     agents_dest = install.TARGET_AGENTS_GLOBAL / "ralph-project-bootstrap"
+    devin_dest = install.TARGET_DEVIN_GLOBAL / "ralph-project-bootstrap"
     assert "Install mode: global" in result.stdout
-    assert "Install targets (2):" in result.stdout
+    assert "Install targets (3):" in result.stdout
     assert f"destination: {claude_dest}" in result.stdout
     assert f"destination: {agents_dest}" in result.stdout
-    assert result.stdout.count("result:      would") == 2
+    assert f"destination: {devin_dest}" in result.stdout
+    assert result.stdout.count("result:      would") == 3
 
 
 def test_prune_removes_unrequested(fresh_target: Path) -> None:
