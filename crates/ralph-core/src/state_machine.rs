@@ -50,7 +50,7 @@ impl StateMachineTransitionId {
         let bytes = serde_json::to_vec(&canonical).expect("transition identity tuple serializes");
         let mut hasher = Sha256::new();
         hasher.update(bytes);
-        Self(format!("sm-v2:{:x}", hasher.finalize()))
+        Self(format!("sm-v2:{}", hex::encode(hasher.finalize())))
     }
 
     /// Expose the underlying string for ledger / outbox comparisons.
@@ -112,7 +112,7 @@ fn transition_fingerprint(delta: &StateMachineTransitionDelta) -> String {
     let bytes = serde_json::to_vec(&canonical).expect("transition fingerprint serializes");
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("tf-v1:{:x}", hasher.finalize())
+    format!("tf-v1:{}", hex::encode(hasher.finalize()))
 }
 
 /// Recover the source discriminator from the pre-v2 six-segment identity.

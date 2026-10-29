@@ -274,7 +274,7 @@ pub(crate) fn json_digest_hex(value: &serde_json::Value) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.to_string().as_bytes());
     let digest = hasher.finalize();
-    let hex = format!("{:x}", digest);
+    let hex = hex::encode(digest);
     hex.chars().take(16).collect()
 }
 

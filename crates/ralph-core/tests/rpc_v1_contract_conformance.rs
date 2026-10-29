@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use jsonschema::{Draft, JSONSchema};
+use jsonschema::{Draft, Validator};
 use serde_json::{Value, json};
 
 fn repo_root() -> PathBuf {
@@ -18,14 +18,14 @@ fn load_json(path: &Path) -> Value {
         .unwrap_or_else(|err| panic!("failed parsing json {}: {err}", path.display()))
 }
 
-fn compile_validator(schema: &Value) -> JSONSchema {
-    JSONSchema::options()
+fn compile_validator(schema: &Value) -> Validator {
+    jsonschema::options()
         .with_draft(Draft::Draft202012)
-        .compile(schema)
+        .build(schema)
         .unwrap_or_else(|err| panic!("failed compiling schema: {err}"))
 }
 
-fn compile_def_validator(root_schema: &Value, def_name: &str) -> JSONSchema {
+fn compile_def_validator(root_schema: &Value, def_name: &str) -> Validator {
     let defs = root_schema
         .get("$defs")
         .cloned()
@@ -48,14 +48,15 @@ fn collect_json_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn assert_all_valid(validator: &JSONSchema, dir: &Path) {
+fn assert_all_valid(validator: &Validator, dir: &Path) {
     for path in collect_json_files(dir) {
         let instance = load_json(&path);
-        if let Err(errors) = validator.validate(&instance) {
-            let reasons = errors
-                .map(|err| err.to_string())
-                .collect::<Vec<_>>()
-                .join("; ");
+        let reasons = validator
+            .iter_errors(&instance)
+            .map(|err| err.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !reasons.is_empty() {
             panic!(
                 "expected fixture to be valid: {}\nvalidation errors: {}",
                 path.display(),
@@ -65,7 +66,7 @@ fn assert_all_valid(validator: &JSONSchema, dir: &Path) {
     }
 }
 
-fn assert_all_invalid(validator: &JSONSchema, dir: &Path) {
+fn assert_all_invalid(validator: &Validator, dir: &Path) {
     for path in collect_json_files(dir) {
         let instance = load_json(&path);
         assert!(

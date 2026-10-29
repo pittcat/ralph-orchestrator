@@ -581,7 +581,9 @@ fn pid_alive(pid: u32) -> bool {
     #[cfg(not(unix))]
     {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
-        let mut sys = sysinfo::System::new();
+        let Ok(mut sys) = sysinfo::System::new() else {
+            return false;
+        };
         sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
             false,
@@ -715,7 +717,9 @@ fn print_urls(state: &WebState) {
 /// enumeration.
 fn lan_ip() -> Option<String> {
     use std::net::IpAddr;
-    let networks = sysinfo::Networks::new_with_refreshed_list();
+    let Ok(networks) = sysinfo::Networks::new_with_refreshed_list() else {
+        return None;
+    };
     networks
         .values()
         .flat_map(|data| data.ip_networks().iter())
@@ -1177,7 +1181,9 @@ async fn terminate_pid(pid: u32, _grace: Duration) -> Result<()> {
 #[cfg(not(unix))]
 async fn terminate_pid(pid: u32, _grace: Duration) -> Result<()> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
-    let mut sys = sysinfo::System::new();
+    let Ok(mut sys) = sysinfo::System::new() else {
+        return Ok(());
+    };
     sys.refresh_processes_specifics(ProcessesToUpdate::All, false, ProcessRefreshKind::nothing());
     if let Some(process) = sys.process(sysinfo::Pid::from_u32(pid)) {
         process.kill();

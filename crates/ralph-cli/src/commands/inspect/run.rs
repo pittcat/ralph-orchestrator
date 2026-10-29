@@ -138,7 +138,7 @@ pub(crate) fn compute_revision(
         )
         .as_bytes(),
     );
-    format!("{:x}", sha.finalize())
+    hex::encode(sha.finalize())
 }
 
 /// Action availability rules (D2, mirrored from `loops.rs`):

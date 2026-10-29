@@ -58,7 +58,7 @@ pub(crate) enum BlockState {
 pub fn compute_sha256_hex(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// Regex pattern for the begin marker: `<!-- ralph:begin <id> v=sha256:<64hex> -->`

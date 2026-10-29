@@ -1036,7 +1036,7 @@ impl GitTokenContext {
         };
         let mut hasher = Sha256::new();
         hasher.update(canonical.as_bytes());
-        let status_fingerprint = format!("{:x}", hasher.finalize());
+        let status_fingerprint = hex::encode(hasher.finalize());
 
         Ok(Self {
             branch,

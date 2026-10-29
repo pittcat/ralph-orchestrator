@@ -44,6 +44,7 @@ uuid.workspace = true
 keyring.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
+hex.workspace = true
 tempfile.workspace = true
 
 # 2026-07-03-001 plan U5: rusqlite is gated behind
@@ -53,7 +54,7 @@ tempfile.workspace = true
 # `--features supervisor-db` build. The `bundled` feature
 # ensures the SQLite engine is statically linked so the
 # binary works on hosts without a libsqlite3 shared object.
-rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+rusqlite = { version = "0.41", features = ["bundled"], optional = true }
 
 # For Unix file locking (flock)
 [target.'cfg(unix)'.dependencies]
@@ -65,7 +66,7 @@ nix = { workspace = true }
 # without the `test` cfg. A self dev-dependency is the standard way to switch a
 # feature on for integration tests; it never affects production `cargo build`.
 ralph-core = { path = ".", features = ["test-support"] }
-jsonschema = { version = "0.18", features = ["draft202012"] }
+jsonschema = "0.60"
 # U11-T7: env-isolation tests (`UNIFIED_PROTOCOL_VIEW`) flip the
 # global env var, so they must run serially relative to one another.
 serial_test = "3"

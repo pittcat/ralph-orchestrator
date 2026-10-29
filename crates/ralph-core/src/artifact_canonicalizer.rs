@@ -185,7 +185,7 @@ pub fn canonicalize(raw: &[u8]) -> Result<CanonicalArtifact, ArtifactError> {
     // 5. Digest of the canonical bytes.
     let mut hasher = Sha256::new();
     hasher.update(&canonical_bytes);
-    let digest = format!("{:x}", hasher.finalize());
+    let digest = hex::encode(hasher.finalize());
 
     Ok(CanonicalArtifact {
         digest,

@@ -3299,7 +3299,7 @@ mod tests {
         let ev = TerminalEvidence::from_event("review.unit.done", payload);
         let mut hasher = sha2::Sha256::new();
         Digest::update(&mut hasher, payload.as_bytes());
-        let expected = format!("{:x}", hasher.finalize());
+        let expected = hex::encode(hasher.finalize());
         assert_eq!(
             ev.payload_fingerprint, expected,
             "fingerprint must equal SHA-256 hex of payload",

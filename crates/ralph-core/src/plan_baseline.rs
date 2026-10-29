@@ -105,7 +105,7 @@ fn path_based_plan_id(path: &Path) -> Option<String> {
 fn short_hash(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())[..16].to_string()
+    hex::encode(hasher.finalize())[..16].to_string()
 }
 
 /// Path to the persisted plan baseline file.

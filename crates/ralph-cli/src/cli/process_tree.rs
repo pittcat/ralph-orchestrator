@@ -85,9 +85,11 @@ pub fn kill_process_tree(_root_pid: u32, _include_root: bool) {
 /// that the cleanup never commits suicide (this matters in tests where the
 /// child shares the test runner's session).
 fn collect_descendants(root_pid: u32, include_root: bool) -> Vec<u32> {
-    let mut sys = System::new_with_specifics(
+    let Ok(mut sys) = System::new_with_specifics(
         RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
-    );
+    ) else {
+        return Vec::new();
+    };
     sys.refresh_processes_specifics(ProcessesToUpdate::All, false, ProcessRefreshKind::nothing());
 
     let mut parent_map: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -151,9 +153,11 @@ fn collect_descendants(root_pid: u32, include_root: bool) -> Vec<u32> {
 }
 
 fn process_is_alive(pid: u32) -> bool {
-    let mut sys = System::new_with_specifics(
+    let Ok(mut sys) = System::new_with_specifics(
         RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
-    );
+    ) else {
+        return false;
+    };
     sys.refresh_processes_specifics(ProcessesToUpdate::All, false, ProcessRefreshKind::nothing());
     sys.process(sysinfo::Pid::from(pid as usize)).is_some()
 }

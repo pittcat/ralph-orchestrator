@@ -146,7 +146,7 @@ fn host_status_fingerprint(repo_root: &std::path::Path) -> String {
     } else {
         format!("{}\n", kept.join("\n"))
     };
-    format!("{:x}", sha2::Sha256::digest(joined.as_bytes()))
+    hex::encode(sha2::Sha256::digest(joined.as_bytes()))
 }
 
 /// Resolve a branch tip (`git rev-parse <ref>`), empty string when
@@ -451,10 +451,9 @@ impl DagSchedulerRuntime {
             })
             .collect();
         for (plan_key, artifact_path, digest, unit_count) in candidates {
-            let fence_key = format!(
-                "{:x}",
-                sha2::Sha256::digest(format!("{plan_key}|{DEVELOPMENT_DONE}|{digest}").as_bytes())
-            );
+            let fence_key = hex::encode(sha2::Sha256::digest(
+                format!("{plan_key}|{DEVELOPMENT_DONE}|{digest}").as_bytes(),
+            ));
             let Some(journal) = self.journal() else {
                 return;
             };

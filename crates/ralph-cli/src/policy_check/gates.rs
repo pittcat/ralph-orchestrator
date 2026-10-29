@@ -1672,7 +1672,7 @@ mod tests {
         canonical.push(b'\n');
         let mut hasher = Sha256::new();
         hasher.update(canonical);
-        let computed = format!("{:x}", hasher.finalize());
+        let computed = hex::encode(hasher.finalize());
 
         let abs = root.join(relative_path);
         if let Some(parent) = abs.parent() {
@@ -1714,7 +1714,7 @@ mod tests {
         canonical.push(b'\n');
         let mut hasher = Sha256::new();
         hasher.update(canonical);
-        (format!("{:x}", hasher.finalize()), abs)
+        (hex::encode(hasher.finalize()), abs)
     }
 
     fn build_postmerge_payload(manifest_path: &str, manifest_digest: &str) -> String {
@@ -2046,7 +2046,7 @@ mod tests {
         canonical.push(b'\n');
         let mut hasher = Sha256::new();
         hasher.update(canonical);
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     #[test]
@@ -2202,7 +2202,7 @@ mod tests {
         // with a trailing newline.
         let mut hasher = Sha256::new();
         hasher.update(b"[1,2,3]\n");
-        let digest = format!("{:x}", hasher.finalize());
+        let digest = hex::encode(hasher.finalize());
         let result = verify_scope_manifest_digest(
             root.path(),
             ".ralph/post-merge/scope-manifest.json",
@@ -2228,7 +2228,7 @@ mod tests {
         std::fs::write(&abs, body).expect("write patch");
         let mut hasher = Sha256::new();
         hasher.update(body);
-        let raw_digest = format!("{:x}", hasher.finalize());
+        let raw_digest = hex::encode(hasher.finalize());
         let result = verify_artifact_digest(
             root.path(),
             ".ralph/red-team/resolved-patch.json",
@@ -2539,7 +2539,7 @@ mod tests {
         // equality check then rejects the array shape.
         let mut hasher = Sha256::new();
         hasher.update(&manifest_bytes);
-        let digest = format!("{:x}", hasher.finalize());
+        let digest = hex::encode(hasher.finalize());
         let (patch_digest, _) = write_artifact(
             root.path(),
             ".ralph/red-team/resolved-patch.json",
@@ -2670,7 +2670,7 @@ mod tests {
         canonical.push(b'\n');
         let mut hasher = Sha256::new();
         hasher.update(canonical);
-        let manifest_digest = format!("{:x}", hasher.finalize());
+        let manifest_digest = hex::encode(hasher.finalize());
         manifest.as_object_mut().expect("manifest object").insert(
             "scope_digest".to_string(),
             serde_json::Value::String(manifest_digest.clone()),
@@ -2909,7 +2909,7 @@ mod tests {
         canonical.push(b'\n');
         let mut hasher = Sha256::new();
         hasher.update(&canonical);
-        let declared = format!("{:x}", hasher.finalize());
+        let declared = hex::encode(hasher.finalize());
         if let Some(object) = value.as_object_mut() {
             object.insert(
                 "scope_digest".to_string(),
@@ -2949,7 +2949,7 @@ mod tests {
         canonical.push(b'\n');
         let mut hasher = Sha256::new();
         hasher.update(&canonical);
-        let declared = format!("{:x}", hasher.finalize());
+        let declared = hex::encode(hasher.finalize());
         if let Some(object) = value.as_object_mut() {
             object.insert(
                 "boundary_digest".to_string(),
@@ -2987,7 +2987,7 @@ mod tests {
         canonical.push(b'\n');
         let mut hasher = Sha256::new();
         hasher.update(&canonical);
-        let declared = format!("{:x}", hasher.finalize());
+        let declared = hex::encode(hasher.finalize());
         // Tamper with a non-excluded field after writing the digest
         // so the recomputed digest differs.
         if let Some(object) = value.as_object_mut() {

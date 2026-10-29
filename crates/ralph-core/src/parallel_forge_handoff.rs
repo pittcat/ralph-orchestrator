@@ -259,7 +259,7 @@ pub fn compute_resource_aware_digest(
 
     let mut hasher = Sha256::new();
     hasher.update(s.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// Borrowed view over the fields of an [`ExecutionPlanUnit`] that participate

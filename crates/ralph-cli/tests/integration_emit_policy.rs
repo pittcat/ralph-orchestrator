@@ -27,10 +27,9 @@ fn write_redteam_scope_fixture(root: &std::path::Path, manifest_coverage: u64) -
     std::fs::create_dir_all(manifest_path.parent().expect("manifest parent")).unwrap();
     std::fs::write(&patch_path, br#"{"patches":["a"]}"#).unwrap();
 
-    let patch_digest = format!(
-        "{:x}",
-        Sha256::digest(std::fs::read(&patch_path).expect("patch bytes"))
-    );
+    let patch_digest = hex::encode(Sha256::digest(
+        std::fs::read(&patch_path).expect("patch bytes"),
+    ));
     let mut manifest = serde_json::json!({
         "scope_status": "resolved",
         "overall_confidence": 100,
@@ -42,7 +41,7 @@ fn write_redteam_scope_fixture(root: &std::path::Path, manifest_coverage: u64) -
     });
     let mut canonical = serde_json::to_vec(&manifest).expect("canonical manifest");
     canonical.push(b'\n');
-    let manifest_digest = format!("{:x}", Sha256::digest(canonical));
+    let manifest_digest = hex::encode(Sha256::digest(canonical));
     manifest.as_object_mut().expect("manifest object").insert(
         "scope_digest".to_string(),
         serde_json::Value::String(manifest_digest.clone()),

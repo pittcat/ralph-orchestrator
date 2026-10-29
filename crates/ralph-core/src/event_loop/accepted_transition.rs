@@ -149,7 +149,7 @@ impl AcceptedTransition {
             hasher.update((field.len() as u64).to_le_bytes());
             hasher.update(field.as_bytes());
         }
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     fn derive_identity(
@@ -161,7 +161,7 @@ impl AcceptedTransition {
         let payload_digest = {
             let mut hasher = Sha256::new();
             hasher.update(event.payload.as_bytes());
-            format!("{:x}", hasher.finalize())
+            hex::encode(hasher.finalize())
         };
         let event_identity = format!(
             "{}:{}",
@@ -861,7 +861,7 @@ mod tests {
         let canonical_digest = {
             let mut h = Sha256::new();
             h.update(event.payload.as_bytes());
-            format!("{:x}", h.finalize())
+            hex::encode(h.finalize())
         };
         let event_identity = "work.done:executor";
         let expected = AcceptedTransition::compute_transition_id(

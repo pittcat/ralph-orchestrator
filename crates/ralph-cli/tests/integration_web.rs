@@ -75,6 +75,7 @@ exit 1",
         let output = crate::common::ralph_bin()
             .current_dir(workspace)
             .env("PATH", path)
+            .env("RALPH_WEB_STATE_DIR", workspace.join("web-state"))
             .args([
                 "web",
                 "--dev",

@@ -4,10 +4,11 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use jsonschema::{Draft, JSONSchema};
+use jsonschema::{Draft, Validator};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ErrorCode, ErrorData, Implementation, InitializeResult,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, Tool, ToolAnnotations,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ErrorCode, ErrorData, Implementation,
+    InitializeResult, ListToolsResult, PaginatedRequestParams, ServerCapabilities, Tool,
+    ToolAnnotations,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ServerHandler, ServiceExt};
@@ -286,7 +287,7 @@ impl ServerHandler for RalphMcpServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
+    ) -> Result<CallToolResponse, ErrorData> {
         let request_id = context.id.to_string();
         let Some(entry) = self.catalog.lookup(request.name.as_ref()) else {
             return Err(ErrorData::new(
@@ -304,7 +305,7 @@ impl ServerHandler for RalphMcpServer {
             ))
             .with_context(request_id.clone(), Some(entry.method_name().to_string()))
             .with_details(json!({ "errors": errors }));
-            return Ok(tool_error_result(error));
+            return Ok(tool_error_result(error).into());
         }
 
         let result = match &entry.target {
@@ -323,8 +324,8 @@ impl ServerHandler for RalphMcpServer {
         };
 
         match result {
-            Ok(result) => Ok(result),
-            Err(error) => Ok(tool_error_result(error)),
+            Ok(result) => Ok(result.into()),
+            Err(error) => Ok(tool_error_result(error).into()),
         }
     }
 }
@@ -436,7 +437,7 @@ impl ToolCatalog {
 struct ToolEntry {
     tool: Tool,
     target: ToolTarget,
-    input_validator: Arc<JSONSchema>,
+    input_validator: Arc<Validator>,
 }
 
 impl ToolEntry {
@@ -448,9 +449,15 @@ impl ToolEntry {
     }
 
     fn validate_input(&self, arguments: &Value) -> Result<(), Vec<String>> {
-        match self.input_validator.validate(arguments) {
-            Ok(()) => Ok(()),
-            Err(errors) => Err(errors.map(|error| error.to_string()).collect()),
+        let errors: Vec<String> = self
+            .input_validator
+            .iter_errors(arguments)
+            .map(|error| error.to_string())
+            .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
         }
     }
 }
@@ -649,11 +656,11 @@ fn schema_ref_object(root_schema: &Value, schema_ref: &str) -> Result<Map<String
         .context("generated schema object must be a JSON object")
 }
 
-fn compile_validator(schema: &Map<String, Value>) -> Result<Arc<JSONSchema>> {
+fn compile_validator(schema: &Map<String, Value>) -> Result<Arc<Validator>> {
     let schema_value = Value::Object(schema.clone());
-    let validator = JSONSchema::options()
+    let validator = jsonschema::options()
         .with_draft(Draft::Draft202012)
-        .compile(&schema_value)
+        .build(&schema_value)
         .map_err(|error| anyhow!("tool schema must compile: {error}"))?;
     Ok(Arc::new(validator))
 }

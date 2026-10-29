@@ -62,6 +62,7 @@ exit 1",
         let output = crate::common::ralph_bin()
             .current_dir(workspace)
             .env("PATH", &path)
+            .env("RALPH_WEB_STATE_DIR", workspace.join("web-state"))
             .args([
                 "web",
                 "--workspace",
@@ -83,7 +84,7 @@ exit 1",
         );
         assert!(stdout.contains("Starting Ralph monitor"), "{stdout}");
         assert!(
-            stdout.contains(&format!("Dashboard: http://localhost:{port}")),
+            stdout.contains(&format!("dashboard: http://localhost:{port}")),
             "{stdout}"
         );
         assert!(stdout.contains("Monitor exited"), "{stdout}");
@@ -133,6 +134,7 @@ exit 1",
         let output = crate::common::ralph_bin()
             .current_dir(workspace)
             .env("PATH", &path)
+            .env("RALPH_WEB_STATE_DIR", workspace.join("web-state"))
             .args([
                 "web",
                 "--workspace",
@@ -186,6 +188,7 @@ exit 1",
         let output = crate::common::ralph_bin()
             .current_dir(workspace)
             .env("PATH", &path)
+            .env("RALPH_WEB_STATE_DIR", workspace.join("web-state"))
             .args([
                 "web",
                 "--workspace",

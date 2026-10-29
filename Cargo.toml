@@ -78,12 +78,12 @@ async-trait = "0.1"
 
 # TUI (pinned for rustc 1.87.0 compatibility)
 ratatui = "0.30"
-crossterm = { version = "0.28", features = ["event-stream"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
 
 # Async stream utilities
 futures = "0.3"
 tokio-util = { version = "0.7", features = ["compat"] }
-rmcp = { version = "1.1.0", default-features = false, features = ["server", "client", "transport-io"] }
+rmcp = { version = "3.8.0", default-features = false, features = ["server", "client", "transport-io"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -98,16 +98,16 @@ clap_complete = "4"
 regex = "1"
 
 # HTTP client for remote presets
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-tungstenite = "0.24"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+tungstenite = "0.30"
 
 # Error handling
 thiserror = "2"
 anyhow = "1"
 
 # OS keychain for secure credential storage
-keyring = { version = "3", features = ["apple-native", "linux-native"] }
+keyring = { version = "4", features = ["apple-native-keyring-store", "dbus-secret-service-keyring-store", "linux-keyutils-keyring-store"] }
 
 # Logging/tracing
 tracing = "0.1"
@@ -120,32 +120,33 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 
 # Hashing (agent_doc_sync block content fingerprints)
-sha2 = "0.10"
+sha2 = "0.11"
+hex = "0.4"
 
 # Testing
 tempfile = "3"
 
 # Terminal markdown rendering
-termimad = "0.31"
+termimad = "0.35"
 
 # Terminal colors
 colored = "3"
 
 # Progress indicators
-indicatif = "0.17"
+indicatif = "0.18"
 
 # Open URLs in default browser
 open = "5"
 
 # PTY support
 portable-pty = "0.9"
-nix = { version = "0.29", features = ["signal", "term", "fs"] }
-vt100 = "0.15"
+nix = { version = "0.31", features = ["signal", "term", "fs"] }
+vt100 = "0.18"
 scopeguard = "1"
 strip-ansi-escapes = "0.2"
 
 # Cross-platform process tree enumeration for reliable cleanup
-sysinfo = "0.33"
+sysinfo = "0.40"
 
 # Internal crates (version required for crates.io publishing)
 ralph-proto = { version = "0.1.0", path = "crates/ralph-proto" }

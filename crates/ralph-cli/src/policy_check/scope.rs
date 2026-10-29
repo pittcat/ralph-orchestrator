@@ -267,7 +267,7 @@ pub(crate) fn verify_canonical_json_digest_excluding(
     canonical.push(b'\n');
     let mut hasher = Sha256::new();
     hasher.update(canonical);
-    let computed = format!("{:x}", hasher.finalize());
+    let computed = hex::encode(hasher.finalize());
     if !declared_digest.eq_ignore_ascii_case(&computed) {
         return Err(ValidationError {
             payload_index: 0,

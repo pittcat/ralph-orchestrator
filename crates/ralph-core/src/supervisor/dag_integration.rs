@@ -177,7 +177,7 @@ pub fn compute_integration_fingerprint(input: &IntegrationInput) -> String {
     hasher.update(b"|");
     hasher.update(input.expected_head_before.as_bytes());
     let digest = hasher.finalize();
-    format!("{:x}", digest)
+    hex::encode(digest)
 }
 
 /// In-memory [`IntegrationStore`]. Backed by a single

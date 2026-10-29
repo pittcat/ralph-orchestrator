@@ -264,7 +264,7 @@ pub fn write_start(args: &WriteStartArgs<'_>) -> io::Result<PathBuf> {
 
     let mut sha = Sha256::new();
     sha.update(args.prompt.as_bytes());
-    let prompt_sha256 = format!("{:x}", sha.finalize());
+    let prompt_sha256 = hex::encode(sha.finalize());
 
     let (started_at, revision) = match read(&path) {
         Ok(existing) => (existing.started_at, existing.revision.saturating_add(1)),
@@ -338,7 +338,7 @@ pub fn record_terminal(
 pub fn prompt_sha256_hex(prompt: &str) -> String {
     let mut sha = Sha256::new();
     sha.update(prompt.as_bytes());
-    format!("{:x}", sha.finalize())
+    hex::encode(sha.finalize())
 }
 
 /// Whether a process `pid` exists. Mirrors `LoopEntry::is_pid_alive`

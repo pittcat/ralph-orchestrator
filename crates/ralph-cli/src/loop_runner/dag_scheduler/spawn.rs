@@ -556,7 +556,7 @@ fn follow_up_kind(topic: &str, payload: &Value) -> Option<SpawnKind> {
 }
 
 fn sha256_hex(input: &str) -> String {
-    format!("{:x}", sha2::Sha256::digest(input.as_bytes()))
+    hex::encode(sha2::Sha256::digest(input.as_bytes()))
 }
 
 impl DagSchedulerRuntime {

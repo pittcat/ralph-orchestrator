@@ -292,7 +292,7 @@ impl ResumeManifest {
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// SHA-256 over the drift-checked identity fields (length-prefixed
@@ -310,7 +310,7 @@ pub fn identity_digest(identity: &ResumeIdentity) -> String {
         hasher.update((field.len() as u64).to_le_bytes());
         hasher.update(field.as_bytes());
     }
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// Validate that a manifest path is worktree-relative and bounded:

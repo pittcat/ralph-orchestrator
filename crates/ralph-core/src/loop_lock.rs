@@ -408,7 +408,7 @@ impl LoopLock {
             // writing never panics on its input (fail-closed ≠ crash).
             let cut = crate::floor_char_boundary(prompt, 64);
             let digest = Sha256::digest(prompt.as_bytes());
-            format!("{}\u{2026}[sha256:{:x}]", &prompt[..cut], digest)
+            format!("{}\u{2026}[sha256:{}]", &prompt[..cut], hex::encode(digest))
         } else {
             prompt.to_string()
         }

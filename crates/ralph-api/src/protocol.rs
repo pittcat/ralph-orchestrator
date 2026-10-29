@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use jsonschema::{Draft, JSONSchema};
+use jsonschema::{Draft, Validator};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -198,9 +198,14 @@ pub fn parse_request(raw: &Value) -> Result<RpcRequestEnvelope, ApiError> {
 
 pub fn validate_request_schema(raw: &Value) -> Result<(), Vec<String>> {
     let validator = request_schema_validator();
-    match validator.validate(raw) {
-        Ok(()) => Ok(()),
-        Err(errors) => Err(errors.map(|error| error.to_string()).collect()),
+    let errors: Vec<String> = validator
+        .iter_errors(raw)
+        .map(|error| error.to_string())
+        .collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
     }
 }
 
@@ -233,8 +238,8 @@ fn response_meta(served_by: &str) -> ResponseMeta {
     }
 }
 
-fn request_schema_validator() -> &'static JSONSchema {
-    static REQUEST_VALIDATOR: OnceLock<JSONSchema> = OnceLock::new();
+fn request_schema_validator() -> &'static Validator {
+    static REQUEST_VALIDATOR: OnceLock<Validator> = OnceLock::new();
     REQUEST_VALIDATOR.get_or_init(|| {
         let raw_schema = include_str!("../data/rpc-v1-schema.json");
         let root_schema: Value =
@@ -250,9 +255,9 @@ fn request_schema_validator() -> &'static JSONSchema {
             "$ref": "#/$defs/requestEnvelope"
         });
 
-        JSONSchema::options()
+        jsonschema::options()
             .with_draft(Draft::Draft7)
-            .compile(&request_schema)
+            .build(&request_schema)
             .expect("request envelope schema must compile")
     })
 }

@@ -609,7 +609,7 @@ mod tests {
             hasher.update(&content);
             hasher.update([0u8]);
         }
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// 1. Only `completion_promise` maps to `AlreadyCompleted`.
