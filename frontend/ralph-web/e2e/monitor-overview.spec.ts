@@ -65,8 +65,30 @@ async function mockMonitorApi(page: Page): Promise<string[]> {
         contentType: "application/json",
         body: JSON.stringify(body),
       });
+    if (url.includes("/stream")) {
+      return route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: ": hb\n\n",
+      });
+    }
+    if (url.includes("/snapshot")) {
+      return json({
+        watermark: 0,
+        generated_at: "2026-10-28T12:00:00Z",
+        projects: [],
+        runs: [],
+      });
+    }
     if (url.includes("/projects/") && url.endsWith("/health")) {
-      return json({ collector: "ok", last_collected_at: "t" });
+      return json({
+        collector: {
+          status: "ok",
+          consecutive_failures: 0,
+          last_collected_at: "t",
+        },
+        degraded_runs: [],
+      });
     }
     if (url.includes("/projects")) return json({ projects: PROJECTS });
     if (/\/runs\/[^?]+/.test(url)) {

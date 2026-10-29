@@ -41,7 +41,16 @@ function respond(url: string): Response {
     new Response(JSON.stringify(body), {
       headers: { "content-type": "application/json" },
     });
-  if (url.includes("/projects/")) return json({ collector: url.includes("p1") ? "error" : "ok", error: url.includes("p1") ? "boom" : null, last_collected_at: "t" });
+  if (url.includes("/projects/"))
+    return json({
+      collector: {
+        status: url.includes("p1") ? "error" : "ok",
+        error: url.includes("p1") ? "boom" : null,
+        consecutive_failures: url.includes("p1") ? 3 : 0,
+        last_collected_at: "t",
+      },
+      degraded_runs: url.includes("p1") ? ["m:p1:loop-1"] : [],
+    });
   if (url.includes("/projects"))
     return json({
       projects: [

@@ -14,6 +14,7 @@ import {
   apiGetProjectHealth,
   apiGetProjects,
   apiGetRun,
+  apiGetRunHealth,
   apiGetRuns,
   type EventsQuery,
   type MonitorEvent,
@@ -21,7 +22,12 @@ import {
 } from "./api";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export const MONITOR_REFETCH_MS = 3_000;
+/**
+ * Plan3-U4: freshness is now driven by the monitor stream
+ * (invalidations on each event); polling survives only as a 60s
+ * safety net for a silently-dead stream.
+ */
+export const MONITOR_REFETCH_MS = 60_000;
 
 export function useMonitorProjects() {
   return useQuery({
@@ -72,8 +78,18 @@ export function useMonitorProjectsHealth(projectIds: string[]) {
   });
   return results
     .map((r, i) => ({ id: projectIds[i], health: r.data }))
-    .filter((x) => x.health?.collector === "error")
+    .filter((x) => x.health?.collector.status === "error")
     .map((x) => x.id);
+}
+
+/** Run-level four-layer health (Plan3-U2/U4). */
+export function useMonitorRunHealth(globalRunId: string | undefined) {
+  return useQuery({
+    queryKey: ["monitor", "run-health", globalRunId],
+    queryFn: () => apiGetRunHealth(globalRunId!),
+    enabled: !!globalRunId,
+    refetchInterval: MONITOR_REFETCH_MS,
+  });
 }
 
 // ── Plan2-U2 detail hooks ──

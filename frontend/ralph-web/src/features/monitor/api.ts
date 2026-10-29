@@ -154,11 +154,86 @@ export const projectsResponseSchema = z.object({
 });
 
 export const projectHealthSchema = z.object({
-  collector: z.enum(["ok", "error"]),
-  error: z.string().nullable().optional(),
-  last_collected_at: z.string().nullable(),
+  collector: z.object({
+    status: z.enum(["ok", "error"]),
+    error: z.string().nullable().optional(),
+    consecutive_failures: z.number(),
+    last_collected_at: z.string().nullable(),
+  }),
+  degraded_runs: z.array(z.string()),
 });
 export type ProjectHealth = z.infer<typeof projectHealthSchema>;
+
+// ── Plan3-U2/U3 health + stream contract ──
+
+export const runHealthSchema = z.object({
+  run_id: z.string(),
+  global_run_id: z.string(),
+  layers: z.object({
+    collector: z.object({
+      status: z.enum(["ok", "error", "stale"]),
+      error: z.string().optional(),
+      consecutive_failures: z.number(),
+      last_collected_at: z.string().nullable(),
+    }),
+    runtime: z.object({
+      status: z.enum([
+        "running",
+        "silent",
+        "exited",
+        "dead_unverified",
+        "pid_unverified",
+        "unknown",
+      ]),
+      pid: z.number().nullable(),
+      pid_alive: z.boolean().nullable(),
+      pid_start_verified: z.boolean().nullable(),
+      last_event_at: z.string().nullable(),
+      last_activity_at: z.string().nullable(),
+    }),
+    backend: z.object({
+      status: z.enum([
+        "ok",
+        "timeout",
+        "exit_error",
+        "transport_unknown",
+        "unknown",
+      ]),
+      hint: z.string().optional(),
+      pending: z.boolean().optional(),
+      last_end_at: z.string().nullable(),
+    }),
+  }),
+  terminal_converged: z.boolean(),
+  last_valid_at: z.string().nullable(),
+});
+export type RunHealth = z.infer<typeof runHealthSchema>;
+
+export const snapshotSchema = z.object({
+  watermark: z.number(),
+  generated_at: z.string(),
+  projects: z.array(
+    z.object({
+      id: z.string(),
+      canonical_path: z.string(),
+      display_name: z.string(),
+      created_at: z.string(),
+      health: projectHealthSchema,
+    }),
+  ),
+  runs: z.array(runSchema),
+});
+export type MonitorSnapshot = z.infer<typeof snapshotSchema>;
+
+/** One frame of the monitor event stream (SSE `data` payload). */
+export const streamEventSchema = z.object({
+  kind: z.string(),
+  seq: z.number(),
+  project_id: z.string().nullable(),
+  run_id: z.string().nullable(),
+  payload: z.record(z.string(), z.unknown()).nullable(),
+});
+export type MonitorStreamEvent = z.infer<typeof streamEventSchema>;
 
 // ── Plan2-U2 events/progress/graph contract ──
 
@@ -283,6 +358,17 @@ export function apiGetRun(globalRunId: string): Promise<RunDetail> {
 
 export function apiGetProjectHealth(projectId: string): Promise<ProjectHealth> {
   return request(`/projects/${projectId}/health`, projectHealthSchema);
+}
+
+export function apiGetRunHealth(globalRunId: string): Promise<RunHealth> {
+  return request(
+    `/runs/${encodeURIComponent(globalRunId)}/health`,
+    runHealthSchema,
+  );
+}
+
+export function apiGetSnapshot(): Promise<MonitorSnapshot> {
+  return request("/snapshot", snapshotSchema);
 }
 
 export function apiGetEvents(

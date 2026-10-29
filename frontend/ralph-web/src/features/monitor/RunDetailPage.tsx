@@ -12,11 +12,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import {
   useMonitorRunDetail,
+  useMonitorRunHealth,
   useRunEvents,
   useRunGraph,
   useRunProgress,
 } from "./hooks";
 import { DetailHeader } from "./detail/DetailHeader";
+import { HealthPanel } from "./health/HealthPanel";
 import { StageStrip } from "./detail/StageStrip";
 import { OverviewTab } from "./detail/OverviewTab";
 import { TimelineTab } from "./detail/TimelineTab";
@@ -55,6 +57,7 @@ export function RunDetailPage() {
   const detail = useMonitorRunDetail(decoded);
   const terminal = !!detail.data?.run.terminal;
   const progress = useRunProgress(decoded, terminal);
+  const health = useMonitorRunHealth(decoded);
 
   const tab = (searchParams.get("tab") as TabId) || "overview";
   const seqParam = searchParams.get("seq");
@@ -182,6 +185,7 @@ export function RunDetailPage() {
       </Link>
 
       <DetailHeader run={run} progress={progress.data} />
+      {health.data && <HealthPanel health={health.data} />}
 
       {!hasDescriptor && (
         <p

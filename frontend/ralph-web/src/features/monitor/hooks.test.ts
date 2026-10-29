@@ -46,7 +46,7 @@ describe("useMonitorRuns", () => {
     expect(result.current.data?.total).toBe(0);
   });
 
-  it("refetch interval aligns with the 3s collector poll", () => {
-    expect(MONITOR_REFETCH_MS).toBe(3000);
+  it("refetch interval is the 60s stream-failure fallback (Plan3-U4)", () => {
+    expect(MONITOR_REFETCH_MS).toBe(60_000);
   });
 });

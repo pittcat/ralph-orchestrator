@@ -12,6 +12,17 @@ import { MonitorLayout } from "./features/monitor/MonitorLayout";
 import { OverviewPage } from "./features/monitor/OverviewPage";
 import { RunDetailPage } from "./features/monitor/RunDetailPage";
 import { useThemeEffect } from "./features/monitor/theme";
+import { ConnectionProvider } from "./features/monitor/connection/ConnectionProvider";
+import type { ReactNode } from "react";
+
+/** Monitor pages share one stream lifetime per mounted subtree. */
+function Monitor({ children }: { children: ReactNode }) {
+  return (
+    <ConnectionProvider>
+      <MonitorLayout>{children}</MonitorLayout>
+    </ConnectionProvider>
+  );
+}
 
 export function App() {
   useThemeEffect();
@@ -28,17 +39,17 @@ export function App() {
         <Route
           path="/monitor"
           element={
-            <MonitorLayout>
+            <Monitor>
               <OverviewPage />
-            </MonitorLayout>
+            </Monitor>
           }
         />
         <Route
           path="/monitor/runs/:globalId"
           element={
-            <MonitorLayout>
+            <Monitor>
               <RunDetailPage />
-            </MonitorLayout>
+            </Monitor>
           }
         />
         {/* Redirect root to tasks */}
