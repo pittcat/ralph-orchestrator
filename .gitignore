@@ -90,7 +90,7 @@ fix-log.md
 .claude/worktrees/
 .kiro/
 .serena/
-# .envrc
+.envrc
 
 # Playwright screenshots
 .playwright-mcp/
