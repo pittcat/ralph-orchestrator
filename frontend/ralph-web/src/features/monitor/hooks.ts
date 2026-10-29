@@ -6,6 +6,7 @@
 
 import { keepPreviousData, useQueries, useQuery } from "@tanstack/react-query";
 import {
+  apiDeleteRun,
   apiGetArtifactContent,
   apiGetArtifacts,
   apiGetChannelConfig,
@@ -322,6 +323,19 @@ export function useOperation(id: string | undefined) {
       ["recorded", "dispatching", "dispatched"].includes(q.state.data.state)
         ? 1_500
         : false,
+  });
+}
+
+/** Dismiss a run — invalidates the run list + detail caches. */
+export function useDeleteRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (globalRunId: string) => apiDeleteRun(globalRunId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["monitor", "runs"] });
+      void qc.invalidateQueries({ queryKey: ["monitor", "run"] });
+      void qc.invalidateQueries({ queryKey: ["monitor", "snapshot"] });
+    },
   });
 }
 

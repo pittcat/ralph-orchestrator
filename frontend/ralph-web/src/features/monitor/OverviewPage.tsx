@@ -30,6 +30,7 @@ import { FilterBar } from "./components/FilterBar";
 import { Pagination } from "./components/Pagination";
 import { RunStateBadge } from "./components/RunStateBadge";
 import { StaleBanner } from "./components/StaleBanner";
+import { DeleteRunButton } from "./components/DeleteRunButton";
 import { LaunchDialog } from "./launch/LaunchDialog";
 
 function fmt(ts: string | null): string {
@@ -153,6 +154,7 @@ export function OverviewPage() {
                 </button>
               </TableHead>
               <TableHead>Last evidence</TableHead>
+              <TableHead className="w-10" />
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -184,6 +186,9 @@ export function OverviewPage() {
                 </TableCell>
                 <TableCell className="text-muted-foreground">
                   {fmt(r.lastEventAt ?? r.terminal?.at ?? r.lastObservedAt)}
+                </TableCell>
+                <TableCell className="text-right">
+                  <DeleteRunButton run={r} variant="icon" />
                 </TableCell>
               </TableRow>
             ))}

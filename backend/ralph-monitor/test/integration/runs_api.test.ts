@@ -203,6 +203,82 @@ test('GET /runs/:globalId → detail with evidence timestamps; 404s typed', asyn
   await app.close();
 });
 
+test('DELETE /runs/:gid dismisses the run and suppresses re-import', async () => {
+  const { app, db, machineId } = makeApp();
+  const pa = insertProject(db, '/w/a');
+  const obs = run('run-1');
+  ingest(db, pa, '/w/a', [obs]);
+
+  const gid = `${machineId}:${pa}:run-1`;
+  const session = await getSession(app);
+
+  // Happy path → 204, projection row + dismissed mark + audit row.
+  const del = await app.inject({
+    method: 'DELETE',
+    url: `/api/monitor/v1/runs/${encodeURIComponent(gid)}`,
+    headers: unsafeHeaders(session),
+  });
+  assert.equal(del.statusCode, 204);
+
+  assert.equal(
+    db
+      .prepare('SELECT 1 FROM runs WHERE project_id = ? AND run_id = ?')
+      .get(pa, 'run-1'),
+    undefined,
+  );
+  const mark = db
+    .prepare(
+      'SELECT dismissed_at FROM dismissed_runs WHERE project_id = ? AND run_id = ?',
+    )
+    .get(pa, 'run-1') as { dismissed_at: string } | undefined;
+  assert.ok(mark, 'dismissed_runs row recorded');
+  const audit = db
+    .prepare("SELECT action FROM audit_log WHERE action = 'run_deleted'")
+    .all() as { action: string }[];
+  assert.equal(audit.length, 1);
+
+  // Detail + list no longer report the run.
+  let res = await app.inject({
+    method: 'GET',
+    url: `/api/monitor/v1/runs/${encodeURIComponent(gid)}`,
+  });
+  assert.equal(res.statusCode, 404);
+  res = await app.inject({ method: 'GET', url: '/api/monitor/v1/runs' });
+  assert.equal(res.json().total, 0);
+
+  // The stale evidence still reports it — re-ingest must NOT resurrect
+  // the row (this is what the dismissal mark is for).
+  ingest(db, pa, '/w/a', [obs], '2026-10-28T12:10:00Z');
+  assert.equal(
+    db
+      .prepare('SELECT 1 FROM runs WHERE project_id = ? AND run_id = ?')
+      .get(pa, 'run-1'),
+    undefined,
+  );
+
+  // Error matrix: malformed → 400, foreign machine → 404,
+  // already-deleted → 404.
+  for (const [url, code, status] of [
+    ['/api/monitor/v1/runs/not-three-segments', 'invalid_run_id', 400],
+    [`/api/monitor/v1/runs/other-machine:${pa}:run-1`, 'run_not_found', 404],
+    [
+      `/api/monitor/v1/runs/${encodeURIComponent(gid)}`,
+      'run_not_found',
+      404,
+    ],
+  ] as const) {
+    const bad = await app.inject({
+      method: 'DELETE',
+      url,
+      headers: unsafeHeaders(session),
+    });
+    assert.equal(bad.statusCode, status, url);
+    assert.equal(bad.json().error.code, code, url);
+  }
+
+  await app.close();
+});
+
 test('DELETE project cascades runs/cursors and writes an audit row', async () => {
   const { app, db } = makeApp();
   const pa = insertProject(db, '/w/a');

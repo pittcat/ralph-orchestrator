@@ -6,7 +6,13 @@
  */
 
 import { useCallback, useMemo, useState } from "react";
-import { Link, useLocation, useParams, useSearchParams } from "react-router-dom";
+import {
+  Link,
+  useLocation,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -26,6 +32,7 @@ import { LogsTab } from "./detail/LogsTab";
 import { GraphTab } from "./detail/GraphTab";
 import { ArtifactsTab } from "./detail/ArtifactsTab";
 import { ActionsMenu } from "./actions/ActionsMenu";
+import { DeleteRunButton } from "./components/DeleteRunButton";
 import { OperationsSection } from "./ops/OperationsSection";
 
 type TabId = "overview" | "timeline" | "logs" | "graph" | "artifacts" | "operations";
@@ -54,6 +61,7 @@ function backSearch(search: string): string {
 export function RunDetailPage() {
   const { globalId } = useParams<{ globalId: string }>();
   const location = useLocation();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const decoded = globalId ? decodeURIComponent(globalId) : undefined;
 
@@ -188,7 +196,12 @@ export function RunDetailPage() {
       </Link>
 
       <DetailHeader run={run} progress={progress.data} />
-      <ActionsMenu run={run} />
+      <div className="flex items-center gap-2">
+        <ActionsMenu run={run} />
+        <span className="ml-auto">
+          <DeleteRunButton run={run} onDeleted={() => navigate(backTo)} />
+        </span>
+      </div>
       {health.data && <HealthPanel health={health.data} />}
 
       {!hasDescriptor && (

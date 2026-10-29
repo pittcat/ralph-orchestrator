@@ -38,6 +38,12 @@ describe("splitSseFrames", () => {
 describe("invalidationsFor", () => {
   it("maps kinds to query-key prefixes", () => {
     expect(invalidationsFor("run.events")).toContainEqual(["monitor", "events"]);
+    expect(invalidationsFor("run.deleted")).toEqual(
+      ["runs", "run", "progress", "graph", "events", "artifacts"].map((k) => [
+        "monitor",
+        k,
+      ]),
+    );
     expect(invalidationsFor("project.health")).toContainEqual([
       "monitor",
       "health",

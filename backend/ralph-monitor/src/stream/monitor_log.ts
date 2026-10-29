@@ -16,6 +16,7 @@ export const KEEP_EVENTS = 50_000;
 export type MonitorEventKind =
   | 'run.created'
   | 'run.updated'
+  | 'run.deleted'
   | 'run.events'
   | 'run.health'
   | 'project.health'

@@ -141,9 +141,22 @@ export function ingestSnapshot(
     const conflict = db.prepare(
       'INSERT INTO collection_errors (project_id, at, error) VALUES (?, ?, ?)',
     );
+    // Dismissed runs (DELETE /runs/:gid) stay suppressed while their
+    // on-disk evidence keeps reporting them — no row, no event or
+    // activity ingest, no notifications for this pair.
+    const dismissed = new Set(
+      (
+        db
+          .prepare(
+            'SELECT run_id FROM dismissed_runs WHERE project_id = ?',
+          )
+          .all(projectId) as { run_id: string }[]
+      ).map((r) => r.run_id),
+    );
 
     for (const obs of snapshot.runs) {
-      if (obs.run_id === NON_IDENTITY_RUN_ID) continue;
+      if (obs.run_id === NON_IDENTITY_RUN_ID || dismissed.has(obs.run_id))
+        continue;
       const mapped = mapObservationState({
         state: obs.state,
         pid: obs.pid ?? null,

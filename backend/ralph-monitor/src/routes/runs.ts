@@ -8,6 +8,7 @@ import {
   queryRuns,
   type RunRow,
 } from '../db/run_projection.js';
+import { appendEvent } from '../stream/monitor_log.js';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -194,4 +195,77 @@ export function registerRunRoutes(
     },
   );
 
+  /**
+   * Dismiss a run from the dashboard. Deletes the projection rows for
+   * this (project, run) pair and records a `dismissed_runs` marker so
+   * the collector does not resurrect it while on-disk evidence keeps
+   * reporting it (stale `current-loop-id` / events files). Purely a
+   * view-layer operation — the project's `.ralph/` data is untouched.
+   * History tables (operations / notifications / monitor_events /
+   * audit_log) are kept: they are the record, not the projection.
+   */
+  app.delete<{ Params: { globalId: string } }>(
+    '/api/monitor/v1/runs/:globalId',
+    async (req, reply) => {
+      const id = req.params.globalId;
+      const first = id.indexOf(':');
+      const second = first === -1 ? -1 : id.indexOf(':', first + 1);
+      if (first === -1 || second === -1) {
+        return sendError(
+          reply,
+          400,
+          'invalid_run_id',
+          'expected `<machine_id>:<project_id>:<run_id>`',
+        );
+      }
+      const machine = id.slice(0, first);
+      const projectId = id.slice(first + 1, second);
+      const runId = id.slice(second + 1);
+      if (machine !== machineId || !runId) {
+        return sendError(
+          reply,
+          404,
+          'run_not_found',
+          'unknown run id for this monitor',
+        );
+      }
+      const row = getRun(db, projectId, runId);
+      if (!row) {
+        return sendError(reply, 404, 'run_not_found', 'unknown run id');
+      }
+
+      const dismiss = db.prepare(
+        'INSERT OR REPLACE INTO dismissed_runs (project_id, run_id, dismissed_at) VALUES (?, ?, ?)',
+      );
+      const audit = db.prepare(
+        'INSERT INTO audit_log (at, project_id, action, details) VALUES (?, ?, ?, ?)',
+      );
+      const now = new Date().toISOString();
+      db.transaction(() => {
+        dismiss.run(projectId, runId, now);
+        for (const table of [
+          'run_events',
+          'event_cursors',
+          'run_evidence',
+          'run_activity',
+          'activity_cursors',
+        ]) {
+          db.prepare(
+            `DELETE FROM ${table} WHERE project_id = ? AND run_id = ?`,
+          ).run(projectId, runId);
+        }
+        db.prepare(
+          'DELETE FROM runs WHERE project_id = ? AND run_id = ?',
+        ).run(projectId, runId);
+        audit.run(
+          now,
+          projectId,
+          'run_deleted',
+          JSON.stringify({ runId }),
+        );
+        appendEvent(db, 'run.deleted', { projectId, runId }, {});
+      })();
+      return reply.code(204).send();
+    },
+  );
 }

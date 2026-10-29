@@ -63,6 +63,9 @@ export function invalidationsFor(kind: string): string[][] {
     case "run.created":
     case "run.updated":
       return [["monitor", "runs"], ["monitor", "run"], ["monitor", "overview"]];
+    case "run.deleted":
+      // Projection rows are gone — refresh every run-scoped surface.
+      return RUN_KEYS.map((k) => ["monitor", k]);
     case "run.events":
       return [
         ["monitor", "events"],

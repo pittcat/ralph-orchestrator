@@ -616,6 +616,20 @@ export function apiRegisterProject(path: string, displayName?: string): Promise<
   }).then((r) => r.project);
 }
 
+/**
+ * Dismiss a run from the dashboard (204). Server deletes the
+ * projection rows and marks the pair dismissed so a stale on-disk
+ * `current-loop-id`/events file does not resurrect it. The project's
+ * own `.ralph/` evidence is never touched.
+ */
+export function apiDeleteRun(globalRunId: string): Promise<void> {
+  return request(
+    `/runs/${encodeURIComponent(globalRunId)}`,
+    z.undefined(),
+    { method: "DELETE" },
+  );
+}
+
 // ── Plan5-U2/U3 operations + presets contract ──
 
 export const OP_STATES = [
