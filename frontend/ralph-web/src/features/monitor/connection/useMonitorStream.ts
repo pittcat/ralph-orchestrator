@@ -29,6 +29,8 @@ export interface StreamDriverOptions {
   fetchSnapshot?: () => ReturnType<typeof apiGetSnapshot>;
   openStream?: typeof readSseStream;
   onChange?: (state: MonitorStreamState) => void;
+  /** Raw frame hook (browser notifications, tests). Runs before invalidate. */
+  onEvent?: (frame: { kind: string; data: unknown }) => void;
   /** Backoff tuning (tests shrink to 0). */
   baseDelayMs?: number;
   maxDelayMs?: number;
@@ -72,6 +74,12 @@ export function invalidationsFor(kind: string): string[][] {
     case "project.health":
     case "project.updated":
       return [["monitor", "projects"], ["monitor", "health"]];
+    case "notification.created":
+    case "notification.updated":
+      return [
+        ["monitor", "notifications"],
+        ["monitor", "pending-interactions"],
+      ];
     default:
       return [];
   }
@@ -170,7 +178,16 @@ export function startMonitorStream(
                 state.lastSeq = seq;
               }
               state.lastValidAt = now().toISOString();
-              if (f.event) dispatch(f.event);
+              if (f.event) {
+                let data: unknown;
+                try {
+                  data = f.data ? JSON.parse(f.data) : undefined;
+                } catch {
+                  data = undefined;
+                }
+                opts.onEvent?.({ kind: f.event, data });
+                dispatch(f.event);
+              }
             },
           },
         );

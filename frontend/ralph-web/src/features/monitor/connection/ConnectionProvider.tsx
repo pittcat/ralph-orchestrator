@@ -19,6 +19,8 @@ import {
   type MonitorStreamState,
   type StreamDriver,
 } from "./useMonitorStream";
+import { maybeNotify } from "../browserNotify";
+import { useNavigate } from "react-router-dom";
 
 const ConnectionCtx = createContext<MonitorStreamState>({
   status: "connecting",
@@ -33,6 +35,7 @@ export function useMonitorConnection(): MonitorStreamState {
 
 export function ConnectionProvider({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [state, setState] = useState<MonitorStreamState>({
     status: "connecting",
     lastSeq: 0,
@@ -43,9 +46,18 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const driver: StreamDriver = startMonitorStream(qc, {
       onChange: setState,
+      onEvent: ({ kind, data }) => {
+        // Plan4-U3 S11: stream → system notification (page-present only).
+        if (kind === "notification.created") {
+          const p = data as { title?: string; link?: string | null } | undefined;
+          if (p?.title) {
+            maybeNotify({ title: p.title, link: p.link ?? null }, navigate);
+          }
+        }
+      },
     });
     return () => driver.stop();
-  }, [qc]);
+  }, [qc, navigate]);
 
   return <ConnectionCtx.Provider value={state}>{children}</ConnectionCtx.Provider>;
 }

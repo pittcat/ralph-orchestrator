@@ -85,6 +85,8 @@ export const projectSchema = z.object({
   canonicalPath: z.string(),
   displayName: z.string(),
   createdAt: z.string(),
+  /** Plan4-U2 S13: ralph.yml runtime webhook hint ("none" when absent). */
+  runtimeWebhookHint: z.string().default("none"),
 });
 export type MonitorProject = z.infer<typeof projectSchema>;
 
@@ -369,6 +371,173 @@ export function apiGetRunHealth(globalRunId: string): Promise<RunHealth> {
 
 export function apiGetSnapshot(): Promise<MonitorSnapshot> {
   return request("/snapshot", snapshotSchema);
+}
+
+// ── Plan4 notifications contract ──
+
+export const NOTIFICATION_STATES = [
+  "unread",
+  "read",
+  "muted",
+  "resolved",
+] as const;
+export type NotificationState = (typeof NOTIFICATION_STATES)[number];
+
+export const notificationSchema = z.object({
+  id: z.string(),
+  kind: z.string(),
+  project_id: z.string(),
+  run_gid: z.string().nullable(),
+  pending_interaction_id: z.string().nullable(),
+  title: z.string(),
+  body: z.string().nullable(),
+  detail: z.record(z.string(), z.unknown()).nullable(),
+  state: z.enum(NOTIFICATION_STATES),
+  created_at: z.string(),
+  resolved_at: z.string().nullable(),
+  link: z.string().nullable(),
+});
+export type MonitorNotification = z.infer<typeof notificationSchema>;
+
+export const notificationsResponseSchema = z.object({
+  notifications: z.array(notificationSchema),
+  total: z.number(),
+  limit: z.number(),
+  offset: z.number(),
+});
+
+export const pendingInteractionSchema = z.object({
+  id: z.string(),
+  project_id: z.string(),
+  session_id: z.string(),
+  run_gid: z.string().nullable(),
+  prompt: z.string().nullable(),
+  status: z.string(),
+  created_at: z.string(),
+  link: z.string().nullable(),
+});
+export type PendingInteraction = z.infer<typeof pendingInteractionSchema>;
+
+export const channelConfigSchema = z.object({
+  url: z.string().nullable(),
+  secret: z.string().nullable(),
+  enabled: z.boolean(),
+  last_error: z.string().nullable().optional(),
+});
+export type ChannelConfig = z.infer<typeof channelConfigSchema>;
+
+export const deliverySchema = z.object({
+  id: z.string(),
+  channel: z.string(),
+  state: z.string(),
+  attempts: z.number(),
+  next_attempt_at: z.string().nullable(),
+  delivery_id: z.string().nullable(),
+  error: z.string().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+});
+export type Delivery = z.infer<typeof deliverySchema>;
+
+export interface NotificationsQuery {
+  state?: string;
+  kind?: string;
+  q?: string;
+  project?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export function apiGetNotifications(
+  q: NotificationsQuery = {},
+): Promise<z.infer<typeof notificationsResponseSchema>> {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(q)) {
+    if (v !== undefined && v !== "") params.set(k, String(v));
+  }
+  const s = params.toString();
+  return request(
+    `/notifications${s ? `?${s}` : ""}`,
+    notificationsResponseSchema,
+  );
+}
+
+export function apiGetPending(): Promise<PendingInteraction[]> {
+  return request(
+    "/pending-interactions",
+    z.object({ pending: z.array(pendingInteractionSchema) }),
+  ).then((r) => r.pending);
+}
+
+function post(path: string, schema: z.ZodType): Promise<unknown> {
+  return request(path, schema, { method: "POST" });
+}
+
+export function apiReadNotification(id: string): Promise<unknown> {
+  return post(
+    `/notifications/${encodeURIComponent(id)}/read`,
+    z.object({ notification: notificationSchema }),
+  );
+}
+
+export function apiMuteNotification(id: string): Promise<unknown> {
+  return post(
+    `/notifications/${encodeURIComponent(id)}/mute`,
+    z.object({ notification: notificationSchema }),
+  );
+}
+
+export function apiReadAllNotifications(): Promise<{ updated: number }> {
+  return post("/notifications/read-all", z.object({ updated: z.number() })) as Promise<{
+    updated: number;
+  }>;
+}
+
+export function apiGetChannelConfig(): Promise<ChannelConfig> {
+  return request("/notifications/channels/webhook", channelConfigSchema);
+}
+
+export function apiPutChannelConfig(cfg: {
+  url: string;
+  secret?: string | null;
+  enabled?: boolean;
+}): Promise<ChannelConfig> {
+  return request("/notifications/channels/webhook", channelConfigSchema, {
+    method: "PUT",
+    body: JSON.stringify(cfg),
+  });
+}
+
+export function apiTestWebhook(url?: string): Promise<{
+  delivery_id: string;
+  outcome: string;
+  error?: string;
+  status?: number;
+}> {
+  return request(
+    "/notifications/channels/webhook/test",
+    z.object({
+      delivery_id: z.string(),
+      outcome: z.string(),
+      error: z.string().optional(),
+      status: z.number().optional(),
+    }),
+    { method: "POST", body: JSON.stringify(url ? { url } : {}) },
+  );
+}
+
+export function apiGetDeliveries(notificationId: string): Promise<Delivery[]> {
+  return request(
+    `/notifications/${encodeURIComponent(notificationId)}/deliveries`,
+    z.object({ deliveries: z.array(deliverySchema) }),
+  ).then((r) => r.deliveries);
+}
+
+export function apiRetryDelivery(deliveryId: string): Promise<unknown> {
+  return post(
+    `/deliveries/${encodeURIComponent(deliveryId)}/retry`,
+    z.object({ retried: z.string() }),
+  );
 }
 
 export function apiGetEvents(

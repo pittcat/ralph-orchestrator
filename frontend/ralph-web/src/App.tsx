@@ -11,6 +11,7 @@ import { TasksPage, PlanPage, BuilderPage, TaskDetailPage, SettingsPage } from "
 import { MonitorLayout } from "./features/monitor/MonitorLayout";
 import { OverviewPage } from "./features/monitor/OverviewPage";
 import { RunDetailPage } from "./features/monitor/RunDetailPage";
+import { InboxPage } from "./features/monitor/inbox/InboxPage";
 import { useThemeEffect } from "./features/monitor/theme";
 import { ConnectionProvider } from "./features/monitor/connection/ConnectionProvider";
 import type { ReactNode } from "react";
@@ -41,6 +42,14 @@ export function App() {
           element={
             <Monitor>
               <OverviewPage />
+            </Monitor>
+          }
+        />
+        <Route
+          path="/monitor/inbox"
+          element={
+            <Monitor>
+              <InboxPage />
             </Monitor>
           }
         />

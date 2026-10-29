@@ -8,8 +8,12 @@ import { keepPreviousData, useQueries, useQuery } from "@tanstack/react-query";
 import {
   apiGetArtifactContent,
   apiGetArtifacts,
+  apiGetChannelConfig,
+  apiGetDeliveries,
   apiGetEvents,
   apiGetGraph,
+  apiGetNotifications,
+  apiGetPending,
   apiGetProgress,
   apiGetProjectHealth,
   apiGetProjects,
@@ -18,6 +22,7 @@ import {
   apiGetRuns,
   type EventsQuery,
   type MonitorEvent,
+  type NotificationsQuery,
   type RunsQuery,
 } from "./api";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -89,6 +94,45 @@ export function useMonitorRunHealth(globalRunId: string | undefined) {
     queryFn: () => apiGetRunHealth(globalRunId!),
     enabled: !!globalRunId,
     refetchInterval: MONITOR_REFETCH_MS,
+  });
+}
+
+// ── Plan4-U3 notification hooks ──
+
+export function useNotifications(query: NotificationsQuery = {}) {
+  return useQuery({
+    queryKey: ["monitor", "notifications", query],
+    queryFn: () => apiGetNotifications(query),
+    placeholderData: keepPreviousData,
+  });
+}
+
+/** Unread badge count — derived server-side, stream-incremented. */
+export function useUnreadCount() {
+  const q = useNotifications({ state: "unread", limit: 1 });
+  return q.data?.total ?? 0;
+}
+
+export function usePendingInteractions() {
+  return useQuery({
+    queryKey: ["monitor", "pending-interactions"],
+    queryFn: apiGetPending,
+    refetchInterval: MONITOR_REFETCH_MS,
+  });
+}
+
+export function useChannelConfig() {
+  return useQuery({
+    queryKey: ["monitor", "channel-config", "webhook"],
+    queryFn: apiGetChannelConfig,
+  });
+}
+
+export function useDeliveries(notificationId: string | null) {
+  return useQuery({
+    queryKey: ["monitor", "deliveries", notificationId],
+    queryFn: () => apiGetDeliveries(notificationId!),
+    enabled: !!notificationId,
   });
 }
 
