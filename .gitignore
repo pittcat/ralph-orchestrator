@@ -21,6 +21,8 @@ eggs/
 .eggs/
 lib/
 lib64/
+# monitor 服务的源码目录也叫 lib —— python 打包产物规则不适用
+!backend/ralph-monitor/src/lib/
 parts/
 sdist/
 var/

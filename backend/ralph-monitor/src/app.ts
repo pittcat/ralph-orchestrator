@@ -8,6 +8,7 @@ import { registerProjectRoutes } from './routes/projects.js';
 import { registerRunRoutes } from './routes/runs.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerEventRoutes } from './routes/events.js';
+import { registerArtifactRoutes } from './routes/artifacts.js';
 
 export interface BuildAppOptions {
   /** SQLite path; `:memory:` is honored for unit tests. */
@@ -65,6 +66,7 @@ export function buildApp(options: BuildAppOptions): MonitorApp {
   registerRunRoutes(app, db, machineId);
   registerHealthRoutes(app, db);
   registerEventRoutes(app, db, machineId);
+  registerArtifactRoutes(app, db, machineId);
 
   app.get('/api/monitor/v1/health', async () => ({
     ok: true,
