@@ -162,14 +162,85 @@ def test_task_discovery_in_marketplace() -> None:
     assert "ralph-task-discovery" in _marketplace_skill_names()
 
 
-def test_catalog_and_marketplace_both_have_five_skills(catalog_names: set[str]) -> None:
-    """Catalog ↔ marketplace parity must hold at the current size of 5."""
+def test_catalog_and_marketplace_both_have_six_skills(catalog_names: set[str]) -> None:
+    """Catalog ↔ marketplace parity must hold at the current size of 6."""
     advertised = _marketplace_skill_names()
     assert advertised == catalog_names, (
         f"missing={catalog_names - advertised} extra={advertised - catalog_names}"
     )
-    assert len(catalog_names) == 5
-    assert len(advertised) == 5
+    assert len(catalog_names) == 6
+    assert len(advertised) == 6
+
+
+# --- ralph-html catalog parity + vendored bundle (plan 2026-10-29-1053 U2) ---
+
+RALPH_HTML = SKILLS_DIR / "ralph-html"
+
+
+def test_ralph_html_in_catalog(catalog_names: set[str]) -> None:
+    """``ralph-html`` must be a public catalog member."""
+    assert "ralph-html" in catalog_names
+
+
+def test_ralph_html_in_marketplace() -> None:
+    """The marketplace manifest must advertise the ralph-html skill."""
+    assert "ralph-html" in _marketplace_skill_names()
+
+
+def test_ralph_html_on_disk_with_vendor_tree() -> None:
+    """ralph-html ships the entry SKILL.md, VENDOR.md provenance, and the
+    complete vendored Effective HTML tree (7 skills + 5 html references
+    + LICENSE)."""
+    assert (RALPH_HTML / "SKILL.md").is_file()
+    assert (RALPH_HTML / "SKILL.md").read_text(encoding="utf-8").strip()
+    vendor = RALPH_HTML / "vendor"
+    for name in [
+        "html",
+        "design-artifact",
+        "html-plan",
+        "html-diagram",
+        "html-wireframe",
+        "html-prototype",
+        "big-pics-little-words",
+    ]:
+        skill_md = vendor / name / "SKILL.md"
+        assert skill_md.is_file(), f"missing vendored skill {skill_md}"
+        assert skill_md.read_text(encoding="utf-8").strip()
+    for ref in [
+        "documents-and-presentations",
+        "charts-and-data",
+        "diagrams",
+        "interfaces",
+        "creative-direction",
+    ]:
+        ref_file = vendor / "html" / "references" / f"{ref}.md"
+        assert ref_file.is_file(), f"missing vendored reference {ref_file}"
+    assert (vendor / "LICENSE").is_file(), "vendored MIT license must ship"
+    assert (RALPH_HTML / "VENDOR.md").is_file(), "provenance record must ship"
+
+
+def test_ralph_html_installs_full_vendor_tree(fresh_target: Path) -> None:
+    """Installing ralph-html must physically copy the whole directory so
+    vendored sibling links (`../<name>/SKILL.md`, `references/<file>.md`)
+    resolve on disk at the install target."""
+    result = _run(["--dir", str(fresh_target), "--force", "ralph-html"])
+    assert result.returncode == 0, result.stderr
+    installed = fresh_target / "ralph-html"
+    assert (installed / "SKILL.md").is_file()
+    assert (installed / "VENDOR.md").is_file()
+    assert (installed / "vendor" / "html" / "SKILL.md").is_file()
+    assert (
+        installed / "vendor" / "html" / "references" / "documents-and-presentations.md"
+    ).is_file()
+    assert (installed / "vendor" / "html-plan" / "SKILL.md").is_file()
+    assert (installed / "vendor" / "LICENSE").is_file()
+    assert not any(path.is_symlink() for path in installed.rglob("*")), (
+        "installed ralph-html tree must contain no symlinks"
+    )
+    # Sibling link target resolves: html/SKILL.md references
+    # ../design-artifact/SKILL.md relative to itself.
+    html_dir = installed / "vendor" / "html"
+    assert (html_dir.parent / "design-artifact" / "SKILL.md").is_file()
 
 
 def test_readme_lists_every_catalog_skill(catalog_names: set[str]) -> None:
@@ -243,18 +314,29 @@ def test_task_discovery_local_install_copies_to_both_targets(tmp_path: Path) -> 
 
 def test_task_discovery_global_dry_run_no_write() -> None:
     """Global dry-run must print both absolute destinations without writing."""
-    result = _run(["--global", "--dry-run", "ralph-task-discovery"])
-    assert result.returncode == 0, result.stderr
     claude_dest = install.TARGET_GLOBAL / "ralph-task-discovery"
     agents_dest = install.TARGET_AGENTS_GLOBAL / "ralph-task-discovery"
+    before = {
+        dest: (dest.stat().st_mtime_ns if dest.exists() else None)
+        for dest in (claude_dest, agents_dest)
+    }
+    result = _run(["--global", "--dry-run", "ralph-task-discovery"])
+    assert result.returncode == 0, result.stderr
     assert "Install mode: global" in result.stdout
     assert "Install targets (2):" in result.stdout
     assert f"destination: {claude_dest}" in result.stdout
     assert f"destination: {agents_dest}" in result.stdout
-    assert result.stdout.count("result:      would install") == 2
-    # Dry-run must not have materialised either destination.
-    assert not claude_dest.exists()
-    assert not agents_dest.exists()
+    # An existing destination reports "would prompt before replacing"; a
+    # fresh one reports "would install". Either way the action is a "would".
+    assert result.stdout.count("result:      would") == 2
+    # Dry-run must not have written either destination.
+    for dest in (claude_dest, agents_dest):
+        if before[dest] is None:
+            assert not dest.exists(), f"dry-run created {dest}"
+        else:
+            assert dest.stat().st_mtime_ns == before[dest], (
+                f"dry-run modified {dest}"
+            )
 
 
 # --- discover_skills selection --------------------------------------------

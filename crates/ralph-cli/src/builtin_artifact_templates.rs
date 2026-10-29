@@ -47,7 +47,7 @@ pub const PARALLEL_FORGE_TEMPLATE_NAMES: &[&str] = &[
     "unit.template.yml",
     "execution-plan.template.yml",
     "unit-completion.template.md",
-    "manager-report.template.md",
+    "manager-report.template.html",
     "wave-settlement.template.md",
     "wave-failure.template.md",
     "merge-conflict.template.md",
@@ -60,8 +60,8 @@ pub const PARALLEL_FORGE_TEMPLATE_NAMES: &[&str] = &[
 pub const RED_TEAM_ATTACK_TEMPLATE_NAMES: &[&str] = &[
     "experiment.template.yml",
     "finding.template.yml",
-    "report.template.md",
-    "plan.template.md",
+    "report.template.html",
+    "plan.template.html",
     "README.md",
 ];
 
@@ -104,10 +104,10 @@ const PARALLEL_FORGE_TEMPLATES: &[ArtifactTemplate] = &[
         )),
     },
     ArtifactTemplate {
-        file_name: "manager-report.template.md",
+        file_name: "manager-report.template.html",
         content: include_str!(concat!(
             env!("OUT_DIR"),
-            "/artifact-templates/parallel-forge/manager-report.template.md"
+            "/artifact-templates/parallel-forge/manager-report.template.html"
         )),
     },
     ArtifactTemplate {
@@ -163,17 +163,17 @@ const RED_TEAM_ATTACK_TEMPLATES: &[ArtifactTemplate] = &[
         )),
     },
     ArtifactTemplate {
-        file_name: "report.template.md",
+        file_name: "report.template.html",
         content: include_str!(concat!(
             env!("OUT_DIR"),
-            "/artifact-templates/red-team-attack/report.template.md"
+            "/artifact-templates/red-team-attack/report.template.html"
         )),
     },
     ArtifactTemplate {
-        file_name: "plan.template.md",
+        file_name: "plan.template.html",
         content: include_str!(concat!(
             env!("OUT_DIR"),
-            "/artifact-templates/red-team-attack/plan.template.md"
+            "/artifact-templates/red-team-attack/plan.template.html"
         )),
     },
     ArtifactTemplate {
@@ -574,13 +574,18 @@ mod tests {
     fn manager_report_template_retains_scenario_and_tdd() {
         let body = PARALLEL_FORGE_TEMPLATES
             .iter()
-            .find(|t| t.file_name == "manager-report.template.md")
+            .find(|t| t.file_name == "manager-report.template.html")
             .unwrap()
             .content;
-        for marker in ["## 6. Scenario 验收结果", "**TDD 执行情况**"] {
+        for marker in [
+            "<h2>6. Scenario 验收结果</h2>",
+            "<strong>TDD 执行情况</strong>",
+            "<!DOCTYPE html>",
+            "meta name=\"ralph:status\"",
+        ] {
             assert!(
                 body.contains(marker),
-                "manager-report.template.md missing marker: {marker}"
+                "manager-report.template.html missing marker: {marker}"
             );
         }
     }

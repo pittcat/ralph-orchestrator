@@ -30,7 +30,7 @@
 - [ ] **Key-stage event gate 与 Gate Scope 字段隔离**：0d 的 `hard/record/off` 与 0e 的 `guard_selection` / `precheck_guard` / `payload_consistency_guard` / `precheck_retry_budget` / `payload_consistency_retry_budget` 字段语义不混；不得把 Gate Scope `off` 字段当 0e 的关键位置选择。违规 → `preset.key_stage_event_gate_field_reuse` finding（参见 `finding-rubric.md`「Key-stage event gate」段，review-only）。
 - [ ] **Key-stage event gate 两 budget 不共享**：不得把 `precheck_retry_budget` 与 `payload_consistency_retry_budget` 合并为一个 `retry_budget` 或共享 exhaustion state。
 - [ ] **Task brief 前置输入对账**（仅当调用方提供 `task_brief_path` 时；书面规程见 `skills/ralph-task-discovery/references/author-handoff.md`，确定性参考实现 `author_handoff.py`）：
-  - [ ] brief 路径与 validator 结论（`valid` / `author_ready` / `next_action`）已记录到 `preset-author-notes.md`
+  - [ ] brief 路径与 validator 结论（`valid` / `author_ready` / `next_action`）已记录到 `preset-author-notes.html`
   - [ ] 复核顺序完整：文件存在 → YAML → `schema_version` → `project_root` 与当前目标项目根一致 → `brief_validator.validate_brief_text` → `status` / `author_ready`；任一失败输出 `task_brief_invalid` + validator code/path，停在 Discovery gate，不生成任何 preset YAML
   - [ ] brief 的 Goal、成功条件（acceptance）、阻塞条件（failure boundaries）、scope、Evidence refs 已引用进 Preset Intent Confirmation
   - [ ] selected candidate 仅取自 validator `candidate_gates` 结论为 `selected` 的候选；被 rejected 的候选不得被当作 selected 消费
@@ -86,7 +86,7 @@
 - [ ] **Recovery guidance contract**：`event_loop.precheck.rules.<X>.recovery_guidance` 与 `event_policy.payload_consistency.rules[].recovery_guidance` 可选。`recovery_guidance` 必须与 `on_fail` **同级**，must not nest recovery_guidance under on_fail（嵌套会被拒收）。precheck `by_check` key 必须是 `1..=prompt.len()` 的十进制字符串；consistency key 必须等于 rule `id`。rule key 必须是 hat 真实 `publishes` 的 topic。禁止在 guidance 里写 `suggested_command` / 成功 payload 模板。synthetic 拒绝只显示 `common`。
 - [ ] **Artifact 消费与生命周期**：每条消费型 hat 必须显式声明从哪个可见路径读取 artifact，不得依赖 prompt 中的长文本；每份重要 artifact 还要指定消费方以及最终保留、归档或清理责任。
 - [ ] 每个 agent-authored emit topic 的 `event_policy.schemas.<topic>` 已检查：required handoff / identity / verdict / count / path / reason 字段有 `field_docs`，高风险 topic 有不会伪造业务事实的 `examples`
-- [ ] **Instructions ↔ schema required-fields SSOT 对账**：每个 `ralph emit <topic>` 示例的 payload 字段集合与对应 `event_policy.schemas.<topic>.required_fields` 完全一致；每个字段的占位值都能从当前 trigger、注入上下文或本 hat 产物取得，并在 `preset-author-notes.md` 记录 schema 行 + instructions 行证据
+- [ ] **Instructions ↔ schema required-fields SSOT 对账**：每个 `ralph emit <topic>` 示例的 payload 字段集合与对应 `event_policy.schemas.<topic>.required_fields` 完全一致；每个字段的占位值都能从当前 trigger、注入上下文或本 hat 产物取得，并在 `preset-author-notes.html` 记录 schema 行 + instructions 行证据
 - [ ] 若 hat `publishes` 含 `review.dimensions.complete`，`state_projection.actions_chain` 须有对应投影 action（否则下游 Q2 看不到 review 汇总）
 - [ ] **Triggered 路由硬规则**：`--triggered` 是事件目标 hat，不是来源 hat；普通业务 handoff 一律省略，让 isolated runtime / CLI 自动推导。显式使用必须证明是不同 hat 的必要直达例外，并在 author notes 记录目标、原因和拓扑证据；self-target 直接判为 P0。
 - [ ] loop preset 中 `fix.done.next_review_plan` 必须是非空 object 合同；schema、example、fixer instructions 都不能允许 `null`
@@ -201,8 +201,8 @@
 
 ## 交 review 前门禁
 
-- [ ] `preset-author-notes.md` 首部包含已确认的 `Preset Intent Confirmation`（新 preset 或实质行为变更）
-- [ ] 每 hat 一张 AAF 表 + Payload Contract 表，写入 `preset-author-notes.md`
+- [ ] `preset-author-notes.html` 首部包含已确认的 `Preset Intent Confirmation`（新 preset 或实质行为变更）
+- [ ] 每 hat 一张 AAF 表 + Payload Contract 表，写入 `preset-author-notes.html`
 - [ ] hat 表数 == YAML hat 数；每 emit topic 都填了 Payload Contract 行
 - [ ] Payload Contract 的 `schema metadata` 列已同步到 `presets/schemas/<name>.yml` 或 preset inline `event_policy.schemas`
 - [ ] Emitter instructions 引用 `ralph-tools-emit`「Policy-Check 反馈」，不复制字段说明
@@ -353,4 +353,4 @@
 | 文件 | 位置 |
 |---|---|
 | Preset YAML | `presets/en/<name>.yml` 或 `.ralph/hats/<name>.yml` |
-| `preset-author-notes.md` | 与 preset 同目录（默认）；含 AAF 五问表 + Payload Contract 表 |
+| `preset-author-notes.html` | 与 preset 同目录（默认）；含 AAF 五问表 + Payload Contract 表 |

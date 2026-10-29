@@ -447,7 +447,7 @@ schemas:
         fill_rule: Real readable `.ralph/` artifact path; run `test -f` and read it before impact analysis; must include accepted and rejected experiments.
         examples: [".ralph/<plan>/<unit>/<evidence-board>.md"]
 
-  # impact-boundary -> all findings processed and PLAN.md written.
+  # impact-boundary -> all findings processed and PLAN.html written.
   # independent-reviewer picks this up to run the final audit.
   redteam.plan.ready:
     required_fields:
@@ -472,7 +472,7 @@ schemas:
         examples: [".ralph/<plan>/<unit>/<impact-boundary>.md"]
 
   # independent-reviewer -> final review complete. reporter reads review
-  # artifact to write REPORT.md and emit completion.
+  # artifact to write REPORT.html and emit completion.
   redteam.reviewed:
     required_fields:
       - verdict

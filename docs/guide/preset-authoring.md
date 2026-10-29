@@ -397,8 +397,8 @@ ralph run -c ralph.yml -H .ralph/hats/my-flow.yml --skip-preflight -p "smoke mig
 
 | Skill | 用途 |
 |---|---|
-| [`skills/ralph-preset-author`](../skills/ralph-preset-author/SKILL.md) | 拓扑 + 逐 hat AAF 起草 + **Payload Contract 表**；产出 `preset-author-notes.md` 后再交 review |
-| [`skills/ralph-preset-review`](../skills/ralph-preset-review/SKILL.md) | 独立 activation dry-run + **Payload Audit 表** + 机械 lint → `preset-review-report.md`（含按 runtime unblock 排序的 remediation） |
+| [`skills/ralph-preset-author`](../skills/ralph-preset-author/SKILL.md) | 拓扑 + 逐 hat AAF 起草 + **Payload Contract 表**；产出 `preset-author-notes.html` 后再交 review |
+| [`skills/ralph-preset-review`](../skills/ralph-preset-review/SKILL.md) | 独立 activation dry-run + **Payload Audit 表** + 机械 lint → `preset-review-report.html`（含按 runtime unblock 排序的 remediation） |
 
 > 用户 `.ralph/hats/` 集合（create / inspect / validate user hat workflows）、以及 topology-debug / validate-routing 这类 user-only 责任不在任一 preset skill 范围内。
 

@@ -18,12 +18,12 @@
 #   .ralph/merge/stabilize-log.md        — stabilizer writes per attempt
 #   .ralph/merge/stabilize-state.json    — stabilizer writes/reads across attempts
 #   .ralph/merge/scope-manifest.json     — integrator writes the batch scope contract
-#   .ralph/merge/REPORT.md               — reporter writes (operator-facing; required
+#   .ralph/merge/REPORT.html             — reporter writes (operator-facing; required
 #                                          before merge.batch.complete)
-#   .ralph/merge/reports/<timestamp>.md  — reporter optional stamped copy
+#   .ralph/merge/reports/<timestamp>.html — reporter optional stamped copy
 #
 # Lifecycle: stabilize-* files persist across the stabilization self-loop and are
-# the authoritative audit trail. REPORT.md is the durable operator-facing record;
+# the authoritative audit trail. REPORT.html is the durable operator-facing record;
 # reporter retains the entire .ralph/merge/ tree (no cleanup in this preset).
 
 topic_format_whitelist:
@@ -649,7 +649,7 @@ hats:
 
   reporter:
     name: "Merge Reporter"
-    description: "Writes merge report, cleans up worktrees on success, emits merge.batch.complete."
+    description: "Writes self-contained HTML merge report, cleans up worktrees on success, emits merge.batch.complete."
     exempt_topics: ["merge.batch.complete"]
     triggers: ["merge.stabilized"]
     publishes: ["merge.batch.complete"]
@@ -670,15 +670,23 @@ hats:
       files. Do not reproduce command syntax tables in this hat.
 
       ### HARD RULE — deliverable path first
-      Canonical path: `.ralph/merge/REPORT.md`
-      Optional stamped copy: `.ralph/merge/reports/<YYYY-MM-DDTHH-MM-SS>.md`
+      Canonical path: `.ralph/merge/REPORT.html`
+      Optional stamped copy: `.ralph/merge/reports/<YYYY-MM-DDTHH-MM-SS>.html`
       (then `report_path` must point at the file you actually wrote).
       Create parent dirs if missing.
       **No readable `report_path` ⇒ no `merge.batch.complete`.**
 
-      ### Report contents (minimum)
+      Before writing the report, load the shared HTML guidance:
+      `ralph tools skill load ralph-html`, then
+      `ralph tools skill load ralph-html-design` and
+      `ralph tools skill load ralph-html-ref-documents-and-presentations`;
+      follow their self-contained / offline / escaping rules. If a load
+      fails, still write honest minimal self-contained HTML — never
+      present a Markdown file as the final deliverable.
 
-      ```markdown
+      ### Report contents (minimum, semantic HTML sections)
+
+      ```text
       # Merge Batch Report
 
       ## 结论
@@ -707,7 +715,7 @@ hats:
       to `report_input_file`, read and validate `integration_path` and
       `scope_manifest_path` through the report-input manifest; recompute and
       record the scope digest, status, base SHA, confidence, and critical
-      unknown count in REPORT.md. Missing or insufficient artifacts require a
+      unknown count in REPORT.html. Missing or insufficient artifacts require a
       FAIL report and `success: false`.
       Read `report_input_file` from the trigger context. Run `test -f` on the
       manifest and every listed artifact, read them, and verify they contain

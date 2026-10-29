@@ -11,10 +11,10 @@ scenarios:
       - hat: reporter
         output: |
           <event topic="report.done">
-          {"plan_name":"verify-blocked","report_path":".ralph/review/verify-blocked/report.md","verdict":"blocked"}
+          {"plan_name":"verify-blocked","report_path":".ralph/review/verify-blocked/report.html","verdict":"blocked"}
           </event>
           <event topic="LOOP_COMPLETE">
-          {"reason":"blocked plan reported","report_path":".ralph/review/verify-blocked/report.md"}
+          {"reason":"blocked plan reported","report_path":".ralph/review/verify-blocked/report.html"}
           </event>
         success: true
     expect:

@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="ralph:title" content="<任务名称> 开发执行汇报">
+<meta name="ralph:date" content="<YYYY-MM-DD>">
+<meta name="ralph:status" content="<COMPLETED | PARTIAL | BLOCKED | FAILED>">
+<meta name="ralph:final_audit" content="<ACCEPTED | REJECTED | BLOCKED>">
+<meta name="ralph:target_branch" content="<最终分支>">
+<meta name="ralph:base_commit" content="<起始 Commit>">
+<meta name="ralph:final_commit" content="<最终 Commit>">
+<meta name="ralph:reporter" content="Reporter">
+<title>&lt;任务名称&gt; 开发执行汇报</title>
+<!--
+  模板来源：parallel-dev-preset.md §21。Reporter 复制到
+  `docs/reports/<YYYY-MM-DD>-<task-name>-manager-report.html` 并逐节填满。
+  `status` 必须按 §22 从 Auditor verdict 映射，不得自行篡改审计结论。
+  机器字段通过 <head> 中的 ralph:* meta 声明；人类阅读内容放在语义化 body。
+  本文件必须自包含、离线可打开：所有样式内联，禁止外部资源、CDN、图片外链。
+  渲染前请先 `ralph tools skill load ralph-html` + `ralph-html-design`
+  + `ralph-html-ref-documents-and-presentations`。
+-->
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0 auto; max-width: 960px; padding: 2rem 1.25rem; line-height: 1.6; color: #1a1a1a; }
+  h1 { border-bottom: 3px solid #333; padding-bottom: .4rem; }
+  h2 { margin-top: 2.2rem; border-bottom: 1px solid #ccc; padding-bottom: .25rem; }
+  h3 { margin-top: 1.6rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .95rem; }
+  th, td { border: 1px solid #ccc; padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #f2f2f2; }
+  pre { background: #f6f6f6; border: 1px solid #ddd; padding: .8rem; overflow-x: auto; font-size: .85rem; }
+  blockquote { border-left: 4px solid #ccc; margin: 1rem 0; padding: .3rem 1rem; color: #444; }
+  .verdict-ok { color: #0a7d2c; font-weight: 600; }
+  .verdict-bad { color: #b00020; font-weight: 600; }
+  .placeholder { color: #888; }
+  @media print { body { max-width: none; } }
+</style>
+</head>
+<body>
+
+<h1>&lt;任务名称&gt; 开发执行汇报</h1>
+
+<h2>1. 一句话结论</h2>
+<ul>
+  <li>任务是否完成：</li>
+  <li>核心功能是否交付：</li>
+  <li>全量测试是否通过：</li>
+  <li>需要关注的风险：</li>
+</ul>
+
+<h2>2. 管理摘要</h2>
+<table>
+  <tbody>
+    <tr><th>项目</th><th>结果</th></tr>
+    <tr><td>最终状态</td><td>完成 / 部分完成 / 阻塞 / 失败</td></tr>
+    <tr><td>原计划是否调整</td><td>是 / 否</td></tr>
+    <tr><td>计划内 Scenario</td><td class="placeholder">&lt;数量&gt;</td></tr>
+    <tr><td>已通过 Scenario</td><td class="placeholder">&lt;数量&gt;</td></tr>
+    <tr><td>Unit 总数</td><td class="placeholder">&lt;数量&gt;</td></tr>
+    <tr><td>已完成 Unit</td><td class="placeholder">&lt;数量&gt;</td></tr>
+    <tr><td>未完成 Unit</td><td class="placeholder">&lt;数量&gt;</td></tr>
+    <tr><td>并发执行 Unit</td><td class="placeholder">&lt;数量&gt;</td></tr>
+    <tr><td>串行执行 Unit</td><td class="placeholder">&lt;数量&gt;</td></tr>
+    <tr><td>最终 Commit 数量</td><td class="placeholder">&lt;数量&gt;</td></tr>
+    <tr><td>合并冲突数量</td><td class="placeholder">&lt;数量&gt;</td></tr>
+    <tr><td>增量测试</td><td>通过 / 失败 / 部分执行</td></tr>
+    <tr><td>全量测试</td><td>通过 / 失败 / 未执行</td></tr>
+    <tr><td>最终审计</td><td>ACCEPTED / REJECTED / BLOCKED</td></tr>
+    <tr><td>是否建议进入下一阶段</td><td>是 / 否 / 满足条件后可以</td></tr>
+  </tbody>
+</table>
+
+<h2>3. 本次任务要解决什么问题</h2>
+<ul>
+  <li>原来存在什么问题：</li>
+  <li>影响了谁：</li>
+  <li>本次增加、修改或修复什么：</li>
+  <li>完成后的预期效果：</li>
+</ul>
+
+<h2>4. 原计划为什么需要调整</h2>
+<ul>
+  <li>原计划问题：</li>
+  <li>依赖与并发/串行说明：</li>
+  <li>Unit 拆分/合并/增删原因：</li>
+  <li>若无结构性调整，写明：仅补充执行顺序和验证要求。</li>
+</ul>
+
+<h2>5. 最终执行方案</h2>
+<h3>5.1 执行阶段</h3>
+<table>
+  <thead>
+    <tr><th>阶段</th><th>主要工作</th><th>执行方式</th><th>结果</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Wave 1</td><td>公共基础修改</td><td>串行</td><td></td></tr>
+    <tr><td>Wave 2</td><td>独立功能开发</td><td>并发</td><td></td></tr>
+    <tr><td>Wave 3</td><td>功能集成</td><td>串行</td><td></td></tr>
+    <tr><td>Wave 4</td><td>系统验证</td><td>串行</td><td></td></tr>
+  </tbody>
+</table>
+
+<h3>5.2 依赖关系</h3>
+<pre>（粘贴 execution-plan / development-plan 中的 ASCII DAG）</pre>
+
+<h2>6. Scenario 验收结果</h2>
+<table>
+  <thead>
+    <tr><th>Scenario</th><th>外部可观察行为</th><th>验收测试</th><th>结果</th><th>证据</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>S01</td><td></td><td></td><td>通过 / 失败</td><td></td></tr>
+  </tbody>
+</table>
+<ul>
+  <li>未通过或未执行 Scenario 及原因：</li>
+  <li>测试层级不足或环境限制：</li>
+</ul>
+
+<h2>7. 各 Unit 完成情况</h2>
+<h3>U01：&lt;Unit 名称&gt;</h3>
+<p><strong>目标</strong></p>
+<p><strong>完成情况</strong>（完成 / 部分完成 / 失败 / 阻塞）</p>
+<p><strong>主要修改</strong></p>
+<p><strong>为什么这样实现</strong></p>
+<p><strong>TDD 执行情况</strong></p>
+<ul>
+  <li>RED：</li>
+  <li>GREEN：</li>
+  <li>REFACTOR：</li>
+  <li>REGRESSION：</li>
+</ul>
+<p><strong>验收结果</strong></p>
+<table>
+  <thead>
+    <tr><th>验收条件</th><th>结果</th><th>证据</th></tr>
+  </thead>
+  <tbody>
+    <tr><td></td><td></td><td></td></tr>
+  </tbody>
+</table>
+<p><strong>代码提交</strong></p>
+<ul>
+  <li>Commit：</li>
+  <li>Commit Message：</li>
+</ul>
+<p><strong>风险与说明</strong></p>
+<p>（为每个 Unit 复制本节）</p>
+
+<h2>8. 并发开发情况</h2>
+<ul>
+  <li>Worktree 数量：</li>
+  <li>并发 Unit 列表：</li>
+  <li>并发安全理由摘要：</li>
+  <li>越界修改 / 共享文件冲突：</li>
+</ul>
+<p>Worktree 映射表：</p>
+<table>
+  <thead>
+    <tr><th>Unit</th><th>分支</th><th>Worktree</th><th>最终状态</th></tr>
+  </thead>
+  <tbody>
+    <tr><td></td><td></td><td></td><td></td></tr>
+  </tbody>
+</table>
+
+<h2>9. 代码合入和 Commit 历史</h2>
+<h3>9.1 合入过程</h3>
+<h3>9.2 最终 Commit 顺序</h3>
+<table>
+  <thead>
+    <tr><th>顺序</th><th>Unit</th><th>Commit</th><th>Commit Message</th><th>验证结果</th></tr>
+  </thead>
+  <tbody>
+    <tr><td></td><td></td><td></td><td></td><td></td></tr>
+  </tbody>
+</table>
+<h3>9.3 历史质量</h3>
+<ul>
+  <li>线性历史：</li>
+  <li>无 Merge / WIP / fixup Commit：</li>
+  <li>每 Unit 一个 Commit：</li>
+  <li>可按 Unit 回退 / bisect：</li>
+</ul>
+
+<h2>10. 测试结果</h2>
+<h3>10.1 测试总体结论</h3>
+<h3>10.2 测试统计</h3>
+<table>
+  <thead>
+    <tr><th>测试类型</th><th>执行数量</th><th>通过</th><th>失败</th><th>跳过</th><th>结果</th></tr>
+  </thead>
+  <tbody>
+    <tr><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+  </tbody>
+</table>
+<blockquote>若工具无法提供准确总数，写明：项目测试工具未提供准确用例总数。</blockquote>
+<h3>10.3 全量测试命令</h3>
+<pre># command 1
+# command 2</pre>
+
+<h2>11. 开发过程中发现的问题</h2>
+<table>
+  <thead>
+    <tr><th>问题</th><th>影响</th><th>处理方式</th><th>当前状态</th></tr>
+  </thead>
+  <tbody>
+    <tr><td></td><td></td><td></td><td></td></tr>
+  </tbody>
+</table>
+
+<h2>12. 与原计划相比发生了什么变化</h2>
+<table>
+  <thead>
+    <tr><th>计划项</th><th>原计划</th><th>实际执行</th><th>变化原因</th></tr>
+  </thead>
+  <tbody>
+    <tr><td></td><td></td><td></td><td></td></tr>
+  </tbody>
+</table>
+
+<h2>13. 风险和遗留事项</h2>
+<table>
+  <thead>
+    <tr><th>风险</th><th>等级</th><th>影响</th><th>建议动作</th><th>负责人建议</th></tr>
+  </thead>
+  <tbody>
+    <tr><td></td><td></td><td></td><td></td><td></td></tr>
+  </tbody>
+</table>
+<blockquote>无阻塞风险时写明：在当前测试范围和已知使用场景内，没有发现阻塞交付的已知风险。</blockquote>
+
+<h2>14. 需要经理关注或决定的事项</h2>
+<table>
+  <thead>
+    <tr><th>决策项</th><th>背景</th><th>可选方案</th><th>建议</th></tr>
+  </thead>
+  <tbody>
+    <tr><td></td><td></td><td></td><td></td></tr>
+  </tbody>
+</table>
+<blockquote>无决策项时写明：当前没有需要经理额外决策的事项。</blockquote>
+
+<h2>15. 是否建议进入下一阶段</h2>
+<p>（必须三选一，禁止模糊措辞）</p>
+<ul>
+  <li>☐ 建议进入下一阶段</li>
+  <li>☐ 满足条件后进入下一阶段</li>
+  <li>☐ 不建议进入下一阶段</li>
+</ul>
+
+<h2>16. 清理结果</h2>
+<table>
+  <thead>
+    <tr><th>清理项</th><th>结果</th><th>说明</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>临时 Worktree</td><td>已清理 / 保留</td><td></td></tr>
+    <tr><td>临时分支</td><td>已清理 / 保留</td><td></td></tr>
+    <tr><td>临时日志</td><td>已清理 / 保留</td><td></td></tr>
+    <tr><td>构建产物</td><td>已清理 / 保留</td><td></td></tr>
+    <tr><td>最终报告</td><td>已保留</td><td></td></tr>
+  </tbody>
+</table>
+
+<h2>17. 最终结论</h2>
+<ul>
+  <li>最终审计结论：</li>
+  <li>功能交付结论：</li>
+  <li>测试结论：</li>
+  <li>Git 历史结论：</li>
+  <li>风险结论：</li>
+  <li>下一步建议：</li>
+</ul>
+
+<h2>技术附录</h2>
+<h3>A. 最终 Git 状态</h3>
+<pre></pre>
+<h3>B. 最终 Commit 列表</h3>
+<pre></pre>
+<h3>C. Worktree 记录</h3>
+<pre></pre>
+<h3>D. 完整测试命令与结果</h3>
+<pre></pre>
+<h3>E. 关键文件变更</h3>
+<table>
+  <thead>
+    <tr><th>文件或目录</th><th>变更目的</th><th>所属 Unit</th></tr>
+  </thead>
+  <tbody>
+    <tr><td></td><td></td><td></td></tr>
+  </tbody>
+</table>
+<h3>F. 已知限制</h3>
+
+<h2>Reporter 自检（§23 — emit 前逐项确认）</h2>
+<ul>
+  <li>☐ 报告文件已创建，路径符合命名规则</li>
+  <li>☐ 开头明确最终结果；经理可读，非日志堆砌</li>
+  <li>☐ 所有 Unit / Scenario / 测试 / 风险 / 决策项已覆盖</li>
+  <li>☐ 数字有依据；不确定项标「无法确认」</li>
+  <li>☐ status 与 final_audit 映射符合 §22</li>
+</ul>
+
+</body>
+</html>

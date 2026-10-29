@@ -46,7 +46,7 @@ schemas:
         - field: dirty_verdict
           op: eq
           value: blocked
-        guidance: do NOT emit wave; write dispatch-blocked.md then emit dispatch.blocked so finalizer can close with LOOP_COMPLETE{result:blocked}.
+        guidance: do NOT emit wave; write dispatch-blocked.html then emit dispatch.blocked so finalizer can close with LOOP_COMPLETE{result:blocked}.
     field_docs:
       plan_name:
         meaning: basename of the original plan without extension; downstream hat routing identity
@@ -110,9 +110,9 @@ schemas:
         fill_rule: one of `plan_file_not_found | plan_file_unreadable | no_candidate | ambiguous_candidates | merge_parent_ambiguous | git_object_unreadable | root_commit | dirty_tracked_path | dirty_untracked_related
           | dirty_unclassifiable | scope_drift_pre_emit`
       block_artifact_path:
-        meaning: repo-relative path to scope-blocked.md containing the candidate table and evidence
+        meaning: repo-relative path to scope-blocked.html (self-contained HTML) containing the candidate table and evidence
         source: scope-preparer writes via the Write tool
-        fill_rule: literal `.ralph/review/<plan>/scope-blocked.md`; do NOT fabricate
+        fill_rule: literal `.ralph/review/<plan>/scope-blocked.html`; do NOT fabricate
       scope_digest:
         meaning: scope identity at the moment of block; carried into the block artifact
         source: scope-preparer computes
@@ -138,9 +138,9 @@ schemas:
         source: review-dispatcher
         fill_rule: one of `scope_drift_pre_dispatch | digest_mismatch | dirty_drift | idempotency_conflict | payloads_invalid`
       block_artifact_path:
-        meaning: artifact land path (repo-relative under `.ralph/`) for dispatch-blocked.md with re-verify evidence
+        meaning: artifact land path (repo-relative under `.ralph/`) for dispatch-blocked.html (self-contained HTML) with re-verify evidence
         source: review-dispatcher writes via the Write tool
-        fill_rule: literal `.ralph/review/<plan>/dispatch-blocked.md`; do NOT fabricate
+        fill_rule: literal `.ralph/review/<plan>/dispatch-blocked.html`; do NOT fabricate
       scope_digest:
         meaning: scope identity at the moment of block (from trigger or last known manifest digest)
         source: review-dispatcher copies from scope.ready / scope-manifest.json when still readable
@@ -430,9 +430,9 @@ schemas:
         source: review-synthesizer
         fill_rule: one of `scope_drift_pre_synth | dimension_digest_mismatch | handoff_precheck_failed | incomplete_or_duplicate_dimensions | synthesized_artifact_io_failure`
       block_artifact_path:
-        meaning: repo-relative path to review-blocked.md
+        meaning: repo-relative path to review-blocked.html (self-contained HTML)
         source: review-synthesizer writes via the Write tool
-        fill_rule: literal `.ralph/review/<plan>/review-blocked.md`; do NOT fabricate
+        fill_rule: literal `.ralph/review/<plan>/review-blocked.html`; do NOT fabricate
       scope_digest:
         meaning: scope identity at the moment of block
         source: review-synthesizer
@@ -509,15 +509,15 @@ schemas:
         source: fix-planner carries forward
         fill_rule: 40-char git SHA
       fix_plan_file:
-        meaning: repo-relative path to fix-plan.md
+        meaning: repo-relative path to fix-plan.html (self-contained HTML)
         source: fix-planner writes via the Write tool
-        fill_rule: literal `.ralph/review/<plan>/fix-plan.md`; do NOT fabricate
+        fill_rule: literal `.ralph/review/<plan>/fix-plan.html`; do NOT fabricate
       result:
         meaning: synthesized outcome of the review run; one of clean / residual_only / fixes_required
         source: fix-planner derives from findings severity distribution
         fill_rule: one of `clean | residual_only | fixes_required`
       implementation_unit_count:
-        meaning: total Implementation Units in fix-plan.md (P0-P2 + 0 when clean)
+        meaning: total Implementation Units in fix-plan.html (P0-P2 + 0 when clean)
         source: fix-planner
         fill_rule: non-negative integer; equals actionable_unit_count (P3 never maps to actionable units)
       actionable_unit_count:
@@ -555,7 +555,7 @@ schemas:
         source: finalizer
         fill_rule: one of `clean | residual_only | fixes_required | blocked`
       artifact_path:
-        meaning: 'repo-relative path to the terminal artifact: fix-plan.md (success / residual / fixes) or wave-blocked.md / scope-blocked.md / review-blocked.md (blocked). Must exist and be readable before emit; Confirm must print DELIVERABLE_PATH with the same value for the operator TUI.'
+        meaning: 'repo-relative path to the terminal artifact: fix-plan.html (success / residual / fixes) or wave-blocked.html / scope-blocked.html / review-blocked.html (blocked; self-contained HTML). Must exist and be readable before emit; Confirm must print DELIVERABLE_PATH with the same value for the operator TUI.'
         source: finalizer
         fill_rule: do NOT fabricate; the path is the file the finalizer just validated; never complete without a readable artifact_path
       scope_digest:

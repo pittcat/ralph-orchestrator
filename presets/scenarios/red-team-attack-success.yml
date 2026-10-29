@@ -28,15 +28,15 @@ scenarios:
         success: true
       - hat: impact-boundary
         output: |
-          <event topic="redteam.plan.ready">{"plan_file_path":".ralph/red-team/PLAN.md","finding_count":1,"impact_file_path":".ralph/red-team/08-impact-boundary.md"}</event>
+          <event topic="redteam.plan.ready">{"plan_file_path":".ralph/red-team/PLAN.html","finding_count":1,"impact_file_path":".ralph/red-team/08-impact-boundary.md"}</event>
         success: true
       - hat: independent-reviewer
         output: |
-          <event topic="redteam.reviewed">{"verdict":"PLAN_READY","review_file_path":".ralph/red-team/10-independent-review.md","plan_file_path":".ralph/red-team/PLAN.md"}</event>
+          <event topic="redteam.reviewed">{"verdict":"PLAN_READY","review_file_path":".ralph/red-team/10-independent-review.md","plan_file_path":".ralph/red-team/PLAN.html"}</event>
         success: true
       - hat: reporter
         output: |
-          <event topic="redteam.complete">{"success":true,"report_path":".ralph/red-team/REPORT.md","plan_path":".ralph/red-team/PLAN.md","questions_path":".ralph/red-team/QUESTIONS.md"}</event>
+          <event topic="redteam.complete">{"success":true,"report_path":".ralph/red-team/REPORT.html","plan_path":".ralph/red-team/PLAN.html","questions_path":".ralph/red-team/QUESTIONS.html"}</event>
         success: true
     expect:
       start_event: redteam.start
@@ -60,7 +60,7 @@ scenarios:
         success: true
       - hat: reporter
         output: |
-          <event topic="redteam.complete">{"success":false,"report_path":".ralph/red-team/REPORT.md","plan_path":"","questions_path":".ralph/red-team/QUESTIONS.md"}</event>
+          <event topic="redteam.complete">{"success":false,"report_path":".ralph/red-team/REPORT.html","plan_path":"","questions_path":".ralph/red-team/QUESTIONS.html"}</event>
         success: true
     expect:
       start_event: redteam.start

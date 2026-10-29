@@ -14,6 +14,7 @@
       "source": "./",
       "strict": false,
       "skills": [
+        "./skills/ralph-html",
         "./skills/ralph-preset-author",
         "./skills/ralph-preset-review",
         "./skills/ralph-project-bootstrap",

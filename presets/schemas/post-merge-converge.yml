@@ -378,5 +378,5 @@ schemas:
       report_path:
         meaning: Artifact landing point, expressed as a workspace-root-relative path (joined with the workspace root; do not treat `.ralph/` as cwd), for the operator-facing convergence report.
         source: The report file actually written by reporter under `.ralph/post-merge/`.
-        fill_rule: Use the workspace-root-relative path observed after `test -f` from the repository root (example `.ralph/post-merge/REPORT.md`). Never emit `post-merge/REPORT.md` as if cwd were `.ralph/`. Stop before emit if absent; Confirm must print the same path as `DELIVERABLE_PATH`.
-        examples: [".ralph/post-merge/REPORT.md"]
+        fill_rule: Use the workspace-root-relative path observed after `test -f` from the repository root (example `.ralph/post-merge/REPORT.html`). Never emit `post-merge/REPORT.html` as if cwd were `.ralph/`. Stop before emit if absent; Confirm must print the same path as `DELIVERABLE_PATH`.
+        examples: [".ralph/post-merge/REPORT.html"]

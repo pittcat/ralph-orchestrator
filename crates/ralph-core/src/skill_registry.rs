@@ -97,6 +97,50 @@ impl SkillRegistry {
         Ok(())
     }
 
+    /// Register a built-in skill under an explicit controlled name.
+    ///
+    /// Unlike [`Self::register_builtin`], the frontmatter `name:` does
+    /// not decide the registration key — vendored files keep their
+    /// upstream frontmatter verbatim, while the registry exposes them
+    /// under the namespaced `ralph-html-*` names. `description` is used
+    /// only when the frontmatter provides none; `hats` replaces the
+    /// frontmatter list unconditionally (vendored files declare none).
+    ///
+    /// Plan 2026-10-29-1053 U2: the ralph-html family registers through
+    /// this path so controlled names cannot be remapped by file content.
+    pub fn register_builtin_scoped(
+        &mut self,
+        name: &str,
+        raw_content: &str,
+        description: &str,
+        hats: Vec<String>,
+    ) -> Result<()> {
+        let (fm, content) = parse_frontmatter(raw_content);
+        let fm = fm.unwrap_or_default();
+
+        let description = if description.is_empty() {
+            fm.description.unwrap_or_default()
+        } else {
+            description.to_string()
+        };
+
+        self.skills.insert(
+            name.to_string(),
+            SkillEntry {
+                name: name.to_string(),
+                description,
+                content,
+                source: SkillSource::BuiltIn,
+                hats,
+                backends: fm.backends,
+                tags: fm.tags,
+                auto_inject: false,
+            },
+        );
+
+        Ok(())
+    }
+
     /// Register built-in skills (ralph-tools, ralph-tools-tasks, ralph-tools-memories,
     /// ralph-tools-emit, ralph-tools-wave, ralph-tools-precheck, ralph-tools-cmdref,
     /// ralph-tools-opac, ralph-tools-recovery-directives, ralph-tools-workstate).
@@ -127,6 +171,11 @@ impl SkillRegistry {
         )?;
         // Loop-scoped workstate CLI reference (on-demand load).
         self.register_builtin("ralph-tools-workstate", RALPH_TOOLS_WORKSTATE_SKILL_RAW)?;
+
+        // Ralph HTML deliverable guidance (plan 2026-10-29-1053):
+        // namespaced on-demand entries embedded from the
+        // `skills/ralph-html/` maintenance source.
+        crate::html_skills::register_html_skills(self)?;
         Ok(())
     }
 
@@ -192,6 +241,21 @@ impl SkillRegistry {
         let fm = fm.unwrap_or_default();
 
         let name = fm.name.unwrap_or_else(|| fallback_name.to_string());
+
+        // Plan 2026-10-29-1053 U2: `ralph-html*` names are controlled —
+        // they must always resolve to the embedded vendored source.
+        // Refuse to let a same-named filesystem skill replace the
+        // built-in entry instead of silently adopting unvetted content.
+        if crate::html_skills::is_controlled_name(&name) {
+            warn!(
+                "refusing to register filesystem skill '{}' from {}: \
+                 the name is controlled by the embedded ralph-html source",
+                name,
+                path.display()
+            );
+            return Ok(());
+        }
+
         let description = fm.description.unwrap_or_default();
 
         self.skills.insert(

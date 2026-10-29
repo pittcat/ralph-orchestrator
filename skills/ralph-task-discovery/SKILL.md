@@ -27,13 +27,16 @@ description: >-
 - **输入。** 调用方提供:项目根目录(cwd)+ 一句话目标请求。
 - **输出。** task brief YAML 路径 + validator 裁定结果
   (`recommended_status` / `next_action` / `handoff_block_reasons`)。
-  交接物**只有 brief 路径**。
+  交接物**只有 brief 路径**。同时产出一份自包含 HTML 阅读视图
+  `<brief>.html`(见「HTML 阅读视图契约」),镜像 brief 内容供人审阅;
+  视图不是交接物,下游机器只读 YAML。
 - **不生成 preset。** preset / hat 起草属于 `ralph-preset-author`;
   本 skill 到 `author_ready` 为止。
 - **不修改目标项目。** 发现阶段不写代码、不改 glossary、不写目标项目文档;
   冲突只记录,裁决与修改留给用户决策之后。
 - **不调用 Ralph 状态命令。** 发现阶段不执行 `ralph emit` /
-  `ralph tools` 等任何状态变更命令。
+  `ralph tools` 等任何状态变更命令(加载 `ralph-html*` 指导 skill 的
+  `ralph tools skill load` 只读取文档、不改状态,允许使用)。
 - **事实查环境,不反问用户。** 凡能从项目调查获得的事实
   (包结构、测试入口、CI、glossary、代码行为)一律自己查证,
   不得作为问题抛给用户。
@@ -72,8 +75,19 @@ description: >-
    `recommended_status` 为准:与声明状态不一致时先修 brief;按 `next_action`
    补调查 / 逐题问用户 / 换候选 / 输出 blocked。每补一轮调查
    `attempt_count` +1;三轮仍不达标 → `blocked`,不得开第四轮自动调查。
-8. **交接。** 仅当 `author_ready` 且 `next_action == ready_for_handoff` 时,
-   把 **brief 路径**交接给 `ralph-preset-author`,发现阶段结束。
+8. **HTML 阅读视图。** brief 收敛(任意终态:`author_ready` /
+   `needs_*` / `blocked`)后,写 `<brief>.html`(与 brief YAML 同目录同
+   basename):自包含、离线可打开的语义化 HTML,逐节镜像 brief 的
+   Evidence / Decision / Candidate / blocking 状态;未决问题与
+   `blocked` / `needs_user_decision` 必须按 YAML 原样诚实标注,不得
+   美化成完成态。写前先 `ralph tools skill load ralph-html`,再
+   `ralph tools skill load ralph-html-plan` 与
+   `ralph tools skill load ralph-html-design`;加载失败仍写最小自
+   包含 HTML 并在视图头部声明 `guidance: unloaded`(诚实降级,不冒充
+   已验证渲染)。
+9. **交接。** 仅当 `author_ready` 且 `next_action == ready_for_handoff` 时,
+   把 **brief 路径**交接给 `ralph-preset-author`,发现阶段结束;
+   `<brief>.html` 仅供人阅读,不随交接传入下游。
 
 上述规则的确定性参考实现在 [scripts/discovery_transcript.py](scripts/discovery_transcript.py)
 (transcript → brief 映射,纯函数);deterministic transcript 样例见

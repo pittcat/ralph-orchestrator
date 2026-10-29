@@ -1513,7 +1513,7 @@ event_loop:
             source: "passed-through from align.done / plan.blocked / work.failed / stabilization.blocked / review.loop.blocked / review.artifact.blocked"
             fill_rule: "literal string; do NOT hand-write"
           report_path:
-            meaning: "repo-relative path to the final aggregated report under `.ralph/review/<plan>/report.md`; agent must verify readable before emit (schema checks field presence, not filesystem)"
+            meaning: "repo-relative path to the final aggregated report under `.ralph/review/<plan>/report.html` (self-contained, offline-openable HTML); agent must verify readable before emit (schema checks field presence, not filesystem)"
             source: "reporter writes the file this activation, then copies the real path"
             fill_rule: "repo-relative path only after the file is readable; do NOT invent a path; Confirm must print DELIVERABLE_PATH with the same value"
           verdict:
@@ -5311,7 +5311,7 @@ hats:
         `LOOP_COMPLETE` (or `LOOP_COMPLETE` only on the next
         activation after `report.done` is acknowledged).
       - If this is a second activation whose only remaining work is
-        `LOOP_COMPLETE`, do NOT rewrite `.ralph/review/{plan_name}/report.md`;
+        `LOOP_COMPLETE`, do NOT rewrite `.ralph/review/{plan_name}/report.html`;
         emit only `LOOP_COMPLETE` and stop.
       - Do NOT emit `work.done` / `work.failed` / `plan.*` /
         `stabilization.*` / `review.*` / `fix.*` / `align.done`.
@@ -5337,11 +5337,25 @@ hats:
 
       ### Report contract (manager body + short technical appendix)
 
-      Always write `.ralph/review/{plan_name}/report.md` after creating the
+      Always write `.ralph/review/{plan_name}/report.html` after creating the
       directory if needed. **No readable report file ⇒ no `report.done`.**
-      Use exactly this run-level structure:
+      The report is a single self-contained HTML file that opens offline
+      in a browser: semantic HTML body carrying all conclusions, evidence,
+      and open items with HTML characters escaped; inline CSS only;
+      readable on wide and narrow screens and when printed. Before
+      writing, run `ralph tools skill load ralph-html`, then
+      `ralph tools skill load ralph-html-artifact`,
+      `ralph tools skill load ralph-html-design`, and
+      `ralph tools skill load ralph-html-ref-documents-and-presentations`;
+      follow their offline, escaping, and accessibility rules. If any of
+      these loads fails, do NOT write a substitute report — emit
+      `report.done` with `verdict: "blocked"` and record the guidance
+      load failure as the reason.
+      The HTML body carries exactly this run-level structure
+      (section headings shown as text; choose the HTML layout per the
+      guidance):
 
-      ```markdown
+      ```text
       ## 一句话结论
       <one Chinese sentence using exactly one of these manager conclusions:
       "通过，可以继续" / "有遗留可跟进，可以有条件继续" / "未完成需介入，暂不建议继续">
@@ -5372,7 +5386,7 @@ hats:
 
       ## 全部产物路径清单
       <bullet list of every important repo-relative path for this run:
-      report.md itself, report_input_file, per-round verification/review
+      report.html itself, report_input_file, per-round verification/review
       products, fix-plan, decisions, and residual artifacts. Missing
       phases → mark 未运行 / 无文件.>
 
@@ -5400,10 +5414,10 @@ hats:
       or `gantt`.
 
       ### OPAC Confirm order (mandatory for report.done)
-      1. Write `.ralph/review/{plan_name}/report.md`; verify readable.
+      1. Write `.ralph/review/{plan_name}/report.html`; verify readable.
       2. `ralph emit report.done --policy-check` with real `report_path`.
       3. Real `report.done` emit.
-      4. Confirm: print `DELIVERABLE_PATH: .ralph/review/{plan_name}/report.md`
+      4. Confirm: print `DELIVERABLE_PATH: .ralph/review/{plan_name}/report.html`
          in this activation's visible reply (operator TUI search).
          Do this on the `report.done` activation (the one that writes the
          file). If a later activation also emits `LOOP_COMPLETE`, reprint
@@ -5459,14 +5473,14 @@ hats:
          `fix-plan.md`, residuals, and diffstat.
       8. Emit `report.done` with policy-check first (see `ralph tools skill load ralph-tools-emit` §5):
          ```bash
-         ralph emit report.done --policy-check --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"<pass|pass_with_residuals|blocked>"}'
-         ralph emit report.done --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"<pass|pass_with_residuals|blocked>"}'
+         ralph emit report.done --policy-check --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.html","verdict":"<pass|pass_with_residuals|blocked>"}'
+         ralph emit report.done --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.html","verdict":"<pass|pass_with_residuals|blocked>"}'
          ```
       9. Emit `LOOP_COMPLETE` with policy-check first (next activation is OK, or
          same activation if the runtime allows; usually separate):
          ```bash
-         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"<Chinese or English 1-2 sentence summary matching the report verdict>","report_path":".ralph/review/<plan>/report.md"}'
-         ralph emit LOOP_COMPLETE --json '{"reason":"<Chinese or English 1-2 sentence summary matching the report verdict>","report_path":".ralph/review/<plan>/report.md"}'
+         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"<Chinese or English 1-2 sentence summary matching the report verdict>","report_path":".ralph/review/<plan>/report.html"}'
+         ralph emit LOOP_COMPLETE --json '{"reason":"<Chinese or English 1-2 sentence summary matching the report verdict>","report_path":".ralph/review/<plan>/report.html"}'
          ```
 
       ### Branch B — Dead-end failure path (trigger = `work.failed` or `plan.blocked`)
@@ -5478,7 +5492,7 @@ hats:
       1. Read the trigger payload for `plan_name` and `reason`.
       2. Use `plan_path` from the current trigger payload. Do not read the
          runtime events file to recover an earlier plan.ready payload.
-      3. Write a blocked report to `.ralph/review/{plan_name}/report.md`
+      3. Write a blocked report to `.ralph/review/{plan_name}/report.html`
          using the same Report contract. Use `未完成需介入，暂不建议继续` in
          `一句话结论`, explain the upstream reason in
          `尝试过但未做成 / 刻意没做的` and `质量与风险`, and mark plan review,
@@ -5486,13 +5500,13 @@ hats:
          repair as "未运行" or "仅取得部分证据" where appropriate.
       4. Emit `report.done` with policy-check first:
          ```bash
-         ralph emit report.done --policy-check --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"blocked"}'
-         ralph emit report.done --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"blocked"}'
+         ralph emit report.done --policy-check --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.html","verdict":"blocked"}'
+         ralph emit report.done --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.html","verdict":"blocked"}'
          ```
       5. Emit `LOOP_COMPLETE` with policy-check first:
          ```bash
-         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"blocked: <upstream reason>","report_path":".ralph/review/<plan>/report.md"}'
-         ralph emit LOOP_COMPLETE --json '{"reason":"blocked: <upstream reason>","report_path":".ralph/review/<plan>/report.md"}'
+         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"blocked: <upstream reason>","report_path":".ralph/review/<plan>/report.html"}'
+         ralph emit LOOP_COMPLETE --json '{"reason":"blocked: <upstream reason>","report_path":".ralph/review/<plan>/report.html"}'
          ```
 
       ### Branch C — Loop exhausted path (trigger = `review.loop.blocked`)
@@ -5514,13 +5528,13 @@ hats:
          still blocking.
       4. Emit `report.done` with policy-check first:
          ```bash
-         ralph emit report.done --policy-check --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"blocked"}'
-         ralph emit report.done --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"blocked"}'
+         ralph emit report.done --policy-check --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.html","verdict":"blocked"}'
+         ralph emit report.done --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.html","verdict":"blocked"}'
          ```
       5. Emit `LOOP_COMPLETE` with policy-check first:
          ```bash
-         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"blocked: <loop_decision_basis> (<reason>)","report_path":".ralph/review/<plan>/report.md"}'
-         ralph emit LOOP_COMPLETE --json '{"reason":"blocked: <loop_decision_basis> (<reason>)","report_path":".ralph/review/<plan>/report.md"}'
+         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"blocked: <loop_decision_basis> (<reason>)","report_path":".ralph/review/<plan>/report.html"}'
+         ralph emit LOOP_COMPLETE --json '{"reason":"blocked: <loop_decision_basis> (<reason>)","report_path":".ralph/review/<plan>/report.html"}'
          ```
 
       ### Notes

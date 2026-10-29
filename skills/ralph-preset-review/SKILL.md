@@ -1,6 +1,6 @@
 ---
 name: ralph-preset-review
-description: Review Ralph preset YAML with agent-native AAF audit, mechanical lint, and structured preset-review-report.md. Use after drafting a preset or when validating builtin/local presets for per-hat feasibility, handoff closure, OPAC discipline, and P0/P1 issues. Produces findings with severity and confidence scores.
+description: Review Ralph preset YAML with agent-native AAF audit, mechanical lint, and structured preset-review-report.html (self-contained). Use after drafting a preset or when validating builtin/local presets for per-hat feasibility, handoff closure, OPAC discipline, and P0/P1 issues. Produces findings with severity and confidence scores.
 ---
 
 # Ralph Preset Review
@@ -9,7 +9,9 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
 
 **Boundary:** Does not replace Rust `preset_lint` rules. Does not run full `./scripts/run-tests.sh` by default. User-only `.ralph/hats/` collection authoring (create / inspect / validate user hat workflows) and topology-debug / validate-routing workflows are not owned by either preset skill. For drafting, use `ralph-preset-author`.
 
-**Deliverable:** Every review MUST write **`preset-review-report.md`** — not chat-only summaries.
+**Deliverable:** Every review MUST write **`preset-review-report.html`** — a self-contained, offline-openable HTML report — not chat-only summaries.
+
+**HTML 交付契约（HARD RULE）**：报告必须是自包含、离线可打开的 HTML（内联样式、无外部资源、特殊字符转义）。写文件前先 `ralph tools skill load ralph-html`，再 `ralph tools skill load ralph-html-design` 与 `ralph tools skill load ralph-html-ref-documents-and-presentations`；加载失败仍写诚实的最小自包含 HTML——禁止以 Markdown 冒充交付，也禁止因指导缺失而隐瞒 finding。**机器契约保留**：固定 8 段结构以 `<section id="executive-summary" | "findings-table" | "topology" | "per-hat-aaf-reviews" | "handoff-audit" | "mechanical-lint-results" | "remediation-plan" | "unverified-suspicions">` 组织；Executive Summary 中的 `agent_skill_audit` / `decision_gate` / `decision_gate_scope` / `decision_gate_critical_counts` / `key_stage_event_gate_audit` / `key_stage_event_gate_scope` / `key_stage_event_gate_per_stage` / `prompt_visibility_evidence` / `author_vs_reviewer_key_stage_delta` 字段同时以 `<meta name="ralph:<field>" content="<value>">` 在 `<head>` 声明（Executive Summary `<dl>` 行与 meta 值一致），供下一次 review run 稳定读取。
 
 ## Dynamic Verification Gate
 
@@ -28,7 +30,7 @@ review 必须先确认 source mode：`builtin:*` 可使用仓库源码、BDD 或
 
 ## Core Assumptions
 
-- **Do not trust** `preset-author-notes.md` — rebuild AAF + payload audit independently; use notes only to flag author/review mismatches.
+- **Do not trust** `preset-author-notes.html` — rebuild AAF + payload audit independently; use notes only to flag author/review mismatches.
 - **Simulate one hat activation at a time** — declare explicitly: "I am simulating hat X's activation."
 - **Confidence ≥ 60** required for findings in the main table; below 60 → discard, re-investigate (max 2 rounds), or `Unverified Suspicions`.
 - **Shape passing ≠ payload usable.** `ralph emit --schema` / `--policy-check` prove shape only. Field visibility, value source, identity, semantic sufficiency, downstream consumption are review's job.
@@ -45,13 +47,13 @@ review 必须先确认 source mode：`builtin:*` 可使用仓库源码、BDD 或
    **默认行为**：未选 / 选推荐 → **不**审 data/*.md；报告「Executive Summary」必须写 `agent_skill_audit: skipped`。
    **选审后**：报告写 `agent_skill_audit: performed`，并按 `references/agent-skill-audit.md` 输出审计结论（含外仓「二进制内嵌」来源说明）；命中按 `references/finding-rubric.md`「Agent skill audit」段 `agent_skill.*` finding_id 入主表。
 
-0b. **Discovery / 重审区分**：复跑已有 preset-review-report.md 时，先看上一份报告「Workflow 0a」行记录的 `agent_skill_audit` 字段；若上一份是 `performed`，本次默认仍是 `performed`（不要无声地降级回 skipped）。若选择降级，必须在本次报告显式说明「由 performed 降级到 skipped」。
+0b. **Discovery / 重审区分**：复跑已有 preset-review-report.html 时，先看上一份报告 `<meta name="ralph:agent_skill_audit">`（或 Executive Summary `<dl>` 同名行）记录的字段；若上一份是 `performed`，本次默认仍是 `performed`（不要无声地降级回 skipped）。若选择降级，必须在本次报告显式说明「由 performed 降级到 skipped」。
 
 0z. **Key-stage event gate discovery (capability-triggered, independent rebuild)**:
    - **Workflow ordering**: this step sits between Workflow 0a/0b and the topology-only discovery (Step 1). Per-Hat AAF may not run before both Workflow 0a/0b and 0z are settled.
-   - **Independent scope (hard rule)**: rebuild the key-stage scope from real topology signals (`hats.*.triggers`, `hats.*.publishes`, `state_projection`, `event_policy`, `instructions` permissions). **Hard rule: 不得 继承 author notes / preset-author-notes.md 的 scope as evidence**. Author scope may appear in the report's `author_vs_reviewer_key_stage_delta` row as comparison data only — never as the reviewer's own scope.
+   - **Independent scope (hard rule)**: rebuild the key-stage scope from real topology signals (`hats.*.triggers`, `hats.*.publishes`, `state_projection`, `event_policy`, `instructions` permissions). **Hard rule: 不得 继承 author notes / preset-author-notes.html 的 scope as evidence**. Author scope may appear in the report's `author_vs_reviewer_key_stage_delta` row as comparison data only — never as the reviewer's own scope.
    - **Capability triggers (same vocabulary as Author side, capability-triggered)**: terminal authority / production mutation / phase branching / multi-hat aggregation / artifact producer / key handoff. Plain passthrough / pure read-only hats are out of scope. Hard rule: 禁止 identifying key hats by preset-name or hat-name prefix; equal capability signals yield equal rules.
-   - **Author notes are consumption evidence, not source of truth**: read `preset-author-notes.md` to extract the user-confirmed `key_stage` / `guard_selection` / `precheck_guard` / `precheck_retry_budget` / `payload_consistency_guard` / `payload_consistency_retry_budget` / `reason` / `confirmation_status` per key stage. The notes serve as the audit trail of the operator's choices; do not let them replace the reviewer's own capability rebuild.
+   - **Author notes are consumption evidence, not source of truth**: read `preset-author-notes.html` to extract the user-confirmed `key_stage` / `guard_selection` / `precheck_guard` / `precheck_retry_budget` / `payload_consistency_guard` / `payload_consistency_retry_budget` / `reason` / `confirmation_status` per key stage. The notes serve as the audit trail of the operator's choices; do not let them replace the reviewer's own capability rebuild.
    - **Skip-mode note**: when the author side skips Workflow 0e (e.g. narrow mechanical edit, no key stages identified), the reviewer records `key_stage_event_gate_audit: skipped` with a brief reason. No finding is raised solely due to skip-mode, but transparent skip-record is required.
 
 1. Read **topology-only** fields from preset YAML: `event_loop`, `hats.*.triggers`, `hats.*.publishes`, `state_projection`, `event_policy` — **not** other hats' `instructions` yet.
@@ -71,7 +73,7 @@ review 必须先确认 source mode：`builtin:*` 可使用仓库源码、BDD 或
 
 3a.6. **Key-hat scope and opt-in decision gate (Reviewer side, capability-triggered, independent from author)**:
    - **Workflow ordering**: this step sits between topology-only discovery (Step 1) and Per-Hat AAF (Step 4). Per-Hat AAF may not run before the Gate Scope table is drafted.
-   - **Independent scope (hard rule)**: rebuild the Gate Scope from real topology signals (`hats.*.triggers`, `hats.*.publishes`, `state_projection`, `event_policy`, `instructions` permissions). **Hard rule: 不得 继承 author notes / preset-author-notes.md 的 scope as evidence**. Author scope may appear in the report's `author_vs_reviewer_scope_delta` row as comparison data only — never as the reviewer's own scope.
+   - **Independent scope (hard rule)**: rebuild the Gate Scope from real topology signals (`hats.*.triggers`, `hats.*.publishes`, `state_projection`, `event_policy`, `instructions` permissions). **Hard rule: 不得 继承 author notes / preset-author-notes.html 的 scope as evidence**. Author scope may appear in the report's `author_vs_reviewer_scope_delta` row as comparison data only — never as the reviewer's own scope.
    - **Capability triggers (same vocabulary as Author side, capability-triggered)**: terminal authority / 终态 authority / 终态 决策 (success, failure, blocked terminal), production mutation / production code / 修改 生产 (code / test / config), phase branching / 重试 决策 / 阶段 分支 (stage transitions, retry, fix, rollback, stop), multi-hat aggregation / 跨 hat 汇总, artifact producer / 关键 artifact, key handoff / 关键 handoff. Plain passthrough / pure read-only hats are out of scope. Hard rule: 禁止 identifying key hats by preset-name or hat-name prefix; equal capability signals yield equal rules.
 - **Scope contract capability (merge-batch / post-merge-converge / red-team-attack presets)**：Three presets (`merge-batch`, `post-merge-converge`, `red-team-attack`) must independently write a byte-stable scope manifest and emit with `scope_status` / `scope_digest` / `scope_manifest_path` fields. Reviewer must verify the emitting hat's `instructions` require:
   1. Writing the scope manifest to `.ralph/{merge,post-merge,red-team}/` before emit.
@@ -87,13 +89,13 @@ review 必须先确认 source mode：`builtin:*` 可使用仓库源码、BDD 或
      - **record** — write the metrics, evidence, and Critical counts to the report; do not downgrade existing P0/P1 findings; never use the new metrics to claim pass on their own.
      - **off** — do not run this gate; existing AAF / Payload Audit / mechanical lint and finding confidence calibration remain unchanged.
    - **Critical checks are structural**: under hard or record, every Gate Scope hat must carry `Critical Ambiguities` and `Critical Unverified Assumptions` rows. The agent is not allowed to mark them N/A while the gate is enabled; `off` is the only way to skip them entirely.
-   - **Author/reviewer scope delta**: if the reviewer identifies a hat that the author notes omitted from scope (for example, a terminal-authority hat that author skipped), record a `scope_gap` entry in `preset-review-report.md` Executive Summary and an additional P0 finding keyed on the missing hat's capability class.
+   - **Author/reviewer scope delta**: if the reviewer identifies a hat that the author notes omitted from scope (for example, a terminal-authority hat that author skipped), record a `scope_gap` entry in `preset-review-report.html` Executive Summary and an additional P0 finding keyed on the missing hat's capability class.
    - **Identity rule (capability-triggered, 不得 name-prefix)**: this section is a hard rule, capability-triggered identification. Reviewer must never identify a key hat by preset-name or hat-name prefix; equal capabilities must yield equal rules regardless of preset or hat name.
 
 3a.7. **Key-stage event gate audit (capability-triggered, independent from author)**:
    - **Workflow ordering**: this step sits between Workflow 3a.6 (Decision-gate) and the per-hat AAF (Step 4). Per-Hat AAF may not run before both 3a.6 and 3a.7 are settled.
-   - **Independent scope (hard rule)**: rebuild the key stages from real topology signals (`hats.*.triggers`, `hats.*.publishes`, `state_projection`, `event_policy`, `instructions` permissions). **Hard rule: 不得 继承 author notes / preset-author-notes.md 的 scope as evidence**. Author scope may appear in the report's `author_vs_reviewer_key_stage_delta` row as comparison data only — never as the reviewer's own scope.
-   - **Author notes as audit trail**: read `preset-author-notes.md` to extract the user-confirmed `key_stage` / `guard_selection` / `precheck_guard` / `precheck_retry_budget` / `payload_consistency_guard` / `payload_consistency_retry_budget` / `reason` / `confirmation_status` per key stage. Notes serve as evidence of the operator's choices; do not let them replace the reviewer's capability rebuild.
+   - **Independent scope (hard rule)**: rebuild the key stages from real topology signals (`hats.*.triggers`, `hats.*.publishes`, `state_projection`, `event_policy`, `instructions` permissions). **Hard rule: 不得 继承 author notes / preset-author-notes.html 的 scope as evidence**. Author scope may appear in the report's `author_vs_reviewer_key_stage_delta` row as comparison data only — never as the reviewer's own scope.
+   - **Author notes as audit trail**: read `preset-author-notes.html` to extract the user-confirmed `key_stage` / `guard_selection` / `precheck_guard` / `precheck_retry_budget` / `payload_consistency_guard` / `payload_consistency_retry_budget` / `reason` / `confirmation_status` per key stage. Notes serve as evidence of the operator's choices; do not let them replace the reviewer's capability rebuild.
    - **Per-stage audit items**:
      - `key_stage` 字段是否齐全（每个 reviewer 独立识别的关键位置都有 name + 上下文）。
      - `guard_selection` ∈ {`precheck`, `payload_consistency`, `both`, `neither`}；选择 `neither` 必须有 ≤80 字 `reason` 且理由指向恢复 / 审计 / 下游依赖等具体风险。
@@ -180,7 +182,7 @@ review 必须先确认 source mode：`builtin:*` 可使用仓库源码、BDD 或
      - producer / consumer 缺顺序约束 → 严重度按 `references/finding-rubric.md`「Artifact-First Handoff → Severity」表入栏。
    - Compare to `instructions:` → candidate findings.
    - **模板文件机制轻量检查（review-only，不新增 finding_id）**：若某 hat 的 `instructions:` 内联了大段固定格式文档（报告模板、计划模板、验收清单、SOP 步骤等，通常 >80 行或占 instructions 一半以上），review 应在 Per-Hat AAF Reviews 的「deltas vs instructions」或 Executive Summary 中备注「该 hat 可考虑模板文件机制（`presets/templates/` + `ralph preset materialize-artifacts`）压缩上下文」。验证方式：用 `ralph -c <preset>.yml inspect prompt --hat <hat_id> --format json --full` 查看 `prompt_body` 中 `### 1. EXECUTE` 到 `### 2. VERIFY` 之间的 instructions 实际长度；若 instructions 引用了 `materialize-artifacts` 且长度 <80 行，说明模板机制已生效。此检查不阻塞 review，仅作为优化建议记录；若 author notes 中已说明「未采用模板文件机制」及理由，则跳过。
-   - Optional: read `preset-author-notes.md` for that hat only after your table is drafted.
+   - Optional: read `preset-author-notes.html` for that hat only after your table is drafted.
 
 5. **Payload Audit table** (mandatory — aggregate it under the Per-Hat AAF Reviews section, one row per material emit field):
    - Columns: topic | field | value source | visibility evidence | identity check | semantic downstream use | schema metadata | policy-check repair surface | verdict | repair surface.
@@ -235,8 +237,8 @@ review 必须先确认 source mode：`builtin:*` 可使用仓库源码、BDD 或
 
 ## Report Path
 
-- Default: `.ralph/reviews/<preset-basename>-<YYYY-MM-DD>.md` (gitignored)
-- Optional PR copy: `<preset-dir>/preset-review-report.md`
+- Default: `.ralph/reviews/<preset-basename>-<YYYY-MM-DD>.html` (gitignored)
+- Optional PR copy: `<preset-dir>/preset-review-report.html`
 
 ## Report Structure (fixed)
 

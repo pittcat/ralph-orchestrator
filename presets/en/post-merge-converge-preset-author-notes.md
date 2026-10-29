@@ -45,7 +45,7 @@
 - **阻塞条件：** 基线无效或 P0/P1 未关闭且未 accepted → `postmerge.fix.ready{passed:false}` → closer `FAIL` / `success:false`（merge-batch 式全路径收敛，不用 plan.blocked 旁路）。
 - **允许的修改范围：** 审计/地图/test-gap/终审只读生产代码；reproducer 只写失败测试；fixer 按 Finding 最小修复。
 - **必须独立执行的评审：** closer 的 Final Review，不补前面工作。
-- **重要 artifact：** `.ralph/post-merge/01…15` + `findings/PMI-*.md` + `REPORT.md`。
+- **重要 artifact：** `.ralph/post-merge/01…15` + `findings/PMI-*.md` + `REPORT.html`。
 - **execution_model：** single-chain  
   **why：** 严格串行，无 wave/supervisor 需求。
 - **非目标：** 不重跑各计划、不重新 merge、不绑语言/CI。
@@ -102,7 +102,7 @@ key_stages:
 | reproducer | 10 | 自环；一 Finding/activation；禁改生产代码 |
 | fixer | 11–13 | **同 activation 内强制顺序** 根因→修复→回归；回归失败发 `fix.next` 再进，不在「回归心态」里继续改 |
 | closer | 14–15 | **先 14 后 15**；终审不补活；发 `postmerge.reviewed` |
-| reporter | （收口） | 写 `.ralph/post-merge/REPORT.md`；唯一 `postmerge.complete`（必填 `report_path`） |
+| reporter | （收口） | 写 `.ralph/post-merge/REPORT.html`；唯一 `postmerge.complete`（必填 `report_path`） |
 
 Hard questions — single-chain-first: ✓（无 supervisor/wave）  
 Hard questions — wave / supervisor: N/A  
@@ -254,7 +254,7 @@ Hard questions — Artifact-First: ✓（`.ralph/post-merge/` 为业务 artifact
 
 | topic | 字段 | artifact 落盘 |
 |---|---|---|
-| postmerge.complete | report_path | 必填 · `.ralph/post-merge/REPORT.md` |
+| postmerge.complete | report_path | 必填 · `.ralph/post-merge/REPORT.html` |
 | postmerge.complete | success/verdict | 不落盘 + 短控制；正文在 REPORT |
 
 ## 7-point sync checklist（builtin）

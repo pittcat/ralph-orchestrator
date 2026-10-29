@@ -60,7 +60,7 @@ const REQUIRED_FILES: &[&str] = &[
     "unit.template.yml",
     "execution-plan.template.yml",
     "unit-completion.template.md",
-    "manager-report.template.md",
+    "manager-report.template.html",
     "README.md",
 ];
 
@@ -115,7 +115,7 @@ fn dest_override_writes_only_to_dest() {
         ],
     );
     assert_success(&out);
-    assert!(dest.join("manager-report.template.md").is_file());
+    assert!(dest.join("manager-report.template.html").is_file());
     assert!(!tmp.path().join(".ralph/forge").exists());
 }
 

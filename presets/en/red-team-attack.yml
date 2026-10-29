@@ -43,10 +43,10 @@
 #   .ralph/red-team/failures/<stage>.md         — failing producer writes
 #   .ralph/red-team/08-impact-boundary.md        — impact-boundary writes
 #   .ralph/red-team/findings/RTF-*.md            — impact-boundary writes
-#   .ralph/red-team/PLAN.md                      — impact-boundary (as repair-planner) writes
+#   .ralph/red-team/PLAN.html                    — impact-boundary (as repair-planner) writes
 #   .ralph/red-team/10-independent-review.md     — independent-reviewer writes
-#   .ralph/red-team/REPORT.md                    — reporter writes
-#   .ralph/red-team/QUESTIONS.md                 — reporter writes
+#   .ralph/red-team/REPORT.html                  — reporter writes
+#   .ralph/red-team/QUESTIONS.html              — reporter writes
 #
 # Artifact lifecycle:
 #   owner: this loop's hats (writer of each file); operator is the final reader
@@ -60,8 +60,8 @@
 #   Default output: `.ralph/red-team/<plan-key>/templates/`
 #     experiment.template.yml   → experiments/RTE-*.md
 #     finding.template.yml      → findings/RTF-*.md
-#     report.template.md        → REPORT.md
-#     plan.template.md          → PLAN.md
+#     report.template.html        → REPORT.html
+#     plan.template.html          → PLAN.html
 
 topic_format_whitelist:
   - redteam.complete
@@ -1078,13 +1078,21 @@ hats:
       ```bash
       ralph preset materialize-artifacts red-team-attack --plan-key <plan-key>
       ```
-      Copy `finding.template.yml` and `plan.template.md` from `.ralph/red-team/<plan-key>/templates/`.
+      Copy `finding.template.yml` and `plan.template.html` from `.ralph/red-team/<plan-key>/templates/`.
+
+      Before writing `PLAN.html`, load the shared HTML guidance:
+      `ralph tools skill load ralph-html`, then
+      `ralph tools skill load ralph-html-plan` and
+      `ralph tools skill load ralph-html-design`; follow their
+      self-contained / offline / escaping rules. If a load fails, still
+      write honest minimal self-contained HTML — never present Markdown
+      as the plan deliverable.
 
       ### Mission
       For each qualified experiment, bound the impact scope through real commands and tests.
       Create formal finding (RTF-NNN). If impact is uncertain, record the
       rejection evidence and fail the run for operator follow-up.
-      After all findings processed, write `.ralph/red-team/PLAN.md`.
+      After all findings processed, write `.ralph/red-team/PLAN.html`.
 
       ### Steps
       1. Read `redteam.evidence.gated` payload. Read the aggregate evidence
@@ -1134,7 +1142,7 @@ hats:
          - Write `.ralph/red-team/findings/RTF-<NNN>.md` from finding template
          - Write `.ralph/red-team/08-impact-boundary.md`
       8. Process every qualified experiment listed in the aggregate board.
-         After all findings are processed, write `.ralph/red-team/PLAN.md` from
+         After all findings are processed, write `.ralph/red-team/PLAN.html` from
          the plan template, then emit `redteam.plan.ready` with
          `plan_file_path`, `finding_count`, and `impact_file_path`.
       9. Precheck then emit. Single business event only.
@@ -1169,11 +1177,11 @@ hats:
       OPAC: `ralph-tools-opac`. Before constructing any payload, run `ralph tools skill load ralph-tools-emit` and follow its Policy-Check feedback and §5 precheck. If policy-check rejects, use only visible trigger/artifact values to repair the named field; never copy an example or invent a business fact.
 
       ### Mission
-      Audit the final `PLAN.md` and all supporting artifacts.
+      Audit the final `PLAN.html` and all supporting artifacts.
       Emit `redteam.reviewed` with verdict `PLAN_READY` or `PLAN_REJECTED`.
 
       ### Trigger Handling
-      - On `redteam.plan.ready`: all findings qualified and PLAN.md is complete. Run full audit.
+      - On `redteam.plan.ready`: all findings qualified and PLAN.html is complete. Run full audit.
       - If the audit fails, write `.ralph/red-team/failures/independent-reviewer.md`
         and emit `redteam.failed`; do not emit a misleading reviewed event.
 
@@ -1206,7 +1214,7 @@ hats:
            `impact_file_path`; `finding_count` must match the artifacts.
       2. Read all available artifacts: target-lock, plan-resolution, patch-reconstruction,
          attack-surface, experiment-plan, experiments, evidence board, retry board,
-         impact boundary, findings, PLAN.md (on plan.ready only).
+         impact boundary, findings, PLAN.html (on plan.ready only).
       3. Verify HEAD/tree match lock.
       4. Run through the audit checklist above.
       5. Write `.ralph/red-team/10-independent-review.md` with detailed findings.
@@ -1239,13 +1247,22 @@ hats:
       ```bash
       ralph preset materialize-artifacts red-team-attack --plan-key <plan-key>
       ```
-      Copy `report.template.md` from `.ralph/red-team/<plan-key>/templates/`.
+      Copy `report.template.html` from `.ralph/red-team/<plan-key>/templates/`.
+
+      Before writing the report / plan / questions files, load the shared
+      HTML guidance: `ralph tools skill load ralph-html`, then
+      `ralph tools skill load ralph-html-design` and
+      `ralph tools skill load ralph-html-ref-documents-and-presentations`.
+      Follow their self-contained / offline / escaping rules. All three
+      operator-facing deliverables are HTML. If a load fails, still write
+      honest minimal self-contained HTML — never present Markdown as the
+      final deliverable and never hide a failed state.
 
       ### HARD RULE — deliverable paths first
       Canonical paths:
-      - `.ralph/red-team/REPORT.md` — operator-facing report
-      - `.ralph/red-team/PLAN.md` — repair plan (written by impact-boundary, verified by reporter)
-      - `.ralph/red-team/QUESTIONS.md` — questions for operator (may be empty)
+      - `.ralph/red-team/REPORT.html` — operator-facing report
+      - `.ralph/red-team/PLAN.html` — repair plan (written by impact-boundary, verified by reporter)
+      - `.ralph/red-team/QUESTIONS.html` — questions for operator (may be empty)
       Create parent dirs if missing.
       **No readable `report_path` / `plan_path` / `questions_path` ⇒ no `redteam.complete`.**
 
@@ -1255,11 +1272,11 @@ hats:
          required evidence for the final report, not just a path to copy.
       2. Verify HEAD/tree match lock.
       3. Verify `plan_file_path` exists and is readable.
-      4. Write `.ralph/red-team/REPORT.md` from report template.
+      4. Write `.ralph/red-team/REPORT.html` from report template.
          Fill every section: conclusion, summary, inputs, execution summary,
          finding list, rejected candidates, repair plan summary,
          zero-regression checklist, questions, evidence index, delivery statement.
-      5. Write `.ralph/red-team/QUESTIONS.md` (may be empty if no questions).
+      5. Write `.ralph/red-team/QUESTIONS.html` (may be empty if no questions).
          Include any items requiring operator decision:
          - Product behavior choices
          - Public interface changes
@@ -1285,12 +1302,12 @@ hats:
          event context; if they differ, record the mismatch as a report
          integrity issue and keep `success: false`.
       2. Verify HEAD/tree match lock.
-      3. Write `.ralph/red-team/REPORT.md` with FAIL conclusion:
+      3. Write `.ralph/red-team/REPORT.html` with FAIL conclusion:
          - identify the failed stage and stable reason
          - link the failure artifact and any available evidence
          - distinguish missing evidence from a qualified security finding
-         - state whether `PLAN.md` was generated
-      4. Write `.ralph/red-team/QUESTIONS.md` asking operator to verify plan paths
+         - state whether `PLAN.html` was generated
+      4. Write `.ralph/red-team/QUESTIONS.html` asking operator to verify plan paths
          and provide the operator-approved follow-up if a rerun is needed.
       5. Verify files readable.
       6. Precheck then emit `redteam.complete` with `success: false`,

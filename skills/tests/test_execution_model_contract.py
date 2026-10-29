@@ -1010,7 +1010,7 @@ def test_author_skill_threshold_values_locked() -> None:
 
 
 def test_author_skill_outputs_gate_scope_table_in_notes() -> None:
-    """Author SKILL.md must require a Gate Scope table in preset-author-notes.md."""
+    """Author SKILL.md must require a Gate Scope table in preset-author-notes.html."""
     text = _read(AUTHOR_SKILL)
     assert re.search(
         r"Gate\s*Scope|Gate\s*Scope\s*表|gate[\s_-]*scope[\s_-]*table",
@@ -1018,7 +1018,7 @@ def test_author_skill_outputs_gate_scope_table_in_notes() -> None:
         re.IGNORECASE,
     ), (
         "Author SKILL.md must define a Gate Scope output written into "
-        "preset-author-notes.md"
+        "preset-author-notes.html"
     )
 
 

@@ -53,7 +53,13 @@ hats:
       timeout: 300
     instructions: |
       Synthesize all review findings into a structured report.
-      Write the report to .ralph/REVIEW-REPORT.md with:
+      Write the report as a self-contained HTML file to .ralph/REVIEW-REPORT.html
+      — first run `ralph tools skill load ralph-html`, then
+      `ralph tools skill load ralph-html-artifact` and
+      `ralph tools skill load ralph-html-design`, and follow their
+      offline/escaping rules. If the guidance cannot be loaded, do not
+      publish review.report; report the load failure instead.
+      Include:
       - Summary
       - Findings by category
       - Recommendations

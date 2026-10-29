@@ -21,7 +21,7 @@
   },
   {
     "name": "implementation-review",
-    "description": "Post-implementation six-dimension review: freeze scope, fan out a single SharedReadonly wave across goal-alignment / correctness / testing / maintainability / project-standards / adversarial, synthesize findings, and emit a fix-plan.md or block artifact as the terminal LOOP_COMPLETE",
+    "description": "Post-implementation six-dimension review: freeze scope, fan out a single SharedReadonly wave across goal-alignment / correctness / testing / maintainability / project-standards / adversarial, synthesize findings, and emit a fix-plan.html or block artifact as the terminal LOOP_COMPLETE",
     "category": "development"
   },
   {
@@ -36,7 +36,7 @@
   },
   {
     "name": "post-merge-converge",
-    "description": "After one or more development plans have landed in the current branch: baseline, change map, six-dimension audit, test-gap, per-finding reproduce/fix with confidence redo-first, clean-env + final review, then operator REPORT.md before complete",
+    "description": "After one or more development plans have landed in the current branch: baseline, change map, six-dimension audit, test-gap, per-finding reproduce/fix with confidence redo-first, clean-env + final review, then operator REPORT.html before complete",
     "category": "workflow"
   },
   {

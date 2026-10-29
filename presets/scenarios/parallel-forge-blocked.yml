@@ -22,10 +22,10 @@ scenarios:
       - hat: reporter
         output: |
           <event topic="forge.report.done">
-          {"report_path":"docs/reports/2026-08-26-verify-pf-manager-report.md","status":"BLOCKED","final_audit":"BLOCKED","plan_key":"verify-pf"}
+          {"report_path":"docs/reports/2026-08-26-verify-pf-manager-report.html","status":"BLOCKED","final_audit":"BLOCKED","plan_key":"verify-pf"}
           </event>
           <event topic="LOOP_COMPLETE">
-          {"report_path":"docs/reports/2026-08-26-verify-pf-manager-report.md"}
+          {"report_path":"docs/reports/2026-08-26-verify-pf-manager-report.html"}
           </event>
         success: true
     expect:

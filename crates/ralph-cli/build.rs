@@ -286,7 +286,7 @@ fn copy_artifact_templates(manifest_dir: &str, out_dir: &str) {
             "unit.template.yml",
             "execution-plan.template.yml",
             "unit-completion.template.md",
-            "manager-report.template.md",
+            "manager-report.template.html",
             "wave-settlement.template.md",
             "wave-failure.template.md",
             "merge-conflict.template.md",
@@ -303,8 +303,8 @@ fn copy_artifact_templates(manifest_dir: &str, out_dir: &str) {
         &[
             "experiment.template.yml",
             "finding.template.yml",
-            "report.template.md",
-            "plan.template.md",
+            "report.template.html",
+            "plan.template.html",
             "README.md",
         ],
     );

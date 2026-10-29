@@ -77,6 +77,7 @@ DAG 模式（`event_loop.supervisor.scheduler_mode: dag`）下，runtime 为每�
 | `ralph emit` 报 `triggered_not_in_topology` | 普通业务 handoff 省略 `--triggered`；只有已确认的跨 hat 直达例外才改为不同的合法 hat。禁止把当前 hat 自己填成目标 | `ralph tools skill load ralph-tools-emit` |
 | prompt 顶部出现 `## TRIGGER CONTEXT` 区块 | 先读完它，再按 hat instructions 执行；不要从完整 payload / ledger 重新推断 | 本 skill「核心规则」第 8 条 |
 | 本轮要写操作者可读文件，且即将 emit 的 topic schema 要求路径字段 | 先落盘并 `test -f` → `--schema` 确认字段名 → policy-check → emit → 回复打印 `DELIVERABLE_PATH:`；细则按需 load emit skill | `ralph tools skill load ralph-tools-emit`「操作者交付文件路径」（非每轮自动注入） |
+| 要写人类可读最终交付物（终态报告 / 阻塞 artifact / 诊断报告） | 先 `ralph tools skill load ralph-html`（vendored Effective HTML 指导；按需再 load `ralph-html-plan` / `ralph-html-design` / `ralph-html-diagram` / `ralph-html-prototype` / `ralph-html-wireframe` / `ralph-html-big-pics`）；交付物必须自包含 `.html`、离线可打开，机器字段用 `<meta name="ralph:*">` 或 `<pre class="contract-yaml">` 保留；guidance 加载失败不得用 Markdown 冒充交付，按 preset 阻塞路径诚实上报 | `ralph tools skill load ralph-html`（binary 内嵌 vendored 内容；controlled `ralph-html*` 名 filesystem 同名 skill 会被拒） |
 
 **新增 flag 一句话说明**：
 - `ralph run --no-default-profiles`：跳过 `ralph.yml` 中的 `profiles.default`，仅保留 CLI `--profile`。

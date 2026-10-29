@@ -16,6 +16,7 @@ the review skill owns its own fixtures/ and tests/ tree. This test:
 """
 from __future__ import annotations
 
+import html
 import re
 import sys
 from pathlib import Path
@@ -120,7 +121,8 @@ ANCHORS: tuple[tuple[str, str], ...] = (
 # Capability-triggered fixtures from plan 2026-08-02-001 U3.
 # Each entry: (fixture filename, expected finding id advertised in
 # the fixture header comment). Key-stage fixtures additionally carry a
-# companion `*.preset-author-notes.md` contract that is parsed below.
+# companion `*.preset-author-notes.html` contract that is parsed below
+# (YAML lives inside a `<pre class="contract-yaml"><code>` block in the HTML).
 CAPABILITY_FIXTURES: tuple[tuple[str, str], ...] = (
     (
         "worktree-reuse-negative-fixture.yml",
@@ -321,11 +323,13 @@ VAGUE_REASONS = {"", "用户偏好", "后续再说", "先这样"}
 
 
 def _load_key_stage_notes(fixture: Path) -> dict[str, object]:
-    notes = fixture.with_suffix(".preset-author-notes.md")
+    notes = fixture.with_suffix(".preset-author-notes.html")
     text = _read(notes)
-    match = re.search(r"```yaml\n(.*?)```", text, re.DOTALL)
+    match = re.search(
+        r'<pre class="contract-yaml"><code>(.*?)</code>', text, re.DOTALL
+    )
     assert match is not None, f"notes missing YAML contract: {notes}"
-    value = yaml.safe_load(match.group(1))
+    value = yaml.safe_load(html.unescape(match.group(1)))
     assert isinstance(value, dict), f"notes contract must be a mapping: {notes}"
     return value
 
@@ -542,7 +546,7 @@ def _check_fixture_present(
         )
         return False
     if filename.startswith("key-stage-event-gate-"):
-        notes = full.with_suffix(".preset-author-notes.md")
+        notes = full.with_suffix(".preset-author-notes.html")
         if not notes.is_file():
             print(f"FAIL key-stage fixture missing notes: {notes}")
             return False

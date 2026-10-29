@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="ralph:template" content="red-team-attack/plan.v1">
+<meta name="ralph:execution_authorized" content="false">
+<title>Red Team Repair Plan</title>
+<!--
+  Copy to `.ralph/red-team/PLAN.html` and fill every section.
+  This is the repair plan deliverable. It is NOT authorization to modify code.
+
+  Artifact lifecycle:
+    owner: repair-planner (writes this file)
+    readers: independent-reviewer (audits), operator (confirms),
+             coding-agent (executes after confirmation)
+    retention: operator-owned; do not delete until plan is executed or abandoned
+
+  Per-Unit machine fields (finding_id / metrics / invariants / regression
+  matrix) stay machine-readable inside each Unit's <section data-unit>
+  block — coding agents read the HTML text directly. Self-contained /
+  offline: inline styles only.
+-->
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0 auto; max-width: 960px; padding: 2rem 1.25rem; line-height: 1.6; color: #1a1a1a; }
+  h1 { border-bottom: 3px solid #333; padding-bottom: .4rem; }
+  h2 { margin-top: 2.2rem; border-bottom: 1px solid #ccc; padding-bottom: .25rem; }
+  h3 { margin-top: 1.6rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .95rem; }
+  th, td { border: 1px solid #ccc; padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #f2f2f2; }
+  pre { background: #f6f6f6; border: 1px solid #ddd; padding: .8rem; overflow-x: auto; font-size: .85rem; }
+  code { background: #f2f2f2; padding: .1em .3em; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: .2rem 1rem; }
+  dt { font-weight: 600; }
+  @media print { body { max-width: none; } }
+</style>
+</head>
+<body>
+
+<h1>Red Team Repair Plan</h1>
+
+<h2>元信息</h2>
+<ul>
+  <li>生成时间: <code>&lt;ISO8601&gt;</code></li>
+  <li>目标分支: <code>&lt;branch&gt;</code></li>
+  <li>锁定 HEAD: <code>&lt;head_sha&gt;</code></li>
+  <li>计划来源: Red Team Attack Preset</li>
+  <li>执行授权: false（必须人工确认）</li>
+</ul>
+
+<h2>输入 Finding 汇总</h2>
+<table>
+  <thead>
+    <tr><th>Finding</th><th>Severity</th><th>Confidence</th><th>Evidence</th><th>Verifiability</th><th>Impact</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>RTF-001</td><td>P1</td><td>92</td><td>88</td><td>91</td><td>87</td></tr>
+  </tbody>
+</table>
+
+<h2>修复 Unit 列表</h2>
+<p>严格串行。前一个 Unit 的 Red → Green → Refactor → Regression 全部完成后，才能开始下一个 Unit。</p>
+
+<section data-unit="0">
+<h3>Unit 0: 锁定修复前基线</h3>
+<ul>
+  <li>目标: 记录修复前全量测试状态、静态检查状态、关键行为快照</li>
+  <li>命令: <code>&lt;verification_command&gt;</code></li>
+  <li>预期: 全部通过（或记录已知失败作为基线）</li>
+  <li>产物: <code>.ralph/red-team/baseline/</code></li>
+</ul>
+</section>
+
+<section data-unit="1">
+<h3>Unit 1: RTF-001 — &lt;title&gt;</h3>
+<dl>
+  <dt>finding_id</dt><dd>RTF-001</dd>
+  <dt>experiment_id</dt><dd>RTE-001</dd>
+  <dt>plan_ids</dt><dd>[]</dd>
+  <dt>commits</dt><dd>[]</dd>
+  <dt>patch_hunks</dt><dd>[]</dd>
+  <dt>confidence</dt><dd>92</dd>
+  <dt>evidence_coverage</dt><dd>88</dd>
+  <dt>verifiability</dt><dd>91</dd>
+  <dt>impact_certainty</dt><dd>87</dd>
+  <dt>broken_invariant</dt><dd>&lt;invariant&gt;</dd>
+  <dt>minimal_fix_locus</dt><dd>&lt;file:line&gt;</dd>
+  <dt>allowed_files</dt><dd>[]</dd>
+  <dt>forbidden_scope</dt><dd>[]</dd>
+  <dt>existing_behavior_to_preserve</dt><dd>[]</dd>
+  <dt>red_test_source</dt><dd>&lt;how to convert reproducer to formal failing test&gt;</dd>
+  <dt>rollback_condition</dt><dd>&lt;when to revert&gt;</dd>
+</dl>
+<p>regression_matrix:</p>
+<table>
+  <thead>
+    <tr><th>component</th><th>command</th><th>expected</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>&lt;module&gt;</td><td>&lt;test command&gt;</td><td>pass</td></tr>
+    <tr><td>&lt;module&gt; (integration)</td><td>&lt;test command&gt;</td><td>pass</td></tr>
+    <tr><td>&lt;module&gt; (cross_plan)</td><td>&lt;test command&gt;</td><td>pass</td></tr>
+  </tbody>
+</table>
+
+<h4>执行顺序</h4>
+<ol>
+  <li>读取原始实验 <code>.ralph/red-team/experiments/RTE-001.md</code></li>
+  <li>将临时 reproducer 转为正式失败测试（Red）</li>
+  <li>确认测试失败（Red）</li>
+  <li>最小生产修复（Green）</li>
+  <li>确认测试通过（Green）</li>
+  <li>局部重构（如有必要）</li>
+  <li>组件回归</li>
+  <li>集成回归</li>
+  <li>跨计划回归</li>
+  <li>全量回归</li>
+</ol>
+</section>
+
+<section data-unit="2">
+<h3>Unit 2: RTF-002 — &lt;title&gt;</h3>
+<p>...（同上结构）</p>
+</section>
+
+<h2>Final Regression</h2>
+<ul>
+  <li>全量测试: <code>&lt;command&gt;</code></li>
+  <li>静态检查: <code>&lt;command&gt;</code></li>
+  <li>干净环境重建: <code>&lt;command&gt;</code></li>
+</ul>
+
+<h2>Clean Environment</h2>
+<ul>
+  <li>新 clone / container 中执行 Full Regression</li>
+  <li>预期: 全部通过</li>
+</ul>
+
+<h2>Independent Review</h2>
+<ul>
+  <li>审查人: <code>&lt;independent-reviewer hat&gt;</code></li>
+  <li>审查产物: <code>.ralph/red-team/10-independent-review.md</code></li>
+  <li>结论: PLAN_READY | PLAN_REJECTED</li>
+</ul>
+
+<h2>禁止事项</h2>
+<ul>
+  <li>禁止无关重构</li>
+  <li>禁止顺手修复其他 Finding</li>
+  <li>禁止删除失败测试</li>
+  <li>禁止弱化失败断言</li>
+  <li>禁止 catch-and-ignore</li>
+  <li>禁止返回假成功</li>
+  <li>禁止改变公共行为来规避问题</li>
+  <li>禁止扩大公共接口</li>
+  <li>禁止通过默认关闭功能掩盖缺陷</li>
+  <li>禁止使用不达标 Finding 生成 Unit</li>
+</ul>
+
+<h2>人工确认</h2>
+<ul>
+  <li>☐ 操作者已阅读 REPORT.html</li>
+  <li>☐ 操作者已阅读 QUESTIONS.html 并回答所有问题</li>
+  <li>☐ 操作者明确授权执行本计划</li>
+</ul>
+<p>确认签名: _______________<br>确认时间: _______________</p>
+
+</body>
+</html>

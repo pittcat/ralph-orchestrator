@@ -259,7 +259,7 @@ default severity + default confidence 入主表。
 `key-stage-event-gate-divergence-negative-fixture.yml` / `key-stage-event-gate-no-reason-negative-fixture.yml`
 覆盖 plan 2026-08-05-007 的 8 个 review-only finding_id：
 
-每个 YAML 都有同名 `.preset-author-notes.md` companion 文件；文件中的 YAML
+每个 YAML 都有同名 `.preset-author-notes.html` companion 文件（自包含 HTML，YAML 契约放在 `<pre class="contract-yaml"><code>` 块内）；文件中的 YAML
 contract 是测试实际读取的 notes 输入，不再只靠 fixture 注释声明反例。
 
 | Axis | What the YAML contains | Expected finding | Source |

@@ -625,9 +625,9 @@ schemas:
     field_docs:
       report_path:
         meaning: Manager-readable Markdown report path.
-        source: File written at docs/reports/date-task-manager-report.md per naming rules.
+        source: File written at docs/reports/date-task-manager-report.html per naming rules.
         fill_rule: Verify file exists; follow parallel-forge naming rules.
-        examples: [".ralph/<plan>/manager-report.md"]
+        examples: [".ralph/<plan>/manager-report.html"]
       status:
         meaning: Manager report status derived from Auditor verdict or blocked/failed mapping.
         source: Map ACCEPTED→COMPLETED, REJECTED→FAILED/PARTIAL, BLOCKED→BLOCKED; work.failed→FAILED.
@@ -681,7 +681,7 @@ schemas:
         meaning: Repo-relative path to the manager report (same as forge.report.done.report_path).
         source: forge.report.done trigger payload or file written this activation.
         fill_rule: Must match an existing report file path.
-        examples: [".ralph/<plan>/manager-report.md"]
+        examples: [".ralph/<plan>/manager-report.html"]
 
   # Supervisor slot topics (worker publishes; schema parity with ce-executor-supervisor)
   exec.wave.complete:

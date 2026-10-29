@@ -16,7 +16,7 @@
 #   reproducer (10, self-loop)
 #   fixer (11–13, self-loop)
 #   closer (14–15 technical gates)
-#   reporter (operator-facing REPORT.md + completion)
+#   reporter (operator-facing REPORT.html + completion)
 #
 # Prompt contract (operator provides via `.ralph/post-merge.prompt.md`,
 # referenced by `ralph.post-merge.yml`):
@@ -35,7 +35,7 @@
 # Artifacts (under gitignored .ralph/, like merge-batch):
 #   .ralph/post-merge/01-baseline.md … 15-final-review.md
 #   .ralph/post-merge/findings/PMI-*.md
-#   .ralph/post-merge/REPORT.md  (operator-facing; required before complete)
+#   .ralph/post-merge/REPORT.html  (operator-facing; required before complete)
 #
 # Artifact lifecycle:
 #   owner: this loop's hats (writer of each file); operator is the final reader
@@ -277,7 +277,7 @@ core:
     - "OPAC Precheck: `ralph emit --policy-check` before every real emit. Cite `ralph tools skill load ralph-tools-emit` Policy-Check feedback; do not copy field tables."
     - "OPAC Apply: one business event per isolated activation; never put business events before a terminal emit in the same activation."
     - "OPAC Confirm: `ralph events --events-source hat-channel` after emit."
-    - "Artifact-First: write `.ralph/post-merge/**` (including findings and REPORT.md) first; emit only short status + paths. Never treat runtime ledgers as business artifacts."
+    - "Artifact-First: write `.ralph/post-merge/**` (including findings and REPORT.html) first; emit only short status + paths. Never treat runtime ledgers as business artifacts."
     - "Artifact lifecycle: owner = writing hat + operator as final reader; retention = keep until operator archives/deletes; cleanup = operator-owned. Agents MUST NOT wipe or empty `.ralph/post-merge/` as 'cleanup'."
     - "Finding discipline: every risk/defect becomes `.ralph/post-merge/findings/PMI-NNN.md`. Status flow DISCOVERED→TRIAGED→REPRODUCED→ROOT_CAUSED→FIXED→VERIFIED→CLOSED. Never jump DISCOVERED→FIXED. Allowed exits: NOT_A_BUG, DUPLICATE, ACCEPTED_RISK (with reasons), residual LOW_CONFIDENCE after redo-first."
     - "Confidence discipline (redo-first): confidence ∈ {high,medium,low}. On P0/P1 low confidence: deepen observation or self-loop once; if still low, mark LOW_CONFIDENCE — never VERIFIED/CLOSED; reporter lists 待核实."
@@ -697,7 +697,7 @@ hats:
 
       First clean-environment validation, then independent final review.
       Final review does NOT backfill earlier work. Gaps → FAIL.
-      You do NOT write the operator-facing REPORT.md and do NOT emit `postmerge.complete`.
+      You do NOT write the operator-facing REPORT.html and do NOT emit `postmerge.complete`.
 
       OPAC: follow `ralph-tools-opac` and `ralph tools skill load ralph-tools-emit` §5; always `--policy-check` before real emit.
 
@@ -729,12 +729,12 @@ hats:
 
       ### DON'T
       - Quietly repair earlier hats' missing work
-      - Emit `postmerge.complete` or write REPORT.md
+      - Emit `postmerge.complete` or write REPORT.html
       - Treat full-suite green alone as sufficient without system audits
 
   reporter:
     name: "Reporter"
-    description: "Write the operator-facing convergence report with all product paths, conclusions, and next steps; sole completion publisher."
+    description: "Write the operator-facing self-contained HTML convergence report with all product paths, conclusions, and next steps; sole completion publisher."
     exempt_topics: ["postmerge.complete"]
     triggers: ["postmerge.reviewed"]
     publishes: ["postmerge.complete"]
@@ -753,7 +753,7 @@ hats:
       Confirm emit with `--output json` (`ok`/`recorded`), not by reading event files.
       If policy-check rejects the payload, use the feedback fields to locate the topic/field/path, repair the report or payload from visible artifacts, rerun `test -f`, then rerun policy-check. Stop without a real emit until it returns `ok`.
       Artifact-first: write the operator report, `test -f` it from the repo root, put that **workspace-root-relative** path in
-      `report_path` (`.ralph/post-merge/REPORT.md`, never `post-merge/REPORT.md`), then print `DELIVERABLE_PATH` in the visible reply.
+      `report_path` (`.ralph/post-merge/REPORT.html`, never `post-merge/REPORT.html`), then print `DELIVERABLE_PATH` in the visible reply.
       Schema only checks the field is non-empty — admission joins the path with the workspace root, so stripping `.ralph/` fails.
 
       ### Observe
@@ -761,7 +761,15 @@ hats:
       Do not delete or empty `.ralph/post-merge/` — lifecycle cleanup is operator-owned.
 
       ### Write operator report (required)
-      Create `.ralph/post-merge/REPORT.md` (or `.ralph/post-merge/reports/<timestamp>.md` if you need a stamped copy; then use that as `report_path`) containing at least:
+      Before writing, load the shared HTML guidance:
+      `ralph tools skill load ralph-html`, then
+      `ralph tools skill load ralph-html-design` and
+      `ralph tools skill load ralph-html-ref-documents-and-presentations`;
+      follow their self-contained / offline / escaping rules. If a load
+      fails, still write honest minimal self-contained HTML — never
+      present a Markdown file as the final deliverable.
+
+      Create `.ralph/post-merge/REPORT.html` (or `.ralph/post-merge/reports/<timestamp>.html` if you need a stamped copy; then use that as `report_path`) containing at least:
       1. **结论** — PASS / PASS WITH ACCEPTED RISKS / FAIL (must match closer verdict) + verdict_confidence
       2. **本轮做了什么** — short stage summary (baseline → map → six audits → test-gap → reproduce/fix loops → clean → final review)
       3. **产物路径清单** — every important file path (01–15, findings dir, REPORT itself)

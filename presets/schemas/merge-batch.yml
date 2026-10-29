@@ -146,7 +146,7 @@ schemas:
         fill_rule: Array of {branch, reason} objects; no overlap with `branches_merged`.
       merge_commit_shas:
         meaning: SHAs of merge commits created during this run, for the reporter
-          to include in REPORT.md.
+          to include in REPORT.html.
         source: Integrator writes from `git rev-parse HEAD` after each successful merge.
         fill_rule: Array of full commit SHAs.
       integration_path:
@@ -378,9 +378,9 @@ schemas:
         fill_rule: true only when merge.stabilized.passed is true; otherwise false.
       report_path:
         meaning: Artifact落盘点，相对仓库根目录 `.ralph/` 的 operator-facing merge report 路径。Agent must verify the file is readable before emit.
-        source: File actually written this activation under .ralph/merge/ (typically REPORT.md).
+        source: File actually written this activation under .ralph/merge/ (typically REPORT.html).
         fill_rule: Real readable path only. Agent must verify the file exists before emit (schema checks the field is present, not the filesystem). Confirm must print DELIVERABLE_PATH with the same path.
-        examples: [".ralph/<plan>/REPORT.md"]
+        examples: [".ralph/<plan>/REPORT.html"]
       scope_manifest_path:
         meaning: Artifact落盘点，相对仓库根目录 `.ralph/` 的 scope manifest JSON 路径 retained for audit.
         source: Reporter copies from `merge.stabilized.scope_manifest_path` after reading it.
@@ -391,23 +391,23 @@ schemas:
         source: Reporter copies from the validated `merge.stabilized` payload.
         fill_rule: Must match the recomputed manifest digest; never hand-write.
       scope_status:
-        meaning: Final scope resolution status recorded in REPORT.md.
+        meaning: Final scope resolution status recorded in REPORT.html.
         source: Reporter copies from `merge.stabilized.scope_status`.
         fill_rule: One of `resolved | ambiguous | blocked`.
       scope_base_sha:
-        meaning: Target-before-merge SHA recorded in REPORT.md.
+        meaning: Target-before-merge SHA recorded in REPORT.html.
         source: Reporter copies from `merge.stabilized.scope_base_sha`.
         fill_rule: Exact 40-character SHA from the validated handoff.
       scope_source:
-        meaning: Provenance of the scope base recorded in REPORT.md.
+        meaning: Provenance of the scope base recorded in REPORT.html.
         source: Reporter copies from `merge.stabilized.scope_source`.
         fill_rule: One of `explicit | direct-target | branch-merge | inferred`.
       overall_confidence:
-        meaning: Scope evidence confidence recorded in REPORT.md.
+        meaning: Scope evidence confidence recorded in REPORT.html.
         source: Reporter copies from `merge.stabilized.overall_confidence`.
         fill_rule: One of `0 | 85 | 90 | 100`.
       critical_unknown_count:
-        meaning: Unresolved critical scope fact count recorded in REPORT.md.
+        meaning: Unresolved critical scope fact count recorded in REPORT.html.
         source: Reporter copies from `merge.stabilized.critical_unknown_count`.
         fill_rule: Non-negative integer; report any non-zero value as an unresolved risk.
       proceed:

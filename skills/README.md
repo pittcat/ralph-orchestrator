@@ -7,8 +7,9 @@ It ships operator skills:
 
 | Skill | Purpose |
 |---|---|
+| `ralph-html` | HTML deliverable guidance bundle: the Ralph entry skill plus the vendored Effective HTML collection (`vendor/`); bound by every entry that ships a human-readable final artifact |
 | `ralph-preset-author` | Draft presets (builtin + local) with per-hat AAF tables **+ payload contract notes** before review |
-| `ralph-preset-review` | Per-hat activation dry-run + **payload audit** + mechanical lint → `preset-review-report.md` |
+| `ralph-preset-review` | Per-hat activation dry-run + **payload audit** + mechanical lint → `preset-review-report.html` |
 | `ralph-project-bootstrap` | Audit a target project via ONE unified pipeline entry (`bootstrap_pipeline.py`), generate or safely update the preset-bound `ralph.<stem>.yml` + `PROMPT.<stem>.md` suite and the AGENTS.md / CLAUDE.md managed sections from an existing preset, run staged validation, and hand off the official launch command (`dry-run green != loop closed`) |
 | `ralph-run-diagnosis` | Post-run deep diagnosis: artifacts, OPAC, mechanism vs preset attribution |
 | `ralph-task-discovery` | Structured task discovery before formal planning: environment-sourced evidence, one-question-at-a-time business decisions, and a validated task brief handed off to `ralph-preset-author` |

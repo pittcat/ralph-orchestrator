@@ -54,6 +54,7 @@ core:
   specs_dir: ".agents/scratchpad/"
   guardrails:
     - "每次迭代都使用全新上下文——每次都重新读取 autoresearch.md 和 git log"
+    - "最终报告为 HTML：在发出 `LOOP_COMPLETE` 之前，先写 `autoresearch.html` —— 一个由 `autoresearch.md` 渲染而来、自包含、可离线打开的 HTML 会话报告（先运行 `ralph tools skill load ralph-html`，再运行 `ralph tools skill load ralph-html-artifact`、`ralph tools skill load ralph-html-design` 和 `ralph tools skill load ralph-html-ref-documents-and-presentations`，并遵守其规则）。文件存在且可读后才发出 `LOOP_COMPLETE`。如果指导无法加载，改用 `experiment.blocked` 并写明加载失败原因，不得宣称完成。"
     - "主要指标为王——改善了 = 保留，更差/持平 = 丢弃"
     - "注意不要过度拟合基准测试，也不要在基准测试上作弊"
     - "越简单越好——为同等指标删除代码 = 保留"
@@ -182,8 +183,9 @@ hats:
       2. 从不同角度考虑方案
       3. 检查 "What's Been Tried" 中的条目是否可以组合
       4. 如果确实已穷尽，用最终摘要更新 autoresearch.md
-      5. 发出：`ralph emit "LOOP_COMPLETE" "All experiment paths exhausted — see autoresearch.md for summary"`
-      6. 发出后停止。不要发送一个假的实验走过场。
+      5. 按 guardrail 写出最终 `autoresearch.html` 报告，并确认其可读。
+      6. 发出：`ralph emit LOOP_COMPLETE --json '{"reason":"All experiment paths exhausted - see autoresearch.html for the session report","report_path":"autoresearch.html"}'`
+      7. 发出后停止。不要发送一个假的实验走过场。
 
       ### 约束
       - 你不得实现代码变更 —— 这属于实现者
@@ -476,6 +478,7 @@ Result: {\"status\":\"keep\",\"<metric_name>\":<value>}"
 
       策略师通过直接发出 LOOP_COMPLETE 来处理思路枯竭。
       评估者仅应在每个剩余实验都崩溃且循环卡住时发出 LOOP_COMPLETE。
+      发出前，评估者按 guardrail 写出 `autoresearch.html`，并在 payload 中携带 `report_path=autoresearch.html`。
 
       ### 约束
       - 你不得修改源文件 —— 只允许 git 操作和实验记录

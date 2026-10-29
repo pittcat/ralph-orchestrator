@@ -38,7 +38,7 @@
 #     unit.template.yml             → execution-plan.yml units[]
 #     execution-plan.template.yml   → execution-plan.yml
 #     unit-completion.template.md   → units/<id>-completion.md
-#     manager-report.template.md    → docs/reports/<date>-<task>-manager-report.md
+#     manager-report.template.html  → docs/reports/<date>-<task>-manager-report.html
 
 topic_format_whitelist:
   - LOOP_COMPLETE
@@ -1155,7 +1155,7 @@ hats:
 
   reporter:
     name: "Reporter"
-    description: "Writes manager-readable Markdown report; terminal hat."
+    description: "Writes manager-readable self-contained HTML report; terminal hat."
     triggers: [forge.cleanup.done]
     publishes: [forge.report.done, LOOP_COMPLETE]
     exempt_topics: [forge.report.done, LOOP_COMPLETE]
@@ -1181,8 +1181,18 @@ hats:
 
       If the templates directory is missing:
       `ralph preset materialize-artifacts parallel-forge --plan-key <plan_key>`
-      Copy `manager-report.template.md` to
-      `docs/reports/<YYYY-MM-DD>-<task-name>-manager-report.md`
+      Copy `manager-report.template.html` to
+      `docs/reports/<YYYY-MM-DD>-<task-name>-manager-report.html`
+
+      Before writing the report, load the shared HTML guidance:
+      `ralph tools skill load ralph-html`, then
+      `ralph tools skill load ralph-html-design` and
+      `ralph tools skill load ralph-html-ref-documents-and-presentations`.
+      Follow their self-contained / offline / escaping rules — the report
+      must open correctly when double-clicked from disk with no network.
+      If a load fails, do NOT claim completion: still write the report as
+      honest minimal self-contained HTML, but never present a Markdown
+      file as the final deliverable.
 
       ### Step 1 — Observe (artifact-first; do not scan event history)
 
@@ -1202,6 +1212,8 @@ hats:
       - `<forge_artifact_root>/development-plan.md` and `execution-plan.yml`
       - `units/*-completion.md`, `units/*-review.md`, and `units/*-verification.md` if present
       - `worktree-map.yml`, `full-verification.md`, and `final-audit.md` if present
+      (these upstream evidence artifacts stay Markdown; only the final
+      manager report is HTML)
       - the complete `context_artifact_path`
 
       For `forge.finalized`, the finalizer should have verified terminal artifacts
@@ -1238,8 +1250,8 @@ hats:
          reason and trigger context in the report appendix, then stop and let
          `ralph run` resume naturally.
       3. Emit `LOOP_COMPLETE` as the reporter's narrow dual-terminal exception with
-         the same `report_path`; runtime rejects mismatches with the accepted
-         `forge.report.done` path.
+         the same `report_path` (the accepted `.html` manager report); runtime
+         rejects mismatches with the accepted `forge.report.done` path.
       4. Print `DELIVERABLE_PATH: <report_path>`.
 
       ### Resume rules

@@ -437,3 +437,148 @@ fn test_skill_list_backend_filter_and_hat_filter_both_apply() {
     // is filtered out. Either way, no error is raised.
     let _ = stdout; // shape verified by surrounding tests
 }
+
+// ---- Plan 2026-10-29-1053 U2: ralph-html namespaced builtin skills ----
+
+/// Human CLI (no agent env) can load the ralph-html entry skill in a
+/// bare workspace — no `.claude/skills` dir and no source checkout
+/// needed because the guidance is embedded in the binary.
+#[test]
+fn test_skill_load_ralph_html_entry_without_user_dirs() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+
+    let stdout = ralph_skill_ok(temp_path, &["load", "ralph-html"]);
+    assert!(stdout.contains("<ralph-html-skill>"));
+    assert!(stdout.contains("Ralph HTML Deliverables"));
+    assert!(stdout.contains("ralph-html-artifact"));
+    assert!(stdout.contains("ralph tools skill load"));
+}
+
+/// The vendored report workflow loads with sibling/reference links
+/// rewritten to explicit namespaced load names — no `](../` or
+/// `](references/` targets may survive embedding.
+#[test]
+fn test_skill_load_ralph_html_artifact_rewrites_links() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+
+    let stdout = ralph_skill_ok(temp_path, &["load", "ralph-html-artifact"]);
+    assert!(stdout.contains("<ralph-html-artifact-skill>"));
+    assert!(
+        !stdout.contains("](../"),
+        "sibling link must be rewritten: {stdout}"
+    );
+    assert!(
+        !stdout.contains("](references/"),
+        "reference link must be rewritten: {stdout}"
+    );
+    assert!(stdout.contains("ralph tools skill load ralph-html-design"));
+    assert!(stdout.contains("ralph tools skill load ralph-html-ref-documents-and-presentations"));
+}
+
+/// A filesystem skill that claims a controlled `ralph-html*` name must
+/// not replace the embedded entry — the built-in content wins.
+#[test]
+fn test_skill_load_controlled_name_refuses_file_replacement() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+
+    write_skill(
+        temp_path,
+        "ralph-html",
+        r"---
+name: ralph-html
+description: unvetted external copy
+---
+
+UNVETTED-EXTERNAL-CONTENT
+",
+    );
+
+    let stdout = ralph_skill_ok(temp_path, &["load", "ralph-html"]);
+    assert!(stdout.contains("Ralph HTML Deliverables"));
+    assert!(
+        !stdout.contains("UNVETTED-EXTERNAL-CONTENT"),
+        "controlled entry must not be replaced by a filesystem skill: {stdout}"
+    );
+
+    // The refused file also cannot shadow via `skill list` — the entry
+    // shown is the built-in (identical name but built-in source).
+    let list = ralph_skill_ok(temp_path, &["list", "--format", "json"]);
+    assert!(list.contains("\"ralph-html\""));
+    assert!(list.contains("\"built-in\""));
+}
+
+/// Default visibility scopes ralph-html skills to deliverable hats; an
+/// unrelated agent hat cannot read them even by name.
+#[test]
+fn test_skill_load_ralph_html_hidden_from_unrelated_hat() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+
+    let output = ralph_skill_with_env(
+        temp_path,
+        &[("RALPH_CURRENT_HAT", "worker")],
+        &["load", "ralph-html"],
+    );
+    assert!(
+        !output.status.success(),
+        "worker hat must not load ralph-html; status: {:?}",
+        output.status
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Ralph HTML Deliverables"),
+        "stdout must not contain skill body; got: {stdout}"
+    );
+
+    // …while the canonical deliverable hat can.
+    let output = ralph_skill_with_env(
+        temp_path,
+        &[("RALPH_CURRENT_HAT", "reporter")],
+        &["load", "ralph-html"],
+    );
+    assert!(
+        output.status.success(),
+        "reporter hat must load ralph-html; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `skills.overrides` can widen hat visibility for file presets whose
+/// deliverable hat is not in the canonical default list.
+#[test]
+fn test_skill_load_ralph_html_visibility_via_overrides() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    fs::write(
+        temp_path.join("ralph.yml"),
+        "skills:\n  enabled: true\n  overrides:\n    ralph-html:\n      hats:\n        - scribe\n",
+    )
+    .expect("write ralph.yml");
+
+    let output = ralph_skill_with_env(
+        temp_path,
+        &[("RALPH_CURRENT_HAT", "scribe")],
+        &["load", "ralph-html"],
+    );
+    assert!(
+        output.status.success(),
+        "scribe hat must load ralph-html after override; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // A hat that was in the default list but not in the override list
+    // loses visibility (override replaces, not merges).
+    let output = ralph_skill_with_env(
+        temp_path,
+        &[("RALPH_CURRENT_HAT", "reporter")],
+        &["load", "ralph-html"],
+    );
+    assert!(
+        !output.status.success(),
+        "override replaces the default hat list; status: {:?}",
+        output.status
+    );
+}

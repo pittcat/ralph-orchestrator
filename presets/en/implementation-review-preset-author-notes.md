@@ -25,17 +25,17 @@
   - 不读取 `.ralph/events.jsonl` / `.ralph/loops.json` /
     `.ralph/supervisor.db` 作为业务 artifact 接口(R0/visibility rule)。
 - **成功条件:** 生成 `LOOP_COMPLETE{result: clean | residual_only |
-  fixes_required, artifact_path: .ralph/review/<plan>/fix-plan.md}`。
+  fixes_required, artifact_path: .ralph/review/<plan>/fix-plan.html}`。
   `fixes_required` 是合法成功结果(KTD18:发现 P0–P2 不等于 preset 失败)。
 - **阻塞条件:** 生成 `LOOP_COMPLETE{result: blocked, artifact_path:
-  .ralph/review/<plan>/{scope-blocked|review-blocked|wave-blocked}.md}`。
+  .ralph/review/<plan>/{scope-blocked|review-blocked|wave-blocked}.html}`。
   阻塞来源:scope 多候选/根 commit/merge 父歧义/Git 对象不可读/相关
   dirty/review 期间 tracked 漂移/wave fan-in 失败/synth 完整性失败。
 - **允许的修改范围:**
   - 业务 artifact:`.ralph/review/<plan>/` 下所有文件(scope manifest /
     patch / scope-analysis / review-context / scope-blocked /
-    dimensions/*.md / synthesized-review.md / fix-plan.md /
-    review-blocked.md / wave-blocked.md / git-state-* evidence)。
+    dimensions/*.md / synthesized-review.md / fix-plan.html /
+    review-blocked.html / wave-blocked.html / git-state-* evidence)。
   - 审计:`.ralph/agent/decisions.md` 追加行(scope-preparer 唯一允许的
     audit file)。
   - 其它路径:严格只读。tracked source / 计划文件 / 其它 worktree
@@ -54,7 +54,7 @@
     阻塞时由 reviewer 查,保留)
   - `.ralph/review/<plan>/review-context.md`(scope-preparer → six
     workers,保留)
-  - `.ralph/review/<plan>/scope-blocked.md`(scope-preparer → finalizer
+  - `.ralph/review/<plan>/scope-blocked.html`(scope-preparer → finalizer
     触发 `LOOP_COMPLETE{result: blocked}`,保留)
   - `.ralph/review/<plan>/dispatch-batch/payloads.jsonl`(review-dispatcher
     → 自身 OPAC verify/emit 输入,loop 完成后清理或归档到 dispatch
@@ -65,11 +65,11 @@
     (六 worker → audit,保留)
   - `.ralph/review/<plan>/synthesized-review.md`(review-synthesizer
     → fix-planner,保留)
-  - `.ralph/review/<plan>/review-blocked.md`(review-synthesizer →
+  - `.ralph/review/<plan>/review-blocked.html`(review-synthesizer →
     finalizer,保留)
-  - `.ralph/review/<plan>/fix-plan.md`(fix-planner → finalizer,
+  - `.ralph/review/<plan>/fix-plan.html`(fix-planner → finalizer,
     保留;loop completion 后 operator 可读取并喂给后续 fix executor)
-  - `.ralph/review/<plan>/wave-blocked.md`(finalizer 自写 → LOOP_COMPLETE
+  - `.ralph/review/<plan>/wave-blocked.html`(finalizer 自写 → LOOP_COMPLETE
     引用,保留)
 - **execution_model:** wave
   **why:** 六维独立 review 同 topic 批并行 fan-out;不开 supervisor
@@ -95,7 +95,7 @@
     payload 索取。
 - **用户确认:** 已确认(三个关键问题:execution_model=wave,
   finalizer LOOP_COMPLETE 仅 result+artifact_path,
-  阻塞 handoff=scope.blocked+review.blocked+finalizer 自写 wave-blocked.md)。
+  阻塞 handoff=scope.blocked+review.blocked+finalizer 自写 wave-blocked.html)。
 
 ---
 
@@ -200,10 +200,10 @@
 1. **每条写入型 hat 是否声明了当前 `.ralph/` 下的 artifact 路径集合,
    且拓扑层没有把这些路径描述为「preset 创建」?**
    ✓ + scope-preparer 声明 scope-manifest.json / review.diff.patch /
-   scope-analysis.md / review-context.md / scope-blocked.md;
+   scope-analysis.md / review-context.md / scope-blocked.html;
    review-worker 声明 dimensions/<dim>.md + git-state evidence;
-   review-synthesizer 声明 synthesized-review.md / review-blocked.md;
-   fix-planner 声明 fix-plan.md;finalizer 自写 wave-blocked.md(仅
+   review-synthesizer 声明 synthesized-review.md / review-blocked.html;
+   fix-planner 声明 fix-plan.html;finalizer 自写 wave-blocked.html(仅
    review.wave.failed 路径)。YAML 顶部注释明确"6-hat topology,
    该 hat 写入...",**不**写"preset creates X.md"。
 2. **每条 consumer hat 的 instructions 是否要求从路径读完整内容,不是
@@ -236,7 +236,7 @@
    审计价值和下游依赖解释,而非只按字符数判断?**
    ✓ + 终态 `LOOP_COMPLETE.result` 是单 token verdict(短状态),
    不落盘例外 — 理由:短暂(activation 内有效)、短小(枚举值)、无
-   下游历史依赖(reviewer 业务事实已落在 fix-plan.md / block
+   下游历史依赖(reviewer 业务事实已落在 fix-plan.html / block
    artifact)。`scope_digest` / `patch_digest` 是 digests 不落盘 —
    理由:非业务内容,仅作为 identity 摘要,完整内容已落盘。
    `count` 字段(`p0_count` / `findings_count` 等)不落盘例外 —
@@ -310,7 +310,7 @@
     `summary_fields` + `routing_hints`)读 → 同时通过 `Read
     scope_manifest_path` 取得 canonical scope。
   - 阻塞路径:`scope.blocked` payload → finalizer 通过 trigger payload
-    读 `block_artifact_path` → `Read scope-blocked.md` 验证
+    读 `block_artifact_path` → `Read scope-blocked.html` 验证
     reason code。
 
 ### Payload Contract — scope-preparer
@@ -326,8 +326,8 @@
 | `scope.ready` | `patch_digest` | string(64 hex) | scope-preparer Step 3 `sha256sum` | 本 hat work 输出 | 写后重算对齐 | worker / synthesizer / finalizer identity check | `field_docs.patch_digest.fill_rule` 禁手写 | 必填 · digest 落到 `scope-manifest.json` 与 event |
 | `scope.ready` | `scope_manifest_path` | string | scope-preparer Step 5a Write tool | 本 hat work 输出 | 文件存在可读 | dispatcher / synthesizer / finalizer 读完整 manifest | `field_docs.scope_manifest_path.fill_rule` 禁构路径 | 必填 · 路径 `.ralph/review/<plan>/scope-manifest.json` |
 | `scope.ready` | `dirty_verdict` | enum | scope-preparer Step 4 决议 | 本 hat work 输出 | 与 manifest `dirty_verdict` 字段对齐 | dispatcher 路由(`scope_clean` / `scope_dirty_blocked` hints) | `field_docs.dirty_verdict.fill_rule` 枚举 `clean | blocked` | 不落盘·短暂 verdict,审计已在 `scope-analysis.md` |
-| `scope.blocked` | `reason` | enum string | scope-preparer Step 5b/Step 6 决议 | 本 hat work 输出 | 与 block artifact `reason` 字段对齐 | finalizer 路由,reviewer 查阻塞根因 | `field_docs.reason.fill_rule` 枚举 11 个 canonical code | 必填 · 完整 evidence 落到 `scope-blocked.md`;event 只带 short code |
-| `scope.blocked` | `block_artifact_path` | string | scope-preparer Step 5b Write tool | 本 hat work 输出 | 文件存在可读 | finalizer 读完整 block evidence | `field_docs.block_artifact_path.fill_rule` 禁构路径 | 必填 · 路径 `.ralph/review/<plan>/scope-blocked.md` |
+| `scope.blocked` | `reason` | enum string | scope-preparer Step 5b/Step 6 决议 | 本 hat work 输出 | 与 block artifact `reason` 字段对齐 | finalizer 路由,reviewer 查阻塞根因 | `field_docs.reason.fill_rule` 枚举 11 个 canonical code | 必填 · 完整 evidence 落到 `scope-blocked.html`;event 只带 short code |
+| `scope.blocked` | `block_artifact_path` | string | scope-preparer Step 5b Write tool | 本 hat work 输出 | 文件存在可读 | finalizer 读完整 block evidence | `field_docs.block_artifact_path.fill_rule` 禁构路径 | 必填 · 路径 `.ralph/review/<plan>/scope-blocked.html` |
 | `scope.blocked` | `scope_digest` | string(16-64 hex) | 同上 | 本 hat work 输出 | 与 manifest / block artifact 对齐 | identity check | `field_docs.scope_digest.fill_rule` 禁手写 | 必填 |
 
 ---
@@ -446,7 +446,7 @@
   重读 → 重算 counts → `ralph emit --policy-check`)→ Apply(
   `ralph emit review.synthesized` 去掉 `--policy-check`)→ Confirm(
   `ralph events --events-source hat-channel`)。阻塞路径类似但发
-  `review.blocked`,先写 `review-blocked.md`。
+  `review.blocked`,先写 `review-blocked.html`。
 - **Q4 输出(topic + payload 合同):** `review.synthesized` payload
   携带 counts + `synthesized_review_file` 路径 + 七个 identity 字段;
   或 `review.blocked` payload 携带 reason + `block_artifact_path`。
@@ -465,8 +465,8 @@
 | `review.synthesized` | `findings_count` / `p0_count` / `p1_count` / `p2_count` / `p3_count` | int ≥0 | 本 hat Step 3 dedupe + rank 后写 artifact,再回填 | 本 hat work 输出 | 与 artifact frontmatter 对齐 | fix-planner 决定 `result`;finalizer 终态 | 五个字段 `fill_rule` 禁手写 | 不落盘·完整 findings 已落盘 synthesized-review.md |
 | `review.synthesized` | `handoff_precheck_failed_count` | int ≥0 | 本 hat Step 2 累积 | 本 hat work 输出 | 与六 dimensions 对齐 | fix-planner 路由(`handoff_precheck_failed` hint);finalizer fail-close | `field_docs.handoff_precheck_failed_count.fill_rule` 整数 | 不落盘·短暂 verdict,evidence 在 synthesized-review.md frontmatter |
 | `review.synthesized` | seven identity fields | string | 从 `scope.ready` 复制(`scope_digest` / `patch_digest` / `review_head_sha` / `first_implementation_commit_sha` / `resolved_baseline_sha` / `plan_name` / `plan_path`) | `## TRIGGER CONTEXT` 投影 | 与 manifest / patch 对齐 | fix-planner / finalizer identity check | 七个字段 `fill_rule` 禁手写 | 不落盘·本 hat 持有 |
-| `review.blocked` | `reason` | enum string | 本 hat Step 6 决议 | 本 hat work 输出 | 与 block artifact `reason` 对齐 | finalizer fail-close | `field_docs.reason.fill_rule` 枚举 5 个 canonical code | 必填 · 完整 evidence 落到 `review-blocked.md` |
-| `review.blocked` | `block_artifact_path` | string | 本 hat Step 6 Write tool | 本 hat work 输出 | 文件存在可读 | finalizer `Read` 验证 | `field_docs.block_artifact_path.fill_rule` 禁构路径 | 必填 · 路径 `.ralph/review/<plan>/review-blocked.md` |
+| `review.blocked` | `reason` | enum string | 本 hat Step 6 决议 | 本 hat work 输出 | 与 block artifact `reason` 对齐 | finalizer fail-close | `field_docs.reason.fill_rule` 枚举 5 个 canonical code | 必填 · 完整 evidence 落到 `review-blocked.html` |
+| `review.blocked` | `block_artifact_path` | string | 本 hat Step 6 Write tool | 本 hat work 输出 | 文件存在可读 | finalizer `Read` 验证 | `field_docs.block_artifact_path.fill_rule` 禁构路径 | 必填 · 路径 `.ralph/review/<plan>/review-blocked.html` |
 
 ---
 
@@ -475,27 +475,27 @@
 ### AAF 五问
 
 - **Q1 使命:** 把 P0–P2 转成 actionable Implementation Units(P3 → residual),
-  写 `fix-plan.md`,发 `fix.plan.ready`(`result` enum)。空 findings 仍
+  写 `fix-plan.html`,发 `fix.plan.ready`(`result` enum)。空 findings 仍
   生成结构完整、actionable_unit_count=0 的 fix plan。
 - **Q2 输入(Observe 命令 + 期望字段):**
   - 当前 trigger(`review.synthesized`)— 七 identity 字段 +
     `synthesized_review_file` + counts。
   - `Read synthesized_review_file`(Step 1)+ `Read scope-manifest.json`。
 - **Q3 执行(OPAC 命令序列):** Observe(trigger + synthesized
-  artifact + manifest)→ Precheck(写 fix-plan.md → 重读 →
+  artifact + manifest)→ Precheck(写 fix-plan.html → 重读 →
   `ralph emit --policy-check`)→ Apply(`ralph emit fix.plan.ready`)
   → Confirm(`ralph events --events-source hat-channel`)。
 - **Q4 输出(topic + payload 合同):** `fix.plan.ready` payload 携带
   seven identity 字段 + `fix_plan_file` + `result` + three counts。
 - **Q5 交接(emit 字段 → 下游 Observe 路径):** finalizer 通过
   trigger + `## TRIGGER CONTEXT` 读 `fix_plan_file` → `Read
-  fix-plan.md` 验证 counts + `result` → 发 `LOOP_COMPLETE`。
+  fix-plan.html` 验证 counts + `result` → 发 `LOOP_COMPLETE`。
 
 ### Payload Contract — fix-planner
 
 | topic | 字段 | 类型 | 值源 | 可见性 | 身份检查 | 下游消费 | schema metadata | artifact 落盘 |
 |---|---|---|---|---|---|---|---|---|
-| `fix.plan.ready` | `fix_plan_file` | string | 本 hat Step 3 Write tool | 本 hat 可见 | 文件存在可读 | finalizer `Read` 完整 | `field_docs.fix_plan_file.fill_rule` 禁构路径 | 必填 · 路径 `.ralph/review/<plan>/fix-plan.md` |
+| `fix.plan.ready` | `fix_plan_file` | string | 本 hat Step 3 Write tool | 本 hat 可见 | 文件存在可读 | finalizer `Read` 完整 | `field_docs.fix_plan_file.fill_rule` 禁构路径 | 必填 · 路径 `.ralph/review/<plan>/fix-plan.html` |
 | `fix.plan.ready` | `result` | enum | 本 hat Step 3 artifact frontmatter | 本 hat work 输出 | 与 artifact 对齐 | finalizer 路由 4 hint groups(`clean` / `residual_only` / `fixes_required` 等) | `field_docs.result.fill_rule` 枚举 3 个 success code | 不落盘·短暂 verdict,完整 plan 已落盘 |
 | `fix.plan.ready` | `implementation_unit_count` / `actionable_unit_count` / `residual_finding_count` | int ≥0 | 本 hat Step 3 artifact frontmatter | 本 hat work 输出 | 与 artifact body 对齐 | finalizer validation(fall-back to `blocked` on mismatch) | 三个字段 `fill_rule` 禁手写 | 不落盘·完整 plan 已落盘 |
 | `fix.plan.ready` | `source_review_file` | string | 当前 trigger `synthesized_review_file` 复制 | `## TRIGGER CONTEXT` | 文件存在可读 | finalizer 反向验证 source review | `field_docs.source_review_file.fill_rule` literal copy | 不落盘·路径已存在 |
@@ -508,17 +508,17 @@
 ### AAF 五问
 
 - **Q1 使命:** 唯一发布 `LOOP_COMPLETE`;在发之前验证 referenced artifact
-  (fix-plan.md / scope-blocked.md / review-blocked.md / wave-blocked.md),
+  (fix-plan.html / scope-blocked.html / review-blocked.html / wave-blocked.html),
   保证 `result` 与 `artifact_path` 一一对应且 digest 一致。
 - **Q2 输入(Observe 命令 + 期望字段):**
   - 当前 trigger 任一(`fix.plan.ready` / `scope.blocked` /
     `review.blocked` / `review.wave.failed`)。
   - 按 trigger 表读对应 artifact:
-    `Read fix-plan.md` / `Read scope-blocked.md` /
-    `Read review-blocked.md` / 自写 `Read wave-blocked.md`。
+    `Read fix-plan.html` / `Read scope-blocked.html` /
+    `Read review-blocked.html` / 自写 `Read wave-blocked.html`。
   - `Read scope-manifest.json`(任何路径都要对齐 scope_digest)。
 - **Q3 执行(OPAC 命令序列):** Observe(trigger + manifest + 对应
-  artifact)→ Precheck(可选:写 wave-blocked.md → 重读 →
+  artifact)→ Precheck(可选:写 wave-blocked.html → 重读 →
   `ralph emit --policy-check`)→ Apply(`ralph emit LOOP_COMPLETE`)→
   Confirm(`ralph events --events-source main`)。
 - **Q4 输出(topic + payload 合同):** `LOOP_COMPLETE` payload:
@@ -534,10 +534,10 @@
 | topic | 字段 | 类型 | 值源 | 可见性 | 身份检查 | 下游消费 | schema metadata | artifact 落盘 |
 |---|---|---|---|---|---|---|---|---|
 | `LOOP_COMPLETE` | `result` | enum | 本 hat Step 1 validation | 本 hat 决议 | 与 artifact `result` 对齐(fix-plan)或 reason code 对齐(block) | operator 路由;runtime 终态记录 | `field_docs.result.fill_rule` 枚举 4 个 code | 不落盘·短暂 verdict |
-| `LOOP_COMPLETE` | `artifact_path` | string | 本 hat Step 1 / Step 2 决议 | 本 hat 决议 | 文件存在可读 | operator / downstream 读 artifact | `field_docs.artifact_path.fill_rule` 禁构路径 | 必填 · artifact 已由上游 hat 落盘;finalizer 自写 wave-blocked.md |
+| `LOOP_COMPLETE` | `artifact_path` | string | 本 hat Step 1 / Step 2 决议 | 本 hat 决议 | 文件存在可读 | operator / downstream 读 artifact | `field_docs.artifact_path.fill_rule` 禁构路径 | 必填 · artifact 已由上游 hat 落盘;finalizer 自写 wave-blocked.html |
 | `LOOP_COMPLETE` | `scope_digest` | string(16-64 hex) | `Read scope-manifest.json` 取 | 本 hat 可见 | 与 manifest 对齐 | operator / downstream identity check | `field_docs.scope_digest.fill_rule` 禁手写 | 不落盘·digest 已落盘 manifest |
 | `LOOP_COMPLETE` | `plan_name` / `plan_path` | string | 当前 trigger 复制 | `## TRIGGER CONTEXT` | 与 manifest 对齐 | operator routing | 两字段 `fill_rule` 禁手写 | 不落盘·本 hat 持有 |
-| (finalizer 自产物,仅 review.wave.failed 路径) | `wave-blocked.md` | markdown | finalizer Step 2 Write tool | 本 hat 可见 | YAML frontmatter 解析 | 本 hat Step 3 emit 引用 | 不适用(是 artifact) | 必填 · 路径 `.ralph/review/<plan>/wave-blocked.md` |
+| (finalizer 自产物,仅 review.wave.failed 路径) | `wave-blocked.html` | markdown | finalizer Step 2 Write tool | 本 hat 可见 | YAML frontmatter 解析 | 本 hat Step 3 emit 引用 | 不适用(是 artifact) | 必填 · 路径 `.ralph/review/<plan>/wave-blocked.html` |
 
 ---
 

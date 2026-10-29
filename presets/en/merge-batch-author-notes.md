@@ -34,9 +34,9 @@
 - **目标：** Git-first batch merge — review design intent and conflict strategy, merge multiple worktree branches into a target branch, stabilize with verify-fix-retest self-loop, then write a merge report.
 - **操作者与启动路径：** `ralph run -H builtin:merge-batch -P merge.prompt.md` 或 `ralph run -c ralph.merge.yml -H builtin:merge-batch`
 - **输入与事实源：** target branch（默认 main）+ ordered branch list from `git worktree list`；prompt 不提供时用 git-first discovery
-- **成功条件：** `merge.stabilized(passed: true)` + `merge.batch.complete(success: true)` + readable `.ralph/merge/REPORT.md`
+- **成功条件：** `merge.stabilized(passed: true)` + `merge.batch.complete(success: true)` + readable `.ralph/merge/REPORT.html`
 - **阻塞条件：** 任何 branch merge 失败 → `integration_complete: false` → stabilizer short-circuits → reporter 写 FAIL report
-- **允许的修改范围：** review.md / integration.md / stabilize-log.md / stabilize-state.json / report-input.md / scope-manifest.json / merge-boundary.json / REPORT.md
+- **允许的修改范围：** review.md / integration.md / stabilize-log.md / stabilize-state.json / report-input.md / scope-manifest.json / merge-boundary.json / REPORT.html
 - **必须独立执行的评审：** 无独立评审 hat；linear chain reviewer → integrator → stabilizer → reporter
 - **重要 artifact：**
   - `.ralph/merge/review.md` — reviewer 写，integrator 读
@@ -46,7 +46,7 @@
   - `.ralph/merge/stabilize-state.json` — stabilizer 写/读，贯穿自环
   - `.ralph/merge/report-input.md` — stabilizer 写，reporter 读
   - `.ralph/merge/merge-boundary.json` — integrator 写，stabilizer/reporter 读并校验（event evidence）
-  - `.ralph/merge/REPORT.md` — reporter 写，操作者读（required before `merge.batch.complete`）
+  - `.ralph/merge/REPORT.html` — reporter 写，操作者读（required before `merge.batch.complete`）
 
 ## Hard Questions — Artifact-First
 
@@ -71,7 +71,7 @@
 | merge.integrated | integrator | `.ralph/merge/integration.md` / `scope-manifest.json` | merge order, SHAs, conflicts; boundary + 独立 scope contract |
 | merge.retest | stabilizer | `.ralph/merge/stabilize-log.md` / `stabilize-state.json` | self-loop retry signal |
 | merge.stabilized | stabilizer | `.ralph/merge/report-input.md` / `scope-manifest.json` | passed + evidence manifest + boundary/scope echo |
-| merge.batch.complete | reporter | `.ralph/merge/REPORT.md` / `scope-manifest.json` | terminal completion token + final scope identity |
+| merge.batch.complete | reporter | `.ralph/merge/REPORT.html` / `scope-manifest.json` | terminal completion token + final scope identity |
 
 ## 7-Point Sync Checklist
 

@@ -14,7 +14,7 @@
 
 | 路径 | 内容 |
 |------|------|
-| `docs/report/*-diagnosis.md` | **主索引** — 历次跑后诊断 |
+| `docs/report/*-diagnosis.{md,html}` | **主索引** — 历次跑后诊断（新为 HTML，历史 `.md` 不回迁） |
 | `docs/achieved/report/` | 已归档诊断 |
 | `docs/brainstorms/` | 机制/preset 需求与根因讨论 |
 | `docs/plans/` | 修复 plan（status、U1-Ux 任务） |

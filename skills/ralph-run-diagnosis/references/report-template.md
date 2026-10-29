@@ -1,65 +1,80 @@
-# 诊断报告模板
+# 诊断报告模板（HTML 交付契约）
 
-落盘：`docs/report/YYYY-MM-DD-<preset-basename>-<loop_id>-diagnosis.md`
+落盘：`docs/report/YYYY-MM-DD-<preset-basename>-<loop_id>-diagnosis.html`
+
+报告是**自包含、离线可打开**的 HTML 文件：内联样式、无外部资源、
+HTML 特殊字符全部转义。写文件前先加载共享 HTML 指导：
+`ralph tools skill load ralph-html`，再 `ralph tools skill load ralph-html-design`
+与 `ralph tools skill load ralph-html-ref-documents-and-presentations`。
 
 参考样板：`docs/report/2026-07-04-ce-executor-serial-primary-20260704-115242-diagnosis.md`
+（历史 Markdown 样板不回迁；新报告一律 HTML）。
 
 置信度规程：[confidence-rubric.md](confidence-rubric.md)
 
 ---
 
-```markdown
----
-title: <preset> Loop `<loop_id>` 运行链路诊断报告
-date: YYYY-MM-DD
-type: diagnosis
-loop_id: <loop_id>
-preset: builtin:<name> 或 <preset_file>
-run_dir: <repo-relative run_dir>
-status: <一句话健康度>
-diagnostics_mode: FULL | MINIMAL | LOGS_ONLY | DISABLED
-bundle: present | finalized | degraded | legacy | missing   # 来自 §0.2 bundle-first 读取
-bundle_path: <rel-path-to-diagnosis-input.json>             # 同源；缺失时省略
+## 机器字段（`<head>` 内 ralph meta，全部 required）
+
+原来 frontmatter 的字段逐一声明为
+`<meta name="ralph:<field>" content="<value>">`；缺一即视为模板漂移：
+
+```text
+<meta name="ralph:title" content="<preset> Loop `<loop_id>` 运行链路诊断报告">
+<meta name="ralph:date" content="YYYY-MM-DD">
+<meta name="ralph:type" content="diagnosis">
+<meta name="ralph:loop_id" content="<loop_id>">
+<meta name="ralph:preset" content="builtin:<name> 或 <preset_file>">
+<meta name="ralph:run_dir" content="<repo-relative run_dir>">
+<meta name="ralph:status" content="<一句话健康度>">
+<meta name="ralph:diagnostics_mode" content="FULL | MINIMAL | LOGS_ONLY | DISABLED">
+<meta name="ralph:bundle" content="present | finalized | degraded | legacy | missing">   # 来自 §0.2 bundle-first 读取
+<meta name="ralph:bundle_path" content="<rel-path-to-diagnosis-input.json>">             # 同源；缺失时省略
 # U10 plan: causal 归因（DT7 机检，>85 严格门禁）
 # 来自 `ralph diagnose --causal` JSON；非 session 视图下省略
-causal_status: complete | incomplete | not_evaluable
-causal_confidence: <0-100, ralph diagnose --causal.confidence>
-causal_primary_domain: runtime | preset | agent | backend | diagnostic_capture_contract
-causal_rejected_hypotheses: <list, 4 落选域各自 ≥1 条反驳证据>
-causal_score_change: <list of {prev, current, delta, reason}；首次 N/A>
-history_search: disabled | preset-only | full   # 来自主 SKILL §0.1 的 AskUserQuestion；默认 disabled
-# plan 2026-08-12-001 fix-plan U3: bundle-first 报告配套 frontmatter 字段
-# 全部 required: true，缺一即视为模板漂移（grep 校验）
-structured_result_ref: "inline: summarized in report"  # JSON 只存在 DIAG_WORKDIR，清理后不在 target branch 留副本
-trace_status: present | missing | degraded | legacy        # runtime-trace.jsonl 读取状态
-feedback_status: present | missing | degraded | legacy     # feedback.jsonl 读取状态
-# plan 2026-08-15-1823 (U3): activation outcome 报告 frontmatter 字段
+<meta name="ralph:causal_status" content="complete | incomplete | not_evaluable">
+<meta name="ralph:causal_confidence" content="<0-100, ralph diagnose --causal.confidence>">
+<meta name="ralph:causal_primary_domain" content="runtime | preset | agent | backend | diagnostic_capture_contract">
+<meta name="ralph:causal_rejected_hypotheses" content="<list, 4 落选域各自 ≥1 条反驳证据>">
+<meta name="ralph:causal_score_change" content="<list of {prev, current, delta, reason}；首次 N/A>">
+<meta name="ralph:history_search" content="disabled | preset-only | full">   # 来自主 SKILL §0.1 的 AskUserQuestion；默认 disabled
+# plan 2026-08-12-001 fix-plan U3: bundle-first 报告配套字段，全部 required
+<meta name="ralph:structured_result_ref" content="inline: summarized in report">  # JSON 只存在 DIAG_WORKDIR，清理后不在 target branch 留副本
+<meta name="ralph:trace_status" content="present | missing | degraded | legacy">        # runtime-trace.jsonl 读取状态
+<meta name="ralph:feedback_status" content="present | missing | degraded | legacy">     # feedback.jsonl 读取状态
+# plan 2026-08-15-1823 (U3): activation outcome 字段
 # 仅记录 presence / classification 状态；具体行表在报告 §4.2 中展示
-activation_outcomes: present | missing | degraded | legacy  # runtime-trace.jsonl 中 phase=activation/kind=hat_activation_outcome 行集状态
-evidence_gaps: <list of strings>                          # bundle reader / trace reader / feedback reader / activation outcome reader / causal attribution reader 上报的证据缺口
+<meta name="ralph:activation_outcomes" content="present | missing | degraded | legacy">  # runtime-trace.jsonl 中 phase=activation/kind=hat_activation_outcome 行集状态
+<meta name="ralph:evidence_gaps" content="<list of strings>">                          # bundle reader / trace reader / feedback reader / activation outcome reader / causal attribution reader 上报的证据缺口
+```
+
 ---
 
+## 报告正文（语义化 HTML 章节）
+
+`<body>` 按以下固定章节组织（`<section>` / `<h2>` 层级一致，章节标题与编号
+保持原样以便下游对账；表格一律 `<table>`）：
+
+```text
 # <preset> Loop `<loop_id>` 运行链路诊断报告
 
-> **生成时间**: ...
-> **诊断对象**: `<run_dir>/.ralph/`（loop_id=..., 启动 → 终止）
-> **对照 preset**: `<preset_file>` + `presets/schemas/<name>.yml`
-> **执行方式**: 4 sub-agent 并行（流程还原 / 历史 / 对账 / 归因）→ 汇总；**`history_search=disabled` 时仅 3 个 sub-agent**（Agent B 跳过）
-> **Diagnostics 模式**: FULL | MINIMAL | LOGS_ONLY | DISABLED
-> **history_search**: `disabled` | `preset-only` | `full`（默认 `disabled`）— 来自主 SKILL §0.1 AskUserQuestion
-> **execution_capabilities**: [single-chain | wave | supervisor | supervisor+wave | supervisor+dag 的子集]（Phase 0 推断结果；由 supervisor 配置、scheduler_mode、wave/DAG 业务证据等 capability 信号决定；**`ralph inspect loop` 的 `supervisor` 键**在 enabled 或盘上已有可打开 ledger 时出现，先 `has("supervisor")`；**禁止**按 builtin preset 名称点名；详见 `SKILL.md`「Phase 0 能力推断」段）
-> **报告仓库**: `ralph-orchestrator` 主仓（非 run_dir）
-> **Tier C 根**: （从 preset+schema 解析）
-> **置信度规则**: §5 仅收录 `status == complete`（DT7 机检 confidence > 85）；P0 同样要求 confidence > 85；`status == incomplete` / `not_evaluable` 移入 §7（见 confidence-rubric DT7）
-
----
+头部信息块（<dl> 或 <ul>，逐项对应原模板注释行）:
+  生成时间: ...
+  诊断对象: `<run_dir>/.ralph/`（loop_id=..., 启动 → 终止）
+  对照 preset: `<preset_file>` + `presets/schemas/<name>.yml`
+  执行方式: 4 sub-agent 并行（流程还原 / 历史 / 对账 / 归因）→ 汇总；`history_search=disabled` 时仅 3 个 sub-agent（Agent B 跳过）
+  Diagnostics 模式: FULL | MINIMAL | LOGS_ONLY | DISABLED
+  history_search: `disabled` | `preset-only` | `full`（默认 `disabled`）— 来自主 SKILL §0.1 AskUserQuestion
+  execution_capabilities: [single-chain | wave | supervisor | supervisor+wave | supervisor+dag 的子集]（Phase 0 推断结果；由 supervisor 配置、scheduler_mode、wave/DAG 业务证据等 capability 信号决定；`ralph inspect loop` 的 `supervisor` 键在 enabled 或盘上已有可打开 ledger 时出现，先 `has("supervisor")`；禁止按 builtin preset 名称点名；详见 `SKILL.md`「Phase 0 能力推断」段）
+  报告仓库: `ralph-orchestrator` 主仓（非 run_dir）
+  Tier C 根: （从 preset+schema 解析）
+  置信度规则: §5 仅收录 `status == complete`（DT7 机检 confidence > 85）；P0 同样要求 confidence > 85；`status == incomplete` / `not_evaluable` 移入 §7（见 confidence-rubric DT7）
 
 ## 0. 产物盘点（Phase 0 必附）
 
-| Tier | 路径 | 存在 | 行数 | 备注 |
-|------|------|------|------|------|
-| S | events（current-events 解析） | | | |
-| … | | | | |
+表格：| Tier | 路径 | 存在 | 行数 | 备注 |
+     | S | events（current-events 解析） | | | |
+     | … | | | | |
 
 **execution_capabilities 推断结果**（Phase 0 必填）: [single-chain / wave / supervisor / supervisor+wave / supervisor+dag 的子集] — 给出每个 capability 的判定信号 + 证据锚点（如 `event_loop.supervisor.enabled=true` / `scheduler_mode=dag` / events 中第一条 `wave_id` 或 `forge.unit.*` 行号 / ledger stat）。
 
@@ -70,8 +85,6 @@ evidence_gaps: <list of strings>                          # bundle reader / trac
 - 其它 Tier B 文件缺失按 manifest 既有规则判定（不因本 plan 改变）。
 
 **盲区 / 根因置信度硬顶**：（如 LOGS_ONLY → agent/OPAC 归因 ≤50，整行硬顶 75）
-
----
 
 ## 1. 结论摘要
 
@@ -84,12 +97,11 @@ evidence_gaps: <list of strings>                          # bundle reader / trac
 
 ### 1.2 强制四问（debug.md）
 
-| # | 问题 | 答案 | 一句证据 | 置信度 |
-|---|------|------|----------|--------|
-| Q1 | 整体执行与 OPAC 是否合规？ | ✅/❌/⚠️ | ... | NN |
-| Q2 | 基座机制是否正常生效？ | ✅/❌/⚠️ | ... | NN |
-| Q3 | 编排是否合理、正常运行？ | ✅/❌/⚠️ | ... | NN |
-| Q4 | 问题归因：机制 vs 编排 vs agent？ | ... | ... | NN（取 §5 主因） |
+表格：| # | 问题 | 答案 | 一句证据 | 置信度 |
+     | Q1 | 整体执行与 OPAC 是否合规？ | ✅/❌/⚠️ | ... | NN |
+     | Q2 | 基座机制是否正常生效？ | ✅/❌/⚠️ | ... | NN |
+     | Q3 | 编排是否合理、正常运行？ | ✅/❌/⚠️ | ... | NN |
+     | Q4 | 问题归因：机制 vs 编排 vs agent？ | ... | ... | NN（取 §5 主因） |
 
 ### 1.3 根因一句话
 
@@ -99,20 +111,18 @@ evidence_gaps: <list of strings>                          # bundle reader / trac
 
 > 强制分栏：先按 accepted event 确定首轮终态，再解释后续 artifact/commit 恢复。禁止用 mutable artifact 反向覆盖先前 accepted verdict。
 
-| 项目 | 内容 |
-|------|------|
-| **首轮终态（initial_terminal_status）** | 按 accepted audit/report 事件序列判定：首轮成功 / 首轮失败（REJECTED/FAILED/BLOCKED） / 证据不足 |
-| **恢复状态（recovery_status）** | 无恢复 / 失败终态后恢复（artifact 被改但无后续 accepted 成功事件） / 恢复后成功（有后续 accepted 成功事件） |
-| **最终代码状态（final_code_state）** | 按最终 Git diff / artifact 内容描述（仅陈述事实，不反写 event verdict） |
-| **一致性告警** | 若存在失败终态后恢复：输出「⚠️ 失败终态后恢复：首轮 audit/report 为 REJECTED/FAILED，后续 artifact 被修改但无对应 accepted 成功事件」；**禁止**输出「零拒收」或「首轮完整成功」 |
-
----
+表格：| 项目 | 内容 |
+     | **首轮终态（initial_terminal_status）** | 按 accepted audit/report 事件序列判定：首轮成功 / 首轮失败（REJECTED/FAILED/BLOCKED） / 证据不足 |
+     | **恢复状态（recovery_status）** | 无恢复 / 失败终态后恢复（artifact 被改但无后续 accepted 成功事件） / 恢复后成功（有后续 accepted 成功事件） |
+     | **最终代码状态（final_code_state）** | 按最终 Git diff / artifact 内容描述（仅陈述事实，不反写 event verdict） |
+     | **一致性告警** | 若存在失败终态后恢复：输出「⚠️ 失败终态后恢复：首轮 audit/report 为 REJECTED/FAILED，后续 artifact 被修改但无对应 accepted 成功事件」；**禁止**输出「零拒收」或「首轮完整成功」 |
 
 ## 2. 执行链路对比图
 
-（粘贴 Agent A 输出：拓扑表 + 时间轴 + mermaid）
-
----
+（粘贴 Agent A 输出：拓扑表 + 时间轴 + 关系图。HTML 交付下关系图用
+语义化表格 / 嵌套列表 / 内联 SVG 表达；**禁止** Mermaid/AACIM 代码块
+冒充图——加载 `ralph-html-ref-diagrams` / `ralph-html-diagram` 后按
+其规则渲染。）
 
 ## 3. 历史问题上下文
 
@@ -120,25 +130,20 @@ evidence_gaps: <list of strings>                          # bundle reader / trac
 
 （粘贴 Agent B：关联度表 + 复发对照）
 
----
-
 ## 4. 证据清单
 
-| ID | 描述 | 证据锚点 | 严重度 | DT7 分项来源 | 缺口 |
-|----|------|----------|--------|--------------|------|
-| DEV-001 | ... | file:line / event#L | P0 | coverage(+30) / integrity(+25) / correlation(+15) | freeze_window 缺 |
+表格：| ID | 描述 | 证据锚点 | 严重度 | DT7 分项来源 | 缺口 |
+     | DEV-001 | ... | file:line / event#L | P0 | coverage(+30) / integrity(+25) / correlation(+15) | freeze_window 缺 |
 
 ### 4.1 OPAC 逐 hat 审计表
 
-| Hat | O | P | A | C | 证据 | 置信度 |
-|-----|---|---|---|---|------|--------|
+表格：| Hat | O | P | A | C | 证据 | 置信度 |
 
 ### 4.2 Activation outcome 表（plan 2026-08-15-1823）
 
-> **⚠️ 启动条件**：仅当 frontmatter `activation_outcomes: present` 时填写本节。`missing` / `degraded` / `legacy` 时整节写 `N/A (activation outcomes unavailable)`，并把缺失原因写进 `evidence_gaps`。
+> **⚠️ 启动条件**：仅当 ralph meta `activation_outcomes: present` 时填写本节。`missing` / `degraded` / `legacy` 时整节写 `N/A (activation outcomes unavailable)`，并把缺失原因写进 `ralph:evidence_gaps`。
 
-| sequence | hat | status | backend_exit_code | watchdog | merge_succeeded | channel_bytes | terminal_obligation | classification | confidence | evidence_refs | notes |
-|----------|-----|--------|-------------------|----------|-----------------|---------------|---------------------|----------------|------------|---------------|-------|
+表格：| sequence | hat | status | backend_exit_code | watchdog | merge_succeeded | channel_bytes | terminal_obligation | classification | confidence | evidence_refs | notes |
 
 **列含义**：
 
@@ -157,55 +162,47 @@ evidence_gaps: <list of strings>                          # bundle reader / trac
 
 ### 4.3 Causal Attribution（plan 2026-08-26-1104, U10）
 
-> **⚠️ 启动条件**：仅当 frontmatter `causal_status` ∈ {`complete`, `incomplete`} 时填写本节。`not_evaluable`（legacy / v1 / 无契约）时整节写 `N/A (causal attribution unavailable)`，并把缺失原因写进 `evidence_gaps`。
+> **⚠️ 启动条件**：仅当 ralph meta `causal_status` ∈ {`complete`, `incomplete`} 时填写本节。`not_evaluable`（legacy / v1 / 无契约）时整节写 `N/A (causal attribution unavailable)`，并把缺失原因写进 `ralph:evidence_gaps`。
 
 `ralph diagnose --causal` 是归因事实唯一来源；agent 不另行打分。
 
 #### 4.3.1 DT7 分项 + 总置信度
 
-| DT7 项 | 分值 | 实测值（来自 `--causal`） | 来源 |
-|--------|------|---------------------------|------|
-| coverage | +30 | `<covered 边界数 / 8>` | `diagnosis-input.json` `boundary_coverage[]` |
-| integrity | +25 | `<join 一致计数 / 应一致计数>` | 三类收据 + ledger |
-| refutation | +20 | `<4 落选域反驳条数 / 4>` | `rejected_hypotheses[]` |
-| correlation | +15 | `<contract_digest 一致 / sequence 单调 / retry_key 对账 三项布尔>` | `runtime-trace.jsonl` |
-| freeze_window | +10 | `<evidence-window.jsonl 是否存在 + 首行 anomaly>` | `<session>/evidence-window.jsonl` |
-| **总置信度** | **max 100** | **`<--causal JSON .confidence>`** | `ralph diagnose --causal` |
+表格：| DT7 项 | 分值 | 实测值（来自 `--causal`） | 来源 |
+     | coverage | +30 | `<covered 边界数 / 8>` | `diagnosis-input.json` `boundary_coverage[]` |
+     | integrity | +25 | `<join 一致计数 / 应一致计数>` | 三类收据 + ledger |
+     | refutation | +20 | `<4 落选域反驳条数 / 4>` | `rejected_hypotheses[]` |
+     | correlation | +15 | `<contract_digest 一致 / sequence 单调 / retry_key 对账 三项布尔>` | `runtime-trace.jsonl` |
+     | freeze_window | +10 | `<evidence-window.jsonl 是否存在 + 首行 anomaly>` | `<session>/evidence-window.jsonl` |
+     | **总置信度** | **max 100** | **`<--causal JSON .confidence>`** | `ralph diagnose --causal` |
 
 #### 4.3.2 被否决假设（rejected_hypotheses）
 
-| 落选域 | 反驳证据类型 | 反驳证据引用 |
-|--------|----------------|----------------|
-| runtime | ... | `event:L<N>` / `recovery.jsonl:L<N>` |
-| agent | ... | ... |
-| backend | ... | ... |
-| diagnostic_capture_contract | ... | ... |
+表格：| 落选域 | 反驳证据类型 | 反驳证据引用 |
+     | runtime | ... | `event:L<N>` / `recovery.jsonl:L<N>` |
+     | agent | ... | ... |
+     | backend | ... | ... |
+     | diagnostic_capture_contract | ... | ... |
 
 > 仅记录 `primary_domain` 之外 4 个落选域；域枚举固定为 `runtime / preset / agent / backend / diagnostic_capture_contract`，**禁止**扩展。证据引用仅用 `file:line` 或 `*.jsonl:L<N>`，不复述具体 payload（per HARD RULE 4.8）。
 
 #### 4.3.3 分数变化（causal_score_change）
 
-| 重新打分原因 | 上次 total | 本次 total | Δ | primary_domain 是否变化 | 落选域反驳新增 |
-|--------------|------------|------------|---|--------------------------|------------------|
-| 加深：补 read 第二账本 | 70 | 95 | +25 | 否 | 无 |
-| 首次打分 | N/A (initial scoring) | 100 | — | — | — |
+表格：| 重新打分原因 | 上次 total | 本次 total | Δ | primary_domain 是否变化 | 落选域反驳新增 |
+     | 加深：补 read 第二账本 | 70 | 95 | +25 | 否 | 无 |
+     | 首次打分 | N/A (initial scoring) | 100 | — | — | — |
 
 > 禁止在分数变化小节捏造上次分数；首次写 `N/A (initial scoring)`。
 
----
-
 ## 5. 问题归因表（DT7 机检，confidence > 85）
 
-| 优先级 | 问题 | primary_domain | status | confidence | 证据 DEV | DT7 分项来源 | rejected_hypotheses | 历史关联 | 加深轮次 |
-|--------|------|----------------|--------|------------|----------|--------------|---------------------|----------|----------|
-| P0 | ... | preset | complete | 95 | DEV-00x | coverage / integrity / correlation / refutation / freeze_window | 4 落选域 | 高 | 1→95 |
-| P1 | ... | runtime | complete | 88 | DEV-00y | coverage / integrity / correlation / refutation | 4 落选域 | N/A (history disabled) | 0 |
+表格：| 优先级 | 问题 | primary_domain | status | confidence | 证据 DEV | DT7 分项来源 | rejected_hypotheses | 历史关联 | 加深轮次 |
+     | P0 | ... | preset | complete | 95 | DEV-00x | coverage / integrity / correlation / refutation / freeze_window | 4 落选域 | 高 | 1→95 |
+     | P1 | ... | runtime | complete | 88 | DEV-00y | coverage / integrity / correlation / refutation | 4 落选域 | N/A (history disabled) | 0 |
 
 > **历史关联列规则**：`history_search=disabled`（默认）一律 `N/A (history disabled)`；`preset-only` / `full` 才填高/中/低/新。
 >
 > **status 列规则**（U10 DT7）：仅 `status == complete`（confidence > 85）入表；`status == incomplete` / `not_evaluable` 移入 §7，不得入 §5 / §6。`primary_domain` 枚举固定 `runtime / preset / agent / backend / diagnostic_capture_contract`，**禁止**扩展。`rejected_hypotheses` 列每行固定 4 条（4 落选域各自 ≥1 条反驳），不全填视为工具漂移。
-
----
 
 ## 6. 修复建议
 
@@ -219,15 +216,12 @@ evidence_gaps: <list of strings>                          # bundle reader / trac
 
 每条：目标 | 改动 | 预期效果 | **关联置信度**
 
----
-
 ## 7. 未核实疑点（可选）
 
 confidence < 60 且已加深 2 轮仍不足；**不驱动修复**。
 
-| 候选问题 | 当前置信度 | blocked_by | 已做加深 |
-|----------|------------|------------|----------|
-| ... | 48 | 缺 agent-output | recovery+logs 已查 |
+表格：| 候选问题 | 当前置信度 | blocked_by | 已做加深 |
+     | ... | 48 | 缺 agent-output | recovery+logs 已查 |
 ```
 
 ---
@@ -241,5 +235,6 @@ confidence < 60 且已加深 2 轮仍不足；**不驱动修复**。
 - `rejected_hypotheses` 每行固定 4 条（4 落选域各自 ≥1 条反驳），不全填视为漂移。
 - 低置信度由 [confidence-rubric.md](confidence-rubric.md) DT7 重打分流程处理（不允许手算补分）。
 - 路径一律 **repo-relative**。
-- frontmatter 必含 `history_search: <disabled | preset-only | full>`（默认 `disabled`，与执行实际一致）。
-- frontmatter 必含 `causal_status` / `causal_confidence` / `causal_primary_domain` / `causal_rejected_hypotheses` / `causal_score_change`（session 视图）。
+- `<head>` 必含 `<meta name="ralph:history_search" content="<disabled | preset-only | full>">`（默认 `disabled`，与执行实际一致）。
+- `<head>` 必含 `ralph:causal_status` / `ralph:causal_confidence` / `ralph:causal_primary_domain` / `ralph:causal_rejected_hypotheses` / `ralph:causal_score_change` meta（session 视图）。
+- 报告必须自包含、离线可打开：内联样式、无 CDN/外部字体/外部图片、HTML 特殊字符转义；表格/章节结构与上方契约一致。

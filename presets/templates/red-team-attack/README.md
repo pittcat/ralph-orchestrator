@@ -17,8 +17,8 @@ ralph preset materialize-artifacts red-team-attack --plan-key <plan-key>
 |---|---|---|
 | `experiment.template.yml` | Experiment design + results | `.ralph/red-team/experiments/RTE-<NNN>.md` |
 | `finding.template.yml` | Formal finding fields | `.ralph/red-team/findings/RTF-<NNN>.md` |
-| `report.template.md` | Operator-facing report | `.ralph/red-team/REPORT.md` |
-| `plan.template.md` | Repair plan deliverable | `.ralph/red-team/PLAN.md` |
+| `report.template.html` | Operator-facing report | `.ralph/red-team/REPORT.html` |
+| `plan.template.html` | Repair plan deliverable | `.ralph/red-team/PLAN.html` |
 
 ## Rules
 

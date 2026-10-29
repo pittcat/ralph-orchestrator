@@ -447,7 +447,7 @@ fixture README §8、fixture 顶部注释与本表 ID 一一对应；review 命�
 
 | finding_id | description | severity | confidence起点 |
 |---|---|---|---|
-| `preset.capability_discovery_missing` | preset exercises a capability not covered in `preset-author-notes.md` | P1 | 60 |
+| `preset.capability_discovery_missing` | preset exercises a capability not covered in `preset-author-notes.html` | P1 | 60 |
 | `preset.review_evidence_coverage_gap` | review lacks evidence path to capability audit | P1 | 60 |
 
 ### Evidence-bound correction finding_id（review-only，plan 2026-08-06-001 U4）

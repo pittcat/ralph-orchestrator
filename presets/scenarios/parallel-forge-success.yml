@@ -62,8 +62,8 @@ scenarios:
         success: true
       - hat: reporter
         output: |
-          <event topic="forge.report.done">{"report_path":"docs/reports/pf.md","status":"COMPLETED","final_audit":"ACCEPTED","plan_key":"pf"}</event>
-          <event topic="LOOP_COMPLETE">{"report_path":"docs/reports/pf.md"}</event>
+          <event topic="forge.report.done">{"report_path":"docs/reports/pf.html","status":"COMPLETED","final_audit":"ACCEPTED","plan_key":"pf"}</event>
+          <event topic="LOOP_COMPLETE">{"report_path":"docs/reports/pf.html"}</event>
         success: true
     expect:
       start_event: forge.start

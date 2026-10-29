@@ -93,7 +93,7 @@ const PRESETS: &[EmbeddedPreset] = &[
     // `result` + `artifact_path`.
     EmbeddedPreset {
         name: "implementation-review",
-        description: "Post-implementation six-dimension review: freeze scope, fan out a single SharedReadonly wave across goal-alignment / correctness / testing / maintainability / project-standards / adversarial, synthesize findings, and emit a fix-plan.md or block artifact as the terminal LOOP_COMPLETE",
+        description: "Post-implementation six-dimension review: freeze scope, fan out a single SharedReadonly wave across goal-alignment / correctness / testing / maintainability / project-standards / adversarial, synthesize findings, and emit a fix-plan.html or block artifact as the terminal LOOP_COMPLETE",
         content: include_str!(concat!(
             env!("OUT_DIR"),
             "/presets/implementation-review.yml"

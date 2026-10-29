@@ -4,7 +4,7 @@ You are a systematic evaluator testing Ralph's hat collection presets.
 
 ## Objective
 
-Test each of the 12 hat collection presets in `presets/` and document your findings in a single consolidated report at `tools/preset-evaluation-findings.md`.
+Test each of the 12 hat collection presets in `presets/` and document your findings in a single consolidated report at `tools/preset-evaluation-findings.html`.
 
 ## Presets to Evaluate
 
@@ -63,55 +63,37 @@ Use these categories:
 
 ## Findings Document Structure
 
-Create `tools/preset-evaluation-findings.md` with this structure:
+Create `tools/preset-evaluation-findings.html` — a self-contained HTML file that opens offline in a browser (load `ralph tools skill load ralph-html`, `ralph tools skill load ralph-html-artifact`, and `ralph tools skill load ralph-html-design` first) — containing this structure (semantic order, not literal markup):
 
-```markdown
-# Hat Collection Preset Evaluation Findings
-
-**Evaluator**: Kiro CLI
-**Date**: <timestamp>
-**Ralph Version**: <version>
-
-## Executive Summary
-- Presets tested: X/12
-- Working well: X
-- Needs fixes: X
-- Critical bugs: X
-
-## Detailed Findings
-
-### 1. tdd-red-green.yml
-
-**Status**: ✅ Working | ⚠️ Partial | ❌ Broken
-
-**Test Task**: <what you tested>
-
-**Hat Flow**:
-```
-task.start → test_writer → test.written → implementer → ...
-```
-
-**What Worked**:
-- ...
-
-**Issues Found**:
-- 🐛 ...
-- 🎨 ...
-
-**Recommendations**:
-- ...
-
----
-
-### 2. adversarial-review.yml
-...
+```html
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Hat Collection Preset Evaluation Findings</title>
+<meta name="ralph:evaluator" content="Kiro CLI">
+<meta name="ralph:date" content="&lt;timestamp&gt;">
+<meta name="ralph:ralph_version" content="&lt;version&gt;">
+</head><body>
+<h1>Hat Collection Preset Evaluation Findings</h1>
+<section id="executive-summary"><h2>Executive Summary</h2>
+<ul><li>Presets tested: X/12</li><li>Working well: X</li>
+<li>Needs fixes: X</li><li>Critical bugs: X</li></ul></section>
+<section id="detailed-findings"><h2>Detailed Findings</h2>
+<article class="preset-finding" id="preset-tdd-red-green">
+<h3>1. tdd-red-green.yml — Status: ✅ Working | ⚠️ Partial | ❌ Broken</h3>
+<p><strong>Test Task</strong>: &lt;what you tested&gt;</p>
+<p><strong>Hat Flow</strong>: <code>task.start → test_writer → test.written → implementer → ...</code></p>
+<h4>What Worked</h4><ul><li>...</li></ul>
+<h4>Issues Found</h4><ul><li>🐛 ...</li><li>🎨 ...</li></ul>
+<h4>Recommendations</h4><ul><li>...</li></ul>
+</article>
+<!-- one <article class="preset-finding"> per preset -->
+</section></body></html>
 ```
 
 ## Completion Criteria
 
 You are done when:
 1. All 12 presets have been tested
-2. Findings are documented in `tools/preset-evaluation-findings.md`
+2. Findings are documented in `tools/preset-evaluation-findings.html`
 3. You've identified at least 3 actionable improvements
 
 Output `EVALUATION_COMPLETE` when finished.

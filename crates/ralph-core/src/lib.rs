@@ -137,6 +137,7 @@ pub mod runtime_contract;
 mod session_player;
 #[cfg(feature = "recording")]
 mod session_recorder;
+pub mod html_skills;
 pub mod skill;
 pub mod skill_registry;
 pub mod state;

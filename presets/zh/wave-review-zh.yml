@@ -110,7 +110,11 @@ hats:
       2. 按严重程度分类发现（关键 / 警告 / 建议）
       3. 注意多位审查者标记的同一区域
       4. 识别跨领域主题
-      5. 将报告写入 `.ralph/agent/review-report.md`
+      5. 将报告写为自包含 HTML 文件，放入 `.ralph/agent/review-report.html`
+         ——先运行 `ralph tools skill load ralph-html`，再运行
+         `ralph tools skill load ralph-html-artifact` 和
+         `ralph tools skill load ralph-html-design`，并遵守其离线/转义规则。
+         如果指导无法加载，不要发布 review.complete；改为报告加载失败。
       6. 发布 review.complete
 
       ### 报告格式

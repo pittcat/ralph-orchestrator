@@ -17,8 +17,8 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 - Designing event schema metadata (`field_docs` / `examples`) that lets agents repair policy-check failures
 - **Declaring schema-backed `trigger_context`** (`summary_fields` + `routing_hints` + `known_fields`) for trigger-consuming hats — collapses duplicated payload if/else in `instructions` into a single injected `## TRIGGER CONTEXT` block
 - Writing per-hat `instructions:` in isolated mode (one agent per activation)
-- Producing `preset-author-notes.md` (AAF 五问表 per hat) before review
-- **Per-key-hat scope and opt-in decision confidence gate (Author side)**: forming a Gate Scope table for hats that carry terminal authority, production mutation, phase branching, multi-hat aggregation, critical artifact production, or key handoff responsibility; asking the operator to choose hard/record/off before YAML drafting; recording the chosen metric matrix in `preset-author-notes.md`.
+- Producing `preset-author-notes.html` (AAF 五问表 per hat; self-contained HTML) before review
+- **Per-key-hat scope and opt-in decision confidence gate (Author side)**: forming a Gate Scope table for hats that carry terminal authority, production mutation, phase branching, multi-hat aggregation, critical artifact production, or key handoff responsibility; asking the operator to choose hard/record/off before YAML drafting; recording the chosen metric matrix in `preset-author-notes.html`.
 - **Artifact-First Handoff authoring** (R1–R7): declaring artifact 落盘点、消费方、生命周期责任，并在 Payload Contract 与 AAF 五问表中固化每一份重要信息的落盘判定
 - **模板文件压缩 instructions（软性推荐）**: 当 hat `instructions:` 需要承载大段固定格式文档（报告模板、计划模板、验收清单、SOP 步骤等）时，推荐采用 `presets/templates/` + `ralph preset materialize-artifacts` 机制（参考 `parallel-forge`），把模板内容移出 prompt、改为运行时复制填写，从而压缩上下文。此推荐不强制，但 author 应在 Drafting phase 前通过菜单询问用户是否采用。
 
@@ -123,7 +123,7 @@ ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format js
      | `Critical Ambiguities`              | `= 0`  (structurally enforced: cannot be individually disabled when the gate is enabled) |
      | `Critical Unverified Assumptions`   | `= 0`  (structurally enforced: cannot be individually disabled when the gate is enabled) |
    - **Critical checks are structural, not opinion**: when the gate is enabled the two `Critical ...` counts must be filled in for every Gate Scope hat; the agent is not free to mark them N/A. The `off` choice is the only way to skip them entirely; that choice preserves all existing AAF/Payload/lint rules.
-   - **What goes into `preset-author-notes.md`** — append a **Gate Scope** table after the Intent Confirmation:
+   - **What goes into `preset-author-notes.html`** — append a **Gate Scope** table after the Intent Confirmation (section `<section id="gate-scope">`):
 
      ```
      | Hat | Trigger reason | Applicable metrics | Evidence | Unverified assumptions | Critical ambiguities | Critical unverified assumptions | Mode | Decision |
@@ -188,7 +188,7 @@ ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format js
 
 2.5. **Capability discovery (mandatory for new presets / material changes)**：
    - Run `ralph capability inventory --format json` and walk each capability's `applies_when` field.
-   - For each capability the preset legitimately uses, ensure the corresponding review evidence path in `references/finding-rubric.md` / `agent-native-model.md` is cited in `preset-author-notes.md`.
+   - For each capability the preset legitimately uses, ensure the corresponding review evidence path in `references/finding-rubric.md` / `agent-native-model.md` is cited in `preset-author-notes.html`.
    - **Scope contract capability (merge-batch / post-merge-converge / red-team-attack presets)**：Three presets (`merge-batch`, `post-merge-converge`, `red-team-attack`) MUST independently write a byte-stable scope manifest and emit with `scope_status` / `scope_digest` / `scope_manifest_path` fields. Author must verify the emitting hat's `instructions` require:
      1. Writing the scope manifest to `.ralph/{merge,post-merge,red-team}/` before emit.
      2. Computing `scope_digest` as SHA-256 of canonical JSON bytes excluding the `scope_digest` value itself.
@@ -226,21 +226,23 @@ ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format js
        3) 部分采用 — 仅对最长的 1–2 个模板使用文件
      ```
    - **若用户选择采用**：在 preset 同级目录创建 `presets/templates/<preset>/`，把固定格式文档写成模板文件；在 `instructions:` 中只保留「先 materialize 再复制填写」的简短指引（参考 `presets/en/parallel-forge.yml` 的 planner / executor / reporter 写法）。**注意**：当前 runtime 仅内嵌 `parallel-forge` 的模板目录；若为新 preset 采用模板机制，需同步扩展 `crates/ralph-cli/src/builtin_artifact_templates.rs` 的 `templates_for_preset` 匹配分支（或改用本地文件路径方案），并更新 `crates/ralph-cli/build.rs` 的模板拷贝逻辑。
-   - **若用户选择不采用**：继续把模板内容写在 `instructions:` 内，author 需在 `preset-author-notes.md` 中记录「未采用模板文件机制」及理由，供 review 参考。
-   - **记录**：无论是否采用，都应在 `preset-author-notes.md` 的 Intent Confirmation 或对应 hat AAF 表旁注明该决定。
+   - **若用户选择不采用**：继续把模板内容写在 `instructions:` 内，author 需在 `preset-author-notes.html` 中记录「未采用模板文件机制」及理由，供 review 参考。
+   - **记录**：无论是否采用，都应在 `preset-author-notes.html` 的 Intent Confirmation 或对应 hat AAF 表旁注明该决定。
 
-4. **Assemble `preset-author-notes.md`** next to the preset YAML (all AAF tables + Payload Contract tables).
+4. **Assemble `preset-author-notes.html`** next to the preset YAML (all AAF tables + Payload Contract tables).
    - Put the confirmed `Preset Intent Confirmation` at the beginning so authoring and review share the same business baseline.
+   - **HTML 交付契约（HARD RULE）**：notes 是自包含、离线可打开的 HTML（内联样式、无外部资源、特殊字符转义）。写文件前先 `ralph tools skill load ralph-html`，再 `ralph tools skill load ralph-html-plan` 与 `ralph tools skill load ralph-html-design`，遵守其结构保真/离线/转义规则。若加载失败仍须写出诚实的最小自包含 HTML——禁止以 Markdown 冒充最终交付。
+   - **机器契约保留（HARD RULE）**：AAF 五问表、Payload Contract 表、Gate Scope 表、Key-stage event gate 表以固定 `<section id="intent-confirmation" | "gate-scope" | "key-stage-event-gate" | "aaf-<hat_id>" | "payload-contract-<hat_id>">` 组织；结构化字段（`key_stages` 等）必须原样放进 `<pre class="contract-yaml"><code>` 内嵌 YAML 块（YAML 内容不转义 `<`/`>` 之外字符，字段名与既有 schema 完全一致），使 `ralph-preset-review` 与其 fixtures/tests 可以从 HTML 中稳定提取同一组字段。HTML 正文中的表头文字与既有 Markdown 表头一致（review 按表头核对）。
 
 5. **Pre-review gate (MUST — do not skip):**
-   - Every hat has a complete AAF table **and** a complete Payload Contract table in `preset-author-notes.md`.
+   - Every hat has a complete AAF table **and** a complete Payload Contract table in `preset-author-notes.html`.
    - Hat count in notes **equals** hat count in YAML; per-emit-topic row count covers every material `publishes` entry.
    - No empty cells; no「待定」「同上」「上游会处理」「约定俗成」.
    - Every `task_id` / `task_key` / `step` row is marked `live required` with a concrete observation command.
    - Multi-trigger hats split Payload Contract by trigger, not collapsed into one row.
    - Required handoff / identity / decision fields have `field_docs` metadata or a documented reason why existing injected docs already explain the field.
    - Emitter instructions reference `ralph-tools-emit` Policy-Check feedback when they mention payload construction, `ralph emit`, `ralph wave emit`, required fields, or field shape.
-   - **Instructions ↔ schema required-fields SSOT 对账已完成**：每个 emitter 示例字段集合等于对应 schema 的 `required_fields`，并且每个字段都有可验证值源；在 `preset-author-notes.md` 记录 schema 行与 instructions 行证据。
+   - **Instructions ↔ schema required-fields SSOT 对账已完成**：每个 emitter 示例字段集合等于对应 schema 的 `required_fields`，并且每个字段都有可验证值源；在 `preset-author-notes.html` 记录 schema 行与 instructions 行证据。
    - Ask: "If I only received this hat's instructions + injection, can I complete Q1? Can I construct every Q4 field from visible sources?"
    - **Single-chain-first 5 问全 ✓**: 填 `references/author-checklist.md` 的「Hard questions — single-chain-first」段；任一 ✗ 必须改写或显式 justify。
    - **执行模型分支 Hard questions 全 ✓（按 model 分支强制 / N/A）**: 按 `references/author-checklist.md`「Hard questions — N/A 规则」段的模型-分支矩阵填：
@@ -285,9 +287,9 @@ ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format js
 
 ## Output Expectations
 
-- Confirmed `Preset Intent Confirmation` (embedded at the beginning of `preset-author-notes.md` for new presets or material behavior changes)
+- Confirmed `Preset Intent Confirmation` (embedded at the beginning of `preset-author-notes.html` for new presets or material behavior changes)
 - Updated preset YAML
-- `preset-author-notes.md` with one complete AAF table **+ one Payload Contract table** per hat
+- `preset-author-notes.html` with one complete AAF table **+ one Payload Contract table** per hat (self-contained HTML; contract fields also in `<pre class="contract-yaml"><code>`)
 - Updated schema metadata for agent-authored emit topics (`field_docs` / safe `examples`) or an explicit no-op rationale
 - Explicit handoff message: preset path + notes path → invoke `ralph-preset-review`
 

@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="ralph:template" content="red-team-attack/report.v1">
+<title>Red Team Attack Report</title>
+<!--
+  Copy to `.ralph/red-team/REPORT.html` and fill every section.
+  This is the operator-facing deliverable. Write for a decision-maker,
+  not for the agent that ran the loop.
+
+  Artifact lifecycle:
+    owner: reporter (writes this file)
+    readers: operator (final decision), independent-reviewer (audit trail)
+    retention: operator-owned; agents must not delete
+
+  Self-contained / offline: inline styles only, no external resources.
+  Load `ralph tools skill load ralph-html` + `ralph-html-design`
+  + `ralph-html-ref-documents-and-presentations` before writing.
+-->
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0 auto; max-width: 960px; padding: 2rem 1.25rem; line-height: 1.6; color: #1a1a1a; }
+  h1 { border-bottom: 3px solid #333; padding-bottom: .4rem; }
+  h2 { margin-top: 2.2rem; border-bottom: 1px solid #ccc; padding-bottom: .25rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .95rem; }
+  th, td { border: 1px solid #ccc; padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #f2f2f2; }
+  pre { background: #f6f6f6; border: 1px solid #ddd; padding: .8rem; overflow-x: auto; font-size: .85rem; }
+  code { background: #f2f2f2; padding: .1em .3em; }
+  .verdict { font-weight: 700; font-size: 1.1rem; }
+  @media print { body { max-width: none; } }
+</style>
+</head>
+<body>
+
+<h1>Red Team Attack Report</h1>
+
+<h2>结论</h2>
+<p class="verdict">PLAN_READY | PLAN_REJECTED</p>
+
+<h2>一句话摘要</h2>
+<p>&lt;one sentence: what was attacked, what was found, what is recommended&gt;</p>
+
+<h2>输入</h2>
+<ul>
+  <li>开发计划列表: <code>&lt;plans&gt;</code></li>
+  <li>目标分支: <code>&lt;branch&gt;</code></li>
+  <li>锁定 HEAD: <code>&lt;head_sha&gt;</code></li>
+  <li>锁定 tree: <code>&lt;tree_sha&gt;</code></li>
+</ul>
+
+<h2>执行摘要</h2>
+<ul>
+  <li>计划解析: X/Y plans resolved (commit match ≥85)</li>
+  <li>Patch 重建: attribution coverage Z%, critical claim traceability W%</li>
+  <li>攻击面识别: N surfaces</li>
+  <li>实验执行: M experiments (K passed gates, L rejected after retry)</li>
+  <li>正式 Finding: F findings (P0: a, P1: b, P2: c, P3: d)</li>
+</ul>
+
+<h2>正式 Finding 列表</h2>
+<table>
+  <thead>
+    <tr><th>ID</th><th>Severity</th><th>Title</th><th>Confidence</th><th>Evidence</th><th>Verifiability</th><th>Impact</th><th>Status</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>RTF-001</td><td>P1</td><td>...</td><td>92</td><td>88</td><td>91</td><td>87</td><td>IMPACT_QUALIFIED</td></tr>
+  </tbody>
+</table>
+
+<h2>被拒绝候选（Retry 耗尽后仍不达标）</h2>
+<table>
+  <thead>
+    <tr><th>Candidate</th><th>Failed Metric</th><th>Final Score</th><th>Threshold</th><th>Retry Attempts</th><th>Rejection Reason</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>RTE-003</td><td>verifiability</td><td>82</td><td>90</td><td>3</td><td>REJECTED_AFTER_RETRY_LOW_VERIFIABILITY</td></tr>
+  </tbody>
+</table>
+
+<h2>修复计划（PLAN.html 摘要）</h2>
+<ul>
+  <li>Unit 0: 锁定修复前基线</li>
+  <li>Unit 1: RTF-001 — Red → Green → Refactor → Regression</li>
+  <li>...</li>
+</ul>
+
+<h2>零回归约束检查清单</h2>
+<ul>
+  <li>☐ 先锁定现有行为</li>
+  <li>☐ 先生成失败测试</li>
+  <li>☐ 限制最小修复范围</li>
+  <li>☐ 禁止无关重构</li>
+  <li>☐ 逐 Finding 回归</li>
+  <li>☐ 跨计划集成回归</li>
+  <li>☐ 全量测试</li>
+  <li>☐ 静态检查</li>
+  <li>☐ 干净环境重建</li>
+  <li>☐ 独立最终审查</li>
+</ul>
+
+<h2>需要人工确认的问题（QUESTIONS.html）</h2>
+<ul>
+  <li>☐ 问题 1: ...</li>
+  <li>☐ 问题 2: ...</li>
+</ul>
+
+<h2>证据索引</h2>
+<ul>
+  <li>实验证据: <code>.ralph/red-team/evidence/RTE-*/**</code></li>
+  <li>原始日志: <code>.ralph/red-team/logs/**</code></li>
+  <li>Patch 存档: <code>.ralph/red-team/patches/**</code></li>
+  <li>独立审查: <code>.ralph/red-team/10-independent-review.md</code></li>
+</ul>
+
+<h2>交付声明</h2>
+<ul>
+  <li>DELIVERABLE_PATH: <code>.ralph/red-team/PLAN.html</code></li>
+  <li>REPORT_PATH: <code>.ralph/red-team/REPORT.html</code></li>
+  <li>QUESTIONS_PATH: <code>.ralph/red-team/QUESTIONS.html</code></li>
+  <li>EXECUTION_AUTHORIZED: false</li>
+  <li>CONFIRMATION_REQUIRED: true</li>
+</ul>
+
+<h2>下一步</h2>
+<p>等待操作者明确确认后，方可将 PLAN.html 交给 Coding Agent 执行。</p>
+
+</body>
+</html>

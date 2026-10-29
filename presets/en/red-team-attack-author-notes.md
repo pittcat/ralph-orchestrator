@@ -3,15 +3,15 @@
 ## Preset Intent Confirmation
 
 - **目标：** 从已完成开发计划的 Git 历史反向定位实现，重建 patch，顺序执行全部攻击实验，保留每个实验的原始证据和独立评分，汇总合格 Finding 后生成零回归修复计划。
-- **操作者与启动路径：** 操作者准备 `.ralph/red-team.prompt.md`，运行 `ralph run -c ralph.red-team-attack.yml -H builtin:red-team-attack`，最终阅读 `.ralph/red-team/REPORT.md`、`PLAN.md` 和 `QUESTIONS.md`。
+- **操作者与启动路径：** 操作者准备 `.ralph/red-team.prompt.md`，运行 `ralph run -c ralph.red-team-attack.yml -H builtin:red-team-attack`，最终阅读 `.ralph/red-team/REPORT.html`、`PLAN.html` 和 `QUESTIONS.html`。
 - **输入与事实源：** prompt 文件、Git HEAD/tree、开发计划、`.ralph/red-team/04-attack-surface.md`、`05-experiment-plan.md`、各 RTE 实验 artifact、原始证据和 evidence board。
-- **成功条件：** 所有计划实验均已记录；至少一个实验通过二元证据门禁和四项阈值；impact-boundary 写出至少一个合格 Finding 和 `PLAN.md`；independent-reviewer 发出 `PLAN_READY`；reporter 发出 `redteam.complete(success=true)`。
+- **成功条件：** 所有计划实验均已记录；至少一个实验通过二元证据门禁和四项阈值；impact-boundary 写出至少一个合格 Finding 和 `PLAN.html`；independent-reviewer 发出 `PLAN_READY`；reporter 发出 `redteam.complete(success=true)`。
 - **阻塞条件：** 宿主 HEAD/tree 改变、宿主生产树变脏、artifact 不可读、实验计划连续 3 次无法通过通用可执行性校验、实验队列 handoff 无法修复、所有实验均未形成合格证据，实验 worktree 未按白名单创建，或独立终审拒绝计划。
 - **允许的修改范围：** 宿主只允许写 `.ralph/red-team/`；每个 RTE 的代码 mutation 只允许在 `.worktrees/redteam-<RTE-id>/`。禁止改宿主生产代码/正式测试/tracked 配置/Git 历史/运行时内部 ledger。禁止把实验树当作 Ralph loop `--worktree`。
 - **必须独立执行的评审：** evidence-gate 只读原始证据；impact-boundary 重新执行影响边界验证；independent-reviewer 独立检查全部 artifact、Finding、阈值和修复范围。
 - **重要 artifact、生产方与消费者：** 见下方 Artifact Ownership 表；事件只传短状态、计数、路径和路由字段，完整结果留在 artifact。
 - **execution_model：** `single-chain`；**why：** 实验必须按证据结果串行推进，不需要 wave 或 supervisor。
-- **非目标：** 不自动重试被证据拒绝的实验，不生成没有正式 Finding 的 `PLAN.md`，不启动生产代码修复，不把通用 runtime 日志当作红队结论。
+- **非目标：** 不自动重试被证据拒绝的实验，不生成没有正式 Finding 的 `PLAN.html`，不启动生产代码修复，不把通用 runtime 日志当作红队结论。
 - **Author 推导与假设：** 实验计划先经过 `experiment-plan-validator`；计划无效时只回 mapper 重写当前实验，最多 3 次，耗尽后才走 `redteam.failed`；证据失败只计入 rejected 并继续独立实验；真正的生产者协议失败仍立即走 `redteam.failed`。
 - **用户确认：** 已确认；Gate Scope=`hard`；用户确认单链、继续剩余实验、最终只交付合格 Finding。
 
@@ -82,9 +82,9 @@ Wave 与 supervisor hard questions：**N/A**，因为 `execution_model=single-ch
 | `07-evidence-board.md` | evidence-gate | experiment-runner、impact-boundary、reviewer、reporter | 保留到 operator 归档 |
 | `07-retry-board.md` | evidence-gate | reporter、operator | 保留到 operator 归档 |
 | `failures/<stage>.md` | 失败 producer | reporter、operator | 保留到 operator 归档 |
-| `findings/RTF-*.md`、`08-impact-boundary.md`、`PLAN.md` | impact-boundary | independent-reviewer、reporter、operator | 保留到 operator 归档 |
+| `findings/RTF-*.md`、`08-impact-boundary.md`、`PLAN.html` | impact-boundary | independent-reviewer、reporter、operator | 保留到 operator 归档 |
 | `10-independent-review.md` | independent-reviewer | reporter、operator | 保留到 operator 归档 |
-| `REPORT.md`、`QUESTIONS.md` | reporter | operator | operator 归档或删除 |
+| `REPORT.html`、`QUESTIONS.html` | reporter | operator | operator 归档或删除 |
 
 ## Artifact-First Handoff hard questions
 

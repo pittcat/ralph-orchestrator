@@ -6,7 +6,8 @@ description: >-
   audits OPAC with mode-aware confidence, traces mechanism bugs to source lines,
   optionally correlates against prior docs/report/ docs/plans/ docs/solutions/
   docs/brainstorms/ (opt-in via --include-history; off by default), writes
-  docs/report/*-diagnosis.md with per-finding root-cause confidence scores and
+  docs/report/*-diagnosis.html (self-contained, offline-openable) with
+  per-finding root-cause confidence scores and
   low-confidence re-investigation. Use after ralph run, ralph-e2e, debug.md,
   loop diagnosis, or orchestration vs mechanism.
 argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file] [--include-history disabled|preset-only|full]"
@@ -18,9 +19,11 @@ argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file] [--incl
 
 **写任何机制/路径前必读**：[ssot-guardrails.md](references/ssot-guardrails.md)（禁止 hat_handoff、loop_state_snapshot.json、错误 CLI 等）。
 
-**交付物**：最终 Markdown 报告 `docs/report/YYYY-MM-DD-<preset>-<loop_id>-diagnosis.md`。
+**交付物**：最终自包含 HTML 报告 `docs/report/YYYY-MM-DD-<preset>-<loop_id>-diagnosis.html`。
 
-**产物隔离 HARD RULE**：`docs/report/` 只允许写入最终 Markdown 报告；诊断过程中的 JSON、工作笔记、sub-agent 输出、stderr、临时清单和其它中间产物，必须写入由 `mktemp -d` 创建的临时诊断目录（或用户明确指定的非 git 工作区），不得写入 target branch、`docs/report/`、`docs/plans/`、`docs/solutions/` 或 `docs/brainstorms/`。开始前记录 `DIAG_WORKDIR`，结束时清理；若清理失败，必须在最终回复中报告残留路径。
+**HTML 交付契约（HARD RULE）**：报告必须是自包含、离线可打开的 HTML（内联样式、无外部资源、HTML 特殊字符转义）。写文件前先加载共享 HTML 指导：`ralph tools skill load ralph-html`，然后 `ralph tools skill load ralph-html-design` 与 `ralph tools skill load ralph-html-ref-documents-and-presentations`，遵守其离线/转义/可访问性规则；如需拓扑/时序图可按需加载 `ralph-html-ref-diagrams` 或 `ralph-html-diagram`（图必须辅助证据，不得替代证据）。若 skill 加载失败，仍须写出诚实的最小自包含 HTML——**禁止**把 Markdown 文件当作最终报告交付，也**禁止**因指导缺失而隐瞒失败状态。frontmatter 字段改为 `<head>` 内 `<meta name="ralph:<field>" content="<value>">` 声明（字段清单见 [report-template.md](references/report-template.md)）；报告正文放在语义化 HTML 章节中。
+
+**产物隔离 HARD RULE**：`docs/report/` 只允许写入最终 HTML 报告；诊断过程中的 JSON、工作笔记、sub-agent 输出、stderr、临时清单和其它中间产物，必须写入由 `mktemp -d` 创建的临时诊断目录（或用户明确指定的非 git 工作区），不得写入 target branch、`docs/report/`、`docs/plans/`、`docs/solutions/` 或 `docs/brainstorms/`。开始前记录 `DIAG_WORKDIR`，结束时清理；若清理失败，必须在最终回复中报告残留路径。
 
 > **变更日志**：
 > - 2026-10-29：plan 2026-10-29-0104 — 新增 §0.3 Run-Analysis 报告契约（`ralph diagnose --performance` / `--format html`）；报告须**视觉打磨**（内联 CSS + 安全 JS 交互），离线零外部资源；数字由固定程序计算，skill 文字分析必须单列、不得改写事实。契约见 [run-analysis-report.md](references/run-analysis-report.md)。
@@ -251,9 +254,10 @@ ralph diagnose --causal --session latest --diagnostics-root "$RUN/.ralph/diagnos
 - [ ] 每条 P0/P1 在 §5 有 **status + confidence**；P0/P1 均为 `status == complete` 且 `confidence > 85`
 - [ ] `status == incomplete` / `not_evaluable` 的候选已落入 §7，未混入 §5/§6
 - [ ] 未引用 ssot-guardrails 禁止项
-- [ ] `docs/report/` 只包含最终 Markdown 报告；JSON、stderr、工作笔记等中间产物均在 `$DIAG_WORKDIR` 并已清理
-- [ ] **历史检索开关状态已写入 frontmatter**（`history_search: disabled | preset-only | full`）
-- [ ] **Causal attribution 已写入 frontmatter**（`causal_status` / `causal_confidence` / `causal_primary_domain` / `causal_rejected_hypotheses` / `causal_score_change`，session 视图）
+- [ ] `docs/report/` 只包含最终 HTML 报告；JSON、stderr、工作笔记等中间产物均在 `$DIAG_WORKDIR` 并已清理
+- [ ] **历史检索开关状态已写入 `<meta name="ralph:history_search">`**（`disabled | preset-only | full`）
+- [ ] **Causal attribution 已写入 ralph meta**（`ralph:causal_status` / `ralph:causal_confidence` / `ralph:causal_primary_domain` / `ralph:causal_rejected_hypotheses` / `ralph:causal_score_change`，session 视图）
+- [ ] 报告为自包含 HTML：`test -f` 可读、含 `<!DOCTYPE html>` 与 `ralph:*` meta、无外部资源引用
 
 ## 参考
 

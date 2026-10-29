@@ -111,7 +111,12 @@ hats:
       2. Categorize findings by severity (Critical / Warning / Suggestion)
       3. Note where multiple reviewers flagged the same area
       4. Identify cross-cutting themes
-      5. Write the report to `.ralph/agent/review-report.md`
+      5. Write the report as a self-contained HTML file to `.ralph/agent/review-report.html`
+         — first run `ralph tools skill load ralph-html`, then
+         `ralph tools skill load ralph-html-artifact` and
+         `ralph tools skill load ralph-html-design`, and follow their
+         offline/escaping rules. If the guidance cannot be loaded, do not
+         publish review.complete; report the load failure instead.
       6. Publish review.complete
 
       ### Report Format

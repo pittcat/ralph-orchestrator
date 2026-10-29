@@ -101,7 +101,7 @@ L0 盘点 → L1 拓扑 → L2 日志三联 → L3 产物五证 → L4 机制十
 | `merge_failed` | `.ralph/diagnostics/channel-routing-fallback-*.md` 含 `merge_hat_channel_failed` reason | 写入 fallback 时机一致 | mechanism（filesystem 写失败） |
 | `interrupted` | `loop_termination` / `termination_reason` sentinel + `.ralph/diagnostics/channel-routing-fallback-*.md` 含 `merge_hat_channel_failed_on_interrupt` | interrupt 时机一致 | report 中无偏离 |
 | `missing` / `unreadable` | hat-channel 路径在 workspace 下但 metadata/read 失败 | 写盘错误存在 | mechanism（filesystem 错误） |
-| `merged` 但 `backend_exit_code != 0` | `recovery.jsonl` 含 backend_failure reason | 后端进程非零退出与 outcome 一致 | compound（agent + backend） |
+| `merged` 但 `backend_exit_code != 0` | `recovery.jsonl` 含后端失败 reason（backend nonzero exit） | 后端进程非零退出与 outcome 一致 | compound（agent + backend） |
 
 **分类优先级**（同 hat 同一 activation 的 multi-row 折叠后取优先级最高者）：
 `timeout_or_termination` > `backend_failure` (nonzero/unsuccessful) > `channel_routing_failure` (missing/unreadable/merge_failed) > `attempted_but_rejected` (rejected/policy) > `successful_no_terminal_emit` (success + empty + terminal_obligation + 无 accepted/rejected candidate + recovery 一致) > `unknown`（证据不足，不得编造 agent 根因）
@@ -185,7 +185,7 @@ Agent D 输出 P0/P1/P2 + **每条置信度** + 修复依赖序；低分须已�
 - [ ] P0 每条有 DEV + 源码或 preset 行号
 - [ ] 日志三联至少 5 行对账
 - [ ] 历史表 ≥3 行（仅在 `--include-history ≠ disabled`）/ `disabled` 时显式 `N/A (history disabled)`
-- [ ] 最终报告路径 `docs/report/...-diagnosis.md` 已写入，且 `docs/report/` 没有本次报告之外的中间产物
+- [ ] 最终报告路径 `docs/report/...-diagnosis.html` 已写入，且 `docs/report/` 没有本次报告之外的中间产物
 - [ ] `$DIAG_WORKDIR` 中的 JSON、stderr、工作笔记已清理；最终报告不引用清理后的临时绝对路径
 - [ ] frontmatter 含 `history_search: <disabled | preset-only | full>`
 - [ ] 已执行下方"frontmatter 对账"机器校验脚本并通过
@@ -198,7 +198,7 @@ Agent D 输出 P0/P1/P2 + **每条置信度** + 修复依赖序；低分须已�
 # 历史检索开关必须可在执行环境复现（如未设 RALPH_INCLUDE_HISTORY 则按 disabled 兜底）
 : "${RALPH_INCLUDE_HISTORY:=disabled}"
 
-REPORT="${REPORT:-docs/report/$(date +%Y-%m-%d)-<preset>-<loop_id>-diagnosis.md}"
+REPORT="${REPORT:-docs/report/$(date +%Y-%m-%d)-<preset>-<loop_id>-diagnosis.html}"
 
 # 提取 frontmatter 中 history_search 的值（解析 ---…--- 包围的 YAML 块）
 HS=$(awk 'BEGIN{f=0} /^---$/{n++; next} n==1 && /^history_search:/{print $2; exit}' "$REPORT")

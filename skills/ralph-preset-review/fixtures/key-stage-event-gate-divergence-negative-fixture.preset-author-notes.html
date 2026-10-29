@@ -1,8 +1,17 @@
-# Key-stage event gate divergence fixture notes
-
-```yaml
-key_stages:
-  - key_stage: executor -> reporter handoff
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="ralph:fixture" content="key-stage-event-gate">
+<title>Key-stage event gate divergence fixture notes</title>
+</head>
+<body>
+<h1>Key-stage event gate divergence fixture notes</h1>
+<section id="key-stage-event-gate">
+<h2>Key-stage event gate</h2>
+<pre class="contract-yaml"><code>key_stages:
+  - key_stage: executor -&gt; reporter handoff
     guard_selection: precheck
     precheck_guard: true
     precheck_retry_budget: 3
@@ -26,4 +35,7 @@ key_stages:
     payload_consistency_retry_budget: null
     reason: "用户偏好"
     confirmation_status: confirmed
-```
+</code></pre>
+</section>
+</body>
+</html>

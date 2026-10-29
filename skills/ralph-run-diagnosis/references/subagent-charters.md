@@ -42,7 +42,7 @@
    - `--include-history=preset-only` → 仅扫与本次 `preset` / `loop_id` 关键词相近的近 30 天条目；
    - `--include-history=full` → 同 1 但窗口扩全库；
    - **禁止** `disabled` 下再启 Agent B。
-2. 扫描历史诊断报告（`docs/report/*-diagnosis.md`）中与 preset / 症状相近的条目。
+2. 扫描历史诊断报告（`docs/report/*-diagnosis.{md,html}`；新报告为 `.html`，历史 `.md` 不回迁）中与 preset / 症状相近的条目。
 3. 扫描 `docs/solutions/`、`docs/brainstorms/` 中机制/preset 修复记录。
 4. 按 **问题类型** 分类（如 `task.resume` 死信、silent-success、loop_anchor、duplicate_work_done、OPAC 缺 precheck）。
 5. 每条记录：文档路径、出现次数、是否闭环、与本次关联度（高/中/低）。
@@ -58,7 +58,7 @@
 
 **目录边界（hard rule）**：Agent B 仅可读以下子目录（其它一律禁止）：
 
-- `docs/report/*-diagnosis.md`
+- `docs/report/*-diagnosis.{md,html}`
 - `docs/solutions/{integration-issues,logic-errors,state-management}/`
 - `docs/plans/` — `status: active` 子集
 - `docs/brainstorms/*.md`

@@ -156,7 +156,7 @@ hats:
       4. 如果建议的修复已经存在于代码中，不要重写代码或测试。确认现有修复，简要记录，然后转向验证。
       5. 否则实现修复根本原因的最小代码更改。
       6. 添加一个本会捕捉到此错误的回归测试，除非已存在并证明修复的测试。
-      7. 在 `.eval-sandbox/debug/counter.md`（或提示词指定的路径）中编写所需的根本原因记录，作为简洁的基于证据的笔记，而不是长篇报告。
+      7. 将所需的根本原因记录写为自包含 HTML 文件，放在 `.eval-sandbox/debug/counter.html`（或提示词指定的 `.html` 路径）——作为简洁的基于证据的笔记，而不是长篇报告。写入前先运行 `ralph tools skill load ralph-html`，再运行 `ralph tools skill load ralph-html-artifact` 和 `ralph tools skill load ralph-html-design`，并遵守其离线/转义规则。如果指导无法加载，不要写替代笔记——发出 `fix.blocked` 并写明加载失败原因，不得宣称完成。
       8. 重新运行聚焦测试套件和原始重现路径。如果你已经从测试员那里有了强大的对抗性压力测试，重用它而不是创造额外的工作。
       9. 一旦修复、回归覆盖和根本原因记录到位，立即发出。
       10. 发出恰好一个带有 `task_id`、`task_key` 和简短摘要 payload 的 `fix.applied` 事件。
