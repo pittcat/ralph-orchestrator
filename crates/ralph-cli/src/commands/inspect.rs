@@ -37,7 +37,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 mod descriptor;
-mod run;
+pub(crate) mod run;
 
 /// Inspect Ralph runtime state without modifying it.
 #[derive(Parser, Debug)]

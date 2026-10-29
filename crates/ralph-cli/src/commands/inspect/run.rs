@@ -87,6 +87,207 @@ fn is_false(v: &bool) -> bool {
     !*v
 }
 
+// ── Plan5-U1 capability declarations ───────────────────────────────
+
+/// Topics the `emit` action accepts (v1 whitelist, D2). Both topics
+/// have real runtime consumers: `loop.cancel` maps to the Cancelled
+/// terminal and `task.resume` is used by the recovery responder
+/// (ralph-proto `topics.rs`).
+pub const EMIT_TOPICS: &[&str] = &["loop.cancel", "task.resume"];
+
+/// One declared capability (`inspect run` `actions[]` element, D1).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ActionDecl {
+    /// `stop` | `retry` | `merge` | `emit`.
+    pub id: String,
+    /// Whether the action may be dispatched right now.
+    pub available: bool,
+    /// Human-readable reason when `available` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Evidence hash the caller must echo back as `expected_revision`
+    /// on mutations (D5). Computed over the same evidence snapshot so
+    /// a state flip changes it.
+    pub revision: String,
+    /// Typed input contract; only `emit` declares one in v1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<serde_json::Value>,
+}
+
+/// `sha256` evidence hash (D5): `run_id|state|manifest_revision|
+/// merge_state|pending_merge_count`. Exposed `pub(crate)` so the
+/// `loops --format json` receipts can recompute `revision_after` with
+/// the identical function instead of drifting apart.
+pub(crate) fn compute_revision(
+    run_id: &str,
+    state: &str,
+    manifest_revision: u64,
+    merge_state: Option<&str>,
+    pending_merge_count: usize,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut sha = Sha256::new();
+    sha.update(
+        format!(
+            "{}|{}|{}|{}|{}",
+            run_id,
+            state,
+            manifest_revision,
+            merge_state.unwrap_or("none"),
+            pending_merge_count,
+        )
+        .as_bytes(),
+    );
+    format!("{:x}", sha.finalize())
+}
+
+/// Action availability rules (D2, mirrored from `loops.rs`):
+///
+/// - `stop`: the owning pid must be alive — `loops stop` resolves the
+///   lock and signals it; a dead/unknown run has nothing to signal.
+/// - `retry`: `loops retry` is `retry_merge` — it only re-runs a merge
+///   whose queue entry is `needs_review` (anything else bails).
+/// - `merge`: `loops merge` requires a stopped loop and either a
+///   queued/needs-review queue entry (gated by the same
+///   `merge_button_state` the UI button uses) or an orphan worktree it
+///   can enqueue; `merging`/`merged`/`discarded` and live runs bail.
+///   The primary run has no merge semantics at all.
+/// - `emit`: `ralph emit --file` writes to the run's events file, so
+///   both a live pid and a known events file are required; topics are
+///   whitelisted (v1: `loop.cancel`, `task.resume`).
+#[allow(clippy::too_many_arguments)]
+fn compute_actions(
+    run_id: &str,
+    kind: &str,
+    pid_alive: bool,
+    state: &str,
+    merge_state: Option<&str>,
+    pending_merge_count: usize,
+    manifest_revision: u64,
+    events_file_present: bool,
+    workspace: &Path,
+) -> Vec<ActionDecl> {
+    let revision = compute_revision(
+        run_id,
+        state,
+        manifest_revision,
+        merge_state,
+        pending_merge_count,
+    );
+    let decl =
+        |id: &str, available: bool, reason: Option<String>, schema: Option<serde_json::Value>| {
+            ActionDecl {
+                id: id.to_string(),
+                available,
+                reason,
+                revision: revision.clone(),
+                input_schema: schema,
+            }
+        };
+
+    let stop = if pid_alive {
+        decl("stop", true, None, None)
+    } else if state == "exited" {
+        decl("stop", false, Some("run already exited".into()), None)
+    } else {
+        decl(
+            "stop",
+            false,
+            Some("process state unknown — nothing verified to signal".into()),
+            None,
+        )
+    };
+
+    let retry = match merge_state {
+        Some("needs_review") => decl("retry", true, None, None),
+        Some(s) => decl(
+            "retry",
+            false,
+            Some(format!(
+                "merge state is '{s}' — only needs-review can be retried"
+            )),
+            None,
+        ),
+        None => decl(
+            "retry",
+            false,
+            Some("run has no merge queue entry".into()),
+            None,
+        ),
+    };
+
+    let merge = if kind == "primary" {
+        decl(
+            "merge",
+            false,
+            Some("primary run has no merge semantics".into()),
+            None,
+        )
+    } else if pid_alive {
+        decl(
+            "merge",
+            false,
+            Some("loop still running — stop it first".into()),
+            None,
+        )
+    } else {
+        match merge_state {
+            Some("merged") => decl("merge", false, Some("already merged".into()), None),
+            Some("discarded") => decl("merge", false, Some("loop discarded".into()), None),
+            Some("merging") => decl(
+                "merge",
+                false,
+                Some("merge already in progress".into()),
+                None,
+            ),
+            Some(_) => {
+                // queued / needs_review: defer to the same state the
+                // merge button reports so the two paths never disagree.
+                match ralph_core::merge_queue::merge_button_state(workspace, run_id) {
+                    Ok(ralph_core::MergeButtonState::Active) => decl("merge", true, None, None),
+                    Ok(ralph_core::MergeButtonState::Blocked { reason }) => {
+                        decl("merge", false, Some(reason), None)
+                    }
+                    Err(e) => decl(
+                        "merge",
+                        false,
+                        Some(format!("merge state unknown: {e}")),
+                        None,
+                    ),
+                }
+            }
+            None if kind == "worktree" => {
+                // `loops merge` enqueues orphan worktrees on demand —
+                // available with the caveat that a missing branch
+                // surfaces at dispatch time.
+                decl("merge", true, None, None)
+            }
+            _ => decl("merge", false, Some("not in merge queue".into()), None),
+        }
+    };
+
+    let emit_schema = serde_json::json!({ "topics": EMIT_TOPICS });
+    let emit = if pid_alive && events_file_present {
+        decl("emit", true, None, Some(emit_schema))
+    } else if !pid_alive {
+        decl(
+            "emit",
+            false,
+            Some("run already exited — no live events file".into()),
+            Some(emit_schema),
+        )
+    } else {
+        decl(
+            "emit",
+            false,
+            Some("no events file known for this run".into()),
+            Some(emit_schema),
+        )
+    };
+
+    vec![stop, retry, merge, emit]
+}
+
 /// One normalized run in the observation payload.
 #[derive(Debug, Clone, Serialize)]
 pub struct RunObservation {
@@ -148,6 +349,9 @@ pub struct RunObservation {
     /// (a run that never reached a backend call has none).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity_file: Option<String>,
+    /// Plan5-U1 capability declarations — the monitor's operation
+    /// menu is rendered verbatim from this list (D1).
+    pub actions: Vec<ActionDecl>,
     pub evidence: RunEvidence,
 }
 
@@ -268,6 +472,42 @@ fn merge_state_str(state: MergeState) -> &'static str {
     }
 }
 
+/// Pending merge-queue load — feeds the revision hash (D5) so any
+/// queue transition invalidates outstanding capabilities.
+fn pending_merge_count(ev: &GatheredEvidence) -> usize {
+    ev.merge_states
+        .values()
+        .filter(|s| matches!(s, MergeState::Queued | MergeState::Merging))
+        .count()
+}
+
+/// Populate `actions` on a finished observation from the evidence we
+/// already collected (alive flag + manifest revision come from the
+/// source-specific constructor).
+fn attach_actions(
+    obs: &mut RunObservation,
+    pid_alive: bool,
+    manifest_revision: u64,
+    ev: &GatheredEvidence,
+    workspace: &Path,
+) {
+    let events_file_present = obs
+        .events_file
+        .as_ref()
+        .is_some_and(|p| PathBuf::from(p).exists());
+    obs.actions = compute_actions(
+        &obs.run_id,
+        &obs.kind,
+        pid_alive,
+        &obs.state,
+        obs.evidence.merge_state.as_deref(),
+        pending_merge_count(ev),
+        manifest_revision,
+        events_file_present,
+        workspace,
+    );
+}
+
 /// Coarse v1 state: the pid evidence decides liveness; terminal
 /// evidence decides convergence; neither → `unknown`.
 fn coarse_state(pid_alive: bool, terminal_present: bool) -> &'static str {
@@ -341,7 +581,7 @@ fn observation_from_manifest(
     let alive = run_manifest::pid_alive(m.pid);
     let registry_present = ev.registry_entries.iter().any(|e| e.id == m.run_id);
     let resolution: DescriptorResolution = descriptor::resolve(m.preset.as_deref(), workspace);
-    RunObservation {
+    let mut obs = RunObservation {
         run_id: m.run_id.clone(),
         kind: m.kind.as_str().to_string(),
         state: coarse_state(alive, m.terminal.is_some()).to_string(),
@@ -377,7 +617,10 @@ fn observation_from_manifest(
                 .map(|s| merge_state_str(*s).to_string()),
             ..RunEvidence::default()
         },
-    }
+        actions: Vec::new(),
+    };
+    attach_actions(&mut obs, alive, m.revision, ev, workspace);
+    obs
 }
 
 fn observation_from_registry(
@@ -388,7 +631,7 @@ fn observation_from_registry(
     let alive = entry.is_pid_alive();
     let events_file =
         read_trimmed(&Path::new(&entry.workspace).join(".ralph/current-events")).map(PathBuf::from);
-    RunObservation {
+    let mut obs = RunObservation {
         run_id: entry.id.clone(),
         kind: if entry.worktree_path.is_some() {
             "worktree".to_string()
@@ -422,7 +665,10 @@ fn observation_from_registry(
                 .map(|s| merge_state_str(*s).to_string()),
             ..RunEvidence::default()
         },
-    }
+        actions: Vec::new(),
+    };
+    attach_actions(&mut obs, alive, 0, ev, workspace);
+    obs
 }
 
 /// Aggregate gathered evidence into normalized run observations.
@@ -444,42 +690,42 @@ fn aggregate_runs(ev: &GatheredEvidence, workspace: &Path) -> Vec<RunObservation
                 );
             }
             None => {
-                runs.insert(
-                    run_id.clone(),
-                    RunObservation {
-                        run_id,
-                        kind: "unknown".to_string(),
-                        state: "unknown".to_string(),
-                        pid: None,
-                        cwd: None,
-                        workspace: None,
-                        repo_root: None,
-                        worktree_path: None,
-                        prompt_preview: None,
-                        prompt_sha256: None,
-                        preset: None,
-                        preset_descriptor: None,
-                        preset_descriptor_from: "none".to_string(),
-                        preset_descriptor_diagnostic: None,
-                        scheduler: None,
-                        plan_path: None,
-                        started_at: None,
-                        events_file: None,
-                        terminal: None,
-                        manifest: Some(manifest_display_path(workspace, &discovered.path)),
-                        activity_file: activity_file_for(workspace, &discovered.run_id)
-                            .map(|p| manifest_display_path(workspace, &p)),
-                        evidence: RunEvidence {
-                            manifest_corrupt: true,
-                            registry_present: registry_ids.contains(discovered.run_id.as_str()),
-                            merge_state: ev
-                                .merge_states
-                                .get(&discovered.run_id)
-                                .map(|s| merge_state_str(*s).to_string()),
-                            ..RunEvidence::default()
-                        },
+                let mut obs = RunObservation {
+                    run_id: run_id.clone(),
+                    kind: "unknown".to_string(),
+                    state: "unknown".to_string(),
+                    pid: None,
+                    cwd: None,
+                    workspace: None,
+                    repo_root: None,
+                    worktree_path: None,
+                    prompt_preview: None,
+                    prompt_sha256: None,
+                    preset: None,
+                    preset_descriptor: None,
+                    preset_descriptor_from: "none".to_string(),
+                    preset_descriptor_diagnostic: None,
+                    scheduler: None,
+                    plan_path: None,
+                    started_at: None,
+                    events_file: None,
+                    terminal: None,
+                    manifest: Some(manifest_display_path(workspace, &discovered.path)),
+                    activity_file: activity_file_for(workspace, &discovered.run_id)
+                        .map(|p| manifest_display_path(workspace, &p)),
+                    evidence: RunEvidence {
+                        manifest_corrupt: true,
+                        registry_present: registry_ids.contains(discovered.run_id.as_str()),
+                        merge_state: ev
+                            .merge_states
+                            .get(&discovered.run_id)
+                            .map(|s| merge_state_str(*s).to_string()),
+                        ..RunEvidence::default()
                     },
-                );
+                    actions: Vec::new(),
+                };
+                attach_actions(&mut obs, false, 0, ev, workspace);
+                runs.insert(run_id, obs);
             }
         }
     }
@@ -511,44 +757,44 @@ fn aggregate_runs(ev: &GatheredEvidence, workspace: &Path) -> Vec<RunObservation
             .as_ref()
             .map(|l| (Some(l.pid), Some(l.prompt.clone()), Some(l.started)))
             .unwrap_or((None, None, None));
-        runs.insert(
-            loop_id.clone(),
-            RunObservation {
-                run_id: loop_id.clone(),
-                kind: "primary".to_string(),
-                state: coarse_state(alive, false).to_string(),
-                pid,
-                cwd: Some(workspace.to_path_buf()),
-                workspace: Some(workspace.to_path_buf()),
-                repo_root: Some(workspace.to_path_buf()),
-                worktree_path: None,
-                prompt_preview: prompt
-                    .as_deref()
-                    .map(|p| truncate_with_ellipsis(p.trim(), 160)),
-                prompt_sha256: prompt.as_deref().map(run_manifest::prompt_sha256_hex),
-                preset: None,
-                preset_descriptor: None,
-                preset_descriptor_from: "none".to_string(),
-                preset_descriptor_diagnostic: None,
-                scheduler: None,
-                plan_path: None,
-                started_at: started,
-                events_file: ev.current_events.as_ref().map(PathBuf::from),
-                terminal: None,
-                manifest: None,
-                activity_file: activity_file_for(workspace, &loop_id)
-                    .map(|p| manifest_display_path(workspace, &p)),
-                evidence: RunEvidence {
-                    lock_present: ev.lock.is_some(),
-                    registry_present: registry_ids.contains(loop_id.as_str()),
-                    merge_state: ev
-                        .merge_states
-                        .get(&loop_id)
-                        .map(|s| merge_state_str(*s).to_string()),
-                    ..RunEvidence::default()
-                },
+        let mut obs = RunObservation {
+            run_id: loop_id.clone(),
+            kind: "primary".to_string(),
+            state: coarse_state(alive, false).to_string(),
+            pid,
+            cwd: Some(workspace.to_path_buf()),
+            workspace: Some(workspace.to_path_buf()),
+            repo_root: Some(workspace.to_path_buf()),
+            worktree_path: None,
+            prompt_preview: prompt
+                .as_deref()
+                .map(|p| truncate_with_ellipsis(p.trim(), 160)),
+            prompt_sha256: prompt.as_deref().map(run_manifest::prompt_sha256_hex),
+            preset: None,
+            preset_descriptor: None,
+            preset_descriptor_from: "none".to_string(),
+            preset_descriptor_diagnostic: None,
+            scheduler: None,
+            plan_path: None,
+            started_at: started,
+            events_file: ev.current_events.as_ref().map(PathBuf::from),
+            terminal: None,
+            manifest: None,
+            activity_file: activity_file_for(workspace, &loop_id)
+                .map(|p| manifest_display_path(workspace, &p)),
+            evidence: RunEvidence {
+                lock_present: ev.lock.is_some(),
+                registry_present: registry_ids.contains(loop_id.as_str()),
+                merge_state: ev
+                    .merge_states
+                    .get(&loop_id)
+                    .map(|s| merge_state_str(*s).to_string()),
+                ..RunEvidence::default()
             },
-        );
+            actions: Vec::new(),
+        };
+        attach_actions(&mut obs, alive, 0, ev, workspace);
+        runs.insert(loop_id, obs);
     }
 
     let mut list: Vec<RunObservation> = runs.into_values().collect();
@@ -618,4 +864,179 @@ pub fn inspect_run_command(args: &InspectRunArgs) -> Result<()> {
         InspectProfilesFormat::Human => print_human(&workspace, &runs),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn actions(
+        kind: &str,
+        alive: bool,
+        state: &str,
+        merge: Option<&str>,
+        events: bool,
+        ws: &Path,
+    ) -> Vec<ActionDecl> {
+        compute_actions("loop-1", kind, alive, state, merge, 0, 0, events, ws)
+    }
+
+    fn get<'a>(acts: &'a [ActionDecl], id: &str) -> &'a ActionDecl {
+        acts.iter().find(|a| a.id == id).unwrap()
+    }
+
+    #[test]
+    fn running_worktree_stop_and_emit_available() {
+        let t = tmp();
+        let a = actions("worktree", true, "running", None, true, t.path());
+        assert!(get(&a, "stop").available);
+        assert!(get(&a, "emit").available);
+        assert!(!get(&a, "retry").available);
+        assert!(!get(&a, "merge").available);
+        assert_eq!(
+            get(&a, "merge").reason.as_deref(),
+            Some("loop still running — stop it first")
+        );
+    }
+
+    #[test]
+    fn exited_needs_review_retry_available() {
+        let t = tmp();
+        let a = actions(
+            "worktree",
+            false,
+            "exited",
+            Some("needs_review"),
+            true,
+            t.path(),
+        );
+        assert!(get(&a, "retry").available);
+        // merge_button_state: no merging entry + no live lock → Active.
+        assert!(get(&a, "merge").available);
+    }
+
+    #[test]
+    fn exited_queued_retry_blocked_merge_available() {
+        let t = tmp();
+        let a = actions("worktree", false, "exited", Some("queued"), true, t.path());
+        let retry = get(&a, "retry");
+        assert!(!retry.available);
+        assert!(retry.reason.as_deref().unwrap().contains("queued"));
+        assert!(get(&a, "merge").available);
+    }
+
+    #[test]
+    fn merge_blocked_states() {
+        let t = tmp();
+        for (ms, want) in [
+            ("merging", "merge already in progress"),
+            ("merged", "already merged"),
+            ("discarded", "loop discarded"),
+        ] {
+            let a = actions("worktree", false, "exited", Some(ms), true, t.path());
+            let m = get(&a, "merge");
+            assert!(!m.available, "{ms}");
+            assert_eq!(m.reason.as_deref(), Some(want), "{ms}");
+        }
+    }
+
+    #[test]
+    fn exited_primary_has_no_merge() {
+        let t = tmp();
+        let a = actions("primary", false, "exited", None, true, t.path());
+        let m = get(&a, "merge");
+        assert!(!m.available);
+        assert_eq!(
+            m.reason.as_deref(),
+            Some("primary run has no merge semantics")
+        );
+    }
+
+    #[test]
+    fn exited_worktree_without_queue_entry_can_merge() {
+        // `loops merge` enqueues orphan worktrees on demand.
+        let t = tmp();
+        let a = actions("worktree", false, "exited", None, true, t.path());
+        assert!(get(&a, "merge").available);
+    }
+
+    #[test]
+    fn exited_run_disables_stop_and_emit() {
+        let t = tmp();
+        let a = actions("worktree", false, "exited", None, true, t.path());
+        let s = get(&a, "stop");
+        assert!(!s.available);
+        assert_eq!(s.reason.as_deref(), Some("run already exited"));
+        let e = get(&a, "emit");
+        assert!(!e.available);
+    }
+
+    #[test]
+    fn unknown_state_stop_reason() {
+        let t = tmp();
+        let a = actions("unknown", false, "unknown", None, false, t.path());
+        assert!(!get(&a, "stop").available);
+        assert!(
+            get(&a, "stop")
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("unknown")
+        );
+    }
+
+    #[test]
+    fn emit_requires_events_file() {
+        let t = tmp();
+        let a = actions("worktree", true, "running", None, false, t.path());
+        let e = get(&a, "emit");
+        assert!(!e.available);
+        assert_eq!(
+            e.reason.as_deref(),
+            Some("no events file known for this run")
+        );
+    }
+
+    #[test]
+    fn emit_whitelist_is_fixed() {
+        let t = tmp();
+        let a = actions("worktree", true, "running", None, true, t.path());
+        let schema = get(&a, "emit").input_schema.clone().unwrap();
+        assert_eq!(
+            schema["topics"],
+            serde_json::json!(["loop.cancel", "task.resume"])
+        );
+    }
+
+    #[test]
+    fn revision_stable_and_sensitive() {
+        let t = tmp();
+        let a = actions("worktree", true, "running", Some("queued"), true, t.path());
+        let r1 = get(&a, "stop").revision.clone();
+        assert_eq!(
+            r1,
+            get(&a, "emit").revision,
+            "one evidence snapshot → one revision"
+        );
+        let b = actions("worktree", true, "running", Some("merging"), true, t.path());
+        assert_ne!(r1, get(&b, "stop").revision, "merge_state flips revision");
+        let c = actions("worktree", false, "exited", Some("queued"), true, t.path());
+        assert_ne!(r1, get(&c, "stop").revision, "state flips revision");
+    }
+
+    #[test]
+    fn revision_hash_matches_receipt_fn() {
+        // The receipt path and the capability path share one hash —
+        // guard against drift.
+        let a = compute_revision("l", "running", 3, Some("queued"), 2);
+        let b = compute_revision("l", "running", 3, Some("queued"), 2);
+        assert_eq!(a, b);
+        assert_ne!(a, compute_revision("l", "running", 3, None, 2));
+        assert_ne!(a, compute_revision("l", "running", 4, Some("queued"), 2));
+    }
 }

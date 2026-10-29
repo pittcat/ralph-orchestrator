@@ -380,6 +380,13 @@ pub struct EventLoopConfig {
     #[serde(default)]
     pub cooldown_delay_seconds: u64,
 
+    /// Monitor-supplied idempotency id (`ralph run
+    /// --client-request-id`); recorded into the run manifest so the
+    /// monitor can reconcile launches across crash windows (Plan5
+    /// D4). `None` for operator runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_request_id: Option<String>,
+
     /// Starting hat for multi-hat mode (deprecated, use starting_event instead).
     pub starting_hat: Option<String>,
 
@@ -801,6 +808,7 @@ impl Default for EventLoopConfig {
             max_cost_usd: None,
             max_consecutive_failures: default_max_failures(),
             cooldown_delay_seconds: 0,
+            client_request_id: None,
             starting_hat: None,
             starting_event: None,
             mutation_score_warn_threshold: None,

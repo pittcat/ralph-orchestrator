@@ -29,6 +29,18 @@ use nix::sys::signal::{Signal, kill};
 #[cfg(unix)]
 use nix::unistd::Pid;
 
+/// `--client-request-id` shape: `[a-zA-Z0-9-]{8,64}` (Plan5 D4 —
+/// ulid/uuid-compatible, no whitespace or shell metacharacters).
+fn validate_client_request_id(v: &str) -> Result<String, String> {
+    if v.len() < 8 || v.len() > 64 {
+        return Err("must be 8-64 characters".to_string());
+    }
+    if !v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("must contain only [a-zA-Z0-9-]".to_string());
+    }
+    Ok(v.to_string())
+}
+
 /// Arguments for the run subcommand.
 #[derive(Parser, Debug)]
 pub struct RunArgs {
@@ -51,6 +63,12 @@ pub struct RunArgs {
     /// Override completion promise
     #[arg(long)]
     pub completion_promise: Option<String>,
+
+    /// Client-supplied idempotency id recorded into the run manifest
+    /// (`[a-zA-Z0-9-]{8,64}`); monitor launches use it to reconcile
+    /// intents across crash windows (Plan5 D4).
+    #[arg(long, value_parser = validate_client_request_id)]
+    pub client_request_id: Option<String>,
 
     /// Dry run - show what would be executed without running
     #[arg(long)]
@@ -904,6 +922,9 @@ pub async fn run_command(
     }
     if let Some(max_iter) = args.max_iterations {
         config.event_loop.max_iterations = max_iter;
+    }
+    if let Some(ref id) = args.client_request_id {
+        config.event_loop.client_request_id = Some(id.clone());
     }
     if let Some(promise) = args.completion_promise {
         config.event_loop.completion_promise = promise;
@@ -3221,6 +3242,7 @@ pub(crate) fn default_run_args() -> RunArgs {
         prompt_file: None,
         max_iterations: None,
         completion_promise: None,
+        client_request_id: None,
         dry_run: false,
         continue_mode: false,
         loop_id: None,

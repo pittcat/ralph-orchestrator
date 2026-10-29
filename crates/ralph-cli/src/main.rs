@@ -535,6 +535,7 @@ async fn main() -> Result<()> {
                 backend: None,
                 max_iterations: None,
                 completion_promise: None,
+                client_request_id: None,
                 dry_run: false,
                 continue_mode: false,
                 loop_id: None,

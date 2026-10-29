@@ -522,7 +522,7 @@ pub(super) async fn run_loop_impl_inner(
                 prompt: &prompt_content,
                 preset: hats_source_label.clone(),
                 plan_path,
-                client_request_id: None,
+                client_request_id: config.event_loop.client_request_id.clone(),
                 events_file: Some(ctx.resolve_events_path()),
             })
         {

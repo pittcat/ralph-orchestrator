@@ -19,7 +19,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use ralph_core::loop_authorization::{
     AuthzDecision, LoopCaller, can_attach, can_discard, can_merge, can_stop, can_view,
@@ -113,10 +113,24 @@ pub struct HistoryArgs {
     pub json: bool,
 }
 
+/// Receipt output format for `loops stop|retry|merge` (Plan5 D3 —
+/// additive `--format json`; `human` stays the byte-identical
+/// default).
+#[derive(Copy, Clone, Debug, Default, ValueEnum)]
+pub enum LoopsFormat {
+    #[default]
+    Human,
+    Json,
+}
+
 #[derive(Parser, Debug)]
 pub struct RetryArgs {
     /// Loop ID
     pub loop_id: String,
+
+    /// Emit a typed receipt (`--format json`) on success
+    #[arg(long, value_enum, default_value_t = LoopsFormat::Human)]
+    pub format: LoopsFormat,
 }
 
 #[derive(Parser, Debug)]
@@ -138,6 +152,10 @@ pub struct StopArgs {
     /// Use SIGKILL instead of SIGTERM
     #[arg(long)]
     pub force: bool,
+
+    /// Emit a typed receipt (`--format json`) on success
+    #[arg(long, value_enum, default_value_t = LoopsFormat::Human)]
+    pub format: LoopsFormat,
 }
 
 #[derive(Parser, Debug)]
@@ -170,6 +188,10 @@ pub struct MergeArgs {
     /// Force merge even if state is 'merging'
     #[arg(long)]
     pub force: bool,
+
+    /// Emit a typed receipt (`--format json`) on success
+    #[arg(long, value_enum, default_value_t = LoopsFormat::Human)]
+    pub format: LoopsFormat,
 }
 
 #[derive(Parser, Debug)]
@@ -710,6 +732,57 @@ fn show_history(args: HistoryArgs) -> Result<()> {
 }
 
 /// Retry merge for a failed loop.
+/// Emit the typed mutation receipt when `--format json` was given
+/// (Plan5 D3). `revision_after` recomputes the same evidence hash
+/// `inspect run`'s `actions[].revision` exposes so callers can chain
+/// mutations without a full re-snapshot.
+fn emit_receipt(format: LoopsFormat, action: &str, loop_id: &str, detail: &str, cwd: &Path) {
+    if !matches!(format, LoopsFormat::Json) {
+        return;
+    }
+    let queue = MergeQueue::new(cwd);
+    let merge_state = queue
+        .get_entry(loop_id)
+        .ok()
+        .flatten()
+        .map(|e| match e.state {
+            MergeState::Queued => "queued",
+            MergeState::Merging => "merging",
+            MergeState::Merged => "merged",
+            MergeState::NeedsReview => "needs_review",
+            MergeState::Discarded => "discarded",
+        });
+    let pending = queue
+        .list()
+        .map(|es| {
+            es.iter()
+                .filter(|e| matches!(e.state, MergeState::Queued | MergeState::Merging))
+                .count()
+        })
+        .unwrap_or(0);
+    let alive = ralph_core::LoopLock::read_existing(cwd)
+        .ok()
+        .flatten()
+        .is_some_and(|m| is_process_alive(m.pid));
+    let revision_after = crate::commands::inspect::run::compute_revision(
+        loop_id,
+        if alive { "running" } else { "exited" },
+        0,
+        merge_state,
+        pending,
+    );
+    println!(
+        "{}",
+        serde_json::json!({
+            "ok": true,
+            "action": action,
+            "loop_id": loop_id,
+            "detail": detail,
+            "revision_after": revision_after,
+        })
+    );
+}
+
 fn retry_merge(args: RetryArgs) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let merge_queue = MergeQueue::new(&cwd);
@@ -731,7 +804,15 @@ fn retry_merge(args: RetryArgs) -> Result<()> {
     let ctx = OperationContext::detect(cwd.clone());
     let (_entry, _worktree) = authorize_loop(&ctx, &args.loop_id, "retry merge", can_merge)?;
 
-    spawn_merge_ralph(&cwd, &args.loop_id)
+    spawn_merge_ralph(&cwd, &args.loop_id)?;
+    emit_receipt(
+        args.format,
+        "retry",
+        &args.loop_id,
+        "merge retry spawned",
+        &cwd,
+    );
+    Ok(())
 }
 
 /// Discard a loop and clean up.
@@ -896,6 +977,13 @@ fn stop_loop(args: StopArgs) -> Result<()> {
             }
             let _ = registry.deregister(&loop_id);
             println!("Orphan loop '{}' cleaned up.", loop_id);
+            emit_receipt(
+                args.format,
+                "stop",
+                &loop_id,
+                "orphan loop cleaned up",
+                &cwd,
+            );
             return Ok(());
         }
         bail!(
@@ -928,6 +1016,7 @@ fn stop_loop(args: StopArgs) -> Result<()> {
             kill(Pid::from_raw(metadata.pid as i32), Signal::SIGKILL)
                 .context("Failed to send SIGKILL")?;
             println!("Signal sent.");
+            emit_receipt(args.format, "stop", &loop_id, "SIGKILL sent", &cwd);
             return Ok(());
         }
 
@@ -947,6 +1036,13 @@ fn stop_loop(args: StopArgs) -> Result<()> {
     println!(
         "Stop requested for loop '{}' (PID {}). The loop will stop at the next iteration boundary.",
         loop_id, metadata.pid
+    );
+    emit_receipt(
+        args.format,
+        "stop",
+        &loop_id,
+        "stop-requested written",
+        &cwd,
     );
 
     Ok(())
@@ -1262,7 +1358,9 @@ fn merge_loop(args: MergeArgs) -> Result<()> {
         }
     }
 
-    spawn_merge_ralph(&cwd, &loop_id)
+    spawn_merge_ralph(&cwd, &loop_id)?;
+    emit_receipt(args.format, "merge", &loop_id, "merge spawned", &cwd);
+    Ok(())
 }
 
 /// Helper to spawn merge-ralph
@@ -1693,6 +1791,7 @@ mod tests {
 
         let err = retry_merge(RetryArgs {
             loop_id: "loop-queue-1".to_string(),
+            format: LoopsFormat::Human,
         })
         .expect_err("retry should fail for non-needs-review");
 
@@ -1865,6 +1964,7 @@ mod tests {
         stop_loop(StopArgs {
             loop_id: None,
             force: false,
+            format: LoopsFormat::Human,
         })
         .expect("stop loop");
 
@@ -1896,6 +1996,7 @@ mod tests {
         let err = stop_loop(StopArgs {
             loop_id: Some("loop-orphan-term-ignore".to_string()),
             force: false,
+            format: LoopsFormat::Human,
         })
         .expect_err("stop should fail when orphan ignores SIGTERM");
 
@@ -2192,6 +2293,7 @@ mod tests {
         let err = merge_loop(MergeArgs {
             loop_id: "loop-merged-1".to_string(),
             force: false,
+            format: LoopsFormat::Human,
         })
         .expect_err("merge should fail for merged loop");
 
@@ -2214,6 +2316,7 @@ mod tests {
         let err = merge_loop(MergeArgs {
             loop_id: "loop-discarded-1".to_string(),
             force: false,
+            format: LoopsFormat::Human,
         })
         .expect_err("merge should fail for discarded loop");
 
@@ -2234,6 +2337,7 @@ mod tests {
         let err = merge_loop(MergeArgs {
             loop_id: "loop-merging-1".to_string(),
             force: false,
+            format: LoopsFormat::Human,
         })
         .expect_err("merge should fail for merging loop without force");
 
