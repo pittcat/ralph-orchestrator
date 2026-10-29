@@ -9,6 +9,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { MonitorDb } from '../db/index.js';
 import { appendEvent } from '../stream/monitor_log.js';
+import { loadWebhookConfig } from './channels/webhook.js';
 import type { Intent, NotifyIntent, ResolveIntent } from './rules.js';
 
 export function idemKey(i: NotifyIntent): string {
@@ -66,6 +67,13 @@ function applyNotify(db: MonitorDb, i: NotifyIntent, at: string): void {
     at,
   );
   insDelivery.run(randomUUID(), id, 'browser', 'pending', null, at, at);
+  // Webhook rows only exist while the channel is enabled (Plan4-U2):
+  // a disabled channel leaves no half-queued deliveries to surprise
+  // the user when they turn it on later.
+  const webhook = loadWebhookConfig(db);
+  if (webhook?.enabled && webhook.url) {
+    insDelivery.run(randomUUID(), id, 'webhook', 'pending', null, at, at);
+  }
 
   appendEvent(
     db,

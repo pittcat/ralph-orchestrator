@@ -7,6 +7,7 @@ import {
 import { inspectRun, type InspectResult } from '../ralph/client.js';
 import { parseSnapshot } from '../ralph/snapshot.js';
 import { scanPlanningSessions } from '../notify/sessions.js';
+import { readRuntimeWebhookHint } from '../notify/runtime_hint.js';
 
 /**
  * Per-project serial collector (plan D7): one `inspect run` child at
@@ -46,6 +47,11 @@ export async function collectOnce(
   let ok = 0;
   let failed = 0;
   for (const project of projects) {
+    // D7: refresh the runtime-webhook duplicate hint every round —
+    // cheap read-only probe, independent of inspect success.
+    db.prepare(
+      'UPDATE projects SET runtime_webhook_hint = ? WHERE id = ?',
+    ).run(readRuntimeWebhookHint(project.canonical_path), project.id);
     try {
       const result = await inspect(project.canonical_path);
       if (!result.ok) {

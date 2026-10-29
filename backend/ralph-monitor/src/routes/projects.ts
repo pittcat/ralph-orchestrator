@@ -11,6 +11,7 @@ interface ProjectRow {
   canonical_path: string;
   display_name: string;
   created_at: string;
+  runtime_webhook_hint: string | null;
 }
 
 export interface ProjectJson {
@@ -18,6 +19,7 @@ export interface ProjectJson {
   canonicalPath: string;
   displayName: string;
   createdAt: string;
+  runtimeWebhookHint: string;
 }
 
 function toJson(row: ProjectRow): ProjectJson {
@@ -26,6 +28,7 @@ function toJson(row: ProjectRow): ProjectJson {
     canonicalPath: row.canonical_path,
     displayName: row.display_name,
     createdAt: row.created_at,
+    runtimeWebhookHint: row.runtime_webhook_hint ?? 'none',
   };
 }
 
@@ -41,10 +44,10 @@ export function registerProjectRoutes(
   db: MonitorDb,
 ): void {
   const byCanonical = db.prepare(
-    'SELECT id, canonical_path, display_name, created_at FROM projects WHERE canonical_path = ?',
+    'SELECT id, canonical_path, display_name, created_at, runtime_webhook_hint FROM projects WHERE canonical_path = ?',
   );
   const byId = db.prepare(
-    'SELECT id, canonical_path, display_name, created_at FROM projects WHERE id = ?',
+    'SELECT id, canonical_path, display_name, created_at, runtime_webhook_hint FROM projects WHERE id = ?',
   );
   const insert = db.prepare(
     'INSERT INTO projects (id, canonical_path, display_name, created_at) VALUES (?, ?, ?, ?)',
@@ -54,7 +57,7 @@ export function registerProjectRoutes(
     'INSERT INTO audit_log (at, project_id, action, details) VALUES (?, ?, ?, ?)',
   );
   const list = db.prepare(
-    'SELECT id, canonical_path, display_name, created_at FROM projects ORDER BY created_at, id',
+    'SELECT id, canonical_path, display_name, created_at, runtime_webhook_hint FROM projects ORDER BY created_at, id',
   );
 
   app.post('/api/monitor/v1/projects', async (req, reply) => {
@@ -100,6 +103,7 @@ export function registerProjectRoutes(
       displayName:
         parsed.data.displayName ?? path.basename(normalized.canonical),
       createdAt: new Date().toISOString(),
+      runtimeWebhookHint: 'none',
     };
     insert.run(
       project.id,
