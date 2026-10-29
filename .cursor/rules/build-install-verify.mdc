@@ -1,0 +1,78 @@
+---
+description: 全栈 build / install / verify SOP — cargo 只覆盖 Rust 侧；frontend/ + backend/ npm workspaces 需要独立构建与验证，ralph web 依赖 frontend/ralph-web/dist
+globs: ["**/package.json", "**/package-lock.json", "**/frontend/**", "**/backend/**", "**/Cargo.toml", "**/Justfile", "**/justfile", "**/scripts/test-fresh-install.sh", "**/crates/ralph-api/**", "**/vite.config.*", "**/.nvmrc"]
+alwaysApply: false
+---
+
+# 全栈 Build / Install / Verify SOP
+
+> 本仓库是 Rust workspace + npm workspaces 双栈。`cargo build` /
+> `cargo install --path crates/ralph-cli` **只覆盖 Rust 半边**——builtin presets
+> 编译期内嵌进二进制，但 monitor server 和前端 dist **不内嵌**。凡改动涉及
+> `frontend/`、`backend/`、`crates/ralph-api`，或目标是跑 `ralph web`，npm 侧
+> 构建/验证同样是完成条件，缺一不可。
+
+## 判定矩阵：改了什么 → 要跑什么
+
+| 改动 / 目标 | Rust 侧 | npm 侧 |
+|---|---|---|
+| `crates/**`（不含 ralph-api） | `cargo build` + `cargo nextest run -p <pkg>`（收尾 `./scripts/run-tests.sh`） | 不需要 |
+| `crates/ralph-api/**` | 同上 + `cargo nextest run -p ralph-api` | `ralph web --dev` 冒烟（vite + `cargo run -p ralph-api`） |
+| `frontend/ralph-web/**` | 不需要 | `npm run build -w @ralph-web/dashboard` + `npm test -w @ralph-web/dashboard` |
+| `backend/ralph-monitor/**` | 不需要 | `npm test -w @ralph-monitor/server`（`npm run build:monitor` 可选——`start` 走 tsx 直跑 TS） |
+| `backend/ralph-web-server/**`（legacy，已弃用） | 不需要 | `npm run test:server`（保证不回归即可） |
+| `backend/ralph-devtools/**` | 不需要 | `npm run build:devtools` + `npm run test:devtools` |
+| `package.json` / `package-lock.json` / `.nvmrc` | — | `npm ci` + `npm run build` + `npm test`（或 `./scripts/test-fresh-install.sh --local` 全链路） |
+| 要用 `ralph web` 验证 dashboard | `cargo build` | `npm ci` + `npm run build:web` |
+
+## npm 侧 SOP
+
+```bash
+npm ci                          # 首次或 lockfile 变更后；Node >= 22（.nvmrc=24，nvm 管理，不走 mise）
+npm run build                   # = npm run build --workspaces，4 个 workspace 全建
+
+# 分 workspace（局部改动时用）
+npm run build -w @ralph-web/dashboard    # tsc -b && vite build → frontend/ralph-web/dist
+npm run build -w @ralph-monitor/server   # tsc（可选；生产入口 `npm run start` 用 tsx 直跑 src/）
+npm run build -w @ralph-devtools/cli     # tsc → dist/cli.js
+
+# 测试
+npm test                        # 所有 workspace（--if-present）
+npm test -w @ralph-web/dashboard      # vitest run
+npm test -w @ralph-monitor/server     # tsx --test
+npm run test:server                   # legacy @ralph-web/server
+
+# 干净环境全链路闸门（node 检查 → 删 node_modules → npm ci → npm run build → server+frontend tests）
+./scripts/test-fresh-install.sh --local
+```
+
+## Rust 侧 install
+
+```bash
+cargo build --release
+cargo install --path crates/ralph-cli   # 安装本仓库 ralph binary（bin 名 `ralph`）
+ralph --version && which ralph
+```
+
+## `ralph web` 依赖链（最容易踩的坑）
+
+- **Monitor 模式（默认 `ralph web`，:3200）**：spawn `npm run start -w @ralph-monitor/server`，`RALPH_MONITOR_STATIC_DIR` 指向 `frontend/ralph-web/dist`。**既不自动 `npm ci` 也不自动 build dist**——node_modules 缺 → monitor 起不来；dist 缺/旧 → dashboard 空白或陈旧。改了 `frontend/` 必须重跑 `npm run build:web` 再看效果。
+- **`--dev` 模式（vite :5173 + `cargo run -p ralph-api` :3000）**：preflight 在 `node_modules/.package-lock.json` 缺失时自动 `npm ci`/`npm install`；不需要 dist。`--legacy-node-api` 换成已弃用的 Node tRPC 后端（`backend/ralph-web-server`）。
+- **workspace root 解析顺序**：cwd → `--workspace` → `~/.ralph/web-home` 记忆路径。装在 PATH 上的 ralph 跑 web 时仍依赖本仓库 checkout + npm 侧产物。
+- 前台 `ralph web` 常驻不退出——冒烟用 `ralph web start`（detached，state file `~/.ralph/web.json`）+ `status` + `stop` 子命令，或外层套 `timeout`（hang-prevention 规则）。
+
+## 冒烟验证（改了 frontend / ralph-api / monitor 后）
+
+```bash
+ralph web start --no-open       # detached；run flags 必须放在 start 之后
+ralph web status                # 确认 monitor up
+curl -sf http://127.0.0.1:3200/ -o /dev/null && echo ok   # dist 真在服务
+ralph web stop
+```
+
+## 宣称完成前的收尾清单
+
+- Rust 涉及：`./scripts/run-tests.sh`（全量）或 targeted `cargo nextest run -p <pkg>`
+- npm 涉及：`npm run build && npm test`
+- 改了 dashboard 行为：上面的 `ralph web` 冒烟
+- lockfile / 依赖变更：`./scripts/test-fresh-install.sh --local`

@@ -83,14 +83,16 @@ cargo doc --no-deps                          # Documentation
 
 ### Web Dashboard
 
+> **⚠️ npm 侧不被 cargo 覆盖(HARD RULE)**：`cargo build` / `cargo install --path crates/ralph-cli` 只产出 Rust 二进制；改动 `frontend/`、`backend/`、`crates/ralph-api` 或任何要跑 `ralph web` 的任务，npm 侧（`npm ci` → `npm run build` → `npm test`）同样是完成条件。monitor 模式**不会**自动装依赖，也不会重建 `frontend/ralph-web/dist`（缺/旧 = dashboard 空白或陈旧）。完整 SOP：`.cursor/rules/build-install-verify.mdc`。
+
 ```bash
-ralph web                 # Launch both servers (backend:3000, frontend:5173)
-npm install               # Install all dependencies
-npm run dev               # Dev mode (both)
-npm run dev:server        # Backend only
-npm run dev:web           # Frontend only
-npm run test:server       # Backend tests
-npm run test              # All npm workspace tests
+ralph web                 # Monitor dashboard (single process, :3200); --dev for vite+api (:5173/:3000)
+npm ci                    # Install all workspace deps (Node >= 22 via nvm/.nvmrc)
+npm run build             # Build all npm workspaces (frontend dist + monitor + devtools + legacy server)
+npm run dev:web           # Vite dev server only (:5173)
+npm run dev:api           # Rust RPC API only (cargo run -p ralph-api, :3000)
+npm test                  # All npm workspace tests
+npm run test:server       # Legacy @ralph-web/server tests
 ```
 
 BDD scenarios (YAML, exercise real runtime paths) live in `crates/ralph-core/tests/scenarios/`.
@@ -101,6 +103,7 @@ BDD scenarios (YAML, exercise real runtime paths) live in `crates/ralph-core/tes
 > **多 hat 隔离 / Agent Output Governance (R1-R6) / preset 单一事实源**:`.cursor/rules/multi-hat-isolation.mdc`
 > **可观测性(Runtime Diagnosis U0-U8 + Doctor) / 诊断**:`.cursor/rules/observability.mdc`
 > **Parallel Loops / Waves / Smoke / E2E / Specs & Tasks**:`.cursor/rules/feature-flags.mdc`
+> **全栈 build / install / verify（Rust + npm workspaces 双栈）**:`.cursor/rules/build-install-verify.mdc`
 
 ### Crate Map (Top-Level)
 
