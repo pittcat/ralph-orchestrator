@@ -22,6 +22,8 @@
     "test": "npm run test --workspaces --if-present",
     "test:server": "npm run test -w @ralph-web/server",
     "test:monitor": "npm test -w @ralph-monitor/server",
+    "build:devtools": "npm run build -w @ralph-devtools/cli",
+    "test:devtools": "npm test -w @ralph-devtools/cli",
     "clean": "npm run clean --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present"
   },

@@ -1,0 +1,55 @@
+# Variant of preset-a: reviewer also verifies, worker gains a publish.
+event_loop:
+  execution_mode: isolated
+  prompt_file: PROMPT.md
+  completion_promise: REVIEW_COMPLETE
+  starting_event: review.start
+  max_iterations: 20
+  required_events:
+    - review.done
+tasks:
+  enabled: false
+cli:
+  backend: claude
+hats:
+  worker:
+    name: Worker
+    description: Does the work.
+    triggers:
+      - review.start
+      - review.changes_requested
+    publishes:
+      - work.done
+      - work.blocked
+      - REVIEW_COMPLETE
+    terminal_events:
+      - work.done
+      - REVIEW_COMPLETE
+    instructions: "Do the thing, emit work.done. Longer instructions here."
+    event_filter:
+      enabled: true
+      events:
+        - work.start
+  reviewer:
+    name: Reviewer
+    description: Reviews the work.
+    triggers:
+      - work.done
+    publishes:
+      - review.done
+      - review.changes_requested
+    terminal_events:
+      - review.done
+      - review.changes_requested
+    default_publishes: review.changes_requested
+    instructions: "Review and emit verdict."
+  verifier:
+    name: Verifier
+    description: Verifies the review.
+    triggers:
+      - review.done
+    publishes:
+      - verify.done
+    terminal_events:
+      - verify.done
+    instructions: "Verify."

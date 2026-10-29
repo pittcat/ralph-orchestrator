@@ -1,0 +1,34 @@
+{
+  "name": "@ralph-devtools/cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ralph dev tools — preset authoring workflow (YAML inspect/topology/diff + Rust-backed check/verify) and run diagnosis reports",
+  "type": "module",
+  "main": "dist/cli.js",
+  "bin": {
+    "ralph-devtools": "dist/cli.js"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "test": "tsx --test $(find test -name '*.test.ts' | sort)",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "yaml": "^2.8.2",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "ralph",
+    "preset",
+    "diagnosis",
+    "devtools"
+  ]
+}
