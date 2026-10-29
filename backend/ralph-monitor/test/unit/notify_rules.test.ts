@@ -33,14 +33,15 @@ const RULES: NotifyRule[] = [
   },
 ];
 
-test('migration seeds exactly the three v1 rules', () => {
+test('migration seeds the v1 rules + Plan5-U2 operation.confirmed', () => {
   const db = openDatabase(':memory:');
   runMigrations(db);
   const rules = loadRules(db);
-  assert.equal(rules.length, 3);
+  assert.equal(rules.length, 4);
   assert.deepEqual(
     rules.map((r) => r.id).sort(),
     [
+      'operation.confirmed',
       'run.terminal.completed',
       'run.terminal.failed',
       'session.waiting_for_input',

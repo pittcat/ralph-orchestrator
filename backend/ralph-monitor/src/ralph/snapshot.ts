@@ -17,6 +17,14 @@ const evidenceSchema = z.object({
   merge_state: z.string().optional(),
 });
 
+const actionDeclSchema = z.object({
+  id: z.string(),
+  available: z.boolean(),
+  reason: z.string().optional(),
+  revision: z.string(),
+  input_schema: z.record(z.string(), z.unknown()).nullish(),
+});
+
 const runObservationSchema = z.object({
   run_id: z.string().min(1),
   kind: z.string(),
@@ -43,6 +51,10 @@ const runObservationSchema = z.object({
   /// Plan3-U1 activity-ledger display path (workspace-relative or
   /// absolute) — absent when no backend call ever wrote a record.
   activity_file: z.string().optional(),
+  /// Plan5-U1 runtime capability declarations (stop/retry/merge/emit).
+  actions: z.array(actionDeclSchema).nullish(),
+  /// Plan5-U1 manifest passthrough — launch ops match on this.
+  client_request_id: z.string().optional(),
   evidence: evidenceSchema.default({
     manifest_present: false,
     manifest_corrupt: false,

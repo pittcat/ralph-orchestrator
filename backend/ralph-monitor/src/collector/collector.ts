@@ -8,6 +8,7 @@ import { inspectRun, type InspectResult } from '../ralph/client.js';
 import { parseSnapshot } from '../ralph/snapshot.js';
 import { scanPlanningSessions } from '../notify/sessions.js';
 import { readRuntimeWebhookHint } from '../notify/runtime_hint.js';
+import { confirmPendingOps } from '../ops/confirm.js';
 
 /**
  * Per-project serial collector (plan D7): one `inspect run` child at
@@ -86,6 +87,9 @@ export async function collectOnce(
         now().toISOString(),
         { sessions: sessions.sessions },
       );
+      // Plan5-U2: launch ops confirm off the projection the round
+      // just committed (manifest client_request_id match).
+      confirmPendingOps(db, project.id, now());
       ok += 1;
     } catch (err) {
       // Never let one project abort the round.

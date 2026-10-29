@@ -11,7 +11,20 @@
 #                       huge      emit >2MB (drives payload cap)
 #                       envcheck  emit v1 JSON with $RALPH_CURRENT_HAT
 #                                 in the workspace field (env scrub probe)
+#   launched-runs.jsonl → run objects appended to the inspect payload
+#                         (written by fake `ralph run`; Plan5-U2).
 # Without .monitor-fixture/fail a canned empty v1 snapshot is printed.
+#
+# Plan5-U2 additions:
+#   ralph run ... --client-request-id <id>
+#       → records a launched run object (client_request_id passthrough)
+#   ralph loops {stop|retry|merge} <id> --format json
+#       → prints a Plan5-U1 typed receipt on the last stdout line;
+#         `.monitor-fixture/ops-fail` with content <op> forces ok:false
+#   ralph emit <topic> [payload] --file <f>
+#       → appends a JSON line to <f>
+#   ralph preset builtin list --format json
+#       → prints a canned builtin catalog
 
 set -u
 
@@ -41,11 +54,76 @@ if [ "${1:-}" = "inspect" ] && [ "${2:-}" = "run" ]; then
         ;;
     esac
   fi
-  if [ -f .monitor-fixture/snapshot.json ]; then
-    cat .monitor-fixture/snapshot.json
-    exit 0
+  node -e '
+    const fs = require("fs");
+    const base = fs.existsSync(".monitor-fixture/snapshot.json")
+      ? JSON.parse(fs.readFileSync(".monitor-fixture/snapshot.json", "utf8"))
+      : { schema_version: "run-observation/v1", workspace: process.cwd(),
+          generated_at: "2026-10-28T00:00:00Z", runs: [] };
+    if (fs.existsSync(".monitor-fixture/launched-runs.jsonl")) {
+      for (const line of fs.readFileSync(".monitor-fixture/launched-runs.jsonl", "utf8").split("\n")) {
+        if (line.trim()) base.runs.push(JSON.parse(line));
+      }
+    }
+    console.log(JSON.stringify(base));
+  '
+  exit 0
+fi
+
+if [ "${1:-}" = "run" ]; then
+  shift
+  preset=""; crid=""; prompt=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -H) preset="$2"; shift 2;;
+      -p) prompt="$2"; shift 2;;
+      --client-request-id) crid="$2"; shift 2;;
+      --*) shift 2;;
+      *) shift;;
+    esac
+  done
+  rid="loop-fake-${crid:-noprompt}"
+  mkdir -p .monitor-fixture
+  printf '{"run_id":"%s","kind":"primary","state":"running","cwd":"%s","workspace":"%s","repo_root":"%s","prompt_preview":"%s","preset":"%s","started_at":"2026-10-28T12:00:00Z","client_request_id":"%s","evidence":{"manifest_present":true,"registry_present":true},"actions":[{"id":"stop","available":true,"revision":"%s"},{"id":"retry","available":false,"reason":"not in merge queue","revision":"%s"},{"id":"merge","available":false,"reason":"no diff","revision":"%s"},{"id":"emit","available":true,"revision":"%s","input_schema":{"topics":["loop.cancel","task.resume"]}}]}\n' \
+    "$rid" "$PWD" "$PWD" "$PWD" "${prompt:0:60}" "$preset" "$crid" \
+    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
+    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
+    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
+    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
+    >> .monitor-fixture/launched-runs.jsonl
+  exit 0
+fi
+
+if [ "${1:-}" = "loops" ]; then
+  op="${2:-}"; lid="${3:-}"
+  fail=""
+  [ -f .monitor-fixture/ops-fail ] && fail="$(cat .monitor-fixture/ops-fail)"
+  if [ "$fail" = "$op" ]; then
+    printf '{"ok":false,"action":"%s","loop_id":"%s","error":"fixture-forced failure"}\n' "$op" "$lid"
+    exit 5
   fi
-  printf '{"schema_version":"run-observation/v1","workspace":"%s","generated_at":"2026-10-28T00:00:00Z","runs":[]}\n' "$PWD"
+  printf '{"ok":true,"action":"%s","loop_id":"%s","detail":"fixture %s applied","revision_after":"cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe"}\n' "$op" "$lid" "$op"
+  exit 0
+fi
+
+if [ "${1:-}" = "emit" ]; then
+  shift
+  topic="$1"; shift || true
+  payload=""; file=".ralph/events.jsonl"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --file) file="$2"; shift 2;;
+      --*) shift;;
+      *) payload="$1"; shift;;
+    esac
+  done
+  mkdir -p "$(dirname "$file")"
+  printf '{"topic":"%s","payload":"%s","at":"2026-10-28T12:00:00Z"}\n' "$topic" "$payload" >> "$file"
+  exit 0
+fi
+
+if [ "${1:-}" = "preset" ] && [ "${2:-}" = "builtin" ] && [ "${3:-}" = "list" ]; then
+  printf '[{"name":"autoresearch","description":"autonomous research loop"},{"name":"ce-executor-pipeline"},{"name":"debug"},{"name":"parallel-forge"}]\n'
   exit 0
 fi
 

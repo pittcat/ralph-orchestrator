@@ -62,6 +62,8 @@ export interface RunRow {
   workspace: string | null;
   activity_file: string | null;
   events_file?: string | null;
+  actions: string | null;
+  client_request_id: string | null;
 }
 
 export interface CursorRow {
@@ -107,8 +109,9 @@ export function ingestSnapshot(
          repo_root, worktree_path, prompt_preview, prompt_sha256,
          preset, plan_path, started_at, terminal, last_event_at,
          last_observed_at, manifest_path, snapshot_sha256,
-         preset_descriptor, scheduler, pid, workspace, activity_file
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         preset_descriptor, scheduler, pid, workspace, activity_file,
+         actions, client_request_id, events_file
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(project_id, run_id) DO UPDATE SET
          kind = excluded.kind,
          state = excluded.state,
@@ -130,7 +133,10 @@ export function ingestSnapshot(
          scheduler = excluded.scheduler,
          pid = excluded.pid,
          workspace = excluded.workspace,
-         activity_file = excluded.activity_file`,
+         activity_file = excluded.activity_file,
+         actions = excluded.actions,
+         client_request_id = excluded.client_request_id,
+         events_file = excluded.events_file`,
     );
     const conflict = db.prepare(
       'INSERT INTO collection_errors (project_id, at, error) VALUES (?, ?, ?)',
@@ -208,6 +214,9 @@ export function ingestSnapshot(
         obs.pid ?? null,
         obs.workspace ?? obs.cwd ?? null,
         obs.activity_file ?? null,
+        obs.actions ? JSON.stringify(obs.actions) : null,
+        obs.client_request_id ?? null,
+        obs.events_file ?? null,
       );
 
       // Plan4-U1: a run crossing into terminal state is notification

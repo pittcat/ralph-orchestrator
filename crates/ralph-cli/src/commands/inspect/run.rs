@@ -352,6 +352,10 @@ pub struct RunObservation {
     /// Plan5-U1 capability declarations — the monitor's operation
     /// menu is rendered verbatim from this list (D1).
     pub actions: Vec<ActionDecl>,
+    /// Plan5-U2: manifest `client_request_id` passthrough — the
+    /// monitor matches a launch operation to the run it spawned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_request_id: Option<String>,
     pub evidence: RunEvidence,
 }
 
@@ -618,6 +622,7 @@ fn observation_from_manifest(
             ..RunEvidence::default()
         },
         actions: Vec::new(),
+        client_request_id: m.client_request_id.clone(),
     };
     attach_actions(&mut obs, alive, m.revision, ev, workspace);
     obs
@@ -666,6 +671,7 @@ fn observation_from_registry(
             ..RunEvidence::default()
         },
         actions: Vec::new(),
+        client_request_id: None,
     };
     attach_actions(&mut obs, alive, 0, ev, workspace);
     obs
@@ -723,6 +729,7 @@ fn aggregate_runs(ev: &GatheredEvidence, workspace: &Path) -> Vec<RunObservation
                         ..RunEvidence::default()
                     },
                     actions: Vec::new(),
+                    client_request_id: None,
                 };
                 attach_actions(&mut obs, false, 0, ev, workspace);
                 runs.insert(run_id, obs);
@@ -792,6 +799,7 @@ fn aggregate_runs(ev: &GatheredEvidence, workspace: &Path) -> Vec<RunObservation
                 ..RunEvidence::default()
             },
             actions: Vec::new(),
+            client_request_id: None,
         };
         attach_actions(&mut obs, alive, 0, ev, workspace);
         runs.insert(loop_id, obs);

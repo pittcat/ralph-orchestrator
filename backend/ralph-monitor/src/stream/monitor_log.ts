@@ -21,7 +21,8 @@ export type MonitorEventKind =
   | 'project.health'
   | 'project.updated'
   | 'notification.created'
-  | 'notification.updated';
+  | 'notification.updated'
+  | 'operation.updated';
 
 export interface MonitorEventRow {
   seq: number;
