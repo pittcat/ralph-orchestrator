@@ -273,7 +273,7 @@ def _task_runner_commands(root: Path) -> dict[str, tuple[str, ...]]:
     """Discover conventional quality targets declared by the project itself."""
     categories = {
         "build": ("build",),
-        "test": ("test", "tests"),
+        "test": ("test-parallel", "test-nextest", "test-ci", "test", "tests"),
         "lint": ("lint", "check", "ci"),
         "format": ("format-check", "fmt-check", "format", "fmt"),
     }
