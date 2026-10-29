@@ -1,23 +1,33 @@
 name: ralph-project-bootstrap
 display_name: "Ralph Project Bootstrap"
 description: |
-  Bring an arbitrary target project onto an existing Ralph preset with a
-  verified runtime suite and a clear handoff.
+  Guide a task or goal onto the right Ralph preset, then bring the
+  target project onto it with a verified runtime suite and a clear
+  handoff.
 when_to_use: |
   Use when the operator needs to provision a brand-new or
   under-provisioned target project, restore a missing Ralph pipeline
   suite, or fix a target whose static checks fail because the suite is
-  incomplete. Do NOT use this skill to author or review presets
-  (`ralph-preset-author` / `ralph-preset-review`), to operate the
-  in-loop CLI (`ralph run` / `ralph loops` / `ralph diagnose`), or to
-  diagnose a loop that already ran (`ralph-run-diagnosis`).
+  incomplete — whether the operator names a preset or only describes a
+  task / hands over a file. Do NOT use this skill to author or review
+  presets (`ralph-preset-author` / `ralph-preset-review`), to operate
+  the in-loop CLI (`ralph run` / `ralph loops` / `ralph diagnose`), or
+  to diagnose a loop that already ran (`ralph-run-diagnosis`).
 entry_point: |
-  ONE unified entry drives the whole pipeline; never call the helper
-  modules by hand to re-implement the flow.
-  CLI: python skills/ralph-project-bootstrap/scripts/bootstrap_pipeline.py
-       --cwd <project> --preset <preset> [--plan <plan.md>]
-       [--prompt-file <prompt.md>] [--binary <ralph>]
-       [--refresh-existing] [--replay-transcript <dir>] [--json]
+  Two phases. Phase 0 (guided triage, read-only): when no preset token
+  was supplied, explore the project and the reachable preset inventory,
+  recommend a fit, and confirm it with the operator — never ask for
+  facts the environment answers, never treat a recommendation as
+  confirmed. Inventory helper:
+    python skills/ralph-project-bootstrap/scripts/preset_inventory.py
+         --cwd <project> [--presets-dir <dir> ...] [--binary ralph] --format json
+  Phase 1 (unified pipeline): ONE entry drives provisioning after the
+  preset is confirmed; never call the helper modules by hand to
+  re-implement the flow.
+    python skills/ralph-project-bootstrap/scripts/bootstrap_pipeline.py
+         --cwd <project> --preset <preset> [--plan <plan.md>]
+         [--prompt-file <prompt.md>] [--binary <ralph>]
+         [--refresh-existing] [--replay-transcript <dir>] [--json]
   Code: bootstrap_pipeline.run_pipeline(cwd=..., preset=..., ...)
   --replay-transcript is the ONLY switch that enables an auto-running
   (content_fixed_replay, bounded) smoke backend, and only when the preset
@@ -26,9 +36,11 @@ entry_point: |
   be repo-relative to --cwd (absolute paths and .. escapes are rejected).
 inputs:
   - project_root
-  - preset (path or builtin id, already passing strict lint)
+  - task description, goal file, or preset (path or builtin id); a preset
+    is optional — Phase 0 derives and confirms it when absent
   - optional launch context (prompt file, plan, environment, or runtime id)
 outputs:
+  - confirmed preset selection (Phase 0, operator-approved)
   - owned AGENTS.md / CLAUDE.md managed sections (idempotent)
   - preset-bound ralph.<stem>.yml and PROMPT.<stem>.md (idempotent)
   - provenance embedded in the generated config
@@ -45,9 +57,12 @@ handoff_levels:
   - complete: static gate green AND the bounded replay smoke reached the
       terminal marker; the command is the official launch command; exit 0.
 boundaries:
-  - Does not author or review presets.
+  - Does not author or review presets; a task no preset fits routes to
+    ralph-task-discovery -> ralph-preset-author.
   - Does not run loops outside an authorized smoke path.
   - Does not mutate git history, branches, worktrees, or remote refs.
+  - Phase 0 asks decision questions only (one at a time, recommendation
+    attached); facts come from the environment, never the operator.
 verification_gates:
   - ralph preset check --strict
   - ralph preflight --strict

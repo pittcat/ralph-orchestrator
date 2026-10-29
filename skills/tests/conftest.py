@@ -44,6 +44,7 @@ for _name, _path in (
     ("_probe_runner", _BOOTSTRAP_SCRIPTS / "_probe_runner.py"),
     ("smoke_runner", _BOOTSTRAP_SCRIPTS / "smoke_runner.py"),
     ("handoff", _BOOTSTRAP_SCRIPTS / "handoff.py"),
+    ("preset_inventory", _BOOTSTRAP_SCRIPTS / "preset_inventory.py"),
     ("bootstrap_pipeline", _BOOTSTRAP_SCRIPTS / "bootstrap_pipeline.py"),
 ):
     if _path.is_file():

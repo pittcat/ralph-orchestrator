@@ -1,22 +1,129 @@
 ---
 name: ralph-project-bootstrap
 description: >-
-  Read an existing Ralph preset, audit a target project, generate a useful
-  project-specific runtime suite, run staged validation, and deliver the exact
-  launch command plus unresolved preconditions. Use when bringing a project
-  onto a builtin or file preset or repairing an incomplete suite. A plan/task
-  is optional. Do not use for preset authoring/review, loop operations, or
-  post-run diagnosis.
+  Guide a task or goal onto the right Ralph preset: explore the project,
+  inventory reachable presets, recommend and confirm a fit with the
+  operator, then generate the runtime suite, run staged validation, and
+  deliver the exact launch command plus unresolved preconditions. Use
+  when bringing a project onto a builtin or file preset — whether the
+  operator names a preset or only describes a task/file — or repairing
+  an incomplete suite. Do not use for preset authoring/review, loop
+  operations, or post-run diagnosis.
 ---
 
 # Ralph Project Bootstrap
 
-Bring an arbitrary target project onto an existing Ralph preset with a
-verified runtime suite and a clear handoff. This skill does **not** author
-or review presets; it consumes presets produced by `ralph-preset-author`
-and vetted by `ralph-preset-review`.
+Bring an arbitrary target project onto the right Ralph preset with a
+verified runtime suite and a clear handoff. This skill does **not**
+author or review presets; it consumes presets produced by
+`ralph-preset-author` and vetted by `ralph-preset-review`.
 
-## Unified Entry Point
+The skill has two phases. **Phase 0 (guided triage)** turns whatever the
+operator brought — a task, a file, or a bare goal — into a confirmed
+preset choice. **Phase 1 (the unified pipeline)** provisions and
+validates the suite. When the operator already supplies a preset token
+(`builtin:<id>` or a preset file path), skip Phase 0 and start at the
+Unified Entry Point directly.
+
+## Phase 0 — Guided intent → preset triage
+
+Exploratory and read-only: this phase never writes the target project,
+never runs `ralph run` / `ralph emit`, and never asks the operator for
+facts the environment can answer. Its only output is a confirmed preset
+plus the launch inputs the preset's contract requires.
+
+### Accepted inputs
+
+| Operator brings | Triage behaviour |
+| --- | --- |
+| free-text task / goal ("merge my worktrees", "run this plan", "review the last feature") | parse the intent, explore, recommend |
+| a file (plan / spec / issue doc) | read it in full, extract the goal, keep it as the candidate `--plan` / `--prompt-file` input |
+| preset token (`builtin:<id>` or `*.yml` path) | triage complete — go straight to the Unified Entry Point |
+| nothing ("what should I run here?") | explore project state, propose the preset that fits what the repo is already doing |
+
+### Step 1 — Explore (environment answers, not operator questions)
+
+Collect facts before forming a recommendation:
+
+1. **Project root + facts** — resolve the root and `ProjectFacts`
+   exactly as the audit stage does (`scripts/audit.py`:
+   `audit_project_root`, `collect_project_facts`). A `root_ambiguous`
+   result stops here, before any further work.
+2. **Preset inventory** — run
+   `python skills/ralph-project-bootstrap/scripts/preset_inventory.py
+   --cwd <root> [--presets-dir <dir> ...] --format json`.
+   The inventory is typed data: per candidate it carries `source`,
+   `description`, `backend`, `hat_count`, `hat_summaries`,
+   `execution_mode`, `inline_prompt_present`, `prompt_excerpt`,
+   `completion_promise`, budget fields, `contract_complete`,
+   `input_contract`, and `shadows_builtin`. Pass `--presets-dir` for
+   each project directory that ships its own `*.yml` presets;
+   `--no-builtin` skips binary introspection (issues still recorded).
+3. **Project-state signals that tilt a recommendation** — check what
+   the repo is already doing:
+   - `git worktree list` shows live side worktrees → merge /
+     parallel-development presets become relevant.
+   - Plan / spec docs exist (`docs/plans/*.md`, `plan.md`, the file the
+     operator supplied) → plan-driven presets fit.
+   - A `.ralph/` directory with loop state already exists → **stop**:
+     this is loop-ops / post-run territory, hand off to `ralph-loop`
+     (operations) or `ralph-run-diagnosis` (post-mortem), not bootstrap.
+   - Plans recently merged into the current branch → post-merge
+     convergence presets fit.
+   - The operator's file is a bug report / incident doc → debug-style
+     presets fit.
+
+Never ask the operator a question the environment can answer (stack,
+test commands, worktree layout, whether a plan file exists).
+
+### Step 2 — Recommend (have an opinion)
+
+Score every inventory candidate on intent fit: the task's verbs and
+objects against `description`, `prompt_excerpt`, `hat_summaries`, and
+`input_contract`; weight by `backend`, `hat_count`, and whether the
+preset expects worktrees / a supervisor. Prefer a `builtin:` source over
+a file preset with `shadows_builtin: true`. Treat
+`contract_complete: false` candidates as risky — flag that the pipeline
+resolver may reject them (missing `cli.backend` / budgets).
+
+Present the result as a compact comparison, not a bare list:
+
+```
+Recommended: builtin:<id> — <one-line reason tied to the task>
+Alternatives:
+  - builtin:<id2> — fits if <condition>; heavier/lighter because <fact>
+  - presets/…/x.yml — file preset; only if <condition>
+Not recommended: <id3> — <why it looks plausible but doesn't fit>
+Every candidate needs from you: <plan file / prompt fields / backend X>
+```
+
+When NO candidate fits, say so and route to
+`ralph-task-discovery` → `ralph-preset-author` (a preset must be
+authored) instead of forcing the nearest match.
+
+### Step 3 — Confirm (decision belongs to the operator)
+
+Ask **exactly one** preset-selection question with the recommended
+candidate as the leading option. After the operator confirms, resolve
+the preset's remaining input contract one question at a time, each with
+a recommendation attached (e.g. target branch for a merge preset, which
+plan file for a plan-driven preset). Never treat the recommendation as
+confirmed by default, and never launch into Phase 1 without explicit
+confirmation.
+
+### Step 4 — Hand off to the unified pipeline
+
+Invoke the Unified Entry Point below with `--preset <confirmed-source>`
+plus `--plan <file>` / `--prompt-file <file>` when the operator supplied
+(or the confirmation produced) those inputs. Phase 0 output feeds the
+pipeline; the pipeline's stage order and blocker semantics are
+unchanged.
+
+The triage contract — inventory schema, recommendation rubric, question
+protocol, stop conditions — lives in
+[references/preset-triage.md](references/preset-triage.md).
+
+## Phase 1 — Unified Entry Point
 
 The whole pipeline has ONE entry point. Do not call the helper modules
 by hand to re-implement the flow; the entry point orchestrates them in
@@ -126,9 +233,11 @@ view, never a launch command.
 
 ## Boundaries
 
-- **Inputs.** Caller supplies the project directory (current cwd) and the
-  preset path or builtin id. Read the resolved preset in full before deciding
-  what else is needed. A plan, ordinary prompt file, environment variable,
+- **Inputs.** Caller supplies the project directory (current cwd) and a
+  task, a file, or a preset path/builtin id. A preset is **optional at
+  invocation**: Phase 0 triage derives and confirms it before the
+  pipeline runs; the pipeline itself still requires `--preset`. Read
+  the resolved preset in full before deciding what else is needed. A plan, ordinary prompt file, environment variable,
   loop id, worktree name, or other runtime context is required only when the
   preset's actual launch contract needs it. Missing first-run business input
   does **not** block provisioning: the entry generates the reusable suite,
@@ -136,7 +245,9 @@ view, never a launch command.
   template the operator must finish. Never invent a placeholder plan file.
 - **No preset authoring.** Hat routing, AAF tables, preset schemas and
   builtin completions live in `ralph-preset-author` / `ralph-preset-review`.
-  If the caller needs to change the preset, hand off there.
+  If the caller needs to change the preset — or Phase 0 finds that no
+  reachable preset fits — hand off there (via `ralph-task-discovery`
+  when the task itself is still unshaped).
 - **No day-to-day loop ops.** Once the suite ships, monitor / resume /
   merge / debug work belongs to the in-loop CLI / web dashboard
   (`ralph run`, `ralph loops`, `ralph diagnose`).  Once a loop has
@@ -159,6 +270,9 @@ view, never a launch command.
 - All paths written to disk must be repo-relative.
 - Stop and request operator decision on any conflict / ambiguity;
   defaulting to "best guess" is forbidden.
+- A Phase 0 recommendation is never a confirmation: no preset is
+  selected, and no file becomes `--plan` / `--prompt-file`, until the
+  operator explicitly says so.
 
 ## Agent Docs Maintenance
 

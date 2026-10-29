@@ -10,7 +10,7 @@ It ships operator skills:
 | `ralph-html` | HTML deliverable guidance bundle: the Ralph entry skill plus the vendored Effective HTML collection (`vendor/`); bound by every entry that ships a human-readable final artifact |
 | `ralph-preset-author` | Draft presets (builtin + local) with per-hat AAF tables **+ payload contract notes** before review |
 | `ralph-preset-review` | Per-hat activation dry-run + **payload audit** + mechanical lint → `preset-review-report.html` |
-| `ralph-project-bootstrap` | Audit a target project via ONE unified pipeline entry (`bootstrap_pipeline.py`), generate or safely update the preset-bound `ralph.<stem>.yml` + `PROMPT.<stem>.md` suite and the AGENTS.md / CLAUDE.md managed sections from an existing preset, run staged validation, and hand off the official launch command (`dry-run green != loop closed`) |
+| `ralph-project-bootstrap` | Guide a task/file/goal onto the right preset: Phase 0 explores the project, inventories reachable presets (`preset_inventory.py`), and confirms a recommended fit with the operator; Phase 1 then runs ONE unified pipeline entry (`bootstrap_pipeline.py`) to generate or safely update the preset-bound `ralph.<stem>.yml` + `PROMPT.<stem>.md` suite and the AGENTS.md / CLAUDE.md managed sections, run staged validation, and hand off the official launch command (`dry-run green != loop closed`) |
 | `ralph-run-diagnosis` | Post-run deep diagnosis: artifacts, OPAC, mechanism vs preset attribution |
 | `ralph-task-discovery` | Structured task discovery before formal planning: environment-sourced evidence, one-question-at-a-time business decisions, and a validated task brief handed off to `ralph-preset-author` |
 
