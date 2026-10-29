@@ -7,6 +7,7 @@ import {
   type MonitorState,
 } from '../lib/state.js';
 import { ingestRunEvents } from '../events/ingest.js';
+import { ingestRunActivity } from '../activity/ingest.js';
 
 /**
  * Runs projection layer (plan U3 §5/§15).
@@ -47,7 +48,9 @@ export interface RunRow {
   snapshot_sha256: string | null;
   preset_descriptor: string | null;
   scheduler: string | null;
-  workspace?: string | null;
+  pid: number | null;
+  workspace: string | null;
+  activity_file: string | null;
   events_file?: string | null;
 }
 
@@ -84,8 +87,8 @@ export function ingestSnapshot(
          repo_root, worktree_path, prompt_preview, prompt_sha256,
          preset, plan_path, started_at, terminal, last_event_at,
          last_observed_at, manifest_path, snapshot_sha256,
-         preset_descriptor, scheduler
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         preset_descriptor, scheduler, pid, workspace, activity_file
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(project_id, run_id) DO UPDATE SET
          kind = excluded.kind,
          state = excluded.state,
@@ -104,7 +107,10 @@ export function ingestSnapshot(
          manifest_path = excluded.manifest_path,
          snapshot_sha256 = excluded.snapshot_sha256,
          preset_descriptor = excluded.preset_descriptor,
-         scheduler = excluded.scheduler`,
+         scheduler = excluded.scheduler,
+         pid = excluded.pid,
+         workspace = excluded.workspace,
+         activity_file = excluded.activity_file`,
     );
     const conflict = db.prepare(
       'INSERT INTO collection_errors (project_id, at, error) VALUES (?, ?, ?)',
@@ -171,6 +177,9 @@ export function ingestSnapshot(
         rawSha256,
         obs.preset_descriptor ? JSON.stringify(obs.preset_descriptor) : null,
         obs.scheduler ? JSON.stringify(obs.scheduler) : null,
+        obs.pid ?? null,
+        obs.workspace ?? obs.cwd ?? null,
+        obs.activity_file ?? null,
       );
 
       // Plan2-U2: events ingest in the same transaction — a run row
@@ -183,6 +192,15 @@ export function ingestSnapshot(
           startedAt: obs.started_at ?? null,
           terminalAt: obs.terminal?.at ?? null,
         });
+        // Plan3-U2: the activity ledger joins the same transaction —
+        // run row + events + activity land atomically (E7).
+        ingestRunActivity(
+          db,
+          projectId,
+          obs.run_id,
+          workspace,
+          obs.activity_file,
+        );
       }
       // Plan2-U2 fills the U3 placeholder: evidence time comes from
       // the projected ledger.

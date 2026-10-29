@@ -40,6 +40,9 @@ const runObservationSchema = z.object({
   scheduler: z.record(z.string(), z.unknown()).nullish(),
   terminal: terminalSchema.nullish(),
   manifest: z.string().optional(),
+  /// Plan3-U1 activity-ledger display path (workspace-relative or
+  /// absolute) — absent when no backend call ever wrote a record.
+  activity_file: z.string().optional(),
   evidence: evidenceSchema.default({
     manifest_present: false,
     manifest_corrupt: false,

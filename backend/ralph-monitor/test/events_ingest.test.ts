@@ -39,7 +39,13 @@ describe('events ingest', () => {
     fs.rmSync(ws, { recursive: true, force: true });
   });
 
-  const ingest = (eventsFile?: string | null, window = { startedAt: null, terminalAt: null }) =>
+  const ingest = (
+    eventsFile?: string | null,
+    window: { startedAt: string | null; terminalAt: string | null } = {
+      startedAt: null,
+      terminalAt: null,
+    },
+  ) =>
     ingestRunEvents(db, PROJ, RUN, ws, eventsFile, window);
 
   const rows = () =>

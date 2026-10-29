@@ -7,7 +7,6 @@ import {
   makeProjectDir,
   insertProject,
   makeApp,
-  type Session,
 } from './helpers.js';
 import { ingestSnapshot } from '../src/db/run_projection.js';
 import type { MonitorApp } from '../src/app.js';
@@ -54,7 +53,6 @@ function snapshot(ws: string): RunSnapshot {
 describe('events/progress/graph API', () => {
   let app: MonitorApp;
   let ws: string;
-  let session: Session | undefined;
   let eventsFile: string;
 
   beforeEach(async () => {

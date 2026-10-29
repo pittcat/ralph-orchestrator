@@ -64,7 +64,7 @@ export function buildApp(options: BuildAppOptions): MonitorApp {
   registerSecurity(app);
   registerProjectRoutes(app, db);
   registerRunRoutes(app, db, machineId);
-  registerHealthRoutes(app, db);
+  registerHealthRoutes(app, db, machineId);
   registerEventRoutes(app, db, machineId);
   registerArtifactRoutes(app, db, machineId);
 

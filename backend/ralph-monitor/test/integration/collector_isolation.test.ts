@@ -68,15 +68,16 @@ test('S9: failing project does not block others; its runs stay stale', async () 
   });
   assert.equal(health.statusCode, 200);
   const body = health.json();
-  assert.equal(body.collector, 'error');
-  assert.match(body.error, /nonzero/);
-  assert.ok(body.last_collected_at);
+  assert.equal(body.collector.status, 'error');
+  assert.match(body.collector.error, /nonzero/);
+  assert.ok(body.collector.last_collected_at);
+  assert.ok(Array.isArray(body.degraded_runs));
 
   const healthB = await app.inject({
     method: 'GET',
     url: `/api/monitor/v1/projects/${idB}/health`,
   });
-  assert.equal(healthB.json().collector, 'ok');
+  assert.equal(healthB.json().collector.status, 'ok');
 
   // A recovering clears the failure flag on the next round.
   writeMonitorFixture(dirA, {
