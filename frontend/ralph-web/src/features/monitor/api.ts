@@ -136,6 +136,9 @@ export type RunsResponse = z.infer<typeof runsResponseSchema>;
 
 export const runDetailSchema = z.object({
   run: runSchema.extend({
+    /// monitor-descriptor/v1 passthrough — stages/artifacts drive
+    /// the detail strip and artifact slots.
+    presetDescriptor: z.record(z.string(), z.unknown()).nullable().default(null),
     evidenceTimestamps: z.object({
       lastEventAt: z.string().nullable(),
       lastObservedAt: z.string().nullable(),
@@ -156,6 +159,70 @@ export const projectHealthSchema = z.object({
   last_collected_at: z.string().nullable(),
 });
 export type ProjectHealth = z.infer<typeof projectHealthSchema>;
+
+// ── Plan2-U2 events/progress/graph contract ──
+
+export const runEventSchema = z.object({
+  seq: z.number(),
+  ts: z.string().nullable(),
+  iteration: z.number().nullable(),
+  hat: z.string().nullable(),
+  topic: z.string().nullable(),
+  payload: z.string().nullable(),
+  truncated: z.boolean(),
+});
+export type MonitorEvent = z.infer<typeof runEventSchema>;
+
+export const eventsResponseSchema = z.object({
+  events: z.array(runEventSchema),
+  next_cursor: z.number(),
+  has_more: z.boolean(),
+  watermark: z.string().nullable(),
+  evidence_timestamps: z.object({
+    last_event_at: z.string().nullable(),
+    last_observed_at: z.string().nullable(),
+    terminal_at: z.string().nullable(),
+    collected_at: z.string().nullable(),
+  }),
+});
+export type EventsResponse = z.infer<typeof eventsResponseSchema>;
+
+export const progressSchema = z.object({
+  stage: z.string().nullable(),
+  stage_label: z.string().nullable(),
+  stage_history: z.array(
+    z.object({ stage: z.string(), at_seq: z.number(), round: z.number() }),
+  ),
+  current_hat: z.string().nullable(),
+  iteration: z.number().nullable(),
+  elapsed_ms: z.number().nullable(),
+  units: z.object({
+    done: z.number(),
+    total: z.number().nullable(),
+    source: z.string(),
+  }),
+  denominator: z.string(),
+});
+export type RunProgress = z.infer<typeof progressSchema>;
+
+export const graphSchema = z.object({
+  nodes: z.array(
+    z.object({ unit: z.string(), status: z.string(), last_seq: z.number() }),
+  ),
+  edges: z.array(z.object({ from: z.string(), to: z.string() })),
+  source: z.string(),
+  scheduler: z.record(z.string(), z.unknown()).nullable().optional(),
+  illegal_transitions: z.number().default(0),
+});
+export type RunGraph = z.infer<typeof graphSchema>;
+
+export interface EventsQuery {
+  cursor?: number;
+  limit?: number;
+  hat?: string;
+  topic?: string;
+  q?: string;
+}
 
 // ── Typed calls ──
 
@@ -191,6 +258,35 @@ export function apiGetRun(globalRunId: string): Promise<RunDetail> {
 
 export function apiGetProjectHealth(projectId: string): Promise<ProjectHealth> {
   return request(`/projects/${projectId}/health`, projectHealthSchema);
+}
+
+export function apiGetEvents(
+  globalRunId: string,
+  query: EventsQuery = {},
+): Promise<EventsResponse> {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(query)) {
+    if (v !== undefined && v !== "") params.set(k, String(v));
+  }
+  const s = params.toString();
+  return request(
+    `/runs/${encodeURIComponent(globalRunId)}/events${s ? `?${s}` : ""}`,
+    eventsResponseSchema,
+  );
+}
+
+export function apiGetProgress(globalRunId: string): Promise<RunProgress> {
+  return request(
+    `/runs/${encodeURIComponent(globalRunId)}/progress`,
+    progressSchema,
+  );
+}
+
+export function apiGetGraph(globalRunId: string): Promise<RunGraph> {
+  return request(
+    `/runs/${encodeURIComponent(globalRunId)}/graph`,
+    graphSchema,
+  );
 }
 
 export function apiRegisterProject(path: string, displayName?: string): Promise<MonitorProject> {

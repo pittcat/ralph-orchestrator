@@ -1,31 +1,116 @@
 /**
- * U5 minimal run detail — identity + state badge + state_evidence
- * summary + field table + evidence timestamps. Plan2 replaces this
- * with the tabbed detail page; no tabs here per unit scope.
+ * Plan2-U4 tabbed run detail: header (identity + live progress),
+ * descriptor-driven stage strip, and 概览/事件时间线/日志 tabs.
+ * URL carries `tab` + selected event `seq` (deep-linkable); the
+ * overview's filter params pass through untouched on the way back.
  */
 
-import { Link, useLocation, useParams } from "react-router-dom";
+import { useCallback, useMemo, useState } from "react";
+import { Link, useLocation, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useMonitorRunDetail } from "./hooks";
-import { RunStateBadge } from "./components/RunStateBadge";
+import { cn } from "@/lib/utils";
+import { useMonitorRunDetail, useRunEvents, useRunProgress } from "./hooks";
+import { DetailHeader } from "./detail/DetailHeader";
+import { StageStrip } from "./detail/StageStrip";
+import { OverviewTab } from "./detail/OverviewTab";
+import { TimelineTab } from "./detail/TimelineTab";
+import { LogsTab } from "./detail/LogsTab";
 
-function Field({ label, value }: { label: string; value: string | null | undefined }) {
-  return (
-    <div className="grid grid-cols-[9rem_1fr] gap-2 py-1 text-sm">
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="break-all font-mono text-xs">{value ?? "—"}</dd>
-    </div>
-  );
+type TabId = "overview" | "timeline" | "logs";
+const TABS: { id: TabId; label: string }[] = [
+  { id: "overview", label: "概览" },
+  { id: "timeline", label: "事件时间线" },
+  { id: "logs", label: "日志" },
+];
+
+/// Overview filter keys that ride in on the inbound URL — everything
+/// else (tab/seq) belongs to the detail page itself.
+const OVERVIEW_KEYS = new Set(["q", "project", "state", "preset", "sort"]);
+
+function backSearch(search: string): string {
+  const p = new URLSearchParams(search);
+  for (const k of [...p.keys()]) {
+    if (!OVERVIEW_KEYS.has(k)) p.delete(k);
+  }
+  const s = p.toString();
+  return s ? `?${s}` : "";
 }
 
 export function RunDetailPage() {
   const { globalId } = useParams<{ globalId: string }>();
   const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
   const decoded = globalId ? decodeURIComponent(globalId) : undefined;
+
   const detail = useMonitorRunDetail(decoded);
-  // Preserve the overview filter URL on the way back.
-  const backTo = `/monitor${location.search}`;
+  const terminal = !!detail.data?.run.terminal;
+  const progress = useRunProgress(decoded, terminal);
+
+  const tab = (searchParams.get("tab") as TabId) || "overview";
+  const seqParam = searchParams.get("seq");
+  const selectedSeq = seqParam ? Number(seqParam) : null;
+  const [logsPaused, setLogsPaused] = useState(false);
+  const events = useRunEvents(decoded, {
+    paused: tab === "logs" ? logsPaused : false,
+  });
+
+  const setTab = useCallback(
+    (t: TabId) => {
+      const p = new URLSearchParams(searchParams);
+      if (t === "overview") p.delete("tab");
+      else p.set("tab", t);
+      setSearchParams(p, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+  const selectSeq = useCallback(
+    (seq: number) => {
+      const p = new URLSearchParams(searchParams);
+      p.set("seq", String(seq));
+      setSearchParams(p, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
+  const backTo = `/monitor${backSearch(location.search)}`;
+
+  const stages = useMemo(() => {
+    const d = detail.data?.run.presetDescriptor;
+    const list = d?.stages;
+    if (!Array.isArray(list)) return [];
+    return list
+      .map((s) => (typeof s === "object" && s !== null ? (s as Record<string, unknown>) : null))
+      .filter((s): s is Record<string, unknown> => !!s)
+      .map((s) => ({
+        id: String(s.id ?? ""),
+        label: String(s.label ?? s.id ?? ""),
+      }))
+      .filter((s) => s.id);
+  }, [detail.data]);
+
+  const artifactSlotIds = useMemo(() => {
+    const d = detail.data?.run.presetDescriptor;
+    const list = d?.artifacts;
+    if (!Array.isArray(list)) return new Set<string>();
+    return new Set(
+      list
+        .map((a) => (typeof a === "object" && a !== null ? (a as Record<string, unknown>).id : null))
+        .filter((id): id is string => typeof id === "string"),
+    );
+  }, [detail.data]);
+
+  // S9: timeline entry → artifacts tab anchor (U5 lands the tab;
+  // placeholder jump records the artifact id in the URL for now).
+  const jumpToArtifact = useCallback(
+    (id: string) => {
+      const p = new URLSearchParams(searchParams);
+      p.set("tab", "overview");
+      p.set("artifact", id);
+      setSearchParams(p, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
 
   if (detail.isLoading) {
     return (
@@ -51,7 +136,8 @@ export function RunDetailPage() {
     );
   }
 
-  const { run, evidenceTimestamps } = { run: detail.data.run, evidenceTimestamps: detail.data.run.evidenceTimestamps };
+  const run = detail.data.run;
+  const hasDescriptor = stages.length > 0;
 
   return (
     <div className="space-y-4" data-testid="run-detail">
@@ -62,47 +148,74 @@ export function RunDetailPage() {
         <ArrowLeft className="h-4 w-4" /> Back to overview
       </Link>
 
-      <div className="flex flex-wrap items-center gap-3">
-        <h2 className="font-mono text-lg" data-testid="run-detail-id">
-          {run.runId}
-        </h2>
-        <RunStateBadge state={run.state} stale={run.stale} />
+      <DetailHeader run={run} progress={progress.data} />
+
+      {!hasDescriptor && (
+        <p
+          className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
+          data-testid="no-descriptor-banner"
+        >
+          此 run 无 monitor descriptor —— 展示通用视图（无阶段条）。
+        </p>
+      )}
+      <StageStrip stages={stages} progress={progress.data} />
+
+      <div role="tablist" aria-label="Run detail tabs" className="flex gap-1 border-b border-border">
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            role="tab"
+            aria-selected={tab === t.id}
+            data-testid={`tab-${t.id}`}
+            className={cn(
+              "-mb-px border-b-2 px-3 py-1.5 text-sm",
+              tab === t.id
+                ? "border-primary text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground",
+            )}
+            onClick={() => setTab(t.id)}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+                const i = TABS.findIndex((x) => x.id === tab);
+                const next =
+                  TABS[(i + (e.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length];
+                setTab(next.id);
+                (
+                  document.querySelector(
+                    `[data-testid="tab-${next.id}"]`,
+                  ) as HTMLElement | null
+                )?.focus();
+              }
+            }}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
 
-      {Object.keys(run.stateEvidence).length > 0 && (
-        <pre
-          data-testid="state-evidence"
-          className="max-h-40 overflow-auto rounded-md border border-border bg-muted/40 p-3 text-xs"
-        >
-          {JSON.stringify(run.stateEvidence, null, 2)}
-        </pre>
-      )}
-
-      <section aria-label="Run fields">
-        <dl>
-          <Field label="kind" value={run.kind} />
-          <Field label="preset" value={run.preset} />
-          <Field label="plan" value={run.planPath} />
-          <Field label="cwd" value={run.cwd} />
-          <Field label="repo_root" value={run.repoRoot} />
-          <Field label="worktree" value={run.worktreePath} />
-          <Field label="prompt" value={run.promptPreview} />
-          <Field label="manifest" value={run.manifestPath} />
-        </dl>
-      </section>
-
-      <section aria-label="Evidence timestamps">
-        <h3 className="mb-1 text-sm font-medium text-muted-foreground">
-          Evidence timestamps
-        </h3>
-        <dl data-testid="evidence-timestamps">
-          <Field label="started_at" value={run.startedAt} />
-          <Field label="last_event_at" value={evidenceTimestamps.lastEventAt} />
-          <Field label="terminal.at" value={evidenceTimestamps.terminalAt} />
-          <Field label="last_observed_at" value={evidenceTimestamps.lastObservedAt} />
-          <Field label="collected_at" value={evidenceTimestamps.collectedAt} />
-        </dl>
-      </section>
+      <div role="tabpanel">
+        {tab === "overview" && <OverviewTab detail={detail.data} />}
+        {tab === "timeline" && (
+          <TimelineTab
+            events={events.events}
+            isLoading={events.isLoading}
+            selectedSeq={selectedSeq}
+            onSelectSeq={selectSeq}
+            artifactSlotIds={artifactSlotIds}
+            onArtifactJump={jumpToArtifact}
+          />
+        )}
+        {tab === "logs" && (
+          <LogsTab
+            events={events.events}
+            isLoading={events.isLoading}
+            paused={logsPaused}
+            onPausedChange={setLogsPaused}
+            onLoadEarlier={() => void events.loadEarlier()}
+            canLoadEarlier={events.events.length > 0}
+          />
+        )}
+      </div>
     </div>
   );
 }

@@ -167,9 +167,18 @@ export function registerRunRoutes(
       const terminal = row.terminal
         ? (JSON.parse(row.terminal) as { at?: string })
         : null;
+      let presetDescriptor: Record<string, unknown> | null = null;
+      if (row.preset_descriptor) {
+        try {
+          presetDescriptor = JSON.parse(row.preset_descriptor) as Record<string, unknown>;
+        } catch {
+          presetDescriptor = null;
+        }
+      }
       return reply.send({
         run: {
           ...toRunJson(machineId, row),
+          presetDescriptor,
           evidenceTimestamps: {
             lastEventAt: row.last_event_at,
             lastObservedAt: row.last_observed_at,
