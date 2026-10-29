@@ -1,20 +1,25 @@
-// ABOUTME: Web dashboard development server launcher.
-// ABOUTME: Provides the `ralph web` command that runs Rust RPC API + frontend (legacy Node backend optional).
+// ABOUTME: Web dashboard launcher and lifecycle manager.
+// ABOUTME: `ralph web` runs the monitor (or --dev stack) in the foreground;
+// ABOUTME: `ralph web start|status|stop` manages a detached background instance
+// ABOUTME: via a state file at ~/.ralph/web.json.
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
+use serde::{Deserialize, Serialize};
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command as AsyncCommand};
 use tokio::sync::Notify;
 
 #[cfg(unix)]
-use nix::sys::signal::{Signal, kill};
+use nix::sys::signal::kill;
 #[cfg(unix)]
 use nix::unistd::Pid;
 
@@ -24,9 +29,64 @@ const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
 /// Timeout for both servers to become ready
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long `ralph web start` waits for the detached child to write its
+/// state file before reporting "still starting" (npm installs can be slow).
+const DAEMON_STATE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// State file name inside the web state dir (`~/.ralph/` by default).
+const STATE_FILE_NAME: &str = "web.json";
+
+/// Daemon log file name inside the web state dir.
+const LOG_FILE_NAME: &str = "web.log";
+
+/// Env override for the web state dir (tests / custom installs).
+const STATE_DIR_ENV: &str = "RALPH_WEB_STATE_DIR";
+
+/// Default monitor port — also the port `status`/`stop` probe for an
+/// unmanaged monitor when no state file exists.
+const DEFAULT_MONITOR_PORT: u16 = 3200;
+
 /// Arguments for the web subcommand
 #[derive(Parser, Debug)]
 pub struct WebArgs {
+    #[command(subcommand)]
+    pub command: Option<WebCommand>,
+
+    #[command(flatten)]
+    pub run: RunArgs,
+}
+
+/// Lifecycle subcommands for `ralph web`.
+#[derive(clap::Subcommand, Debug)]
+pub enum WebCommand {
+    /// Start the dashboard in the background (detached).
+    /// Pass --foreground to run attached like bare `ralph web`.
+    Start(StartArgs),
+    /// Report dashboard status
+    Status,
+    /// Stop the running dashboard
+    Stop,
+}
+
+/// Arguments for `ralph web start`.
+#[derive(clap::Args, Debug)]
+pub struct StartArgs {
+    /// Stay in the foreground instead of detaching into the background
+    #[arg(long)]
+    pub foreground: bool,
+
+    #[command(flatten)]
+    pub run: RunArgs,
+}
+
+/// Run flags shared by bare `ralph web` and `ralph web start`.
+#[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
+pub struct RunArgs {
+    /// Host/interface to bind (default: 127.0.0.1). Use 0.0.0.0 to expose
+    /// the dashboard on the LAN — it has no auth layer.
+    #[arg(long)]
+    pub host: Option<String>,
+
     /// Backend port (default: 3200 for the monitor, 3000 for --dev)
     #[arg(long)]
     pub backend_port: Option<u16>,
@@ -55,6 +115,70 @@ pub struct WebArgs {
     /// Don't open the dashboard in the default browser
     #[arg(long)]
     pub no_open: bool,
+}
+
+impl Default for RunArgs {
+    fn default() -> Self {
+        Self {
+            host: None,
+            backend_port: None,
+            frontend_port: 5173,
+            workspace: None,
+            legacy_node_api: false,
+            monitor: false,
+            dev: false,
+            no_open: false,
+        }
+    }
+}
+
+/// Which surface `ralph web` is running; persisted in the state file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum WebMode {
+    Monitor,
+    Dev,
+}
+
+impl std::fmt::Display for WebMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WebMode::Monitor => f.write_str("monitor"),
+            WebMode::Dev => f.write_str("dev"),
+        }
+    }
+}
+
+/// Managed-instance record persisted at `~/.ralph/web.json`. The pid is the
+/// `ralph web` supervisor process itself — signalling it triggers the
+/// graceful child-shutdown handlers already installed for both modes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WebState {
+    pid: u32,
+    mode: WebMode,
+    /// Interface the surface binds. `127.0.0.1` when the state file was
+    /// written before host tracking existed.
+    #[serde(default = "default_state_host")]
+    host: String,
+    backend_port: u16,
+    frontend_port: u16,
+    workspace: PathBuf,
+    started: DateTime<Utc>,
+}
+
+fn default_state_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+/// Result of inspecting the state file on disk.
+#[derive(Debug)]
+enum StateProbe {
+    /// State file exists and its pid is alive.
+    Live(WebState),
+    /// State file existed but was stale (dead pid or unparseable) — removed.
+    Stale,
+    /// No state file.
+    Absent,
 }
 
 fn is_transient_exec_error(err: &std::io::Error) -> bool {
@@ -413,12 +537,634 @@ async fn forward_output(
     let _ = tokio::join!(stdout_task, stderr_task);
 }
 
+// ---------------------------------------------------------------------------
+// Lifecycle management (start / status / stop + state file)
+// ---------------------------------------------------------------------------
+
+/// The web state dir: `$RALPH_WEB_STATE_DIR` if set, else `~/.ralph`
+/// (sibling of the monitor's own `monitor.db` / `projects.d`).
+fn web_state_dir() -> Option<PathBuf> {
+    if let Some(dir) = env::var_os(STATE_DIR_ENV)
+        && !dir.is_empty()
+    {
+        return Some(PathBuf::from(dir));
+    }
+    env::home_dir().map(|home| home.join(".ralph"))
+}
+
+fn state_file_path(dir: &Path) -> PathBuf {
+    dir.join(STATE_FILE_NAME)
+}
+
+/// Check whether a pid refers to a live process. EPERM counts as alive
+/// (we cannot signal it, but it exists and is not ours to clean up).
+fn pid_alive(pid: u32) -> bool {
+    // kill() treats pid <= 0 specially (process group / every process),
+    // so values that cannot be a real single-process pid report dead.
+    let Ok(pid_i32) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid_i32 <= 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        match kill(Pid::from_raw(pid_i32), None) {
+            Ok(()) | Err(nix::errno::Errno::EPERM) => !is_zombie(pid_i32),
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            false,
+            ProcessRefreshKind::nothing(),
+        );
+        sys.process(sysinfo::Pid::from_u32(pid)).is_some()
+    }
+}
+
+/// Linux: zombies still answer kill(pid, 0) but are already dead — a
+/// zombie supervisor no longer serves anything, so report it as dead.
+#[cfg(target_os = "linux")]
+fn is_zombie(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            // Fields after the last ')' are `state ppid ...`; comm may
+            // itself contain parens, so split from the right.
+            stat.rsplit(')')
+                .next()
+                .map(|rest| rest.trim_start().starts_with('Z'))
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn is_zombie(_pid: i32) -> bool {
+    false
+}
+
+/// Read + validate the state file. Stale entries (dead pid, unparseable
+/// JSON) are removed as a side effect.
+fn inspect_state(dir: &Path) -> StateProbe {
+    let path = state_file_path(dir);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(_) => return StateProbe::Absent,
+    };
+    match serde_json::from_str::<WebState>(&content) {
+        Ok(state) if pid_alive(state.pid) => StateProbe::Live(state),
+        _ => {
+            let _ = std::fs::remove_file(&path);
+            StateProbe::Stale
+        }
+    }
+}
+
+fn write_state(dir: &Path, state: &WebState) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let path = state_file_path(dir);
+    let tmp = dir.join(format!("{STATE_FILE_NAME}.tmp"));
+    std::fs::write(&tmp, serde_json::to_string_pretty(state)?)
+        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+/// Removes the state file if it still points at `pid` (guards against
+/// deleting a newer instance's record).
+fn remove_state_if_matches(dir: &Path, pid: u32) {
+    let path = state_file_path(dir);
+    let stale = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_json::from_str::<WebState>(&c).ok())
+        .is_none_or(|s| s.pid == pid);
+    if stale {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Deletes our own state file when the supervisor exits for any reason
+/// (signal shutdown, child exit, error bail). Only removes the file while
+/// it still names our pid, so a newer instance's record survives.
+struct StateGuard {
+    dir: PathBuf,
+    pid: u32,
+}
+
+impl StateGuard {
+    fn new(dir: &Path, pid: u32) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+            pid,
+        }
+    }
+}
+
+impl Drop for StateGuard {
+    fn drop(&mut self) {
+        remove_state_if_matches(&self.dir, self.pid);
+    }
+}
+
+/// The user-facing URLs for a running instance. Loopback binds show a
+/// single dashboard line; wildcard binds show local + LAN; a specific
+/// non-loopback bind shows that address only.
+fn display_urls(state: &WebState) -> Vec<(&'static str, String)> {
+    let port = match state.mode {
+        WebMode::Monitor => state.backend_port,
+        WebMode::Dev => state.frontend_port,
+    };
+    display_urls_for(&state.host, port)
+}
+
+fn display_urls_for(host: &str, port: u16) -> Vec<(&'static str, String)> {
+    let normalized = host.trim().trim_matches(['[', ']']).to_ascii_lowercase();
+    match normalized.as_str() {
+        "127.0.0.1" | "localhost" | "::1" => {
+            vec![("dashboard", format!("http://localhost:{port}"))]
+        }
+        "0.0.0.0" | "::" | "*" => {
+            let mut urls = vec![("local", format!("http://localhost:{port}"))];
+            if let Some(ip) = lan_ip() {
+                urls.push(("lan", format!("http://{ip}:{port}")));
+            }
+            urls
+        }
+        specific => vec![("dashboard", format!("http://{specific}:{port}"))],
+    }
+}
+
+fn print_urls(state: &WebState) {
+    for (label, url) in display_urls(state) {
+        println!("  {label}: {url}");
+    }
+}
+
+/// Primary LAN IPv4 of this machine — the best-scoring non-loopback v4
+/// address across interfaces (RFC1918 wins over VPN/overlay ranges like
+/// Tailscale's CGNAT block). No egress needed — pure interface
+/// enumeration.
+fn lan_ip() -> Option<String> {
+    use std::net::IpAddr;
+    let networks = sysinfo::Networks::new_with_refreshed_list();
+    networks
+        .values()
+        .flat_map(|data| data.ip_networks().iter())
+        .filter_map(|net| match net.addr {
+            IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_link_local() => {
+                Some((lan_ipv4_score(&v4), v4.to_string()))
+            }
+            _ => None,
+        })
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, ip)| ip)
+}
+
+fn lan_ipv4_score(ip: &std::net::Ipv4Addr) -> u8 {
+    let o = ip.octets();
+    if o[0] == 192 && o[1] == 168 {
+        4
+    } else if o[0] == 10 {
+        3
+    } else if o[0] == 172 && (16..32).contains(&o[1]) {
+        2
+    } else {
+        1
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(
+        host.trim()
+            .trim_matches(['[', ']'])
+            .to_ascii_lowercase()
+            .as_str(),
+        "127.0.0.1" | "localhost" | "::1"
+    )
+}
+
+/// Probe the monitor's health endpoint; returns `machine_id` when a Ralph
+/// monitor answers. Used to distinguish "our dashboard is up" from "an
+/// unrelated process holds the port".
+async fn probe_monitor_health(port: u16) -> Option<String> {
+    probe_health_json(port, "/api/monitor/v1/health")
+        .await
+        .and_then(|body| {
+            if body.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                Some(
+                    body.get("machine_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                )
+            } else {
+                None
+            }
+        })
+}
+
+/// Probe ralph-api's `/health` (dev mode); true when it answers 2xx.
+async fn probe_api_health(port: u16) -> bool {
+    probe_health_json(port, "/health").await.is_some()
+}
+
+async fn probe_health_json(port: u16, path: &str) -> Option<serde_json::Value> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(1500))
+        .build()
+        .ok()?;
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}{path}"))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.json().await.ok()
+}
+
+fn port_in_use(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
+}
+
+fn resolve_workspace(workspace: Option<&Path>) -> Result<PathBuf> {
+    match workspace {
+        Some(path) => path
+            .canonicalize()
+            .with_context(|| format!("Invalid workspace path: {}", path.display())),
+        None => env::current_dir().context("Failed to get current directory"),
+    }
+}
+
+fn print_already_running(state: &WebState) {
+    println!(
+        "ralph web is already running (pid {}, {}):",
+        state.pid, state.mode
+    );
+    print_urls(state);
+    println!("Use `ralph web status` for details or `ralph web stop` to stop it.");
+}
+
+fn print_unmanaged_monitor(port: u16, machine_id: &str) {
+    println!("A Ralph monitor is already running on port {port} (not managed by `ralph web`):");
+    println!("  Dashboard:  http://localhost:{port}");
+    println!("  Machine ID: {machine_id}");
+    println!();
+    println!("`ralph web stop` only manages instances started via `ralph web`.");
+    println!("To stop this one manually: fuser -k {port}/tcp");
+}
+
+/// `ralph web` / `ralph web start` — start foreground or detached. When a
+/// managed (or recognizable unmanaged) instance is already up, report its
+/// status instead of dying on the port check. `state_dir` is injected so
+/// tests can point at a tempdir instead of `~/.ralph`.
+async fn start_command(run: &RunArgs, foreground: bool, state_dir: &Path) -> Result<()> {
+    let workspace_root = resolve_workspace(run.workspace.as_deref())?;
+    if let StateProbe::Live(state) = inspect_state(state_dir) {
+        print_already_running(&state);
+        return Ok(());
+    }
+
+    let mode = if run.dev {
+        WebMode::Dev
+    } else {
+        WebMode::Monitor
+    };
+
+    // Monitor mode: when the port is taken, adopt the "it is a ralph
+    // monitor" case via the health endpoint instead of erroring out.
+    // Runs before the daemon/foreground split so `start` reports the
+    // running instance instead of the detached child quietly exiting.
+    if mode == WebMode::Monitor {
+        let port = run.backend_port.unwrap_or(DEFAULT_MONITOR_PORT);
+        if port_in_use(port) {
+            if let Some(machine_id) = probe_monitor_health(port).await {
+                print_unmanaged_monitor(port, &machine_id);
+                return Ok(());
+            }
+            // Unknown holder or the port just freed — surface the
+            // standard port error when it is still busy.
+            check_port_available(port)?;
+        }
+    }
+
+    // Effective bind host recorded in state. Monitor defaults to loopback;
+    // dev's Vite binds all interfaces by default (`host: true` in the
+    // frontend config) unless --host restricts it.
+    let host = run.host.clone().unwrap_or_else(|| match mode {
+        WebMode::Monitor => "127.0.0.1".to_string(),
+        WebMode::Dev => "0.0.0.0".to_string(),
+    });
+    if mode == WebMode::Monitor && !is_loopback_host(&host) {
+        println!(
+            "WARNING: binding the monitor to {host} — it has no auth layer \
+             and will be reachable from the LAN."
+        );
+    }
+
+    if !foreground {
+        return spawn_daemon(run, &workspace_root, state_dir).await;
+    }
+
+    let backend_port = run.backend_port.unwrap_or(match mode {
+        WebMode::Monitor => DEFAULT_MONITOR_PORT,
+        WebMode::Dev => 3000,
+    });
+    write_state(
+        state_dir,
+        &WebState {
+            pid: std::process::id(),
+            mode,
+            host: host.clone(),
+            backend_port,
+            frontend_port: run.frontend_port,
+            workspace: workspace_root.clone(),
+            started: Utc::now(),
+        },
+    )?;
+    let _state_guard = StateGuard::new(state_dir, std::process::id());
+
+    match mode {
+        WebMode::Monitor => execute_monitor(run, &workspace_root, backend_port).await,
+        WebMode::Dev => execute_dev(run, &workspace_root).await,
+    }
+}
+
+/// Build the argv for the detached child: bare `ralph web` (foreground
+/// path) plus the run flags that affect the instance.
+fn daemon_argv(run: &RunArgs, workspace_root: &Path) -> Vec<OsString> {
+    let mut argv: Vec<OsString> = vec![
+        OsStr::new("web").to_os_string(),
+        OsStr::new("--workspace").to_os_string(),
+        workspace_root.as_os_str().to_os_string(),
+        OsStr::new("--no-open").to_os_string(),
+    ];
+    if let Some(host) = &run.host {
+        argv.push(OsStr::new("--host").to_os_string());
+        argv.push(host.as_str().into());
+    }
+    if let Some(port) = run.backend_port {
+        argv.push(OsStr::new("--backend-port").to_os_string());
+        argv.push(port.to_string().into());
+    }
+    if run.frontend_port != RunArgs::default().frontend_port {
+        argv.push(OsStr::new("--frontend-port").to_os_string());
+        argv.push(run.frontend_port.to_string().into());
+    }
+    if run.dev {
+        argv.push(OsStr::new("--dev").to_os_string());
+    }
+    if run.monitor {
+        argv.push(OsStr::new("--monitor").to_os_string());
+    }
+    if run.legacy_node_api {
+        argv.push(OsStr::new("--legacy-node-api").to_os_string());
+    }
+    argv
+}
+
+/// `ralph web start` (no --foreground): spawn a detached `ralph web`
+/// child, redirect its output to `~/.ralph/web.log`, then wait for the
+/// state file (and health endpoint) before reporting.
+async fn spawn_daemon(run: &RunArgs, workspace_root: &Path, state_dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(state_dir)
+        .with_context(|| format!("failed to create {}", state_dir.display()))?;
+    let log_path = state_dir.join(LOG_FILE_NAME);
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("failed to open {}", log_path.display()))?;
+    let err_log = log.try_clone()?;
+
+    let exe = env::current_exe().context("failed to resolve the ralph binary")?;
+    let mut cmd = Command::new(exe);
+    cmd.args(daemon_argv(run, workspace_root))
+        .current_dir(workspace_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(err_log));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // New session/process group so the daemon survives terminal exit.
+        cmd.process_group(0);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .context("failed to spawn the detached `ralph web` process")?;
+    println!("ralph web starting in background (pid {})", child.id());
+    println!("  log: {}", log_path.display());
+
+    let deadline = Instant::now() + DAEMON_STATE_TIMEOUT;
+    let state = loop {
+        if let Some(status) = child.try_wait().context("failed to poll daemon")? {
+            eprintln!();
+            eprintln!("`ralph web` exited during startup ({status}); recent log:");
+            tail_log(&log_path, 20);
+            anyhow::bail!("background start failed — see {}", log_path.display());
+        }
+        if let StateProbe::Live(state) = inspect_state(state_dir) {
+            break state;
+        }
+        if Instant::now() >= deadline {
+            println!();
+            println!("Still starting (first-run npm install can take a while).");
+            println!("Check `ralph web status` in a moment.");
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+
+    // Wait for the surface to actually answer so the printed URL is live.
+    let ready_deadline = Instant::now() + READY_TIMEOUT;
+    let ready = loop {
+        let up = match state.mode {
+            WebMode::Monitor => probe_monitor_health(state.backend_port).await.is_some(),
+            WebMode::Dev => !port_in_use(state.frontend_port),
+        };
+        if up {
+            break true;
+        }
+        if let Some(status) = child.try_wait().context("failed to poll daemon")? {
+            eprintln!();
+            eprintln!("`ralph web` exited during startup ({status}); recent log:");
+            tail_log(&log_path, 20);
+            anyhow::bail!("background start failed — see {}", log_path.display());
+        }
+        if Instant::now() >= ready_deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+
+    println!();
+    if ready {
+        println!("ralph web is running:");
+    } else {
+        println!("ralph web is still starting:");
+    }
+    println!("  pid:       {}", state.pid);
+    println!("  mode:      {}", state.mode);
+    print_urls(&state);
+    println!("  workspace: {}", state.workspace.display());
+    println!();
+    println!("`ralph web status` for details · `ralph web stop` to stop");
+    Ok(())
+}
+
+fn tail_log(path: &Path, lines: usize) {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        eprintln!("  (log not readable)");
+        return;
+    };
+    let tail: Vec<&str> = content.lines().rev().take(lines).collect();
+    if tail.is_empty() {
+        eprintln!("  (log is empty)");
+        return;
+    }
+    for line in tail.into_iter().rev() {
+        eprintln!("  {line}");
+    }
+}
+
+/// `ralph web status` — managed instance first, then an unmanaged-monitor
+/// probe on the default port. Exits non-zero when nothing is running.
+async fn status_command(state_dir: &Path) -> Result<()> {
+    if let StateProbe::Live(state) = inspect_state(state_dir) {
+        let healthy = match state.mode {
+            WebMode::Monitor => probe_monitor_health(state.backend_port).await.is_some(),
+            WebMode::Dev => probe_api_health(state.backend_port).await,
+        };
+        println!("ralph web is running:");
+        println!("  pid:       {}", state.pid);
+        println!("  mode:      {}", state.mode);
+        print_urls(&state);
+        if state.mode == WebMode::Dev {
+            println!("  api:       http://localhost:{}", state.backend_port);
+        }
+        println!("  workspace: {}", state.workspace.display());
+        println!(
+            "  started:   {}",
+            state.started.format("%Y-%m-%d %H:%M:%S UTC")
+        );
+        println!(
+            "  health:    {}",
+            if healthy {
+                "responding"
+            } else {
+                "not responding"
+            }
+        );
+        println!();
+        println!("`ralph web stop` to stop");
+        return Ok(());
+    }
+
+    if let Some(machine_id) = probe_monitor_health(DEFAULT_MONITOR_PORT).await {
+        println!(
+            "A Ralph monitor is running on port {DEFAULT_MONITOR_PORT} (not managed by `ralph web`):"
+        );
+        println!("  Dashboard:  http://localhost:{DEFAULT_MONITOR_PORT}");
+        println!("  Machine ID: {machine_id}");
+        println!();
+        println!(
+            "`ralph web stop` cannot control it — stop manually: fuser -k {DEFAULT_MONITOR_PORT}/tcp"
+        );
+        return Ok(());
+    }
+
+    println!("ralph web is not running.");
+    std::process::exit(1);
+}
+
+/// `ralph web stop` — SIGTERM the supervisor pid recorded in the state
+/// file, escalate to SIGKILL after the grace period, drop the state file.
+async fn stop_command(state_dir: &Path) -> Result<()> {
+    if let StateProbe::Live(state) = inspect_state(state_dir) {
+        println!("Stopping ralph web (pid {}, {}):", state.pid, state.mode);
+        print_urls(&state);
+        terminate_pid(state.pid, SHUTDOWN_GRACE_PERIOD).await?;
+        remove_state_if_matches(state_dir, state.pid);
+        println!("Stopped.");
+        return Ok(());
+    }
+
+    if let Some(machine_id) = probe_monitor_health(DEFAULT_MONITOR_PORT).await {
+        println!(
+            "A Ralph monitor is running on port {DEFAULT_MONITOR_PORT} (machine {machine_id})"
+        );
+        println!("but was not started via `ralph web` — it is not managed.");
+        println!("Stop it manually: fuser -k {DEFAULT_MONITOR_PORT}/tcp");
+        anyhow::bail!("no managed `ralph web` instance to stop");
+    }
+
+    println!("ralph web is not running.");
+    Ok(())
+}
+
+/// Stop the recorded supervisor pid and its whole process tree
+/// (`npm run` wrappers orphan their node/tsx grandchildren when only the
+/// direct child is signaled). `kill_process_tree` sends SIGTERM to every
+/// descendant at once, then SIGKILLs survivors.
+#[cfg(unix)]
+async fn terminate_pid(pid: u32, _grace: Duration) -> Result<()> {
+    // Refuse values kill() would reinterpret as a process group or
+    // "every process" — signalling those would be catastrophic.
+    i32::try_from(pid)
+        .ok()
+        .filter(|p| *p > 0)
+        .context("invalid pid")?;
+    tokio::task::spawn_blocking(move || {
+        crate::cli::process_tree::kill_process_tree(pid, true);
+    })
+    .await
+    .context("process-tree termination task")?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while pid_alive(pid) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Ok(())
+}
+
+/// Non-Unix fallback: no signal API, so go straight to a hard kill.
+#[cfg(not(unix))]
+async fn terminate_pid(pid: u32, _grace: Duration) -> Result<()> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, false, ProcessRefreshKind::nothing());
+    if let Some(process) = sys.process(sysinfo::Pid::from_u32(pid)) {
+        process.kill();
+    }
+    Ok(())
+}
+
+/// Parent-level flags cannot follow a subcommand — `ralph web --dev start`
+/// parses with `--dev` on the parent where it would be silently dropped.
+/// Catch that with a pointer at the right spelling.
+fn ensure_no_parent_flags(run: &RunArgs, subcommand: &str) -> Result<()> {
+    if *run == RunArgs::default() {
+        return Ok(());
+    }
+    if subcommand == "start" {
+        anyhow::bail!("run flags must come after `start` (e.g. `ralph web {subcommand} --dev`)");
+    }
+    anyhow::bail!("`ralph web {subcommand}` does not accept run flags");
+}
+
 /// Monitor mode (Plan5-U4): spawn the monitor service alone — it
 /// serves the built SPA itself, so there is no vite dev server or
 /// ralph-api process in the tree.
-async fn execute_monitor(args: &WebArgs, workspace_root: &Path, port: u16) -> Result<()> {
+async fn execute_monitor(run: &RunArgs, workspace_root: &Path, port: u16) -> Result<()> {
     println!("Starting Ralph monitor...");
-    if args.frontend_port != 5173 {
+    if run.frontend_port != RunArgs::default().frontend_port {
         println!(
             "Note: --frontend-port is ignored in monitor mode \
              (the monitor serves the dashboard on --backend-port)."
@@ -436,14 +1182,22 @@ async fn execute_monitor(args: &WebArgs, workspace_root: &Path, port: u16) -> Re
     check_port_available(port)?;
 
     let dist_dir = workspace_root.join("frontend/ralph-web/dist");
-    let mut monitor = AsyncCommand::new("npm")
+    let host = run.host.clone().unwrap_or_else(|| "127.0.0.1".to_string());
+    let mut monitor_cmd = AsyncCommand::new("npm");
+    monitor_cmd
         .args(["run", "start", "-w", "@ralph-monitor/server"])
         .current_dir(workspace_root)
         .env("RALPH_MONITOR_PORT", port.to_string())
+        .env("RALPH_MONITOR_HOST", &host)
         .env("RALPH_MONITOR_STATIC_DIR", &dist_dir)
         .env("RALPH_WORKSPACE_ROOT", workspace_root)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if !is_loopback_host(&host) {
+        // Explicit acknowledgement that the auth-less service may bind LAN.
+        monitor_cmd.env("RALPH_MONITOR_ALLOW_LAN", "1");
+    }
+    let mut monitor = monitor_cmd
         .spawn()
         .context("Failed to start monitor server. Is npm installed and deps set up?")?;
 
@@ -455,14 +1209,16 @@ async fn execute_monitor(args: &WebArgs, workspace_root: &Path, port: u16) -> Re
         forward_output(stdout, stderr, "monitor", "listening", ready_clone).await;
     });
 
-    let dashboard_url = format!("http://localhost:{}", port);
+    let urls = display_urls_for(&host, port);
     match tokio::time::timeout(READY_TIMEOUT, ready.notified()).await {
         Ok(()) => {
             println!();
-            println!("Dashboard: {}", dashboard_url);
+            for (label, url) in &urls {
+                println!("{label}: {url}");
+            }
             println!();
-            if !args.no_open {
-                let _ = open::that(&dashboard_url);
+            if !run.no_open {
+                let _ = open::that(&urls[0].1);
             }
         }
         Err(_) => {
@@ -471,7 +1227,9 @@ async fn execute_monitor(args: &WebArgs, workspace_root: &Path, port: u16) -> Re
                 "Warning: monitor did not report ready within {} seconds.",
                 READY_TIMEOUT.as_secs()
             );
-            println!("  Dashboard: {}", dashboard_url);
+            for (label, url) in &urls {
+                println!("  {label}: {url}");
+            }
         }
     }
     println!("Press Ctrl+C to stop");
@@ -509,24 +1267,34 @@ async fn execute_monitor(args: &WebArgs, workspace_root: &Path, port: u16) -> Re
     Ok(())
 }
 
-/// Run both backend and frontend dev servers in parallel
+/// Entry point for `ralph web`. Bare `ralph web` keeps the historical
+/// foreground behavior; the subcommands provide lifecycle management.
 pub async fn execute(args: WebArgs) -> Result<()> {
-    // Determine workspace root: explicit flag or current directory
-    let workspace_root = match args.workspace {
-        Some(ref path) => {
-            // Canonicalize to get absolute path
-            path.canonicalize()
-                .with_context(|| format!("Invalid workspace path: {}", path.display()))?
+    match args.command {
+        Some(WebCommand::Status) => {
+            ensure_no_parent_flags(&args.run, "status")?;
+            status_command(&require_state_dir()?).await
         }
-        None => env::current_dir().context("Failed to get current directory")?,
-    };
-
-    // Monitor is the default surface (single process, serves the built
-    // SPA itself). `--dev` selects the Vite + ralph-api development stack.
-    if !args.dev {
-        return execute_monitor(&args, &workspace_root, args.backend_port.unwrap_or(3200)).await;
+        Some(WebCommand::Stop) => {
+            ensure_no_parent_flags(&args.run, "stop")?;
+            stop_command(&require_state_dir()?).await
+        }
+        Some(WebCommand::Start(start)) => {
+            ensure_no_parent_flags(&args.run, "start")?;
+            start_command(&start.run, start.foreground, &require_state_dir()?).await
+        }
+        // No subcommand: attached foreground run, as before.
+        None => start_command(&args.run, true, &require_state_dir()?).await,
     }
-    let backend_port = args.backend_port.unwrap_or(3000);
+}
+
+fn require_state_dir() -> Result<PathBuf> {
+    web_state_dir().context("cannot locate the web state dir ($HOME is unset)")
+}
+
+/// Run both backend and frontend dev servers in parallel
+async fn execute_dev(run: &RunArgs, workspace_root: &Path) -> Result<()> {
+    let backend_port = run.backend_port.unwrap_or(3000);
 
     println!("Starting Ralph web servers...");
 
@@ -534,7 +1302,7 @@ pub async fn execute(args: WebArgs) -> Result<()> {
     let backend_dir = workspace_root.join("backend/ralph-web-server");
     let frontend_dir = workspace_root.join("frontend/ralph-web");
 
-    if args.legacy_node_api && !backend_dir.join("package.json").exists() {
+    if run.legacy_node_api && !backend_dir.join("package.json").exists() {
         anyhow::bail!(
             "Legacy Node backend not found at {}",
             backend_dir.join("package.json").display()
@@ -542,31 +1310,31 @@ pub async fn execute(args: WebArgs) -> Result<()> {
     }
 
     // Verify frontend Node.js/npm tooling, install deps, and legacy tsx checks when requested.
-    preflight(&workspace_root, &backend_dir, args.legacy_node_api).await?;
+    preflight(workspace_root, &backend_dir, run.legacy_node_api).await?;
 
     // Check ports before spawning anything
     check_port_available(backend_port)?;
-    check_port_available(args.frontend_port)?;
+    check_port_available(run.frontend_port)?;
 
     println!("Using workspace: {}", workspace_root.display());
 
     // Spawn backend (default Rust RPC API, optional legacy Node backend) and frontend.
-    let backend_label = if args.legacy_node_api {
+    let backend_label = if run.legacy_node_api {
         "backend"
     } else {
         "api"
     };
-    let backend_ready_pattern = if args.legacy_node_api {
+    let backend_ready_pattern = if run.legacy_node_api {
         "Server started on"
     } else {
         "ralph-api listening"
     };
 
-    let mut backend = if args.legacy_node_api {
+    let mut backend = if run.legacy_node_api {
         AsyncCommand::new("npm")
             .args(["run", "dev"])
             .current_dir(&backend_dir)
-            .env("RALPH_WORKSPACE_ROOT", &workspace_root)
+            .env("RALPH_WORKSPACE_ROOT", workspace_root)
             .env("PORT", backend_port.to_string())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -581,9 +1349,9 @@ pub async fn execute(args: WebArgs) -> Result<()> {
     } else {
         AsyncCommand::new("cargo")
             .args(["run", "-p", "ralph-api"])
-            .current_dir(&workspace_root)
+            .current_dir(workspace_root)
             .env("RALPH_API_PORT", backend_port.to_string())
-            .env("RALPH_API_WORKSPACE_ROOT", &workspace_root)
+            .env("RALPH_API_WORKSPACE_ROOT", workspace_root)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -595,15 +1363,17 @@ pub async fn execute(args: WebArgs) -> Result<()> {
             })?
     };
 
-    // Pass --port for Vite and RALPH_BACKEND_PORT for proxy config.
+    // Pass --port for Vite and RALPH_BACKEND_PORT for proxy config. An
+    // explicit --host is forwarded to Vite (its config otherwise binds all
+    // interfaces via `host: true`).
+    let frontend_port = run.frontend_port.to_string();
+    let mut vite_args = vec!["run", "dev", "--", "--port", frontend_port.as_str()];
+    if let Some(host) = &run.host {
+        vite_args.push("--host");
+        vite_args.push(host.as_str());
+    }
     let mut frontend = AsyncCommand::new("npm")
-        .args([
-            "run",
-            "dev",
-            "--",
-            "--port",
-            &args.frontend_port.to_string(),
-        ])
+        .args(&vite_args)
         .current_dir(&frontend_dir)
         .env("RALPH_BACKEND_PORT", backend_port.to_string())
         .stdout(std::process::Stdio::piped())
@@ -652,8 +1422,12 @@ pub async fn execute(args: WebArgs) -> Result<()> {
         .await;
     });
 
-    // Wait for both servers to become ready
-    let dashboard_url = format!("http://localhost:{}", args.frontend_port);
+    // Wait for both servers to become ready. Dev Vite binds all interfaces
+    // by default (`host: true`), so the dashboard is LAN-reachable unless
+    // --host restricts it.
+    let effective_host = run.host.as_deref().unwrap_or("0.0.0.0");
+    let urls = display_urls_for(effective_host, run.frontend_port);
+    let dashboard_url = urls[0].1.clone();
     let api_url = format!("http://localhost:{}", backend_port);
 
     let ready_result = tokio::time::timeout(READY_TIMEOUT, async {
@@ -665,11 +1439,13 @@ pub async fn execute(args: WebArgs) -> Result<()> {
         Ok(()) => {
             println!();
             println!("Both servers ready!");
-            println!("  Dashboard: {}", dashboard_url);
-            println!("  API:       {}", api_url);
+            for (label, url) in &urls {
+                println!("  {label}: {url}");
+            }
+            println!("  api:       {api_url}");
             println!();
 
-            if !args.no_open {
+            if !run.no_open {
                 let _ = open::that(&dashboard_url);
             }
         }
@@ -680,8 +1456,10 @@ pub async fn execute(args: WebArgs) -> Result<()> {
                 READY_TIMEOUT.as_secs()
             );
             println!("They may still be starting. Check the output above for errors.");
-            println!("  Dashboard: {}", dashboard_url);
-            println!("  API:       {}", api_url);
+            for (label, url) in &urls {
+                println!("  {label}: {url}");
+            }
+            println!("  api:       {api_url}");
             println!();
         }
     }
@@ -749,28 +1527,29 @@ pub async fn execute(args: WebArgs) -> Result<()> {
     Ok(())
 }
 
-/// Gracefully terminate a child process by sending SIGTERM first, then SIGKILL after grace period
+/// Gracefully terminate a child process by sending SIGTERM to its whole
+/// process tree first, then waiting out the grace period. Tree-wide
+/// signalling matters because `npm run` wrappers do not forward signals —
+/// a single-pid SIGTERM would orphan the real server grandchildren.
 #[cfg(unix)]
 async fn terminate_gracefully(child: &mut Child, grace_period: Duration) {
     if let Some(pid) = child.id() {
-        let pid = Pid::from_raw(pid as i32);
+        tokio::task::spawn_blocking(move || {
+            crate::cli::process_tree::kill_process_tree(pid, true);
+        })
+        .await
+        .unwrap_or_else(|err| {
+            eprintln!("  process-tree termination failed: {err}");
+        });
 
-        // Send SIGTERM for graceful shutdown
-        if kill(pid, Signal::SIGTERM).is_err() {
-            // Process may have already exited
-            let _ = child.wait().await;
-            return;
-        }
-
-        // Wait for graceful exit with timeout
+        // Wait for the direct child to reap; it should already be dead.
         match tokio::time::timeout(grace_period, child.wait()).await {
             Ok(_) => {
-                // Process exited gracefully
+                // Process exited
             }
             Err(_) => {
-                // Grace period elapsed, force kill
                 println!("  Grace period elapsed, forcing termination...");
-                let _ = kill(pid, Signal::SIGKILL);
+                let _ = child.start_kill();
                 let _ = child.wait().await;
             }
         }
@@ -1245,16 +2024,371 @@ exit 1",
         let temp_dir = TempDir::new().expect("temp dir");
         let missing = temp_dir.path().join("missing");
         let args = WebArgs {
-            backend_port: Some(3000),
-            frontend_port: 5173,
-            workspace: Some(missing),
-            legacy_node_api: false,
-            monitor: false,
-            dev: true,
-            no_open: true,
+            command: None,
+            run: RunArgs {
+                backend_port: Some(3000),
+                workspace: Some(missing),
+                dev: true,
+                no_open: true,
+                ..RunArgs::default()
+            },
         };
 
         let err = execute(args).await.expect_err("invalid workspace");
         assert!(err.to_string().contains("Invalid workspace path"));
+    }
+
+    // -----------------------------------------------------------------
+    // Lifecycle state file + subcommands
+    // -----------------------------------------------------------------
+
+    fn test_state(dir: &Path, pid: u32) -> WebState {
+        WebState {
+            pid,
+            mode: WebMode::Monitor,
+            host: "127.0.0.1".to_string(),
+            backend_port: 3200,
+            frontend_port: 5173,
+            workspace: dir.to_path_buf(),
+            started: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn web_args_parse_host_flag() {
+        let args = WebArgs::try_parse_from(["ralph-web", "--host", "0.0.0.0"]).expect("parse");
+        assert_eq!(args.run.host.as_deref(), Some("0.0.0.0"));
+
+        let args = WebArgs::try_parse_from([
+            "ralph-web",
+            "start",
+            "--foreground",
+            "--host",
+            "192.168.1.10",
+        ])
+        .expect("parse");
+        match args.command {
+            Some(WebCommand::Start(start)) => {
+                assert_eq!(start.run.host.as_deref(), Some("192.168.1.10"));
+            }
+            other => panic!("expected start subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn loopback_host_detection() {
+        for host in ["127.0.0.1", "localhost", "::1", "[::1]", "LOCALHOST"] {
+            assert!(is_loopback_host(host), "{host} should be loopback");
+        }
+        for host in ["0.0.0.0", "192.168.1.10", "10.0.0.5", "::", "example.com"] {
+            assert!(!is_loopback_host(host), "{host} should not be loopback");
+        }
+    }
+
+    #[test]
+    fn display_urls_loopback_shows_single_dashboard() {
+        let urls = display_urls_for("127.0.0.1", 3200);
+        assert_eq!(
+            urls,
+            vec![("dashboard", "http://localhost:3200".to_string())]
+        );
+        let urls = display_urls_for("localhost", 5173);
+        assert_eq!(
+            urls,
+            vec![("dashboard", "http://localhost:5173".to_string())]
+        );
+    }
+
+    #[test]
+    fn display_urls_wildcard_shows_local_and_lan() {
+        let urls = display_urls_for("0.0.0.0", 3200);
+        assert_eq!(urls[0], ("local", "http://localhost:3200".to_string()));
+        // A LAN line appears only when the box actually has a non-loopback
+        // IPv4 — CI sandboxes may not, so assert shape, not the IP itself.
+        if urls.len() == 2 {
+            assert_eq!(urls[1].0, "lan");
+            assert!(urls[1].1.starts_with("http://"));
+            assert!(urls[1].1.ends_with(":3200"));
+        }
+    }
+
+    #[test]
+    fn lan_ipv4_score_prefers_rfc1918() {
+        use std::net::Ipv4Addr;
+        let home: Ipv4Addr = "192.168.1.10".parse().unwrap();
+        let corp: Ipv4Addr = "10.0.0.5".parse().unwrap();
+        let priv172: Ipv4Addr = "172.16.0.2".parse().unwrap();
+        let tailscale: Ipv4Addr = "100.80.192.75".parse().unwrap();
+        let public: Ipv4Addr = "8.8.8.8".parse().unwrap();
+        assert!(lan_ipv4_score(&home) > lan_ipv4_score(&corp));
+        assert!(lan_ipv4_score(&corp) > lan_ipv4_score(&priv172));
+        assert!(lan_ipv4_score(&priv172) > lan_ipv4_score(&tailscale));
+        assert_eq!(lan_ipv4_score(&tailscale), lan_ipv4_score(&public));
+    }
+
+    #[test]
+    fn display_urls_specific_address_shows_it() {
+        let urls = display_urls_for("192.168.1.10", 3200);
+        assert_eq!(
+            urls,
+            vec![("dashboard", "http://192.168.1.10:3200".to_string())]
+        );
+    }
+
+    #[test]
+    fn state_without_host_defaults_to_loopback() {
+        // State files written before host tracking existed have no `host`
+        // field — serde must default them to loopback.
+        let json = r#"{
+            "pid": 1234,
+            "mode": "monitor",
+            "backend_port": 3200,
+            "frontend_port": 5173,
+            "workspace": "/tmp/ws",
+            "started": "2026-01-01T00:00:00Z"
+        }"#;
+        let state: WebState = serde_json::from_str(json).expect("parse legacy state");
+        assert_eq!(state.host, "127.0.0.1");
+        assert_eq!(
+            display_urls(&state),
+            vec![("dashboard", "http://localhost:3200".to_string())]
+        );
+    }
+
+    #[test]
+    fn web_args_parse_bare_flags() {
+        let args = WebArgs::try_parse_from(["ralph-web", "--dev", "--no-open"]).expect("parse");
+        assert!(args.command.is_none());
+        assert!(args.run.dev);
+        assert!(args.run.no_open);
+    }
+
+    #[test]
+    fn web_args_parse_start_with_flags() {
+        let args = WebArgs::try_parse_from([
+            "ralph-web",
+            "start",
+            "--dev",
+            "--backend-port",
+            "4321",
+            "--foreground",
+        ])
+        .expect("parse");
+        match args.command {
+            Some(WebCommand::Start(start)) => {
+                assert!(start.foreground);
+                assert!(start.run.dev);
+                assert_eq!(start.run.backend_port, Some(4321));
+            }
+            other => panic!("expected start subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn web_args_parse_status_and_stop() {
+        let args = WebArgs::try_parse_from(["ralph-web", "status"]).expect("parse");
+        assert!(matches!(args.command, Some(WebCommand::Status)));
+        let args = WebArgs::try_parse_from(["ralph-web", "stop"]).expect("parse");
+        assert!(matches!(args.command, Some(WebCommand::Stop)));
+    }
+
+    #[test]
+    fn ensure_no_parent_flags_accepts_default() {
+        assert!(ensure_no_parent_flags(&RunArgs::default(), "start").is_ok());
+    }
+
+    #[test]
+    fn ensure_no_parent_flags_rejects_flags_before_subcommand() {
+        let mut run = RunArgs::default();
+        run.dev = true;
+        let err = ensure_no_parent_flags(&run, "start").expect_err("should reject");
+        assert!(err.to_string().contains("ralph web start"), "{err}");
+        let err = ensure_no_parent_flags(&run, "status").expect_err("should reject");
+        assert!(err.to_string().contains("status"), "{err}");
+    }
+
+    #[test]
+    fn inspect_state_absent_without_file() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        assert!(matches!(inspect_state(temp_dir.path()), StateProbe::Absent));
+    }
+
+    #[test]
+    fn inspect_state_live_for_own_pid() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        write_state(
+            temp_dir.path(),
+            &test_state(temp_dir.path(), std::process::id()),
+        )
+        .expect("write state");
+        match inspect_state(temp_dir.path()) {
+            StateProbe::Live(state) => assert_eq!(state.pid, std::process::id()),
+            other => panic!("expected live state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_state_removes_dead_pid() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        // u32::MAX is never a live pid.
+        write_state(temp_dir.path(), &test_state(temp_dir.path(), u32::MAX)).expect("write state");
+        assert!(matches!(inspect_state(temp_dir.path()), StateProbe::Stale));
+        assert!(!state_file_path(temp_dir.path()).exists());
+    }
+
+    #[test]
+    fn inspect_state_removes_unparseable_file() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        std::fs::write(state_file_path(temp_dir.path()), "not json").expect("write");
+        assert!(matches!(inspect_state(temp_dir.path()), StateProbe::Stale));
+        assert!(!state_file_path(temp_dir.path()).exists());
+    }
+
+    #[test]
+    fn state_guard_removes_own_state_on_drop() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let pid = std::process::id();
+        write_state(temp_dir.path(), &test_state(temp_dir.path(), pid)).expect("write state");
+        {
+            let _guard = StateGuard::new(temp_dir.path(), pid);
+        }
+        assert!(!state_file_path(temp_dir.path()).exists());
+    }
+
+    #[test]
+    fn state_guard_keeps_other_pid_state() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let pid = std::process::id();
+        write_state(temp_dir.path(), &test_state(temp_dir.path(), pid)).expect("write state");
+        {
+            // A guard from an older (already-exited) supervisor must not
+            // delete the newer instance's record.
+            let _guard = StateGuard::new(temp_dir.path(), pid.wrapping_add(1));
+        }
+        assert!(state_file_path(temp_dir.path()).exists());
+    }
+
+    #[test]
+    fn daemon_argv_forwards_run_flags() {
+        let run = RunArgs {
+            host: Some("0.0.0.0".to_string()),
+            backend_port: Some(4321),
+            frontend_port: 6000,
+            dev: true,
+            legacy_node_api: true,
+            ..RunArgs::default()
+        };
+        let root = Path::new("/ws");
+        let argv = daemon_argv(&run, root);
+        let argv: Vec<String> = argv
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            argv,
+            vec![
+                "web",
+                "--workspace",
+                "/ws",
+                "--no-open",
+                "--host",
+                "0.0.0.0",
+                "--backend-port",
+                "4321",
+                "--frontend-port",
+                "6000",
+                "--dev",
+                "--legacy-node-api"
+            ]
+        );
+    }
+
+    #[test]
+    fn daemon_argv_omits_defaults() {
+        let run = RunArgs::default();
+        let argv = daemon_argv(&run, Path::new("/ws"));
+        let argv: Vec<String> = argv
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(argv, vec!["web", "--workspace", "/ws", "--no-open"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pid_alive_self_and_dead() {
+        assert!(pid_alive(std::process::id()));
+        assert!(!pid_alive(u32::MAX));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_pid_stops_process() {
+        // A supervised-style child: `sleep` just sits there like a server.
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+
+        terminate_pid(pid, Duration::from_secs(5))
+            .await
+            .expect("terminate");
+
+        // Reap so the pid is fully gone for the liveness check.
+        let _ = child.wait();
+        assert!(!pid_alive(pid));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_command_terminates_recorded_pid() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        write_state(temp_dir.path(), &test_state(temp_dir.path(), child.id()))
+            .expect("write state");
+
+        stop_command(temp_dir.path()).await.expect("stop");
+
+        let _ = child.wait();
+        assert!(!pid_alive(child.id()));
+        assert!(!state_file_path(temp_dir.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn stop_command_succeeds_when_not_running() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        // No state file and nothing on the default monitor port (usually).
+        // If a real monitor happens to answer on :3200 this test would
+        // see the unmanaged branch — still an error, so only assert in
+        // the quiet case by skipping when the probe hits.
+        if probe_monitor_health(DEFAULT_MONITOR_PORT).await.is_some() {
+            return; // real monitor present; nothing meaningful to assert here
+        }
+        stop_command(temp_dir.path()).await.expect("stop no-op");
+    }
+
+    #[tokio::test]
+    async fn start_command_reports_already_running() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let state_dir = TempDir::new().expect("state dir");
+        write_state(
+            state_dir.path(),
+            &test_state(temp_dir.path(), std::process::id()),
+        )
+        .expect("write state");
+
+        let run = RunArgs {
+            workspace: Some(temp_dir.path().to_path_buf()),
+            no_open: true,
+            ..RunArgs::default()
+        };
+        // Live state short-circuits before any spawn — returns Ok.
+        start_command(&run, true, state_dir.path())
+            .await
+            .expect("already-running report");
     }
 }

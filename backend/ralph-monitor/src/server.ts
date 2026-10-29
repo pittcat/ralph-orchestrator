@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 import { startCollector } from './collector/collector.js';
@@ -8,20 +9,55 @@ import { registerStatic, registerStaticMissing } from './static/spa.js';
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
 
 const config = loadConfig();
+const normalizedHost = config.host
+  .trim()
+  .replace(/^\[|\]$/g, '')
+  .toLowerCase();
 
-// Fail-closed: non-loopback bind requires explicit acknowledgement —
-// the service has no auth layer (Plan5-U4 §20).
-if (!LOOPBACK.has(config.host)) {
+// Fail-closed: non-loopback bind requires explicit acknowledgement via
+// RALPH_MONITOR_ALLOW_LAN — the service has no auth layer (Plan5-U4 §20).
+// `ralph web --host <addr>` sets both env vars on the spawned process.
+const allowLan = ['1', 'true', 'yes'].includes(
+  (process.env.RALPH_MONITOR_ALLOW_LAN ?? '').toLowerCase(),
+);
+if (!LOOPBACK.has(normalizedHost)) {
+  if (!allowLan) {
+    console.error(
+      `ralph-monitor: refusing to bind non-loopback host ${config.host} ` +
+        `(loopback-only service; set RALPH_MONITOR_HOST=127.0.0.1, or ` +
+        `RALPH_MONITOR_ALLOW_LAN=1 to accept LAN exposure)`,
+    );
+    process.exit(1);
+  }
   console.error(
-    `ralph-monitor: refusing to bind non-loopback host ${config.host} ` +
-      `(loopback-only service; set RALPH_MONITOR_HOST=127.0.0.1)`,
+    `ralph-monitor: WARNING — binding non-loopback host ${config.host}; ` +
+      `the service has no auth layer and is now reachable from the LAN ` +
+      `(explicit RALPH_MONITOR_ALLOW_LAN acknowledgement)`,
   );
-  process.exit(1);
+}
+
+// In LAN mode the Host/Origin allowlists must also admit this machine's
+// own interface addresses (the URLs `ralph web` prints) — foreign DNS
+// names pointing at the service are still rejected.
+function localInterfaceHosts(): Set<string> {
+  const hosts = new Set<string>([normalizedHost]);
+  for (const infos of Object.values(os.networkInterfaces())) {
+    for (const info of infos ?? []) {
+      if (info.internal) continue;
+      // family is 'IPv4'/'IPv6' (string) on modern Node, 4/6 (number)
+      // in older typings — the suffix check covers both.
+      hosts.add(
+        String(info.family).endsWith('6') ? `[${info.address}]` : info.address,
+      );
+    }
+  }
+  return hosts;
 }
 
 const { app, db, machineId } = buildApp({
   dbPath: config.dbPath,
   logger: true,
+  lanHosts: LOOPBACK.has(normalizedHost) ? undefined : localInterfaceHosts(),
 });
 
 // Plan5-U4: static SPA hosting — a missing dist dir is a warning,

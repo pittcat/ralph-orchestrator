@@ -3,7 +3,11 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { openDatabase, type MonitorDb } from './db/index.js';
 import { runMigrations } from './db/migrations.js';
 import { ensureMachineId } from './lib/machine_id.js';
-import { registerSecurity } from './plugins/security.js';
+import {
+  isAllowedOrigin,
+  LOOPBACK_HOSTNAMES,
+  registerSecurity,
+} from './plugins/security.js';
 import { registerProjectRoutes } from './routes/projects.js';
 import { registerRunRoutes } from './routes/runs.js';
 import { registerHealthRoutes } from './routes/health.js';
@@ -21,6 +25,13 @@ export interface BuildAppOptions {
   logger?: boolean;
   /** SSE tuning overrides (tests shrink buffers/heartbeats). */
   sse?: Partial<import('./stream/sse.js').SseOptions>;
+  /**
+   * Additional hostnames admitted by the Host/Origin allowlists beyond
+   * loopback — used in LAN mode (`RALPH_MONITOR_ALLOW_LAN`) so the
+   * machine's interface addresses pass the DNS-rebinding defense while
+   * arbitrary foreign names are still rejected.
+   */
+  lanHosts?: ReadonlySet<string>;
 }
 
 export interface MonitorApp {
@@ -51,30 +62,21 @@ export function buildApp(options: BuildAppOptions): MonitorApp {
     db.close();
   });
 
-  // CORS: loopback origins only — same rule the Origin check enforces
+  // Hostnames allowed by the Host/Origin checks: loopback always, plus
+  // LAN interface addresses when the service was explicitly exposed.
+  const allowedHosts = options.lanHosts
+    ? new Set([...LOOPBACK_HOSTNAMES, ...options.lanHosts])
+    : LOOPBACK_HOSTNAMES;
+
+  // CORS: allowed origins only — same rule the Origin check enforces
   // on unsafe methods, applied here to preflights too.
   void app.register(cors, {
     origin: (origin, cb) => {
-      if (origin === undefined) {
-        cb(null, true);
-        return;
-      }
-      try {
-        const hostname = new URL(origin).hostname.toLowerCase();
-        cb(
-          null,
-          hostname === 'localhost' ||
-            hostname === '127.0.0.1' ||
-            hostname === '::1' ||
-            hostname === '[::1]',
-        );
-      } catch {
-        cb(null, false);
-      }
+      cb(null, isAllowedOrigin(origin, allowedHosts));
     },
   });
 
-  registerSecurity(app);
+  registerSecurity(app, allowedHosts);
   registerProjectRoutes(app, db);
   registerRunRoutes(app, db, machineId);
   registerHealthRoutes(app, db, machineId);

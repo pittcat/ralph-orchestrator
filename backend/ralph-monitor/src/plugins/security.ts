@@ -25,9 +25,17 @@ export const CSRF_COOKIE = 'monitor_csrf';
 export const CSRF_HEADER = 'x-monitor-csrf';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
-const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+export const LOOPBACK_HOSTNAMES = new Set([
+  'localhost',
+  '127.0.0.1',
+  '::1',
+  '[::1]',
+]);
 
-export function isAllowedHost(hostHeader: string | undefined): boolean {
+export function isAllowedHost(
+  hostHeader: string | undefined,
+  allowed: ReadonlySet<string> = LOOPBACK_HOSTNAMES,
+): boolean {
   if (!hostHeader) return false;
   // Strip the port — the service may run behind `ralph web` port
   // forwarding; loopback hostnames are trusted at any port. A suffix
@@ -44,10 +52,13 @@ export function isAllowedHost(hostHeader: string | undefined): boolean {
         ? host.slice(0, idx)
         : host;
   }
-  return LOOPBACK_HOSTNAMES.has(hostname);
+  return allowed.has(hostname);
 }
 
-export function isAllowedOrigin(origin: string | undefined): boolean {
+export function isAllowedOrigin(
+  origin: string | undefined,
+  allowed: ReadonlySet<string> = LOOPBACK_HOSTNAMES,
+): boolean {
   if (origin === undefined) {
     // Non-browser clients (curl, server-to-server) send no Origin.
     return true;
@@ -60,7 +71,7 @@ export function isAllowedOrigin(origin: string | undefined): boolean {
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
       return false;
     }
-    return LOOPBACK_HOSTNAMES.has(url.hostname.toLowerCase());
+    return allowed.has(url.hostname.toLowerCase());
   } catch {
     return false;
   }
@@ -98,15 +109,21 @@ function forbidden(reply: FastifyReply, code: string, message: string) {
   return sendError(reply, 403, code, message);
 }
 
-export function registerSecurity(app: FastifyInstance): void {
+/// `allowedHosts` widens the loopback allowlist for LAN mode — callers
+/// pass the union of loopback names + local interface addresses so the
+/// DNS-rebinding defense still rejects arbitrary foreign hostnames.
+export function registerSecurity(
+  app: FastifyInstance,
+  allowedHosts: ReadonlySet<string> = LOOPBACK_HOSTNAMES,
+): void {
   app.addHook('onRequest', async (req, reply) => {
-    if (!isAllowedHost(req.headers.host)) {
+    if (!isAllowedHost(req.headers.host, allowedHosts)) {
       return forbidden(reply, 'forbidden_host', 'Host header is not allowed');
     }
     if (SAFE_METHODS.has(req.method)) {
       return;
     }
-    if (!isAllowedOrigin(req.headers.origin)) {
+    if (!isAllowedOrigin(req.headers.origin, allowedHosts)) {
       return forbidden(reply, 'forbidden_origin', 'Origin header is not allowed');
     }
     if (!csrfSatisfied(req)) {
