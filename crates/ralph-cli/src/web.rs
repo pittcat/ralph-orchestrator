@@ -103,10 +103,6 @@ pub struct RunArgs {
     #[arg(long)]
     pub workspace: Option<PathBuf>,
 
-    /// Use deprecated Node tRPC backend instead of Rust RPC API (--dev mode only)
-    #[arg(long)]
-    pub legacy_node_api: bool,
-
     /// Run the monitor dashboard only (single process; no vite/api).
     /// This is the default; kept for backwards compatibility.
     #[arg(long, conflicts_with = "dev")]
@@ -128,7 +124,6 @@ impl Default for RunArgs {
             backend_port: None,
             frontend_port: 5173,
             workspace: None,
-            legacy_node_api: false,
             monitor: false,
             dev: false,
             no_open: false,
@@ -352,117 +347,8 @@ fn check_port_available(port: u16) -> Result<()> {
     }
 }
 
-const BLOCKED_TSX_VERSION: &str = "4.20.0";
-
-/// Check for tsx 4.20.0 which has known issues.
-fn check_tsx_version_with(backend_dir: &Path, npx_cmd: &OsStr) -> Result<()> {
-    // On some CI filesystems, executing a just-written test helper script can
-    // transiently fail with ETXTBSY/Text file busy. Retry briefly to avoid flakes.
-    let output = run_tsx_version_command_with_retry(backend_dir, npx_cmd);
-
-    if let Some(output) = output {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if contains_blocked_tsx_version(&stdout) || contains_blocked_tsx_version(&stderr) {
-            anyhow::bail!(
-                "tsx 4.20.0 has known issues that affect the web server.\n\
-                 Fix: npm install tsx@^4.21.0 -w @ralph-web/server"
-            );
-        }
-    }
-
-    // If we can't run tsx or it doesn't match, proceed silently.
-    Ok(())
-}
-
-fn run_tsx_version_command_with_retry(
-    backend_dir: &Path,
-    npx_cmd: &OsStr,
-) -> Option<std::process::Output> {
-    const MAX_ATTEMPTS: usize = 5;
-
-    for attempt in 0..MAX_ATTEMPTS {
-        match Command::new(npx_cmd)
-            .args(["tsx", "--version"])
-            .current_dir(backend_dir)
-            .output()
-        {
-            Ok(output) => {
-                // Success: parse this output.
-                if output.status.success() {
-                    return Some(output);
-                }
-
-                // Retry transient ETXTBSY/text-file-busy errors seen in CI.
-                let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
-                let is_transient = stderr.contains("text file busy") || stderr.contains("etxtbsy");
-                if is_transient && attempt + 1 < MAX_ATTEMPTS {
-                    std::thread::sleep(Duration::from_millis(25));
-                    continue;
-                }
-
-                // Non-transient failure: return output for best-effort parsing.
-                return Some(output);
-            }
-            Err(err) => {
-                // Retry transient execution errors for freshly written helper scripts.
-                if is_transient_exec_error(&err) && attempt + 1 < MAX_ATTEMPTS {
-                    std::thread::sleep(Duration::from_millis(25));
-                    continue;
-                }
-
-                // Command missing/unrunnable.
-                return None;
-            }
-        }
-    }
-
-    None
-}
-
-fn contains_blocked_tsx_version(text: &str) -> bool {
-    text.lines().any(|line| {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            return false;
-        }
-
-        // Bare outputs: "4.20.0" or "v4.20.0"
-        if trimmed == BLOCKED_TSX_VERSION
-            || trimmed
-                .strip_prefix('v')
-                .is_some_and(|version| version == BLOCKED_TSX_VERSION)
-        {
-            return true;
-        }
-
-        // Labeled output examples:
-        // - "tsx 4.20.0"
-        // - "tsx v4.20.0"
-        // - "tsx v4.20.0 (node v22.0.0)"
-        if trimmed.to_ascii_lowercase().contains("tsx") {
-            return trimmed.split_whitespace().any(|token| {
-                let cleaned = token
-                    .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.')
-                    .trim_start_matches('v');
-                cleaned == BLOCKED_TSX_VERSION
-            });
-        }
-
-        false
-    })
-}
-
 /// Run pre-flight checks: verify Node.js/npm and install frontend dependencies.
-/// In legacy mode, also validates tsx backend tooling.
-async fn preflight_with(
-    root: &Path,
-    backend_dir: &Path,
-    legacy_node_api: bool,
-    node_cmd: &OsStr,
-    npm_cmd: &OsStr,
-    npx_cmd: &OsStr,
-) -> Result<()> {
+async fn preflight_with(root: &Path, node_cmd: &OsStr, npm_cmd: &OsStr) -> Result<()> {
     let node_version = check_node_with(node_cmd)?;
     let npm_version = check_npm_with(npm_cmd)?;
     println!(
@@ -476,23 +362,11 @@ async fn preflight_with(
         run_npm_install_with(root, npm_cmd).await?;
     }
 
-    if legacy_node_api {
-        check_tsx_version_with(backend_dir, npx_cmd)?;
-    }
-
     Ok(())
 }
 
-async fn preflight(root: &Path, backend_dir: &Path, legacy_node_api: bool) -> Result<()> {
-    preflight_with(
-        root,
-        backend_dir,
-        legacy_node_api,
-        OsStr::new("node"),
-        OsStr::new("npm"),
-        OsStr::new("npx"),
-    )
-    .await
+async fn preflight(root: &Path) -> Result<()> {
+    preflight_with(root, OsStr::new("node"), OsStr::new("npm")).await
 }
 
 /// Forward output from a child process, prefixing each line with a label.
@@ -966,9 +840,6 @@ fn daemon_argv(run: &RunArgs, workspace_root: &Path) -> Vec<OsString> {
     if run.monitor {
         argv.push(OsStr::new("--monitor").to_os_string());
     }
-    if run.legacy_node_api {
-        argv.push(OsStr::new("--legacy-node-api").to_os_string());
-    }
     argv
 }
 
@@ -1344,19 +1215,11 @@ async fn execute_dev(run: &RunArgs, workspace_root: &Path) -> Result<()> {
 
     println!("Starting Ralph web servers...");
 
-    // Compute absolute paths for backend and frontend directories
-    let backend_dir = workspace_root.join("backend/ralph-web-server");
+    // Compute absolute path for the frontend directory
     let frontend_dir = workspace_root.join("frontend/ralph-web");
 
-    if run.legacy_node_api && !backend_dir.join("package.json").exists() {
-        anyhow::bail!(
-            "Legacy Node backend not found at {}",
-            backend_dir.join("package.json").display()
-        );
-    }
-
-    // Verify frontend Node.js/npm tooling, install deps, and legacy tsx checks when requested.
-    preflight(workspace_root, &backend_dir, run.legacy_node_api).await?;
+    // Verify frontend Node.js/npm tooling and install deps when missing.
+    preflight(workspace_root).await?;
 
     // Check ports before spawning anything
     check_port_available(backend_port)?;
@@ -1364,50 +1227,21 @@ async fn execute_dev(run: &RunArgs, workspace_root: &Path) -> Result<()> {
 
     println!("Using workspace: {}", workspace_root.display());
 
-    // Spawn backend (default Rust RPC API, optional legacy Node backend) and frontend.
-    let backend_label = if run.legacy_node_api {
-        "backend"
-    } else {
-        "api"
-    };
-    let backend_ready_pattern = if run.legacy_node_api {
-        "Server started on"
-    } else {
-        "ralph-api listening"
-    };
-
-    let mut backend = if run.legacy_node_api {
-        AsyncCommand::new("npm")
-            .args(["run", "dev"])
-            .current_dir(&backend_dir)
-            .env("RALPH_WORKSPACE_ROOT", workspace_root)
-            .env("PORT", backend_port.to_string())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to start legacy backend server. Is npm installed and {} set up?\nError: {}",
-                    backend_dir.join("package.json").display(),
-                    e
-                )
-            })?
-    } else {
-        AsyncCommand::new("cargo")
-            .args(["run", "-p", "ralph-api"])
-            .current_dir(workspace_root)
-            .env("RALPH_API_PORT", backend_port.to_string())
-            .env("RALPH_API_WORKSPACE_ROOT", workspace_root)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to start Rust RPC API (cargo run -p ralph-api).\nError: {}",
-                    e
-                )
-            })?
-    };
+    // Spawn backend (Rust RPC API) and frontend.
+    let mut backend = AsyncCommand::new("cargo")
+        .args(["run", "-p", "ralph-api"])
+        .current_dir(workspace_root)
+        .env("RALPH_API_PORT", backend_port.to_string())
+        .env("RALPH_API_WORKSPACE_ROOT", workspace_root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to start Rust RPC API (cargo run -p ralph-api).\nError: {}",
+                e
+            )
+        })?;
 
     // Pass --port for Vite and RALPH_BACKEND_PORT for proxy config. An
     // explicit --host is forwarded to Vite (its config otherwise binds all
@@ -1449,8 +1283,8 @@ async fn execute_dev(run: &RunArgs, workspace_root: &Path) -> Result<()> {
         forward_output(
             backend_stdout,
             backend_stderr,
-            backend_label,
-            backend_ready_pattern,
+            "api",
+            "ralph-api listening",
             backend_ready_clone,
         )
         .await;
@@ -1748,62 +1582,6 @@ mod tests {
         assert!(msg.contains("npm is not installed"), "msg: {msg}");
     }
 
-    #[test]
-    fn contains_blocked_tsx_version_detects_supported_formats() {
-        assert!(contains_blocked_tsx_version("4.20.0"));
-        assert!(contains_blocked_tsx_version("v4.20.0"));
-        assert!(contains_blocked_tsx_version("tsx 4.20.0"));
-        assert!(contains_blocked_tsx_version("tsx v4.20.0"));
-        assert!(contains_blocked_tsx_version("tsx v4.20.0 (node v22.20.0)"));
-        assert!(contains_blocked_tsx_version("tsx v4.20.0\nnode v22.20.0"));
-    }
-
-    #[test]
-    fn contains_blocked_tsx_version_ignores_other_versions() {
-        assert!(!contains_blocked_tsx_version("4.21.0"));
-        assert!(!contains_blocked_tsx_version("tsx v4.21.0"));
-        assert!(!contains_blocked_tsx_version("node v4.20.0"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn check_tsx_version_blocks_known_bad_release() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let backend_dir = temp_dir.path().join("server");
-        std::fs::create_dir_all(&backend_dir).expect("backend dir");
-        let npx_path = write_fake_executable(temp_dir.path(), "npx", "echo 4.20.0");
-        let err =
-            check_tsx_version_with(&backend_dir, npx_path.as_os_str()).expect_err("tsx error");
-        let msg = format!("{err}");
-        assert!(msg.contains("tsx 4.20.0"), "msg: {msg}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn check_tsx_version_blocks_known_bad_release_with_v_prefix() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let backend_dir = temp_dir.path().join("server");
-        std::fs::create_dir_all(&backend_dir).expect("backend dir");
-        let npx_path = write_fake_executable(temp_dir.path(), "npx", "echo v4.20.0");
-        let err =
-            check_tsx_version_with(&backend_dir, npx_path.as_os_str()).expect_err("tsx error");
-        let msg = format!("{err}");
-        assert!(msg.contains("tsx 4.20.0"), "msg: {msg}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn check_tsx_version_blocks_known_bad_release_with_label() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let backend_dir = temp_dir.path().join("server");
-        std::fs::create_dir_all(&backend_dir).expect("backend dir");
-        let npx_path = write_fake_executable(temp_dir.path(), "npx", "echo tsx v4.20.0");
-        let err =
-            check_tsx_version_with(&backend_dir, npx_path.as_os_str()).expect_err("tsx error");
-        let msg = format!("{err}");
-        assert!(msg.contains("tsx 4.20.0"), "msg: {msg}");
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn preflight_runs_install_with_fake_tools() {
@@ -1812,7 +1590,6 @@ mod tests {
         std::fs::create_dir_all(&bin_dir).expect("bin dir");
 
         let node_path = write_fake_executable(&bin_dir, "node", "echo v20.1.0");
-        let npx_path = write_fake_executable(&bin_dir, "npx", "echo 4.21.0");
         let npm_path = write_fake_executable(
             &bin_dir,
             "npm",
@@ -1820,24 +1597,14 @@ mod tests {
         );
 
         let root = temp_dir.path().join("workspace");
-        let backend_dir = root.join("server");
-        std::fs::create_dir_all(&backend_dir).expect("backend dir");
+        std::fs::create_dir_all(&root).expect("workspace dir");
 
         // Retrying avoids rare CI flakes where executing freshly written
         // fake scripts can transiently fail (e.g. ETXTBSY surfaced as
         // "Node.js is not installed").
         let mut preflight_ok = false;
         for _ in 0..5 {
-            match preflight_with(
-                &root,
-                &backend_dir,
-                true,
-                node_path.as_os_str(),
-                npm_path.as_os_str(),
-                npx_path.as_os_str(),
-            )
-            .await
-            {
+            match preflight_with(&root, node_path.as_os_str(), npm_path.as_os_str()).await {
                 Ok(()) => {
                     preflight_ok = true;
                     break;
@@ -1860,7 +1627,6 @@ mod tests {
         std::fs::create_dir_all(&bin_dir).expect("bin dir");
 
         let node_path = write_fake_executable(&bin_dir, "node", "echo v20.1.0");
-        let npx_path = write_fake_executable(&bin_dir, "npx", "echo 4.21.0");
         let npm_path = write_fake_executable(
             &bin_dir,
             "npm",
@@ -1870,23 +1636,12 @@ exit 1",
         );
 
         let root = temp_dir.path().join("workspace");
-        let backend_dir = root.join("server");
-        std::fs::create_dir_all(&backend_dir).expect("backend dir");
         std::fs::create_dir_all(root.join("node_modules")).expect("node_modules dir");
         std::fs::write(root.join("node_modules/.package-lock.json"), "").expect("lockfile");
 
         let mut preflight_ok = false;
         for _ in 0..5 {
-            match preflight_with(
-                &root,
-                &backend_dir,
-                true,
-                node_path.as_os_str(),
-                npm_path.as_os_str(),
-                npx_path.as_os_str(),
-            )
-            .await
-            {
+            match preflight_with(&root, node_path.as_os_str(), npm_path.as_os_str()).await {
                 Ok(()) => {
                     preflight_ok = true;
                     break;
@@ -1899,41 +1654,6 @@ exit 1",
         }
         assert!(preflight_ok, "preflight should succeed after retries");
         assert!(!root.join("npm_install_called").exists());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn preflight_reports_bad_tsx_version() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let bin_dir = temp_dir.path().join("bin");
-        std::fs::create_dir_all(&bin_dir).expect("bin dir");
-
-        let node_path = write_fake_executable(&bin_dir, "node", "echo v20.1.0");
-        let npx_path = write_fake_executable(&bin_dir, "npx", "echo 4.20.0");
-        let npm_path = write_fake_executable(
-            &bin_dir,
-            "npm",
-            "if [ \"$1\" = \"--version\" ]; then echo 9.6.0; exit 0; fi",
-        );
-
-        let root = temp_dir.path().join("workspace");
-        let backend_dir = root.join("server");
-        std::fs::create_dir_all(&backend_dir).expect("backend dir");
-        std::fs::create_dir_all(root.join("node_modules")).expect("node_modules dir");
-        std::fs::write(root.join("node_modules/.package-lock.json"), "").expect("lockfile");
-
-        let err = preflight_with(
-            &root,
-            &backend_dir,
-            true,
-            node_path.as_os_str(),
-            npm_path.as_os_str(),
-            npx_path.as_os_str(),
-        )
-        .await
-        .expect_err("preflight should fail on bad tsx");
-        let msg = format!("{err}");
-        assert!(msg.contains("tsx 4.20.0"), "msg: {msg}");
     }
 
     #[cfg(unix)]
@@ -1997,16 +1717,6 @@ exit 1",
             msg.contains("npm install failed") || msg.contains("Failed to run npm install"),
             "msg: {msg}"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn check_tsx_version_with_missing_binary_is_ok() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let backend_dir = temp_dir.path().join("server");
-        std::fs::create_dir_all(&backend_dir).expect("backend dir");
-
-        assert!(check_tsx_version_with(&backend_dir, OsStr::new("missing-npx-123")).is_ok());
     }
 
     #[cfg(unix)]
@@ -2352,7 +2062,6 @@ exit 1",
             backend_port: Some(4321),
             frontend_port: 6000,
             dev: true,
-            legacy_node_api: true,
             ..RunArgs::default()
         };
         let root = Path::new("/ws");
@@ -2374,8 +2083,7 @@ exit 1",
                 "4321",
                 "--frontend-port",
                 "6000",
-                "--dev",
-                "--legacy-node-api"
+                "--dev"
             ]
         );
     }

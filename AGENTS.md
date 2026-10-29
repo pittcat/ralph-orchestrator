@@ -88,11 +88,10 @@ cargo doc --no-deps                          # Documentation
 ```bash
 ralph web                 # Monitor dashboard (single process, :3200); --dev for vite+api (:5173/:3000)
 npm ci                    # Install all workspace deps (Node >= 22 via nvm/.nvmrc)
-npm run build             # Build all npm workspaces (frontend dist + monitor + devtools + legacy server)
+npm run build             # Build all npm workspaces (frontend dist + monitor + devtools)
 npm run dev:web           # Vite dev server only (:5173)
 npm run dev:api           # Rust RPC API only (cargo run -p ralph-api, :3000)
 npm test                  # All npm workspace tests
-npm run test:server       # Legacy @ralph-web/server tests
 ```
 
 BDD scenarios (YAML, exercise real runtime paths) live in `crates/ralph-core/tests/scenarios/`.

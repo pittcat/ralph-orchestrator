@@ -85,8 +85,7 @@ jobs:
           node-version: '22'
       - run: npm ci
       - run: npm run build
-      - run: npm run test:server
-      - run: npm run test -w @ralph-web/dashboard
+      - run: npm test
 
   # Hooks mutation testing is expensive (~20min). Run locally with:
   #   ./scripts/hooks-mutation-gate.sh

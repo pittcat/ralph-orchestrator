@@ -130,15 +130,17 @@ export function resolveWithin(
 ): { ok: true; canonical: string } | { ok: false; message: string } {
   const resolved = path.resolve(projectRoot, userPath);
   let canonical: string;
+  let canonicalRoot: string;
   try {
     canonical = fs.realpathSync(resolved);
+    canonicalRoot = fs.realpathSync(projectRoot);
   } catch {
     return { ok: false, message: `path does not exist: ${userPath}` };
   }
-  const rootWithSep = projectRoot.endsWith(path.sep)
-    ? projectRoot
-    : projectRoot + path.sep;
-  if (canonical !== projectRoot && !canonical.startsWith(rootWithSep)) {
+  const rootWithSep = canonicalRoot.endsWith(path.sep)
+    ? canonicalRoot
+    : canonicalRoot + path.sep;
+  if (canonical !== canonicalRoot && !canonical.startsWith(rootWithSep)) {
     return { ok: false, message: `path escapes project root: ${userPath}` };
   }
   return { ok: true, canonical };

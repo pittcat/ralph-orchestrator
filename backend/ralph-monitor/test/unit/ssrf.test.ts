@@ -58,7 +58,9 @@ test('http targets need an allowlist hit; allowlisted CIDR passes', async () => 
     allowlist: ['localhost'],
   });
   assert.equal(hit.ok, true);
-  const cidr = await validateWebhookUrl('http://localhost:9/hook', {
+  // Literal v4 loopback keeps the CIDR check deterministic — `localhost`
+  // may resolve to ::1 + 127.0.0.1, and ::1 is outside 127.0.0.0/8.
+  const cidr = await validateWebhookUrl('http://127.0.0.1:9/hook', {
     allowlist: ['127.0.0.0/8'],
   });
   assert.equal(cidr.ok, true);
@@ -79,7 +81,9 @@ test('test channel allows loopback only for loopback targets', async () => {
 });
 
 test('unresolvable host fails closed', async () => {
-  const v = await validateWebhookUrl('https://nonexistent.invalid.tld/x', {
+  // A >253-char hostname is invalid at the DNS protocol level, so lookup
+  // fails locally — deterministic even behind wildcard/captive resolvers.
+  const v = await validateWebhookUrl(`https://${'x'.repeat(300)}/x`, {
     allowlist: [],
   });
   assert.equal(v.ok, false);

@@ -16,7 +16,7 @@ Comprehensive testing approaches for Ralph development and validation.
 ### All Tests
 
 ```bash
-cargo test
+./scripts/run-tests.sh
 ```
 
 This includes unit tests and smoke tests (344+ tests total).
@@ -24,7 +24,7 @@ This includes unit tests and smoke tests (344+ tests total).
 ### Smoke Tests Only
 
 ```bash
-cargo test -p ralph-core smoke_runner
+cargo nextest run -p ralph-core --features recording --test smoke_runner
 ```
 
 ### E2E Tests
@@ -205,14 +205,14 @@ Hooks run CI-parity Rust checks before each commit:
 - `./scripts/sync-embedded-files.sh check`
 - `cargo fmt --all -- --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test`
+- `./scripts/run-tests.sh`
 
 ## Testing Best Practices
 
 ### 1. Run Tests After Changes
 
 ```bash
-cargo test  # Always run before declaring done
+./scripts/run-tests.sh  # Always run before declaring done
 ```
 
 ### 2. Prefer Smoke Tests

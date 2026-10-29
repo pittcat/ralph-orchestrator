@@ -20,7 +20,7 @@ ralph-e2e      → End-to-end test framework (scenarios, mock CLI, reporters)
 ralph-api      → Rust RPC API server for web dashboard backend
 ralph-bench    → Benchmarking
 
-backend/       → Web server (@ralph-web/server) - Fastify + tRPC + SQLite (legacy, deprecated)
+backend/       → Monitor server (@ralph-monitor/server) + devtools CLI (@ralph-devtools/cli) - Node/tsx
 frontend/      → Web dashboard (@ralph-web/dashboard) - React + Vite + TailwindCSS
 ```
 
@@ -75,7 +75,7 @@ CLI Config → HaBackend → auto_detect → CliExecutor / PtyExecutor → Strea
 | Preflight | `crates/ralph-core/src/preflight.rs` | Acceptance criteria extraction / validation |
 | Harness extensions | `crates/ralph-core/src/{config,event_loop,event_projection,state_file_injector,preflight}.rs` | Event filtering, projection, state injection, preflight hooks |
 | Web server (Rust) | `crates/ralph-api/src/` | Axum REST/WS for TUI/dashboard |
-| Web server (Node, legacy) | `backend/ralph-web-server/src/` | Fastify + tRPC + SQLite (deprecated) |
+| Monitor server | `backend/ralph-monitor/src/` | Fastify + SQLite, serves dashboard dist (`ralph web` 默认面) |
 | Web frontend | `frontend/ralph-web/src/` | React components |
 | E2E | `crates/ralph-e2e/src/` | scenarios, mock CLI, reporter |
 | BDD scenarios | `crates/ralph-core/tests/scenarios/` | YAML integration scenarios |

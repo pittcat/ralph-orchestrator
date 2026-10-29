@@ -5,7 +5,7 @@ Comprehensive installation instructions for Ralph Orchestrator.
 ## Prerequisites
 
 - **OS**: macOS, Linux, or Windows
-- **Node.js**: 18+ (required for npm installs)
+- **Node.js**: 22+ (required for npm installs; `.nvmrc` pins the dev version)
 - **Rust**: 1.70+ (required for cargo installs)
 
 ## Installation Methods

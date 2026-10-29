@@ -105,7 +105,7 @@ export function fakeRalphEnv(
   extra: NodeJS.ProcessEnv = {},
 ): NodeJS.ProcessEnv {
   return buildChildEnv({
-    PATH: `${FAKE_RALPH_DIR}:/usr/bin:/bin`,
+    PATH: `${FAKE_RALPH_DIR}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
     HOME: os.homedir(),
     ...extra,
   });

@@ -29,7 +29,7 @@ Ralph Orchestrator coordinates AI coding assistants (Claude, Kiro, Gemini, Codex
 |-----------|-------|
 | **Repository** | https://github.com/mikeyobrien/ralph-orchestrator |
 | **Primary Language** | Rust (215 source files, 9 crates) |
-| **Web Backend** | TypeScript/Node.js — Fastify + tRPC + SQLite (58 files) |
+| **Web Backend** | Rust (ralph-api, Axum) + TypeScript/Node.js monitor (Fastify + SQLite) |
 | **Web Frontend** | TypeScript/React — Vite + TailwindCSS (70 files) |
 | **Platforms** | macOS (aarch64/x86_64), Linux (aarch64/x86_64) |
 | **Rust Edition** | 2024 |
@@ -49,7 +49,7 @@ graph TB
 
     subgraph "API Layer"
         API["ralph-api<br/>Axum REST/WS"]
-        WEBAPI["@ralph-web/server<br/>Fastify + tRPC"]
+        WEBAPI["@ralph-monitor/server<br/>Fastify + SQLite"]
     end
 
     subgraph "Core Engine"
@@ -103,7 +103,8 @@ ralph-orchestrator/
 │   ├── ralph-api/          # REST/WebSocket API server (Axum)
 │   ├── ralph-e2e/          # End-to-end test framework
 │   └── ralph-bench/        # Benchmarking
-├── backend/ralph-web-server/  # @ralph-web/server (Fastify + tRPC + SQLite)
+├── backend/ralph-monitor/     # @ralph-monitor/server (Fastify + SQLite, `ralph web` 默认面)
+├── backend/ralph-devtools/    # @ralph-devtools/cli (preset 工作流 + 诊断 CLI)
 ├── frontend/ralph-web/        # @ralph-web/dashboard (React + Vite + TailwindCSS)
 ├── presets/                # Hat collection YAML presets
 ├── cassettes/              # Replay fixtures for smoke/E2E tests
@@ -155,9 +156,9 @@ Three operating modes: in-process (EventBus observer), RPC client (HTTP/WS to ra
 
 Axum-based API with domains: loop management, task CRUD, planning sessions, preset browsing, configuration, hat collections, real-time event streaming.
 
-### @ralph-web/server — Node.js Backend
+### @ralph-monitor/server — Node.js Monitor
 
-Fastify + tRPC + SQLite: task queue with persistent storage, Ralph process supervision, event parsing, log streaming, config merging.
+Fastify + SQLite: multi-project run observation (status, events, DAG, artifacts, notifications); serves the built dashboard SPA from `frontend/ralph-web/dist` (default `ralph web` surface).
 
 ### @ralph-web/dashboard — React Frontend
 
@@ -314,7 +315,7 @@ cargo test                                     # Run all tests
 cargo test -p ralph-core test_name             # Single test
 cargo test -p ralph-core smoke_runner          # Smoke tests (replay-based)
 cargo run -p ralph-e2e -- --mock               # E2E tests (CI-safe)
-npm run test:server                            # Backend tests
+npm test                                       # All npm workspace tests
 ```
 
 - **Unit tests**: Throughout all crates

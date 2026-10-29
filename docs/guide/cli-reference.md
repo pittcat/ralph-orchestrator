@@ -576,7 +576,6 @@ ralph web [OPTIONS]
 | `--workspace <WORKSPACE>` | Workspace root directory. |
 | `--monitor` | Monitor mode — the default; kept for backwards compatibility. |
 | `--dev` | Run the Vite + `ralph-api` development stack instead of the monitor. |
-| `--legacy-node-api` | Use deprecated Node tRPC backend instead of Rust RPC API (`--dev` only). |
 | `--no-open` | Do not open the dashboard in the default browser. |
 
 ### ralph mcp

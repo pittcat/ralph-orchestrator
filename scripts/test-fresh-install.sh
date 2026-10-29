@@ -49,7 +49,8 @@ if [ "$LOCAL_MODE" = true ]; then
 
     info "Removing node_modules..."
     rm -rf "$WORK_DIR/node_modules"
-    rm -rf "$WORK_DIR/backend/ralph-web-server/node_modules"
+    rm -rf "$WORK_DIR/backend/ralph-monitor/node_modules"
+    rm -rf "$WORK_DIR/backend/ralph-devtools/node_modules"
     rm -rf "$WORK_DIR/frontend/ralph-web/node_modules"
     pass "node_modules removed"
 else
@@ -81,8 +82,9 @@ npm run build
 pass "Build succeeded"
 
 # --- Backend tests ---
-info "Running backend tests (npm run test:server)..."
-npm run test:server
+info "Running backend tests (monitor + devtools)..."
+npm run test:monitor
+npm run test:devtools
 pass "Backend tests passed"
 
 # --- Frontend tests ---

@@ -22,7 +22,7 @@ cd ralph-orchestrator
 cargo build
 
 # Run tests
-cargo test
+./scripts/run-tests.sh
 
 # Install git hooks
 ./scripts/setup-hooks.sh

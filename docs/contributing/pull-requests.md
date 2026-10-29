@@ -9,7 +9,7 @@ Guidelines for submitting pull requests to Ralph Orchestrator.
 
 ## Before Submitting
 
-1. **Run tests**: `cargo test`
+1. **Run tests**: `./scripts/run-tests.sh` (nextest gate — bare `cargo test` is not the entrypoint)
 2. **Check formatting**: `cargo fmt --check`
 3. **Run clippy**: `cargo clippy`
 4. **Update documentation** if needed

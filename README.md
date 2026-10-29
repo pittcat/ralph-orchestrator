@@ -69,11 +69,11 @@ ralph run -p "Add input validation to the /users endpoint"
 Ralph includes a web dashboard for monitoring and managing orchestration loops.
 
 ```bash
-ralph web                              # starts Rust RPC API + frontend + opens browser
+ralph web                              # monitor dashboard (:3200) + opens browser
 ralph web --no-open                    # skip browser auto-open
-ralph web --backend-port 4000          # custom RPC API port
-ralph web --frontend-port 8080         # custom frontend port
-ralph web --legacy-node-api            # opt into deprecated Node tRPC backend
+ralph web --dev                        # Vite + Rust RPC API dev stack (:5173/:3000)
+ralph web --backend-port 4000          # custom monitor/API port
+ralph web --frontend-port 8080         # custom frontend port (--dev only)
 ```
 
 ### MCP Server Workspace Scope
@@ -96,9 +96,9 @@ under a single workspace root, so server-per-workspace is the deterministic mode
 
 **Requirements:**
 - Rust toolchain (for `ralph-api`)
-- Node.js >= 18 + npm (for the frontend)
+- Node.js >= 22 + npm (for the frontend)
 
-On first run, `ralph web` auto-detects missing `node_modules` and runs `npm install`.
+On first run, `ralph web --dev` auto-detects missing `node_modules` and runs `npm install`.
 
 To set up Node.js:
 
@@ -113,12 +113,11 @@ nvm install    # reads .nvmrc
 For development:
 
 ```bash
-npm install              # install frontend + legacy backend deps
+npm ci                   # install all workspace deps
 npm run dev:api          # Rust RPC API (port 3000)
 npm run dev:web          # frontend (port 5173)
 npm run dev              # frontend only (default)
-npm run dev:legacy-server  # deprecated Node backend (optional)
-npm run test             # all frontend/backend workspace tests
+npm test                 # all workspace tests
 ```
 
 ## MCP Server Mode
@@ -185,7 +184,7 @@ Unlike single-shot AI assistants, Ralph iterates until completion using a "hat s
 
 **What are the system requirements?**
 - Rust 1.75+ (for the `ralph-api` component)
-- Node.js >= 18 + npm (for the web dashboard frontend)
+- Node.js >= 22 + npm (for the web dashboard frontend)
 - An AI coding assistant CLI (Claude Code, Codex, Gemini CLI, etc.)
 
 **Which installation method should I use?**

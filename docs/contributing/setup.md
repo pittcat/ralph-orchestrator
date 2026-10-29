@@ -40,16 +40,16 @@ This installs pre-commit hooks that mirror CI Rust checks:
 - `./scripts/sync-embedded-files.sh check`
 - `cargo fmt --all -- --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test`
+- `./scripts/run-tests.sh`
 
 ## Verify Setup
 
 ```bash
-# Run tests
-cargo test
+# Run tests (canonical two-phase nextest gate)
+./scripts/run-tests.sh
 
 # Run smoke tests
-cargo test -p ralph-core smoke_runner
+cargo nextest run -p ralph-core --features recording --test smoke_runner
 
 # Check formatting
 cargo fmt --check
@@ -95,7 +95,7 @@ Edit code in `crates/`.
 ### 3. Run Tests
 
 ```bash
-cargo test
+./scripts/run-tests.sh
 ```
 
 ### 4. Format and Lint
@@ -138,7 +138,7 @@ Smoke tests use JSONL fixtures:
 
 ```bash
 # Run smoke tests
-cargo test -p ralph-core smoke_runner
+cargo nextest run -p ralph-core --features recording --test smoke_runner
 
 # Record a new fixture
 cargo run --bin ralph -- run --record-session fixture.jsonl -p "your prompt"
@@ -213,11 +213,11 @@ cargo build
 ### Tests Fail
 
 ```bash
-# Run with output
-cargo test -- --nocapture
+# Run with output (nextest: --no-capture)
+cargo nextest run --no-capture
 
 # Run specific test
-cargo test test_name
+cargo nextest run -p ralph-core -- test_name
 ```
 
 ### Clippy Errors

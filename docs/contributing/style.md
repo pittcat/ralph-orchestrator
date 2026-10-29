@@ -23,7 +23,7 @@ Ralph Orchestrator follows Rust community conventions with project-specific addi
 # - ./scripts/sync-embedded-files.sh check
 # - cargo fmt --all -- --check
 # - cargo clippy --all-targets --all-features -- -D warnings
-# - cargo test
+# - ./scripts/run-tests.sh
 ```
 
 ## Documentation Style
