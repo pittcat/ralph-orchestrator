@@ -9,12 +9,16 @@ import { registerRunRoutes } from './routes/runs.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerEventRoutes } from './routes/events.js';
 import { registerArtifactRoutes } from './routes/artifacts.js';
+import { registerStreamRoutes } from './routes/stream.js';
+import { registerSnapshotRoutes } from './routes/snapshot.js';
 
 export interface BuildAppOptions {
   /** SQLite path; `:memory:` is honored for unit tests. */
   dbPath: string;
   /** Emit Fastify logs (off in tests). */
   logger?: boolean;
+  /** SSE tuning overrides (tests shrink buffers/heartbeats). */
+  sse?: Partial<import('./stream/sse.js').SseOptions>;
 }
 
 export interface MonitorApp {
@@ -67,6 +71,8 @@ export function buildApp(options: BuildAppOptions): MonitorApp {
   registerHealthRoutes(app, db, machineId);
   registerEventRoutes(app, db, machineId);
   registerArtifactRoutes(app, db, machineId);
+  registerStreamRoutes(app, db, options.sse);
+  registerSnapshotRoutes(app, db, machineId);
 
   app.get('/api/monitor/v1/health', async () => ({
     ok: true,

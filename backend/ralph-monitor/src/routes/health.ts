@@ -26,10 +26,10 @@ function silentMsFromEnv(): number {
     : 5 * 60 * 1000;
 }
 
-function classifyRun(
+export function classifyStoredRun(
   db: MonitorDb,
   row: RunRow,
-  pidCheck: PidCheck,
+  pidCheck: PidCheck = posixPidCheck,
 ): RunHealth {
   const activity = db
     .prepare(
@@ -73,6 +73,41 @@ function classifyRun(
   });
 }
 
+/** `{collector, degraded_runs}` for one registered project (S11). */
+export function projectHealth(
+  db: MonitorDb,
+  projectId: string,
+  pidCheck: PidCheck = posixPidCheck,
+): {
+  collector: {
+    status: 'ok' | 'error';
+    error?: string;
+    consecutive_failures: number;
+    last_collected_at: string | null;
+  };
+  degraded_runs: string[];
+} {
+  const cursor = getCursor(db, projectId);
+  const degraded_runs = (
+    db
+      .prepare('SELECT * FROM runs WHERE project_id = ?')
+      .all(projectId) as RunRow[]
+  )
+    .filter((r) => isDegraded(classifyStoredRun(db, r, pidCheck)))
+    .map((r) => r.run_id);
+  return {
+    collector: {
+      status: (cursor?.consecutive_failures ?? 0) > 0 ? 'error' : 'ok',
+      ...(cursor?.consecutive_failures
+        ? { error: latestCollectionError(db, projectId) ?? undefined }
+        : {}),
+      consecutive_failures: cursor?.consecutive_failures ?? 0,
+      last_collected_at: cursor?.last_collected_at ?? null,
+    },
+    degraded_runs,
+  };
+}
+
 /**
  * Health routes (Plan1-U3 project collector health; Plan3-U2 adds the
  * run-level four-layer endpoint + `degraded_runs` on the project
@@ -99,27 +134,7 @@ export function registerHealthRoutes(
           'unknown project id',
         );
       }
-      const cursor = getCursor(db, req.params.id);
-      const degraded_runs = (
-        db
-          .prepare('SELECT * FROM runs WHERE project_id = ?')
-          .all(req.params.id) as RunRow[]
-      )
-        .filter((r) => isDegraded(classifyRun(db, r, pidCheck)))
-        .map((r) => r.run_id);
-      return reply.send({
-        collector: {
-          status: (cursor?.consecutive_failures ?? 0) > 0
-            ? 'error'
-            : 'ok',
-          ...(cursor?.consecutive_failures
-            ? { error: latestCollectionError(db, req.params.id) }
-            : {}),
-          consecutive_failures: cursor?.consecutive_failures ?? 0,
-          last_collected_at: cursor?.last_collected_at ?? null,
-        },
-        degraded_runs,
-      });
+      return reply.send(projectHealth(db, req.params.id, pidCheck));
     },
   );
 
@@ -152,7 +167,7 @@ export function registerHealthRoutes(
       if (!row) {
         return sendError(reply, 404, 'run_not_found', 'unknown run id');
       }
-      const health = classifyRun(db, row, pidCheck);
+      const health = classifyStoredRun(db, row, pidCheck);
       return reply.send({
         run_id: runId,
         global_run_id: id,

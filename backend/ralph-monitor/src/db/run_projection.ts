@@ -8,6 +8,7 @@ import {
 } from '../lib/state.js';
 import { ingestRunEvents } from '../events/ingest.js';
 import { ingestRunActivity } from '../activity/ingest.js';
+import { appendEvent } from '../stream/monitor_log.js';
 
 /**
  * Runs projection layer (plan U3 §5/§15).
@@ -79,7 +80,9 @@ export function ingestSnapshot(
 ): void {
   db.transaction(() => {
     const existing = db.prepare(
-      'SELECT state FROM runs WHERE project_id = ? AND run_id = ?',
+      `SELECT state, terminal, preset, plan_path, prompt_preview,
+              started_at, last_event_at
+       FROM runs WHERE project_id = ? AND run_id = ?`,
     );
     const upsert = db.prepare(
       `INSERT INTO runs (
@@ -138,7 +141,15 @@ export function ingestSnapshot(
       });
 
       const prior = existing.get(projectId, obs.run_id) as
-        | { state: string }
+        | {
+            state: string;
+            terminal: string | null;
+            preset: string | null;
+            plan_path: string | null;
+            prompt_preview: string | null;
+            started_at: string | null;
+            last_event_at: string | null;
+          }
         | undefined;
       if (
         prior &&
@@ -186,21 +197,88 @@ export function ingestSnapshot(
       // and its event ledger advance atomically (plan E12). Workspace
       // resolution prefers `workspace` over `cwd` (manifest runs ship
       // both; worktree runs point workspace at the worktree).
+      // Plan3-U3: projection diffs become monitor_events rows inside
+      // the same transaction (A3 — log and projection never diverge).
+      if (!prior) {
+        appendEvent(
+          db,
+          'run.created',
+          { projectId, runId: obs.run_id },
+          { state: mapped.state, kind: obs.kind },
+        );
+      } else {
+        const changed: Record<string, { from: unknown; to: unknown }> = {};
+        const terminalJson = obs.terminal
+          ? JSON.stringify(obs.terminal)
+          : null;
+        for (const [key, from, to] of [
+          ['state', prior.state, mapped.state],
+          ['terminal', prior.terminal, terminalJson],
+          ['preset', prior.preset, obs.preset ?? null],
+          ['plan_path', prior.plan_path, obs.plan_path ?? null],
+        ] as const) {
+          if (from !== to) changed[key] = { from, to };
+        }
+        if (Object.keys(changed).length > 0) {
+          appendEvent(
+            db,
+            'run.updated',
+            { projectId, runId: obs.run_id },
+            { changed },
+          );
+        }
+      }
+
       const workspace = obs.workspace ?? obs.cwd ?? null;
       if (workspace) {
-        ingestRunEvents(db, projectId, obs.run_id, workspace, obs.events_file, {
-          startedAt: obs.started_at ?? null,
-          terminalAt: obs.terminal?.at ?? null,
-        });
+        const before = (
+          db
+            .prepare(
+              'SELECT MAX(seq) AS m FROM run_events WHERE project_id = ? AND run_id = ?',
+            )
+            .get(projectId, obs.run_id) as { m: number | null }
+        ).m ?? 0;
+        const evStats = ingestRunEvents(
+          db,
+          projectId,
+          obs.run_id,
+          workspace,
+          obs.events_file,
+          {
+            startedAt: obs.started_at ?? null,
+            terminalAt: obs.terminal?.at ?? null,
+          },
+        );
+        if (evStats.inserted > 0) {
+          appendEvent(
+            db,
+            'run.events',
+            { projectId, runId: obs.run_id },
+            {
+              from_seq: before + 1,
+              to_seq: before + evStats.inserted,
+              count: evStats.inserted,
+            },
+          );
+        }
         // Plan3-U2: the activity ledger joins the same transaction —
-        // run row + events + activity land atomically (E7).
-        ingestRunActivity(
+        // run row + events + activity land atomically (E7). New
+        // backend evidence is a health-signal change (Plan3-U3).
+        const actStats = ingestRunActivity(
           db,
           projectId,
           obs.run_id,
           workspace,
           obs.activity_file,
         );
+        if (actStats.inserted > 0) {
+          appendEvent(
+            db,
+            'run.health',
+            { projectId, runId: obs.run_id },
+            { activity_rows: actStats.inserted },
+          );
+        }
       }
       // Plan2-U2 fills the U3 placeholder: evidence time comes from
       // the projected ledger.
@@ -212,6 +290,16 @@ export function ingestSnapshot(
       ).run(projectId, obs.run_id, projectId, obs.run_id);
     }
 
+    // A previously failing collector recovering this round is itself
+    // a project-health transition worth streaming (Plan3-U3).
+    const priorFailures = (
+      db
+        .prepare(
+          'SELECT consecutive_failures FROM source_cursors WHERE project_id = ?',
+        )
+        .get(projectId) as { consecutive_failures: number } | undefined
+    )?.consecutive_failures;
+
     db.prepare(
       `INSERT INTO source_cursors
          (project_id, last_collected_at, last_snapshot_sha256, consecutive_failures)
@@ -221,6 +309,14 @@ export function ingestSnapshot(
          last_snapshot_sha256 = excluded.last_snapshot_sha256,
          consecutive_failures = 0`,
     ).run(projectId, observedAt, rawSha256);
+    if ((priorFailures ?? 0) > 0) {
+      appendEvent(
+        db,
+        'project.health',
+        { projectId },
+        { consecutive_failures: 0, recovered: true },
+      );
+    }
   })();
 }
 
@@ -252,6 +348,12 @@ export function recordCollectionError(
          WHERE project_id = ? ORDER BY id DESC LIMIT ?
        )`,
     ).run(projectId, projectId, KEEP_ERRORS_PER_PROJECT);
+    appendEvent(
+      db,
+      'project.health',
+      { projectId },
+      { error },
+    );
   })();
 }
 

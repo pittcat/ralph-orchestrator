@@ -16,7 +16,7 @@ interface RunRowWithStale extends RunRow {
   stale: boolean;
 }
 
-function toRunJson(
+export function toRunJson(
   machineId: string,
   row: RunRowWithStale,
 ): Record<string, unknown> {
