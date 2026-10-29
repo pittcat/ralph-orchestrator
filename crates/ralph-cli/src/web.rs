@@ -511,8 +511,6 @@ async fn execute_monitor(args: &WebArgs, workspace_root: &Path, port: u16) -> Re
 
 /// Run both backend and frontend dev servers in parallel
 pub async fn execute(args: WebArgs) -> Result<()> {
-    println!("Starting Ralph web servers...");
-
     // Determine workspace root: explicit flag or current directory
     let workspace_root = match args.workspace {
         Some(ref path) => {
@@ -529,6 +527,8 @@ pub async fn execute(args: WebArgs) -> Result<()> {
         return execute_monitor(&args, &workspace_root, args.backend_port.unwrap_or(3200)).await;
     }
     let backend_port = args.backend_port.unwrap_or(3000);
+
+    println!("Starting Ralph web servers...");
 
     // Compute absolute paths for backend and frontend directories
     let backend_dir = workspace_root.join("backend/ralph-web-server");
