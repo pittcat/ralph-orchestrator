@@ -195,26 +195,35 @@ export function RunDetailPage() {
         <ArrowLeft className="h-4 w-4" /> Back to overview
       </Link>
 
-      <DetailHeader run={run} progress={progress.data} />
-      <div className="flex items-center gap-2">
-        <ActionsMenu run={run} />
-        <span className="ml-auto">
-          <DeleteRunButton run={run} onDeleted={() => navigate(backTo)} />
-        </span>
-      </div>
-      {health.data && <HealthPanel health={health.data} />}
+      <section className="space-y-3 rounded-xl border border-border/70 bg-card/50 p-4 shadow-sm sm:p-5">
+        <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+          <DetailHeader run={run} progress={progress.data} />
+          <div className="flex shrink-0 items-center gap-2">
+            <ActionsMenu run={run} />
+            <DeleteRunButton run={run} onDeleted={() => navigate(backTo)} />
+          </div>
+        </div>
+        {health.data && (
+          <div className="border-t border-border/60 pt-3">
+            <HealthPanel health={health.data} />
+          </div>
+        )}
+        {hasDescriptor && (
+          <div className="border-t border-border/60 pt-3">
+            <StageStrip stages={stages} progress={progress.data} />
+          </div>
+        )}
+        {!hasDescriptor && (
+          <p
+            className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
+            data-testid="no-descriptor-banner"
+          >
+            此 run 无 monitor descriptor —— 展示通用视图（无阶段条）。
+          </p>
+        )}
+      </section>
 
-      {!hasDescriptor && (
-        <p
-          className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
-          data-testid="no-descriptor-banner"
-        >
-          此 run 无 monitor descriptor —— 展示通用视图（无阶段条）。
-        </p>
-      )}
-      <StageStrip stages={stages} progress={progress.data} />
-
-      <div role="tablist" aria-label="Run detail tabs" className="flex gap-1 border-b border-border">
+      <div role="tablist" aria-label="Run detail tabs" className="flex gap-0.5 border-b border-border">
         {TABS.filter(
           // 图 tab 仅在 dag 数据存在时出现（无 nodes/scheduler → 隐藏）。
           (t) =>
@@ -228,10 +237,10 @@ export function RunDetailPage() {
             aria-selected={tab === t.id}
             data-testid={`tab-${t.id}`}
             className={cn(
-              "-mb-px border-b-2 px-3 py-1.5 text-sm",
+              "-mb-px rounded-t-md border-b-2 px-3 py-1.5 text-sm transition-colors",
               tab === t.id
-                ? "border-primary text-foreground"
-                : "border-transparent text-muted-foreground hover:text-foreground",
+                ? "border-primary font-medium text-foreground"
+                : "border-transparent text-muted-foreground hover:bg-muted/40 hover:text-foreground",
             )}
             onClick={() => setTab(t.id)}
             onKeyDown={(e) => {

@@ -25,8 +25,10 @@ import type { SessionObservation } from '../notify/sessions.js';
  * - `ingestSnapshot` commits one whole snapshot per project inside a
  *   single transaction: run upserts + cursor advance are atomic —
  *   a partial snapshot is never committed.
- * - Upserts are idempotent and terminal states never regress to
- *   `running` (a `state_conflict` row is recorded instead).
+ * - Upserts are idempotent and evidenced terminal states never
+ *   regress to `running` (a `state_conflict` row is recorded
+ *   instead). `exited_unknown` carries no terminal evidence and may
+ *   recover to `running` on a later live observation.
  * - `stale` is a read-time signal (project cursor has failures or an
  *   old watermark), never persisted.
  */
@@ -143,7 +145,12 @@ export function ingestSnapshot(
     );
     // Dismissed runs (DELETE /runs/:gid) stay suppressed while their
     // on-disk evidence keeps reporting them — no row, no event or
-    // activity ingest, no notifications for this pair.
+    // activity ingest, no notifications for this pair. Exception: an
+    // observation of `running` is only emitted when ralph itself
+    // verified a live pid (`coarse_state`: pid_alive → "running"),
+    // which stale files can never produce — a dismissed run that was
+    // genuinely relaunched (same run_id, e.g. retry/abort+relaunch)
+    // un-dismisses instead of staying invisible forever.
     const dismissed = new Set(
       (
         db
@@ -153,10 +160,26 @@ export function ingestSnapshot(
           .all(projectId) as { run_id: string }[]
       ).map((r) => r.run_id),
     );
+    const undismiss = db.prepare(
+      'DELETE FROM dismissed_runs WHERE project_id = ? AND run_id = ?',
+    );
 
     for (const obs of snapshot.runs) {
-      if (obs.run_id === NON_IDENTITY_RUN_ID || dismissed.has(obs.run_id))
-        continue;
+      if (obs.run_id === NON_IDENTITY_RUN_ID) continue;
+      if (dismissed.has(obs.run_id)) {
+        if (obs.state === 'running') {
+          undismiss.run(projectId, obs.run_id);
+          dismissed.delete(obs.run_id);
+          appendEvent(
+            db,
+            'run.updated',
+            { projectId, runId: obs.run_id },
+            { changed: { dismissed: { from: true, to: false } } },
+          );
+        } else {
+          continue;
+        }
+      }
       const mapped = mapObservationState({
         state: obs.state,
         pid: obs.pid ?? null,
@@ -187,10 +210,22 @@ export function ingestSnapshot(
             last_event_at: string | null;
           }
         | undefined;
+      // Terminal regression guard (S5): only *evidenced* terminal
+      // states refuse a later `running` — a real terminal row carries a
+      // `terminal` record or merged-exit evidence. `exited_unknown` is
+      // the fail-closed "we don't know" bucket (dead pid, missing
+      // manifest, mid-rotation observation): it must recover when a
+      // live observation arrives, e.g. an aborted run relaunched via
+      // `--reuse-worktree`, or the row freezes forever showing a dead
+      // pid while the loop is actually alive.
+      const priorHasTerminalEvidence =
+        prior !== undefined &&
+        (prior.terminal !== null || prior.state === 'exited_merged');
       if (
         prior &&
         prior.state.startsWith('exited_') &&
-        mapped.state === 'running'
+        mapped.state === 'running' &&
+        priorHasTerminalEvidence
       ) {
         conflict.run(
           projectId,

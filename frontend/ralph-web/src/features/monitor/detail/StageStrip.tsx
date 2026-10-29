@@ -5,6 +5,7 @@
  * descriptor (S2 fallback is a banner in the page).
  */
 
+import { Check, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { RunProgress } from "../api";
 
@@ -32,7 +33,7 @@ export function StageStrip({
 
   return (
     <ol
-      className="flex flex-wrap items-center gap-1.5"
+      className="flex flex-wrap items-center gap-x-1 gap-y-1.5"
       data-testid="stage-strip"
       aria-label="Pipeline stages"
     >
@@ -42,20 +43,28 @@ export function StageStrip({
         const done = entered && !isCurrent && currentOrder > i;
         const round = enteredIdx.get(s.id) ?? 0;
         return (
-          <li key={s.id} className="flex items-center gap-1.5">
-            {i > 0 && <span className="text-muted-foreground/50">→</span>}
+          <li key={s.id} className="flex items-center gap-1">
+            {i > 0 && (
+              <ChevronRight
+                className="h-3 w-3 text-muted-foreground/40"
+                aria-hidden
+              />
+            )}
             <span
               data-testid={`stage-node-${s.id}`}
               data-state={isCurrent ? "current" : done || entered ? "done" : "pending"}
               className={cn(
-                "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs",
+                "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition-colors",
                 isCurrent
-                  ? "border-primary bg-primary/10 text-primary"
+                  ? "border-primary/60 bg-primary/10 font-medium text-primary shadow-sm"
                   : done || entered
-                    ? "border-border text-muted-foreground"
-                    : "border-dashed border-border/60 text-muted-foreground/60",
+                    ? "border-emerald-500/30 bg-emerald-500/5 text-muted-foreground"
+                    : "border-dashed border-border/60 text-muted-foreground/50",
               )}
             >
+              {(done || (entered && !isCurrent)) && (
+                <Check className="h-3 w-3 text-emerald-500/80" aria-hidden />
+              )}
               {s.label}
               {round > 1 && (
                 <span

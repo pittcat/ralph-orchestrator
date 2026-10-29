@@ -5,6 +5,7 @@
  * converged suppress the "silent" scare copy (plan D9/S12).
  */
 
+import { formatDistanceToNowStrict } from "date-fns";
 import type { RunHealth } from "../api";
 import { LayerBadge, type LayerTone } from "./LayerBadge";
 
@@ -29,6 +30,13 @@ const BACKEND_TONE: Record<string, LayerTone> = {
   unknown: "muted",
 };
 
+function relTime(iso: string | null): string | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return null;
+  return formatDistanceToNowStrict(t, { addSuffix: true });
+}
+
 export function HealthPanel({ health }: { health: RunHealth }) {
   const { collector, runtime, backend } = health.layers;
   const converged = health.terminal_converged;
@@ -37,6 +45,7 @@ export function HealthPanel({ health }: { health: RunHealth }) {
   // alert — render it exited-equivalent (D9 suppression).
   const runtimeStatus =
     converged && runtime.status === "silent" ? "exited" : runtime.status;
+  const lastValidRel = relTime(health.last_valid_at);
 
   return (
     <div
@@ -83,8 +92,11 @@ export function HealthPanel({ health }: { health: RunHealth }) {
         </span>
       ) : null}
       {health.last_valid_at ? (
-        <span className="text-xs text-muted-foreground">
-          last valid {health.last_valid_at}
+        <span
+          className="text-xs text-muted-foreground"
+          title={health.last_valid_at}
+        >
+          last valid {lastValidRel ?? health.last_valid_at}
         </span>
       ) : null}
     </div>

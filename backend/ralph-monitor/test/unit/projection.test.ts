@@ -90,6 +90,145 @@ test('terminal state never regresses to running → state_conflict row', () => {
   assert.match(errs[0].error, /state_conflict/);
 });
 
+test('exited_unknown recovers to running on later live observation', () => {
+  const d = db();
+  const pid = insertProject(d, '/w/a');
+  // Mid-restart observation: dead pid, no terminal evidence.
+  ingestSnapshot(
+    d,
+    pid,
+    snapshotOf('/w/a', [
+      { run_id: 'loop-x', kind: 'worktree', state: 'unknown', pid: 111 },
+    ]),
+    'sha1',
+    NOW,
+  );
+  assert.equal(getRun(d, pid, 'loop-x')?.state, 'exited_unknown');
+  // Relaunched run observed live — must not be rejected.
+  ingestSnapshot(
+    d,
+    pid,
+    snapshotOf('/w/a', [
+      { run_id: 'loop-x', kind: 'worktree', state: 'running', pid: 222 },
+    ]),
+    'sha2',
+    '2026-10-28T12:01:00Z',
+  );
+  const row = getRun(d, pid, 'loop-x');
+  assert.equal(row?.state, 'running');
+  assert.equal(row?.pid, 222);
+  assert.equal(row?.last_observed_at, '2026-10-28T12:01:00Z');
+  const errs = d
+    .prepare('SELECT error FROM collection_errors WHERE project_id = ?')
+    .all(pid) as { error: string }[];
+  assert.equal(errs.length, 0);
+});
+
+test('exited_merged still refuses regression to running', () => {
+  const d = db();
+  const pid = insertProject(d, '/w/a');
+  ingestSnapshot(
+    d,
+    pid,
+    snapshotOf('/w/a', [
+      {
+        run_id: 'loop-x',
+        kind: 'worktree',
+        state: 'exited',
+        terminal: { reason: 'completed', at: NOW, merge_commit: 'abc' },
+      },
+    ]),
+    'sha1',
+    NOW,
+  );
+  assert.equal(getRun(d, pid, 'loop-x')?.state, 'exited_merged');
+  ingestSnapshot(
+    d,
+    pid,
+    snapshotOf('/w/a', [
+      { run_id: 'loop-x', kind: 'worktree', state: 'running', pid: 7 },
+    ]),
+    'sha2',
+    '2026-10-28T12:01:00Z',
+  );
+  assert.equal(getRun(d, pid, 'loop-x')?.state, 'exited_merged');
+  const errs = d
+    .prepare('SELECT error FROM collection_errors WHERE project_id = ?')
+    .all(pid) as { error: string }[];
+  assert.equal(errs.length, 1);
+  assert.match(errs[0].error, /state_conflict/);
+});
+
+test('dismissed run re-imported when observation reports live running', () => {
+  const d = db();
+  const pid = insertProject(d, '/w/a');
+  d.prepare(
+    'INSERT INTO dismissed_runs (project_id, run_id, dismissed_at) VALUES (?, ?, ?)',
+  ).run(pid, 'loop-x', NOW);
+
+  // Stale evidence keeps the run suppressed.
+  ingestSnapshot(
+    d,
+    pid,
+    snapshotOf('/w/a', [
+      { run_id: 'loop-x', kind: 'worktree', state: 'unknown', pid: 111 },
+    ]),
+    'sha2',
+    '2026-10-28T12:00:30Z',
+  );
+  assert.equal(getRun(d, pid, 'loop-x'), undefined);
+
+  // `running` is only emitted with a verified live pid — the run was
+  // relaunched, so it un-dismisses and lands normally.
+  ingestSnapshot(
+    d,
+    pid,
+    snapshotOf('/w/a', [
+      { run_id: 'loop-x', kind: 'worktree', state: 'running', pid: 222 },
+    ]),
+    'sha3',
+    '2026-10-28T12:01:00Z',
+  );
+  const row = getRun(d, pid, 'loop-x');
+  assert.equal(row?.state, 'running');
+  assert.equal(row?.pid, 222);
+  const stillDismissed = d
+    .prepare(
+      'SELECT run_id FROM dismissed_runs WHERE project_id = ? AND run_id = ?',
+    )
+    .get(pid, 'loop-x');
+  assert.equal(stillDismissed, undefined);
+});
+
+test('dismissed run with exited observation stays suppressed', () => {
+  const d = db();
+  const pid = insertProject(d, '/w/a');
+  d.prepare(
+    'INSERT INTO dismissed_runs (project_id, run_id, dismissed_at) VALUES (?, ?, ?)',
+  ).run(pid, 'loop-x', NOW);
+  ingestSnapshot(
+    d,
+    pid,
+    snapshotOf('/w/a', [
+      {
+        run_id: 'loop-x',
+        kind: 'worktree',
+        state: 'exited',
+        terminal: { reason: 'completed', at: NOW },
+      },
+    ]),
+    'sha1',
+    '2026-10-28T12:00:30Z',
+  );
+  assert.equal(getRun(d, pid, 'loop-x'), undefined);
+  const stillDismissed = d
+    .prepare(
+      'SELECT run_id FROM dismissed_runs WHERE project_id = ? AND run_id = ?',
+    )
+    .get(pid, 'loop-x');
+  assert.ok(stillDismissed);
+});
+
 test('"(primary)" display name is never stored as a run id (E6)', () => {
   const d = db();
   const pid = insertProject(d, '/w/a');

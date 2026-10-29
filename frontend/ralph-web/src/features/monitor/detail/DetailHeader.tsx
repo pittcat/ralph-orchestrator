@@ -17,6 +17,27 @@ function fmtElapsed(ms: number | null | undefined): string {
   return `${h}h ${m % 60}m`;
 }
 
+function Meta({
+  k,
+  v,
+  testid,
+}: {
+  k: string;
+  v: string | null | undefined;
+  testid?: string;
+}) {
+  return (
+    <div className="flex items-baseline gap-1.5">
+      <dt className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70">
+        {k}
+      </dt>
+      <dd className="font-mono text-xs text-foreground" data-testid={testid}>
+        {v ?? "—"}
+      </dd>
+    </div>
+  );
+}
+
 export function DetailHeader({
   run,
   progress,
@@ -25,43 +46,35 @@ export function DetailHeader({
   progress: RunProgress | undefined;
 }) {
   return (
-    <div className="space-y-1" data-testid="detail-header">
-      <div className="flex flex-wrap items-center gap-3">
-        <h2 className="font-mono text-lg" data-testid="run-detail-id">
+    <div className="min-w-0 space-y-2" data-testid="detail-header">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        <h2
+          className="break-all font-mono text-base font-semibold tracking-tight"
+          data-testid="run-detail-id"
+        >
           {run.runId}
         </h2>
         <RunStateBadge state={run.state} stale={run.stale} />
       </div>
-      <dl className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted-foreground">
-        <div className="flex gap-1.5">
-          <dt>project</dt>
-          <dd className="font-mono text-xs text-foreground" data-testid="detail-project">
-            {run.projectId}
-          </dd>
-        </div>
-        <div className="flex gap-1.5">
-          <dt>preset</dt>
-          <dd className="font-mono text-xs text-foreground">{run.preset ?? "—"}</dd>
-        </div>
-        <div className="flex gap-1.5">
-          <dt>elapsed</dt>
-          <dd className="font-mono text-xs text-foreground" data-testid="detail-elapsed">
-            {fmtElapsed(progress?.elapsed_ms)}
-          </dd>
-        </div>
-        <div className="flex gap-1.5">
-          <dt>current_hat</dt>
-          <dd className="font-mono text-xs text-foreground" data-testid="detail-current-hat">
-            {progress?.current_hat ?? "—"}
-          </dd>
-        </div>
+      <dl className="flex flex-wrap gap-x-5 gap-y-1">
+        <Meta k="project" v={run.projectId} testid="detail-project" />
+        <Meta k="preset" v={run.preset} />
+        <Meta
+          k="elapsed"
+          v={fmtElapsed(progress?.elapsed_ms)}
+          testid="detail-elapsed"
+        />
+        <Meta
+          k="current_hat"
+          v={progress?.current_hat}
+          testid="detail-current-hat"
+        />
         {progress?.units.total != null && (
-          <div className="flex gap-1.5">
-            <dt>units</dt>
-            <dd className="font-mono text-xs text-foreground" data-testid="detail-units">
-              {progress.units.done}/{progress.units.total}
-            </dd>
-          </div>
+          <Meta
+            k="units"
+            v={`${progress.units.done}/${progress.units.total}`}
+            testid="detail-units"
+          />
         )}
       </dl>
     </div>

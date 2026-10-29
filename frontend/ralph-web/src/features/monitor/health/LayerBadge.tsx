@@ -4,6 +4,8 @@
  * "no evidence" is not a failure (plan S2 invariants).
  */
 
+import { cn } from "@/lib/utils";
+
 export type LayerTone = "ok" | "warn" | "bad" | "muted";
 
 const TONE_CLASS: Record<LayerTone, string> = {
@@ -11,6 +13,13 @@ const TONE_CLASS: Record<LayerTone, string> = {
   warn: "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300",
   bad: "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300",
   muted: "border-border bg-muted/40 text-muted-foreground",
+};
+
+const DOT_CLASS: Record<LayerTone, string> = {
+  ok: "bg-emerald-500",
+  warn: "bg-amber-500",
+  bad: "bg-red-500",
+  muted: "bg-muted-foreground/50",
 };
 
 export function LayerBadge({
@@ -30,6 +39,7 @@ export function LayerBadge({
       title={title ?? `${layer}: ${status}`}
       className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${TONE_CLASS[tone]}`}
     >
+      <span className={cn("h-1.5 w-1.5 rounded-full", DOT_CLASS[tone])} />
       <span className="opacity-70">{layer}</span>
       <span>{status}</span>
     </span>

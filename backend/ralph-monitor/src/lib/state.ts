@@ -5,8 +5,12 @@
  *
  * `silent` (running but no recent activity) is intentionally not
  * emitted in this unit — liveness needs the activity ledger from
- * Plan 3. `exited_*` rows are terminal: the projection never lets a
- * terminal state regress to `running` (state_conflict is recorded).
+ * Plan 3. `exited_*` rows are terminal, but only evidenced ones
+ * (`exited_success`/`exited_failed` with a terminal record, or
+ * `exited_merged`) are final: the projection records a
+ * `state_conflict` if they regress to `running`. `exited_unknown`
+ * means "no evidence" — a later live observation legitimately
+ * recovers it.
  */
 export const MONITOR_STATES = [
   'running',

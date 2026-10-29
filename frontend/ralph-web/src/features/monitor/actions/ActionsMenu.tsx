@@ -30,7 +30,7 @@ export function ActionsMenu({ run }: { run: MonitorRun }) {
           aria-describedby={a.available ? undefined : `action-reason-${a.id}`}
           onClick={() => setActive(a)}
           data-testid={`action-${a.id}`}
-          className="rounded border border-border px-2.5 py-1 text-xs font-medium hover:bg-accent disabled:cursor-not-allowed disabled:opacity-45"
+          className="rounded-md border border-border bg-background/60 px-2.5 py-1 text-xs font-medium transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-45"
         >
           {KIND_LABEL[a.id] ?? a.id}
         </button>
