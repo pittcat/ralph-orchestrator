@@ -13,7 +13,7 @@ import {
 
 const T = '2026-10-28T12:00:00Z';
 
-async function seedOne(app: ReturnType<typeof makeApp>['app'], db: ReturnType<typeof makeApp>['db']) {
+async function seedOne(db: ReturnType<typeof makeApp>['db']) {
   const dir = makeProjectDir();
   insertProject(db, dir);
   writeMonitorFixture(dir, {
@@ -33,7 +33,7 @@ async function seedOne(app: ReturnType<typeof makeApp>['app'], db: ReturnType<ty
 
 test('notifications API: list/read/read-all/mute + pending endpoint', async () => {
   const { app, db } = makeApp();
-  await seedOne(app, db);
+  await seedOne(db);
   const session = await getSession(app);
 
   const list = await app.inject({
@@ -106,7 +106,7 @@ test('notifications API: list/read/read-all/mute + pending endpoint', async () =
 
 test('notification kinds filter + pagination params validate', async () => {
   const { app, db } = makeApp();
-  await seedOne(app, db);
+  await seedOne(db);
   const bad = await app.inject({
     method: 'GET',
     url: '/api/monitor/v1/notifications?state=bogus',

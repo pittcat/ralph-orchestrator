@@ -29,7 +29,7 @@ export function registerSnapshotRoutes(
     const projects = (
       db
         .prepare(
-          'SELECT id, canonical_path, display_name, created_at FROM projects ORDER BY id',
+          'SELECT id, canonical_path, display_name, created_at, runtime_webhook_hint FROM projects ORDER BY id',
         )
         .all() as {
         id: string;
