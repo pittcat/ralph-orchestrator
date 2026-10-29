@@ -268,3 +268,87 @@ export function useRunEvents(
     loadEarlier: earlier,
   };
 }
+
+// ── Plan5-U3: operations + presets hooks ──
+
+import {
+  apiCreateOperation,
+  apiGetOperation,
+  apiGetOperations,
+  apiGetPresets,
+  apiRecheckOperation,
+  type CreateOperationInput,
+} from "./api";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+
+/** Preset catalog for one project (builtin + .ralph/hats custom). */
+export function usePresets(projectId: string | undefined) {
+  return useQuery({
+    queryKey: ["monitor", "presets", projectId],
+    queryFn: () => apiGetPresets(projectId!),
+    enabled: !!projectId,
+    staleTime: 30_000,
+  });
+}
+
+/** Operation audit rows — 3s poll while any op is non-terminal. */
+export function useOperations(query: {
+  project_id?: string;
+  run_gid?: string;
+  state?: string;
+} = {}) {
+  return useQuery({
+    queryKey: ["monitor", "operations", query],
+    queryFn: () => apiGetOperations(query),
+    refetchInterval: (q) => {
+      const ops = q.state.data ?? [];
+      return ops.some((o) =>
+        ["recorded", "dispatching", "dispatched"].includes(o.state),
+      )
+        ? 2_000
+        : 10_000;
+    },
+  });
+}
+
+/** Single operation — polls while non-terminal (launch confirm watch). */
+export function useOperation(id: string | undefined) {
+  return useQuery({
+    queryKey: ["monitor", "operation", id],
+    queryFn: () => apiGetOperation(id!),
+    enabled: !!id,
+    refetchInterval: (q) =>
+      q.state.data &&
+      ["recorded", "dispatching", "dispatched"].includes(q.state.data.state)
+        ? 1_500
+        : false,
+  });
+}
+
+/**
+ * Create an operation. The caller owns `idempotency_key` — generated
+ * once per dialog-open so a retried submit replays instead of
+ * duplicating (S3/D6).
+ */
+export function useCreateOperation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: CreateOperationInput) => apiCreateOperation(input),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["monitor", "operations"] });
+      void qc.invalidateQueries({ queryKey: ["monitor", "runs"] });
+    },
+  });
+}
+
+/** Manual confirm re-drive for `confirm_timeout` launch ops. */
+export function useRecheckOperation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiRecheckOperation(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["monitor", "operations"] });
+      void qc.invalidateQueries({ queryKey: ["monitor", "operation"] });
+    },
+  });
+}

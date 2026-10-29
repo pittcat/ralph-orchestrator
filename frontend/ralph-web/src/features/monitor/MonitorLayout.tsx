@@ -5,7 +5,7 @@
  */
 
 import type { ReactNode } from "react";
-import { Moon, Sun, Inbox } from "lucide-react";
+import { Moon, Sun, Inbox, Activity } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useThemeStore } from "./theme";
 import { CommandPalette } from "./CommandPalette";
@@ -74,6 +74,14 @@ export function MonitorLayout({ children }: { children: ReactNode }) {
       <header className="flex items-center gap-3 border-b border-border pb-3">
         <h1 className="text-xl font-semibold tracking-tight">Monitor</h1>
         <div className="ml-auto flex items-center gap-2">
+          <Link
+            to="/monitor/operations"
+            data-testid="operations-link"
+            className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+          >
+            <Activity className="h-3.5 w-3.5" />
+            操作
+          </Link>
           <InboxLink />
           <ConnectionBadge />
           <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">

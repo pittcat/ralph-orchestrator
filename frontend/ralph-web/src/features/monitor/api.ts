@@ -100,6 +100,17 @@ export const MONITOR_RUN_STATES = [
 ] as const;
 export type MonitorRunState = (typeof MONITOR_RUN_STATES)[number];
 
+export const actionDeclSchema = z.object({
+  id: z.string(),
+  available: z.boolean(),
+  reason: z.string().optional(),
+  revision: z.string(),
+  input_schema: z
+    .object({ topics: z.array(z.string()).optional() })
+    .nullish(),
+});
+export type ActionDecl = z.infer<typeof actionDeclSchema>;
+
 export const runSchema = z.object({
   globalRunId: z.string(),
   projectId: z.string(),
@@ -126,6 +137,7 @@ export const runSchema = z.object({
   lastObservedAt: z.string(),
   manifestPath: z.string().nullable(),
   stale: z.boolean(),
+  actions: z.array(actionDeclSchema).default([]),
 });
 export type MonitorRun = z.infer<typeof runSchema>;
 
@@ -591,4 +603,111 @@ export function apiRegisterProject(path: string, displayName?: string): Promise<
     method: "POST",
     body: JSON.stringify({ path, ...(displayName ? { displayName } : {}) }),
   }).then((r) => r.project);
+}
+
+// ── Plan5-U2/U3 operations + presets contract ──
+
+export const OP_STATES = [
+  "recorded",
+  "dispatching",
+  "dispatched",
+  "confirmed",
+  "failed",
+  "confirm_timeout",
+] as const;
+export type OperationState = (typeof OP_STATES)[number];
+
+export const operationSchema = z.object({
+  id: z.string(),
+  idempotencyKey: z.string(),
+  kind: z.enum(["launch", "stop", "retry", "merge", "emit"]),
+  projectId: z.string(),
+  runGid: z.string().nullable(),
+  clientRequestId: z.string().nullable(),
+  params: z.record(z.string(), z.unknown()),
+  expectedRevision: z.string().nullable(),
+  state: z.enum(OP_STATES),
+  receipt: z.record(z.string(), z.unknown()).nullable(),
+  actor: z.string().nullable(),
+  origin: z.string().nullable(),
+  error: z.string().nullable(),
+  createdAt: z.string(),
+  dispatchedAt: z.string().nullable(),
+  confirmedAt: z.string().nullable(),
+});
+export type MonitorOperation = z.infer<typeof operationSchema>;
+
+export const operationsResponseSchema = z.object({
+  operations: z.array(operationSchema),
+});
+
+export interface CreateOperationInput {
+  kind: "launch" | "stop" | "retry" | "merge" | "emit";
+  project_id: string;
+  run_gid?: string;
+  params?: Record<string, unknown>;
+  idempotency_key: string;
+  expected_revision?: string;
+}
+
+export function apiCreateOperation(
+  input: CreateOperationInput,
+): Promise<MonitorOperation> {
+  return request("/operations", z.object({ operation: operationSchema }), {
+    method: "POST",
+    body: JSON.stringify(input),
+  }).then((r) => r.operation);
+}
+
+export function apiGetOperations(query: {
+  project_id?: string;
+  run_gid?: string;
+  state?: string;
+} = {}): Promise<MonitorOperation[]> {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(query)) {
+    if (v !== undefined && v !== "") params.set(k, v);
+  }
+  const s = params.toString();
+  return request(
+    `/operations${s ? `?${s}` : ""}`,
+    operationsResponseSchema,
+  ).then((r) => r.operations);
+}
+
+export function apiGetOperation(id: string): Promise<MonitorOperation> {
+  return request(
+    `/operations/${encodeURIComponent(id)}`,
+    z.object({ operation: operationSchema }),
+  ).then((r) => r.operation);
+}
+
+export function apiRecheckOperation(id: string): Promise<MonitorOperation> {
+  return request(
+    `/operations/${encodeURIComponent(id)}/recheck`,
+    z.object({ operation: operationSchema }),
+    { method: "POST" },
+  ).then((r) => r.operation);
+}
+
+export const presetEntrySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  source: z.enum(["builtin", "custom"]),
+  description: z.string().optional(),
+});
+export type PresetEntry = z.infer<typeof presetEntrySchema>;
+
+export const presetCatalogSchema = z.object({
+  presets: z.array(presetEntrySchema),
+  fetched_at: z.string(),
+  builtin_error: z.string().nullable(),
+});
+export type PresetCatalog = z.infer<typeof presetCatalogSchema>;
+
+export function apiGetPresets(projectId: string): Promise<PresetCatalog> {
+  return request(
+    `/projects/${encodeURIComponent(projectId)}/presets`,
+    presetCatalogSchema,
+  );
 }

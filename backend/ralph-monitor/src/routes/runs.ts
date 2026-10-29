@@ -40,6 +40,9 @@ export function toRunJson(
     lastObservedAt: row.last_observed_at,
     manifestPath: row.manifest_path,
     stale: row.stale,
+    /// Plan5-U2 capability declarations — the actions menu renders
+    /// verbatim from this list.
+    actions: row.actions ? JSON.parse(row.actions) : [],
   };
 }
 

@@ -5,9 +5,9 @@
  * restore the view exactly (R4).
  */
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowDown, ArrowUp, FolderPlus } from "lucide-react";
+import { ArrowDown, ArrowUp, FolderPlus, Play } from "lucide-react";
 import {
   Table,
   TableBody,
@@ -30,6 +30,7 @@ import { FilterBar } from "./components/FilterBar";
 import { Pagination } from "./components/Pagination";
 import { RunStateBadge } from "./components/RunStateBadge";
 import { StaleBanner } from "./components/StaleBanner";
+import { LaunchDialog } from "./launch/LaunchDialog";
 
 function fmt(ts: string | null): string {
   if (!ts) return "—";
@@ -41,6 +42,7 @@ export function OverviewPage() {
   const [params, setParams] = useSearchParams();
   const filters = decodeFilters(params);
   const navigate = useNavigate();
+  const [launchOpen, setLaunchOpen] = useState(false);
 
   const projects = useMonitorProjects();
   const runs = useMonitorRuns(toRunsQuery(filters));
@@ -95,6 +97,18 @@ export function OverviewPage() {
   return (
     <div className="space-y-3">
       <StaleBanner projectNames={staleProjects.map((p) => p.displayName)} />
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={() => setLaunchOpen(true)}
+          data-testid="launch-button"
+          className="inline-flex items-center gap-1.5 rounded bg-primary px-3 py-1.5 text-sm text-primary-foreground hover:opacity-90"
+        >
+          <Play className="h-3.5 w-3.5" />
+          启动运行
+        </button>
+      </div>
+      <LaunchDialog open={launchOpen} onOpenChange={setLaunchOpen} />
       <FilterBar
         filters={filters}
         projects={projects.data ?? []}

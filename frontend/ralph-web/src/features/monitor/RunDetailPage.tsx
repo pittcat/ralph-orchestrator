@@ -25,14 +25,17 @@ import { TimelineTab } from "./detail/TimelineTab";
 import { LogsTab } from "./detail/LogsTab";
 import { GraphTab } from "./detail/GraphTab";
 import { ArtifactsTab } from "./detail/ArtifactsTab";
+import { ActionsMenu } from "./actions/ActionsMenu";
+import { OperationsSection } from "./ops/OperationsSection";
 
-type TabId = "overview" | "timeline" | "logs" | "graph" | "artifacts";
+type TabId = "overview" | "timeline" | "logs" | "graph" | "artifacts" | "operations";
 const TABS: { id: TabId; label: string }[] = [
   { id: "overview", label: "概览" },
   { id: "timeline", label: "事件时间线" },
   { id: "logs", label: "日志" },
   { id: "graph", label: "图" },
   { id: "artifacts", label: "产物" },
+  { id: "operations", label: "操作" },
 ];
 
 /// Overview filter keys that ride in on the inbound URL — everything
@@ -185,6 +188,7 @@ export function RunDetailPage() {
       </Link>
 
       <DetailHeader run={run} progress={progress.data} />
+      <ActionsMenu run={run} />
       {health.data && <HealthPanel health={health.data} />}
 
       {!hasDescriptor && (
@@ -267,6 +271,9 @@ export function RunDetailPage() {
             selectedId={artifactParam}
             onSelect={selectArtifact}
           />
+        )}
+        {tab === "operations" && (
+          <OperationsSection runGid={run.globalRunId} />
         )}
       </div>
     </div>

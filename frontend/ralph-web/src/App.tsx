@@ -12,6 +12,7 @@ import { MonitorLayout } from "./features/monitor/MonitorLayout";
 import { OverviewPage } from "./features/monitor/OverviewPage";
 import { RunDetailPage } from "./features/monitor/RunDetailPage";
 import { InboxPage } from "./features/monitor/inbox/InboxPage";
+import { OperationsPage } from "./features/monitor/ops/OperationsPage";
 import { useThemeEffect } from "./features/monitor/theme";
 import { ConnectionProvider } from "./features/monitor/connection/ConnectionProvider";
 import type { ReactNode } from "react";
@@ -50,6 +51,14 @@ export function App() {
           element={
             <Monitor>
               <InboxPage />
+            </Monitor>
+          }
+        />
+        <Route
+          path="/monitor/operations"
+          element={
+            <Monitor>
+              <OperationsPage />
             </Monitor>
           }
         />
