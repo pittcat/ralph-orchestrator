@@ -362,3 +362,34 @@ dag:
     assert_eq!(run["preset_descriptor"]["stages"][0]["id"], "only");
     assert_eq!(run["preset_descriptor_from"], "workspace");
 }
+
+#[test]
+fn test_inspect_run_no_dag_db_omits_scheduler_block() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_manifest(temp_path, "primary-wave", Some("autoresearch"));
+
+    let json = inspect_run_json(temp_path);
+    let run = &json["runs"][0];
+    assert!(
+        run.get("scheduler").is_none(),
+        "wave runs must not emit a scheduler key, got {run}"
+    );
+}
+
+#[test]
+fn test_inspect_run_dag_db_present_emits_scheduler_mode_marker() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_manifest(temp_path, "primary-dag", Some("parallel-forge"));
+    // dag.db presence alone is the non-wave signal; an unreadable /
+    // schema-less store still surfaces the mode marker (fail-soft
+    // passthrough — never aborts the read-only inspect).
+    let ralph_dir = temp_path.join(".ralph");
+    fs::create_dir_all(&ralph_dir).expect("create .ralph");
+    fs::write(ralph_dir.join("dag.db"), b"not-a-database").expect("dag.db");
+
+    let json = inspect_run_json(temp_path);
+    let run = &json["runs"][0];
+    assert_eq!(run["scheduler"]["scheduler_mode"], "dag");
+}

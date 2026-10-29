@@ -125,6 +125,13 @@ pub struct RunObservation {
     /// outcomes — the field that explains *why* no descriptor shipped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preset_descriptor_diagnostic: Option<String>,
+    /// Sanitized DAG scheduler summary passthrough — emitted only
+    /// when the run's workspace carries a durable `.ralph/dag.db`
+    /// (i.e. the run observed `scheduler_mode: dag`). Same shape as
+    /// `inspect loop`'s `scheduler` block so monitor consumers share
+    /// one schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduler: Option<ralph_core::supervisor::SchedulerInspectSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -277,6 +284,40 @@ fn manifest_display_path(workspace: &Path, path: &Path) -> String {
         .to_string()
 }
 
+/// Passthrough for `inspect loop`'s `scheduler` block, scoped to a
+/// run's workspace. Emitted only when `.ralph/dag.db` exists — the
+/// durable store is written exclusively by `scheduler_mode: dag`, so
+/// presence alone is the non-wave signal (no config load needed).
+/// Best-effort: unreadable stores degrade to an absent key, matching
+/// the read-only/no-abort contract of the rest of this command.
+fn scheduler_passthrough(
+    run_workspace: &Path,
+) -> Option<ralph_core::supervisor::SchedulerInspectSummary> {
+    let db_path = crate::loop_runner::dag_scheduler::integration::dag_store_path(run_workspace);
+    if !db_path.exists() {
+        return None;
+    }
+    #[cfg(feature = "supervisor-db")]
+    {
+        use ralph_core::supervisor::dag_plan_receipt::DagPlanReceiptStore as _;
+        if let Ok(store) =
+            ralph_core::supervisor::dag_store_rusqlite::RusqliteDagPlanReceiptStore::open(&db_path)
+            && let Ok(receipts) = store.list_receipts()
+        {
+            return Some(
+                ralph_core::supervisor::SchedulerInspectSummary::from_receipt_rows(
+                    &receipts, "dag",
+                ),
+            );
+        }
+    }
+    // Store present but unreadable (or supervisor-db off): still
+    // surface the mode marker so consumers know DAG was configured.
+    Some(ralph_core::supervisor::SchedulerInspectSummary::for_mode(
+        "dag",
+    ))
+}
+
 fn observation_from_manifest(
     m: &RunManifest,
     manifest_path: &Path,
@@ -301,6 +342,7 @@ fn observation_from_manifest(
         preset_descriptor: descriptor::resolution_json(&resolution),
         preset_descriptor_from: resolution.resolved_from.to_string(),
         preset_descriptor_diagnostic: resolution.diagnostic.clone(),
+        scheduler: scheduler_passthrough(&m.workspace),
         plan_path: m.plan_path.clone(),
         started_at: Some(m.started_at),
         events_file: m.events_file.clone(),
@@ -349,6 +391,7 @@ fn observation_from_registry(
         preset_descriptor: None,
         preset_descriptor_from: "none".to_string(),
         preset_descriptor_diagnostic: None,
+        scheduler: None,
         plan_path: None,
         started_at: Some(entry.started),
         events_file,
@@ -401,6 +444,7 @@ fn aggregate_runs(ev: &GatheredEvidence, workspace: &Path) -> Vec<RunObservation
                         preset_descriptor: None,
                         preset_descriptor_from: "none".to_string(),
                         preset_descriptor_diagnostic: None,
+                        scheduler: None,
                         plan_path: None,
                         started_at: None,
                         events_file: None,
@@ -467,6 +511,7 @@ fn aggregate_runs(ev: &GatheredEvidence, workspace: &Path) -> Vec<RunObservation
                 preset_descriptor: None,
                 preset_descriptor_from: "none".to_string(),
                 preset_descriptor_diagnostic: None,
+                scheduler: None,
                 plan_path: None,
                 started_at: started,
                 events_file: ev.current_events.as_ref().map(PathBuf::from),

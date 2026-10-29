@@ -6,6 +6,7 @@ import {
   mapObservationState,
   type MonitorState,
 } from '../lib/state.js';
+import { ingestRunEvents } from '../events/ingest.js';
 
 /**
  * Runs projection layer (plan U3 §5/§15).
@@ -44,6 +45,10 @@ export interface RunRow {
   last_observed_at: string;
   manifest_path: string | null;
   snapshot_sha256: string | null;
+  preset_descriptor: string | null;
+  scheduler: string | null;
+  workspace?: string | null;
+  events_file?: string | null;
 }
 
 export interface CursorRow {
@@ -78,8 +83,9 @@ export function ingestSnapshot(
          project_id, run_id, kind, state, state_evidence, cwd,
          repo_root, worktree_path, prompt_preview, prompt_sha256,
          preset, plan_path, started_at, terminal, last_event_at,
-         last_observed_at, manifest_path, snapshot_sha256
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         last_observed_at, manifest_path, snapshot_sha256,
+         preset_descriptor, scheduler
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(project_id, run_id) DO UPDATE SET
          kind = excluded.kind,
          state = excluded.state,
@@ -96,7 +102,9 @@ export function ingestSnapshot(
          last_event_at = excluded.last_event_at,
          last_observed_at = excluded.last_observed_at,
          manifest_path = excluded.manifest_path,
-         snapshot_sha256 = excluded.snapshot_sha256`,
+         snapshot_sha256 = excluded.snapshot_sha256,
+         preset_descriptor = excluded.preset_descriptor,
+         scheduler = excluded.scheduler`,
     );
     const conflict = db.prepare(
       'INSERT INTO collection_errors (project_id, at, error) VALUES (?, ?, ?)',
@@ -161,7 +169,29 @@ export function ingestSnapshot(
         observedAt,
         obs.manifest ?? null,
         rawSha256,
+        obs.preset_descriptor ? JSON.stringify(obs.preset_descriptor) : null,
+        obs.scheduler ? JSON.stringify(obs.scheduler) : null,
       );
+
+      // Plan2-U2: events ingest in the same transaction — a run row
+      // and its event ledger advance atomically (plan E12). Workspace
+      // resolution prefers `workspace` over `cwd` (manifest runs ship
+      // both; worktree runs point workspace at the worktree).
+      const workspace = obs.workspace ?? obs.cwd ?? null;
+      if (workspace) {
+        ingestRunEvents(db, projectId, obs.run_id, workspace, obs.events_file, {
+          startedAt: obs.started_at ?? null,
+          terminalAt: obs.terminal?.at ?? null,
+        });
+      }
+      // Plan2-U2 fills the U3 placeholder: evidence time comes from
+      // the projected ledger.
+      db.prepare(
+        `UPDATE runs SET last_event_at =
+           (SELECT MAX(ts) FROM run_events
+            WHERE project_id = ? AND run_id = ?)
+         WHERE project_id = ? AND run_id = ?`,
+      ).run(projectId, obs.run_id, projectId, obs.run_id);
     }
 
     db.prepare(

@@ -32,6 +32,12 @@ const runObservationSchema = z.object({
   plan_path: z.string().optional(),
   started_at: z.string().optional(),
   events_file: z.string().optional(),
+  /// monitor-descriptor/v1 passthrough emitted by Plan2-U1 — loose
+  /// object (shape validated upstream); absent for preset-less runs.
+  preset_descriptor: z.record(z.string(), z.unknown()).nullish(),
+  /// `inspect loop`-shape scheduler summary, present only for
+  /// `scheduler_mode: dag` runs (dag.db passthrough).
+  scheduler: z.record(z.string(), z.unknown()).nullish(),
   terminal: terminalSchema.nullish(),
   manifest: z.string().optional(),
   evidence: evidenceSchema.default({

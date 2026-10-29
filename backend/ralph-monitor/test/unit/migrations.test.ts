@@ -12,7 +12,7 @@ test('migrations are idempotent on an in-memory db', () => {
     .all() as { version: string }[];
   assert.deepEqual(
     versions.map((v) => v.version),
-    ['0001_init', '0002_runs'],
+    ['0001_init', '0002_runs', '0003_events'],
   );
   db.close();
 });
