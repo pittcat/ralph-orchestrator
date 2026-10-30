@@ -213,6 +213,14 @@ ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format js
    - In `instructions:`, cite `ralph-tools-emit` Policy-Check feedback instead of copying field tables. The prompt builder supplies the per-topic schema-aware publish section.
    - **Artifact-First handoff closure (单 hat 视角)**：每条 hat 的 instructions 必须明确产出顺序——「实际执行的 hat 或其 sub-agent 先写 artifact → hat 验收文件 → `ralph emit --policy-check` → 真实 emit」。消费型 hat 的 instructions 必须明确「从路径读完整内容后再决策」。
    - **Trigger Context 收敛**：trigger-consuming hats 的分支判定（accept / fix-now / blocked、residual 处理边界）若用 payload if/else 表达，必须先收敛到 `event_policy.schemas.<topic>.trigger_context.routing_hints`，再用 `summary_fields` 暴露关键计数；`instructions` 只引用 `## TRIGGER CONTEXT` 区块，不复制 hint 条件值。详情见 `references/author-checklist.md`「Trigger Context 审核项」。
+   - **Skill dependency contract 声明（强制，2026-10-30 spec）**：完成全部 hat `instructions:` 后，为每条 `ralph tools skill load <name>` 引用（`instructions:` / `extra_instructions:` / `core.guardrails`）在 preset 顶层 `skills.contract:` 声明一条依赖。字段：`skill`（registry 名）、`hats`（消费 hat 列表或 `*`）、`purpose`（用途一句话）、`required`（必需/可选）、`load`（`on_demand` / `auto_inject`——与 `inspect prompt` 证据一致）、`source`（`builtin` / `project` / `any`）、`when`（加载时机自由文本）、`install_hint`（安装/修复指引）、`requires`（`tools`/`env`/`files` 外部条件）、`unattended`（无人值守适配）。规则：
+     1. `required: false` 必须配 `missing_behavior:` 写明降级行为；required dep 不得静默降级。
+     2. 文件系统 skill 必须写 `unattended:` 块；`status: approved` 必须配 `content_hash: sha256:<hex>`（取 `ralph tools skill check` 输出的当前 hash），内容改动后 hash 失效需重审。内嵌 builtin skill 免此块。
+     3. skill 要求人工确认/交互登录/等待用户输入时，`status: interactive` 是阻塞态——必须先适配 skill（记 `adapted_from`/`notes`）、补 `requires` 输入，或改 preset；不得让 runtime 静默跳过人工确认。
+     4. 依赖的合同文件较多时可外置 `skills.contract_file:`（相对 preset 目录或 workspace root 解析，YAML/JSON 均可）；inline 与外置合并去重后仍是同一份 SSoT。
+     5. preset 随包分发项目 skill 时可声明 `skills.dirs:`——preset 里的相对路径相对 **preset 自身目录** 解析（vendored skill 目录随 preset 走，与 `contract_file` 同一套「声明侧锚定」语义）；operator 配置里的 `skills.dirs` 仍相对 workspace root 解析。
+     6. `materialize-artifacts` / `presets/templates/*` 模板文件若含 `ralph tools skill load <name>`（如 `ralph-html` / `ralph-html-design`），同样必须在 contract 声明——静态 lint 只扫 `instructions:`/`extra_instructions:`/`guardrails`，模板引用靠 author 自查与 review 审计兜底。
+     7. 验证：起草完成后跑 `ralph tools skill check -H <preset>`；`preset.skill_contract_undeclared_reference` / `preset.skill_required_missing` 等 `lint.preset.skill_*` finding 归零才算声明完整。
 
 3. **模板文件机制询问（软性推荐，不强制）**：
    - **触发条件**：当某 hat 的 `instructions:` 需要承载大段固定格式文档（报告模板、计划模板、验收清单、SOP 步骤、审计表等），或单 hat `instructions:` 长度预计超过 ~80 行时，author 应通过交互菜单询问用户是否采用模板文件机制。
@@ -243,6 +251,7 @@ ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format js
    - Multi-trigger hats split Payload Contract by trigger, not collapsed into one row.
    - Required handoff / identity / decision fields have `field_docs` metadata or a documented reason why existing injected docs already explain the field.
    - Emitter instructions reference `ralph-tools-emit` Policy-Check feedback when they mention payload construction, `ralph emit`, `ralph wave emit`, required fields, or field shape.
+   - **Skill contract 覆盖完整**：每条 `skill load <name>` 引用都有 `skills.contract` 条目覆盖（运行 `ralph tools skill check -H <preset>` 确认 `preset.skill_contract_undeclared_reference` 为零）；required dep 全部 `ok`；optional dep 均带 `missing_behavior`；文件系统 dep 均带 `unattended` + `content_hash`。
    - **Instructions ↔ schema required-fields SSOT 对账已完成**：每个 emitter 示例字段集合等于对应 schema 的 `required_fields`，并且每个字段都有可验证值源；在 `preset-author-notes.html` 记录 schema 行与 instructions 行证据。
    - Ask: "If I only received this hat's instructions + injection, can I complete Q1? Can I construct every Q4 field from visible sources?"
    - **Single-chain-first 5 问全 ✓**: 填 `references/author-checklist.md` 的「Hard questions — single-chain-first」段；任一 ✗ 必须改写或显式 justify。
@@ -285,6 +294,7 @@ ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format js
 - **Key-stage event gate 不替 runtime 决策**：author 不得借 0e 段落新增 runtime 配置、计数器、恢复路径或绕过 guard 的替代行为；任何 retry / correction / blocked 描述只引用现有 `ralph-tools-emit.md` / `ralph-tools-recovery-directives.md` 等已注入 skill；不得写新 runtime 规则。
 - **Key-stage event gate `neither` 不削弱既有 AAF / Payload Contract / mechanical lint**：选择 `neither` 只表示该位置不新增本次 guard；既有的 AAF 五问、Payload Contract 落盘判断、mechanical lint 仍然对该位置生效；亦不豁免 0d Gate Scope 的 metric 评估。
 - **Do not duplicate** `ralph-tools*.md` content into instructions.
+- **Skill contract is the only dependency list**: every `ralph tools skill load <name>` an instruction or guardrail references must be declared in `skills.contract` — the startup gate blocks undeclared references in contract-bearing presets (`lint.preset.skill_contract_undeclared_reference`). Never maintain a second dependency list in comments, notes, or prose.
 
 ## Output Expectations
 

@@ -57,6 +57,16 @@ pub mod precheck_gate_hat;
 // invariant that the runtime relies on for silent-success detection.
 pub mod review_synthesizer_block_guard;
 pub mod schema_parity;
+// 2026-10-30 preset skill contract spec: `skills.contract` is the
+// single source of truth for hat→skill dependencies. The evaluator
+// verifies declaration shape, real-environment resolution (the
+// effective registry incl. overrides), hat/backend visibility,
+// load-timing wiring, external requires (tools/env/files), and
+// unattended fit (content scan + content-hash pinning); it also
+// audits every `skill load <name>` instruction reference against the
+// declared contract. Wired into `run_preset_lint` below so preset
+// check / preflight / the `ralph run` startup gate share one verdict.
+pub mod skill_contract;
 // 2026-07-03-001 plan U9: supervisor preset lint rule family.
 // Three rules (R-SW-1, R-SW-2, R-COORD-4) over the raw preset
 // YAML. Pure-YAML entry point so the lint is stable across
@@ -128,6 +138,10 @@ pub use multi_hat::check_multi_hat_isolation;
 // scenarios can call it without reaching into the submodule.
 pub use review_synthesizer_block_guard::{
     FINDING_REVIEW_SYNTHESIZER_BLOCK_GUARD, check_review_synthesizer_block_guard,
+};
+pub use skill_contract::{
+    SkillContractOutcome, SkillDepStatus, check_skill_contract, evaluate_skill_contract,
+    skill_content_hash,
 };
 // 2026-07-04-004 plan U4: review-complete misrouting drift lint
 // exported alongside U3 so callers have a single import surface.
@@ -774,6 +788,19 @@ pub fn run_preset_lint_with_preset_name(
     findings.extend(lint_findings_to_contract_findings(
         &check_precheck_rule_without_synthesized_gate_hat(config, strictness),
     ));
+
+    // 2026-10-30 preset skill contract: verify every declared
+    // hat→skill dependency against the real environment (effective
+    // registry, hat/backend visibility, load timing, requires
+    // tools/env/files, unattended fit incl. content-hash pinning)
+    // and audit instruction `skill load` references against the
+    // declaration. Required-dep failures are `Error` — the
+    // `enforce_preset_lint_gate` startup gate therefore blocks
+    // `ralph run` before any backend spawns; `ralph preset check`
+    // and `ralph preflight` surface the same verdicts.
+    findings.extend(lint_findings_to_contract_findings(&check_skill_contract(
+        config, strictness,
+    )));
 
     // Sort by id, then topic for deterministic output.
     findings.sort_by(|a, b| {

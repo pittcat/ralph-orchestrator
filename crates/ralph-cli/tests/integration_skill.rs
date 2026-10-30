@@ -582,3 +582,184 @@ fn test_skill_load_ralph_html_visibility_via_overrides() {
         output.status
     );
 }
+
+// ── `ralph tools skill check` (2026-10-30 preset skill contract) ────
+
+/// Write a hat-collection preset file usable via `-H` or
+/// `RALPH_HATS_SOURCE`. Returns the preset file path.
+fn write_preset(root: &Path, subdir: &str, body: &str) -> std::path::PathBuf {
+    let dir = root.join(subdir);
+    fs::create_dir_all(&dir).expect("create preset dir");
+    let path = dir.join("preset.yml");
+    fs::write(&path, body).expect("write preset");
+    path
+}
+
+#[test]
+fn test_skill_check_missing_required_dep_exits_2() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    let preset = write_preset(
+        temp_path,
+        "hats",
+        "skills:\n  contract:\n    - skill: definitely-missing-skill\n      hats: [worker]\n      purpose: test dep\n      required: true\n      load: on_demand\nhats:\n  worker:\n    name: Worker\n    instructions: work\n",
+    );
+
+    let output = ralph_skill(temp_path, &["check", "-H", preset.to_str().unwrap()]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "required dep missing must exit 2; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("preset.skill_required_missing"),
+        "finding id must appear in the report: {stdout}"
+    );
+}
+
+#[test]
+fn test_skill_check_no_contract_reports_nothing() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+
+    let stdout = ralph_skill_ok(temp_path, &["check"]);
+    assert!(
+        stdout.contains("nothing to verify") || stdout.contains("No skills.contract"),
+        "expected the nothing-declared report: {stdout}"
+    );
+}
+
+#[test]
+fn test_skill_check_json_format_is_parseable() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    let preset = write_preset(
+        temp_path,
+        "hats",
+        "skills:\n  contract:\n    - skill: ralph-tools-emit\n      hats: [worker]\n      purpose: emit precheck\n      required: true\n      load: on_demand\n      source: builtin\nhats:\n  worker:\n    name: Worker\n    instructions: work\n",
+    );
+
+    let output = ralph_skill(
+        temp_path,
+        &["check", "--format", "json", "-H", preset.to_str().unwrap()],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "check failed status={:?}; stdout: {stdout} stderr: {stderr}",
+        output.status.code()
+    );
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("invalid JSON ({e}); stdout: {stdout} stderr: {stderr}"));
+    assert_eq!(report["error_count"].as_u64(), Some(0));
+    let deps = report["deps"].as_array().expect("deps array");
+    assert_eq!(deps.len(), 1);
+    assert_eq!(deps[0]["skill"].as_str(), Some("ralph-tools-emit"));
+    assert_eq!(deps[0]["ok"].as_bool(), Some(true));
+}
+
+#[test]
+fn test_skill_check_honors_ralph_hats_source_env() {
+    // In-loop the runner injects `RALPH_HATS_SOURCE` instead of `-H`;
+    // `skill check` must evaluate the preset's contract either way.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    let preset = write_preset(
+        temp_path,
+        "hats",
+        "skills:\n  contract:\n    - skill: definitely-missing-skill\n      hats: [worker]\n      purpose: test dep\n      required: true\n      load: on_demand\nhats:\n  worker:\n    name: Worker\n    instructions: work\n",
+    );
+
+    let output = ralph_skill_with_env(
+        temp_path,
+        &[("RALPH_HATS_SOURCE", preset.to_str().unwrap())],
+        &["check"],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "env-sourced preset contract must be enforced; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn test_skill_list_load_honor_ralph_hats_source_vendored_dirs() {
+    // A preset that vendors skills via `skills.dirs` (anchored to the
+    // preset's own dir) must make them visible/loadable in-loop —
+    // the same merged view the startup gate verified.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    let preset = write_preset(
+        temp_path,
+        "hats/mypack",
+        "skills:\n  dirs: [vendored]\nhats:\n  worker:\n    name: Worker\n    instructions: work\n",
+    );
+    let vendored = preset.parent().unwrap().join("vendored");
+    fs::create_dir_all(&vendored).expect("create vendored dir");
+    fs::write(
+        vendored.join("pack-skill.md"),
+        "---\nname: pack-skill\ndescription: vendored skill\n---\npack body\n",
+    )
+    .expect("write vendored skill");
+
+    // `vendored` is NOT under the workspace root — it only resolves
+    // because preset `skills.dirs` anchors to the preset dir.
+    let stdout = ralph_skill_with_env(
+        temp_path,
+        &[("RALPH_HATS_SOURCE", preset.to_str().unwrap())],
+        &["list", "--format", "quiet"],
+    );
+    assert!(
+        stdout.status.success(),
+        "list failed: {}",
+        String::from_utf8_lossy(&stdout.stderr)
+    );
+    let names = String::from_utf8_lossy(&stdout.stdout);
+    assert!(
+        names.lines().any(|l| l == "pack-skill"),
+        "vendored preset skill must be listed: {names}"
+    );
+
+    let load = ralph_skill_with_env(
+        temp_path,
+        &[("RALPH_HATS_SOURCE", preset.to_str().unwrap())],
+        &["load", "pack-skill"],
+    );
+    assert!(
+        load.status.success(),
+        "vendored preset skill must load; stderr: {}",
+        String::from_utf8_lossy(&load.stderr)
+    );
+    assert!(String::from_utf8_lossy(&load.stdout).contains("pack body"));
+}
+
+#[test]
+fn test_skill_list_without_hats_env_ignores_preset_dirs() {
+    // Negative control: without `-H`/env the vendored dir is
+    // invisible — the preset's `skills.dirs` never leaks into the
+    // human/no-loop registry.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    let preset = write_preset(
+        temp_path,
+        "hats",
+        "skills:\n  dirs: [vendored]\nhats:\n  worker:\n    name: Worker\n    instructions: work\n",
+    );
+    let vendored = preset.parent().unwrap().join("vendored");
+    fs::create_dir_all(&vendored).expect("create vendored dir");
+    fs::write(
+        vendored.join("pack-skill.md"),
+        "---\nname: pack-skill\ndescription: vendored skill\n---\npack body\n",
+    )
+    .expect("write vendored skill");
+
+    let stdout = ralph_skill_ok(temp_path, &["list", "--format", "quiet"]);
+    assert!(
+        !stdout.lines().any(|l| l == "pack-skill"),
+        "preset dirs must not leak without a hats source: {stdout}"
+    );
+}

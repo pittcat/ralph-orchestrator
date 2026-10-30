@@ -203,6 +203,7 @@ pub(crate) async fn load_config_for_preflight(
 
     validate_core_config_shape(&core_value, &core_label)?;
 
+    let mut hats_contract_file_origin_dir = None;
     if let Some(source) = hats_source {
         let operator_core = core_value.clone();
         if let Some(mapping) = core_value.as_mapping()
@@ -217,10 +218,14 @@ pub(crate) async fn load_config_for_preflight(
             );
         }
 
-        let hats_value = load_hats_value(source).await?;
+        let mut hats_value = load_hats_value(source).await?;
         validate_hats_config_shape(&hats_value, &source.label())?;
+        anchor_preset_skill_dirs(&mut hats_value, source);
+        let contract_file_origin_dir =
+            contract_file_origin_dir(&operator_core, &hats_value, source);
         core_value = merge_hats_overlay(core_value, hats_value)?;
         merge_operator_hat_field_overlays(&operator_core, &mut core_value);
+        hats_contract_file_origin_dir = contract_file_origin_dir;
     }
 
     let mut config: RalphConfig = serde_yaml::from_value(core_value)
@@ -238,6 +243,7 @@ pub(crate) async fn load_config_for_preflight(
             ConfigSource::File(path) => Some(path.clone()),
             _ => None,
         });
+    config.contract_file_origin_dir = hats_contract_file_origin_dir;
 
     // Resolve external schema files referenced in event_policy.schema_file.
     // Base path is the config file's directory, or workspace_root if no config file.
@@ -292,6 +298,7 @@ pub(crate) fn load_config_for_preflight_sync_with_missing_default_warning(
 
     validate_core_config_shape(&core_value, &core_label)?;
 
+    let mut hats_contract_file_origin_dir = None;
     if let Some(source) = hats_source {
         let operator_core = core_value.clone();
         if let Some(mapping) = core_value.as_mapping()
@@ -306,10 +313,14 @@ pub(crate) fn load_config_for_preflight_sync_with_missing_default_warning(
             );
         }
 
-        let hats_value = load_hats_value_sync(source)?;
+        let mut hats_value = load_hats_value_sync(source)?;
         validate_hats_config_shape(&hats_value, &source.label())?;
+        anchor_preset_skill_dirs(&mut hats_value, source);
+        let contract_file_origin_dir =
+            contract_file_origin_dir(&operator_core, &hats_value, source);
         core_value = merge_hats_overlay(core_value, hats_value)?;
         merge_operator_hat_field_overlays(&operator_core, &mut core_value);
+        hats_contract_file_origin_dir = contract_file_origin_dir;
     }
 
     let mut config: RalphConfig = serde_yaml::from_value(core_value)
@@ -326,6 +337,7 @@ pub(crate) fn load_config_for_preflight_sync_with_missing_default_warning(
             ConfigSource::File(path) => Some(path.clone()),
             _ => None,
         });
+    config.contract_file_origin_dir = hats_contract_file_origin_dir;
 
     // Resolve external schema files referenced in event_policy.schema_file.
     let schema_base_path = config
@@ -661,7 +673,12 @@ fn load_core_value_sync(
 
 /// Synchronous counterpart of [`load_hats_value`]. Remote hats sources are not
 /// supported; callers that need remote hats must use the async path.
-fn load_hats_value_sync(source: &HatsSource) -> Result<Value> {
+/// Synchronous variant of `load_hats_value` — File and Builtin sources
+/// only. `pub(crate)` so `skill_cli` can apply the same `-H` overlay
+/// merge to `skill load`/`list` registries (2026-10-30 skill contract
+/// spec: the runtime load path must see the same preset-declared
+/// `skills.dirs`/`overrides` the startup gate verified).
+pub(crate) fn load_hats_value_sync(source: &HatsSource) -> Result<Value> {
     match source {
         HatsSource::File(path) => {
             if !path.exists() {
@@ -730,6 +747,11 @@ fn normalize_hats_source_value(value: Value, label: &str) -> Result<Value> {
 fn mapping_get<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
     let key_value = Value::String(key.to_string());
     mapping.get(&key_value)
+}
+
+fn mapping_get_mut<'a>(mapping: &'a mut Mapping, key: &str) -> Option<&'a mut Value> {
+    let key_value = Value::String(key.to_string());
+    mapping.get_mut(&key_value)
 }
 
 fn mapping_insert(mapping: &mut Mapping, key: &str, value: Value) {
@@ -838,6 +860,17 @@ const ALLOWED_HATS_TOP_LEVEL: &[&str] = &[
     // hat-driven: it controls runtime gates, not operator resources or
     // budgets, so it must survive the overlay merge.
     "mechanism",
+    // 2026-10-30 preset skill contract spec: builtin presets declare
+    // `skills.contract` — the single source of truth for which hat
+    // needs which skill. Without this entry the contract would be
+    // stripped by `extract_hat_overlay_from_preset` /
+    // `merge_hats_overlay` and the startup gate could never see the
+    // preset's declared dependencies. The block is hat-driven (the
+    // preset owns the dependency contract); the operator still wins
+    // on `enabled`, `contract_file`, and per-skill `overrides`, and
+    // `contract`/`dirs` union rather than replace so an operator's
+    // own dependencies can never silently mask the preset's.
+    "skills",
 ];
 // Event-loop keys that a hat collection overlay is allowed to provide.
 //
@@ -984,6 +1017,7 @@ const SPECIAL_OVERLAY_KEYS: &[&str] = &[
     "event_loop",
     "topic_format_whitelist",
     "telemetry",
+    "skills",
 ];
 
 // 2026-07-02-001 review P1 #5 fix (code-review): the static
@@ -1101,6 +1135,79 @@ pub(crate) fn merge_operator_hat_field_overlays(operator_core: &Value, merged: &
                 hat_id
             );
         }
+    }
+}
+
+/// 2026-10-30 preset skill contract spec: when the `-H` preset declared
+/// `skills.contract_file` and won the merge (the operator config did not
+/// declare its own), the relative path must resolve against the preset's
+/// own directory. The merged value loses which side declared it, so the
+/// loaders record the preset dir here — before `merge_hats_overlay`
+/// consumes `hats_value`. An operator-declared `contract_file` (or an
+/// operator override that wins the merge) keeps resolving against the
+/// config file's dir / workspace root, same convention as
+/// `event_policy.schema_file`.
+fn contract_file_origin_dir(
+    operator_core: &Value,
+    hats_value: &Value,
+    hats_source: &HatsSource,
+) -> Option<PathBuf> {
+    let declares_contract_file = |value: &Value| {
+        value
+            .as_mapping()
+            .and_then(|m| mapping_get(m, "skills"))
+            .and_then(|s| s.as_mapping())
+            .and_then(|m| mapping_get(m, "contract_file"))
+            .is_some_and(|v| !v.is_null())
+    };
+    if !declares_contract_file(hats_value) || declares_contract_file(operator_core) {
+        return None;
+    }
+    match hats_source {
+        // `HatsSource::File` is the only variant with an on-disk
+        // directory; builtin/remote sources fall back to config dir /
+        // workspace root.
+        HatsSource::File(path) => path.parent().map(PathBuf::from),
+        _ => None,
+    }
+}
+
+/// 2026-10-30 preset skill contract spec: preset-declared `skills.dirs`
+/// entries are anchored to the preset's own directory so a preset that
+/// vendors skill files stays self-contained regardless of the run
+/// workspace or cwd — the same declaring-side-anchoring semantics the
+/// loaders use for `skills.contract_file`. Operator dirs keep their
+/// workspace-root-relative resolution (`resolve_skill_dir`); only the
+/// preset's relative entries are rewritten to absolute paths before
+/// `merge_hats_overlay` unions them into the merged `skills.dirs`.
+/// Absolute preset entries pass through untouched.
+pub(crate) fn anchor_preset_skill_dirs(hats_value: &mut Value, hats_source: &HatsSource) {
+    let HatsSource::File(preset_path) = hats_source else {
+        // Builtin/remote presets have no on-disk directory to anchor
+        // against; their relative `skills.dirs` entries (rare) keep the
+        // workspace-relative semantics of every other path in config.
+        return;
+    };
+    let Some(preset_dir) = preset_path.parent() else {
+        return;
+    };
+    let Some(dirs) = hats_value
+        .as_mapping_mut()
+        .and_then(|m| mapping_get_mut(m, "skills"))
+        .and_then(|s| s.as_mapping_mut())
+        .and_then(|m| mapping_get_mut(m, "dirs"))
+        .and_then(Value::as_sequence_mut)
+    else {
+        return;
+    };
+    for entry in dirs {
+        let Some(dir) = entry.as_str() else {
+            continue;
+        };
+        if dir.is_empty() || Path::new(dir).is_absolute() {
+            continue;
+        }
+        *entry = Value::String(preset_dir.join(dir).display().to_string());
     }
 }
 
@@ -1322,6 +1429,88 @@ pub(crate) fn merge_hats_overlay(mut core: Value, hats: Value) -> Result<Value> 
         let merged_telemetry =
             deep_merge_yaml_values(operator_telemetry, preset_telemetry_value.clone());
         mapping_insert(core_mapping, "telemetry", merged_telemetry);
+    }
+
+    // 2026-10-30 preset skill contract spec: dedicated `skills`
+    // merge branch. The preset owns the skill dependency contract —
+    // but "preset wins wholesale" would silently drop the operator's
+    // own `skills:` settings, and "operator wins wholesale" would
+    // silently drop the preset's contract, defeating the startup
+    // gate. Field-level merge instead:
+    //
+    //   - `contract`      union-append (preset entries first) — both
+    //                     sides' deps get verified; an operator can
+    //                     never mask a preset dep by adding their own.
+    //   - `dirs`          union (deduped, preset first) — the preset's
+    //                     vendored dirs must not be shadowed.
+    //   - `overrides`     deep-merge per skill (operator wins fields) —
+    //                     mirrors per-skill precedence everywhere else.
+    //   - everything else operator-wins-when-declared (non-null) —
+    //                     `enabled`, `contract_file`, future keys stay
+    //                     operator policy.
+    if let Some(preset_skills_value) = mapping_get(hats_mapping, "skills") {
+        let preset_skills = preset_skills_value
+            .as_mapping()
+            .ok_or_else(|| anyhow::anyhow!("hats.skills must be a mapping when provided"))?;
+        let operator_skills_value = mapping_get(core_mapping, "skills")
+            .cloned()
+            .unwrap_or_else(|| Value::Mapping(Mapping::new()));
+        let mut skills_mapping = operator_skills_value
+            .as_mapping()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("core.skills must be a mapping when provided"))?;
+
+        for (key, value) in preset_skills {
+            let Some(key_str) = key.as_str() else {
+                continue;
+            };
+            match key_str {
+                "contract" => {
+                    let mut merged_contract = value.as_sequence().cloned().unwrap_or_default();
+                    if let Some(operator_seq) =
+                        mapping_get(&skills_mapping, "contract").and_then(|v| v.as_sequence())
+                    {
+                        merged_contract.extend(operator_seq.iter().cloned());
+                    }
+                    mapping_insert(
+                        &mut skills_mapping,
+                        "contract",
+                        Value::Sequence(merged_contract),
+                    );
+                }
+                "dirs" => {
+                    let mut merged_dirs: Vec<Value> =
+                        value.as_sequence().cloned().unwrap_or_default();
+                    if let Some(operator_seq) =
+                        mapping_get(&skills_mapping, "dirs").and_then(|v| v.as_sequence())
+                    {
+                        for item in operator_seq {
+                            if !merged_dirs.contains(item) {
+                                merged_dirs.push(item.clone());
+                            }
+                        }
+                    }
+                    mapping_insert(&mut skills_mapping, "dirs", Value::Sequence(merged_dirs));
+                }
+                "overrides" => {
+                    let merged_overrides =
+                        match skills_mapping.remove(Value::String("overrides".to_string())) {
+                            Some(operator_overrides) => {
+                                deep_merge_yaml_values(value.clone(), operator_overrides)
+                            }
+                            None => value.clone(),
+                        };
+                    mapping_insert(&mut skills_mapping, "overrides", merged_overrides);
+                }
+                _ => {
+                    let operator_declared = skills_mapping.get(key).is_some_and(|v| !v.is_null());
+                    if !operator_declared {
+                        skills_mapping.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        mapping_insert(core_mapping, "skills", Value::Mapping(skills_mapping));
     }
 
     // 2026-07-02-001 plan U3 (Fix C): the "default merge" branch.
@@ -1805,6 +1994,11 @@ telemetry:
 mechanism:
   flow:
     - step: "s1"
+skills:
+  contract:
+    - skill: ralph-tools-emit
+      hats: [executor]
+      purpose: emit discipline
 "#,
         )
         .unwrap();
@@ -2036,6 +2230,311 @@ hats:
             !config.tasks.enabled,
             "production-path merge (default_core_value -> merge_hats_overlay) must inherit \
              preset `tasks.enabled: false`"
+        );
+    }
+
+    #[test]
+    fn merge_hats_overlay_preserves_preset_skills_contract() {
+        // 2026-10-30 preset skill contract spec: the preset's
+        // `skills.contract` is the single source of truth for
+        // hat→skill dependencies — it MUST survive the `-H` overlay
+        // merge or the startup gate never sees it.
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+skills:
+  contract:
+    - skill: ralph-tools-emit
+      hats: [a]
+      purpose: emit discipline
+      required: true
+      load: on_demand
+      source: builtin
+hats:
+  a: { name: A }
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert_eq!(config.skills.contract.len(), 1);
+        let entry = &config.skills.contract[0];
+        assert_eq!(entry.skill, "ralph-tools-emit");
+        assert_eq!(entry.hats, vec!["a".to_string()]);
+        assert!(entry.required);
+        assert_eq!(
+            entry.source,
+            ralph_core::config::SkillSourceConstraint::Builtin
+        );
+    }
+
+    #[test]
+    fn merge_hats_overlay_preserves_skills_contract_via_default_core_value() {
+        // Production path: `default_core_value()` serialises
+        // `SkillsConfig::default()` — the placeholder `contract: []` /
+        // `contract_file: null` must not swallow the preset's entries.
+        let core = crate::config_resolution::default_core_value()
+            .expect("default_core_value must succeed");
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+skills:
+  contract:
+    - skill: ralph-html
+      hats: [reporter]
+      purpose: html guidance
+      required: true
+      load: on_demand
+      source: builtin
+  contract_file: contracts/skills.yml
+hats:
+  reporter: { name: Reporter }
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert_eq!(config.skills.contract.len(), 1);
+        assert_eq!(config.skills.contract[0].skill, "ralph-html");
+        assert_eq!(
+            config.skills.contract_file.as_deref(),
+            Some(std::path::Path::new("contracts/skills.yml")),
+            "default `contract_file: null` placeholder must not mask the preset reference"
+        );
+    }
+
+    #[test]
+    fn merge_hats_overlay_unions_operator_and_preset_skills_contract() {
+        // An operator's own `skills.contract` entries must not be
+        // dropped when the preset declares its contract — both sides
+        // get verified (union-append, preset entries first).
+        let core: Value = serde_yaml::from_str(
+            r"
+skills:
+  contract:
+    - skill: operator-skill
+      hats: [a]
+      purpose: operator dep
+      required: true
+      load: on_demand
+event_loop:
+  completion_promise: LOOP_COMPLETE
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+skills:
+  contract:
+    - skill: preset-skill
+      hats: [a]
+      purpose: preset dep
+      required: true
+      load: on_demand
+hats:
+  a: { name: A }
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        let skills: Vec<&str> = config
+            .skills
+            .contract
+            .iter()
+            .map(|e| e.skill.as_str())
+            .collect();
+        assert_eq!(
+            skills,
+            vec!["preset-skill", "operator-skill"],
+            "preset contract entries come first; operator entries are appended, never dropped"
+        );
+    }
+
+    #[test]
+    fn merge_hats_overlay_operator_skills_enabled_and_overrides_win() {
+        // Operator policy keys win: `enabled` stays the operator's,
+        // and per-skill overrides deep-merge with operator precedence
+        // on conflicting fields.
+        let core: Value = serde_yaml::from_str(
+            r"
+skills:
+  enabled: false
+  dirs: [operator/skills]
+  overrides:
+    ralph-tools-emit:
+      enabled: false
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+skills:
+  enabled: true
+  dirs: [preset/skills, operator/skills]
+  overrides:
+    ralph-tools-emit:
+      enabled: true
+      auto_inject: true
+    preset-skill:
+      auto_inject: true
+  contract:
+    - skill: ralph-tools-emit
+      hats: [a]
+      purpose: emit
+      required: true
+      load: on_demand
+hats:
+  a: { name: A }
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        // Operator's `enabled: false` wins over the preset's `true`.
+        assert!(!config.skills.enabled);
+        // `dirs` union (deduped), preset first.
+        let dirs: Vec<String> = config
+            .skills
+            .dirs
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        assert_eq!(dirs, vec!["preset/skills", "operator/skills"]);
+        // Overrides deep-merge: operator's `enabled: false` wins,
+        // preset's `auto_inject` is kept on the same entry, and the
+        // preset-only `preset-skill` override survives.
+        let emit = &config.skills.overrides["ralph-tools-emit"];
+        assert_eq!(emit.enabled, Some(false));
+        assert_eq!(emit.auto_inject, Some(true));
+        assert_eq!(
+            config.skills.overrides["preset-skill"].auto_inject,
+            Some(true)
+        );
+        // The contract still lands.
+        assert_eq!(config.skills.contract.len(), 1);
+    }
+
+    #[test]
+    fn merge_hats_overlay_preserves_preset_skills_enabled_via_default_core_value() {
+        // 2026-10-30 spec: a preset's `skills.enabled: false` opt-out
+        // must survive the merge. `default_core_value()` serialises
+        // `SkillsConfig::default().enabled == true` — without the
+        // `config_resolution` strip, the placeholder would masquerade
+        // as an operator declaration and silently drop the preset's.
+        let core = crate::config_resolution::default_core_value()
+            .expect("default_core_value must succeed");
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+skills:
+  enabled: false
+hats:
+  worker: { name: Worker }
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        assert!(
+            !config.skills.enabled,
+            "preset `skills.enabled: false` must reach the merged config; \
+             the default placeholder must not mask it"
+        );
+    }
+
+    #[test]
+    fn anchor_preset_skill_dirs_rewrites_relative_entries_against_preset_dir() {
+        // 2026-10-30 spec: preset-declared `skills.dirs` relative
+        // entries anchor to the preset's own directory (vendored
+        // skill dirs travel with the preset). Absolute entries and
+        // non-file sources pass through untouched.
+        let mut hats: Value = serde_yaml::from_str(
+            r"
+skills:
+  dirs: [vendored-skills, /abs/skills]
+hats:
+  worker: { name: Worker }
+",
+        )
+        .unwrap();
+
+        let source = HatsSource::File(PathBuf::from("/packs/acme/preset.yml"));
+        anchor_preset_skill_dirs(&mut hats, &source);
+
+        let dirs = hats
+            .get("skills")
+            .and_then(|s| s.get("dirs"))
+            .and_then(|d| d.as_sequence())
+            .expect("skills.dirs sequence");
+        assert_eq!(
+            dirs[0].as_str(),
+            Some("/packs/acme/vendored-skills"),
+            "relative entry must anchor to the preset's directory"
+        );
+        assert_eq!(
+            dirs[1].as_str(),
+            Some("/abs/skills"),
+            "absolute entry must pass through"
+        );
+
+        // Builtin/remote sources have no directory to anchor against.
+        let mut hats: Value =
+            serde_yaml::from_str("skills:\n  dirs: [vendored]\nhats:\n  w: {name: W}\n").unwrap();
+        anchor_preset_skill_dirs(&mut hats, &HatsSource::Builtin("debug".to_string()));
+        assert_eq!(
+            hats.get("skills")
+                .and_then(|s| s.get("dirs"))
+                .and_then(|d| d.as_sequence())
+                .and_then(|seq| seq.first())
+                .and_then(|v| v.as_str()),
+            Some("vendored"),
+            "builtin preset dirs keep their spelling (workspace-relative)"
+        );
+    }
+
+    #[test]
+    fn load_config_anchors_preset_skill_dirs_against_preset_dir() {
+        // End-to-end through `load_config_for_preflight_sync`: a
+        // vendored `skills.dirs` entry in a `-H` preset resolves to
+        // the preset's directory, not the workspace root.
+        let temp = tempfile::tempdir().unwrap();
+        let preset_dir = temp.path().join("pack");
+        std::fs::create_dir_all(preset_dir.join("vendored")).unwrap();
+        let preset_path = preset_dir.join("preset.yml");
+        std::fs::write(
+            &preset_path,
+            "skills:\n  dirs: [vendored]\nhats:\n  worker:\n    name: Worker\n    instructions: work\n",
+        )
+        .unwrap();
+
+        let config =
+            load_config_for_preflight_sync(&[], Some(&HatsSource::File(preset_path)), temp.path())
+                .expect("config load");
+
+        assert_eq!(
+            config.skills.dirs,
+            vec![preset_dir.join("vendored")],
+            "preset-relative skills.dirs must anchor to the preset dir"
         );
     }
 
@@ -3122,6 +3621,120 @@ hats:
         assert_eq!(config.event_loop.completion_promise, "REVIEW_COMPLETE");
         assert!(config.hats.contains_key("reviewer"));
         assert!(!config.hats.contains_key("builder"));
+    }
+
+    /// 2026-10-30 preset skill contract spec: a preset-declared
+    /// `skills.contract_file` resolves against the preset's own
+    /// directory even when the merged config's `config_path` points at
+    /// the operator file in a different directory.
+    #[tokio::test]
+    async fn load_config_resolves_preset_contract_file_against_preset_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let operator_dir = temp_dir.path().join("operator");
+        let preset_dir = temp_dir.path().join("preset-pack");
+        std::fs::create_dir_all(&operator_dir).unwrap();
+        std::fs::create_dir_all(preset_dir.join("contracts")).unwrap();
+        let core_path = operator_dir.join("ralph.yml");
+        let hats_path = preset_dir.join("preset.yml");
+
+        std::fs::write(&core_path, "cli:\n  backend: claude\n").unwrap();
+        std::fs::write(
+            preset_dir.join("contracts").join("skills.yml"),
+            "contract:\n  - skill: not-real-file-skill\n    hats: [a]\n    purpose: external\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &hats_path,
+            r"
+hats:
+  a:
+    name: A
+    description: hat a
+skills:
+  contract_file: contracts/skills.yml
+",
+        )
+        .unwrap();
+
+        let config_sources = vec![ConfigSource::File(core_path)];
+        let hats_source = HatsSource::File(hats_path);
+        let config = load_config_for_preflight(&config_sources, Some(&hats_source))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config.contract_file_origin_dir.as_deref(),
+            Some(preset_dir.as_path()),
+            "preset-declared contract_file must record the preset dir"
+        );
+        assert_eq!(
+            config.skills.contract_file.as_deref(),
+            Some(std::path::Path::new("contracts/skills.yml"))
+        );
+
+        // The evaluator must actually read the preset-relative file —
+        // `not-real-file-skill` surfacing as `skill_required_missing`
+        // proves the entries were loaded (a silent miss would yield
+        // `skill_contract_file_error` or no deps at all).
+        let outcome = ralph_core::preset_lint::evaluate_skill_contract(
+            &config,
+            ralph_core::preset_lint::LintStrictness::Strict,
+        );
+        assert!(
+            outcome.findings.iter().any(
+                |f| f.id == ralph_core::preset_lint::finding_id::FINDING_SKILL_REQUIRED_MISSING
+            ),
+            "preset-dir contract_file entries must be evaluated: {:?}",
+            outcome.findings
+        );
+    }
+
+    /// When the operator config declares its own `contract_file` it
+    /// wins the merge — resolution must stay anchored on the operator
+    /// config dir, not the preset dir.
+    #[tokio::test]
+    async fn load_config_operator_contract_file_keeps_operator_origin() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let operator_dir = temp_dir.path().join("operator");
+        let preset_dir = temp_dir.path().join("preset-pack");
+        std::fs::create_dir_all(&operator_dir).unwrap();
+        std::fs::create_dir_all(&preset_dir).unwrap();
+        let core_path = operator_dir.join("ralph.yml");
+        let hats_path = preset_dir.join("preset.yml");
+
+        std::fs::write(
+            &core_path,
+            "cli:\n  backend: claude\nskills:\n  contract_file: ops-contract.yml\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &hats_path,
+            r"
+hats:
+  a:
+    name: A
+    description: hat a
+skills:
+  contract_file: contracts/skills.yml
+",
+        )
+        .unwrap();
+
+        let config_sources = vec![ConfigSource::File(core_path)];
+        let hats_source = HatsSource::File(hats_path);
+        let config = load_config_for_preflight(&config_sources, Some(&hats_source))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config.skills.contract_file.as_deref(),
+            Some(std::path::Path::new("ops-contract.yml")),
+            "operator-declared contract_file must win the merge"
+        );
+        assert!(
+            config.contract_file_origin_dir.is_none(),
+            "operator-declared contract_file must not bind the preset dir"
+        );
     }
 
     #[test]

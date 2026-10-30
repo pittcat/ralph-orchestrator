@@ -92,7 +92,10 @@ pub use scheduler_mode::{
     SchedulerMode, SchedulerModeError, validate_dag_pools, validate_runtime_driven_hats,
     validate_scheduler_mode,
 };
-pub use skills::{SkillOverride, SkillsConfig};
+pub use skills::{
+    SkillContractEntry, SkillLoadTiming, SkillOverride, SkillRequirements, SkillSourceConstraint,
+    SkillUnattended, SkillsConfig, UnattendedStatus,
+};
 pub use state_files::{StateFileEntry, StateFileFormat, StateFilesConfig};
 pub use state_machine::{BusinessAfterTerminalAction, DuplicateTerminalAction, StateMachineConfig};
 pub use state_projection::{StateProjectionAction, StateProjectionConfig};
@@ -311,6 +314,14 @@ pub struct RalphConfig {
     /// Path to the config file that was loaded (not serialized).
     #[serde(skip)]
     pub config_path: Option<PathBuf>,
+
+    /// Directory a preset-declared `skills.contract_file` resolves
+    /// against (set at load time; `None` when the `-H` preset did not
+    /// originate the merged `contract_file` value — e.g. the operator
+    /// config declared it — so resolution falls back to the config
+    /// file's directory and workspace root).
+    #[serde(skip)]
+    pub contract_file_origin_dir: Option<PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -371,6 +382,7 @@ impl Default for RalphConfig {
             topic_format_whitelist: Vec::new(),
             // Config file path (set at load time)
             config_path: None,
+            contract_file_origin_dir: None,
             // P0-3 (2026-06-27 adversarial review):
             // the mechanism foundation opt-in.
             // None by default so the runtime falls

@@ -917,6 +917,7 @@ body
                 );
                 m
             },
+            ..Default::default()
         };
 
         let registry = SkillRegistry::from_config(&config, tmp.path(), Some("claude")).unwrap();
@@ -951,6 +952,7 @@ body
             enabled: true,
             dirs: vec![std::path::PathBuf::from(".claude/skills")],
             overrides: HashMap::new(),
+            ..Default::default()
         };
 
         let registry = SkillRegistry::from_config(&config, &workspace_dir, None).unwrap();

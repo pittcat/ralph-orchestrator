@@ -47,11 +47,14 @@ pub async fn execute(
     args: ToolsArgs,
     use_colors: bool,
     config_sources: &[ConfigSource],
+    hats_source: Option<&crate::cli::HatsSource>,
 ) -> Result<()> {
     match args.command {
         ToolsCommands::Memory(memory_args) => memory::execute(memory_args, use_colors),
         ToolsCommands::Task(task_args) => task_cli::execute(task_args, use_colors, config_sources),
-        ToolsCommands::Skill(skill_args) => skill_cli::execute(skill_args, config_sources),
+        ToolsCommands::Skill(skill_args) => {
+            skill_cli::execute(skill_args, config_sources, hats_source)
+        }
         ToolsCommands::Workstate(workstate_args) => workstate_cli::execute(workstate_args),
     }
 }

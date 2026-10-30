@@ -326,6 +326,207 @@ tasks:
         assert_eq!(EXIT_CODE_LINT_GATE, 2);
     }
 
+    // --- 2026-10-30 preset skill contract: gate-level acceptance tests ---
+    // The `ralph run` startup gate must block on every required-dep
+    // failure the contract evaluator reports — this is spec acceptance
+    // criterion 2 (delete/disable/hide a required skill → startup fails
+    // with targeted remediation).
+
+    #[test]
+    fn gate_blocks_when_contract_required_skill_is_missing() {
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    description: "Only hat"
+    triggers: ["work.start"]
+    publishes: ["loop.complete"]
+    instructions: "Run `ralph tools skill load missing-skill` then emit."
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "loop.complete"
+tasks:
+  enabled: false
+skills:
+  contract:
+    - skill: missing-skill
+      hats: [a]
+      purpose: "test dep"
+      required: true
+      load: on_demand
+      install_hint: "drop missing-skill/SKILL.md into skills.dirs"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = enforce_preset_lint_gate(&config, false);
+        let err = result.expect_err("missing required dep must block the gate");
+        assert!(
+            err.findings
+                .iter()
+                .any(|f| f.id.contains("skill_required_missing")),
+            "expected skill_required_missing, got: {:?}",
+            err.findings.iter().map(|f| &f.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn gate_blocks_when_contract_skill_hidden_from_hat() {
+        // `skills.overrides` narrows `ralph-tools-emit` to hat `b`, but
+        // the contract declares hat `a` consumes it → visibility check
+        // must fail at the gate, not at emit time.
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    description: "Consumer"
+    triggers: ["work.start"]
+    publishes: ["loop.complete"]
+  b:
+    name: "B"
+    description: "Other"
+    triggers: ["noop"]
+    publishes: ["noop.done"]
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "loop.complete"
+tasks:
+  enabled: false
+skills:
+  overrides:
+    ralph-tools-emit:
+      hats: [b]
+  contract:
+    - skill: ralph-tools-emit
+      hats: [a]
+      purpose: "emit discipline"
+      required: true
+      load: on_demand
+      source: builtin
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = enforce_preset_lint_gate(&config, false);
+        let err = result.expect_err("hidden required dep must block the gate");
+        assert!(
+            err.findings
+                .iter()
+                .any(|f| f.id.contains("skill_not_visible_to_hat")),
+            "expected skill_not_visible_to_hat, got: {:?}",
+            err.findings.iter().map(|f| &f.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn gate_blocks_when_contract_skill_disabled_by_override() {
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    description: "Consumer"
+    triggers: ["work.start"]
+    publishes: ["loop.complete"]
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "loop.complete"
+tasks:
+  enabled: false
+skills:
+  overrides:
+    ralph-tools-emit:
+      enabled: false
+  contract:
+    - skill: ralph-tools-emit
+      hats: [a]
+      purpose: "emit discipline"
+      required: true
+      load: on_demand
+      source: builtin
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = enforce_preset_lint_gate(&config, false);
+        let err = result.expect_err("disabled required dep must block the gate");
+        assert!(
+            err.findings
+                .iter()
+                .any(|f| f.id.contains("skill_required_missing")),
+            "expected skill_required_missing (enabled:false removes the skill), got: {:?}",
+            err.findings.iter().map(|f| &f.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn gate_blocks_on_undeclared_skill_reference_in_contract_preset() {
+        // A preset WITH a contract has opted into the SSoT invariant:
+        // an undeclared `skill load` reference is Error in strict mode
+        // — spec acceptance criterion 7 (undeclared refs detected).
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    description: "Consumer"
+    triggers: ["work.start"]
+    publishes: ["loop.complete"]
+    instructions: "Load `ralph tools skill load ralph-tools-wave` for wave syntax."
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "loop.complete"
+tasks:
+  enabled: false
+skills:
+  contract:
+    - skill: ralph-tools-emit
+      hats: [a]
+      purpose: "emit discipline"
+      required: true
+      load: on_demand
+      source: builtin
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = enforce_preset_lint_gate(&config, false);
+        let err = result.expect_err("undeclared ref must block the gate in strict mode");
+        assert!(
+            err.findings
+                .iter()
+                .any(|f| f.id.contains("skill_contract_undeclared_reference")),
+            "expected skill_contract_undeclared_reference, got: {:?}",
+            err.findings.iter().map(|f| &f.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn gate_passes_when_contract_deps_resolve() {
+        // Builtin deps on visible hats pass without redundant installs
+        // — spec criterion 3.
+        let yaml = r#"
+hats:
+  a:
+    name: "A"
+    description: "Consumer"
+    triggers: ["work.start"]
+    publishes: ["loop.complete"]
+event_loop:
+  starting_event: "work.start"
+  completion_promise: "loop.complete"
+tasks:
+  enabled: false
+skills:
+  contract:
+    - skill: ralph-tools-emit
+      hats: [a]
+      purpose: "emit discipline"
+      required: true
+      load: on_demand
+      source: builtin
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = enforce_preset_lint_gate(&config, false);
+        assert!(
+            result.is_ok(),
+            "satisfied builtin dep must pass the gate: {:?}",
+            result
+                .err()
+                .map(|e| e.findings.iter().map(|f| f.id.clone()).collect::<Vec<_>>())
+        );
+    }
+
     #[test]
     fn artifact_writes_to_diagnostics_dir() {
         let tmp = tempfile::tempdir().unwrap();

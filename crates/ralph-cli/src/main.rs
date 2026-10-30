@@ -492,7 +492,24 @@ async fn main() -> Result<()> {
             .await
         }
         Some(Commands::Tools(args)) => {
-            tools::execute(args, cli.color.should_use_colors(), &config_sources).await
+            // Same `config_was_explicit` gating as `Commands::Run`:
+            // without `-c`, do not synthesise `default_config_path()`
+            // — the loader re-discovers it, and a missing default
+            // would fire `Config file "ralph.yml" not found` into
+            // stdout, corrupting `--format json` output of
+            // `skill check` in workspaces without ralph.yml.
+            let tool_config_sources: Vec<ConfigSource> = if config_was_explicit {
+                config_sources.clone()
+            } else {
+                Vec::new()
+            };
+            tools::execute(
+                args,
+                cli.color.should_use_colors(),
+                &tool_config_sources,
+                hats_source.as_ref(),
+            )
+            .await
         }
         Some(Commands::Wave(args)) => wave::execute(args, cli.color.should_use_colors()),
         Some(Commands::Loops(args)) => loops::execute(args, cli.color.should_use_colors()),

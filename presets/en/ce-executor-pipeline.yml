@@ -2054,6 +2054,54 @@ core:
     - "ABSOLUTE PROHIBITION: NEVER create, switch, or rename branches, and NEVER create worktrees from inside the agent. The loop runs on the current working branch by default. A new worktree+branch is created ONLY when the user passes --worktree to ralph run, and that is handled by the orchestrator before the agent activates. Agents MUST NOT run `git checkout -b`, `git switch -c`, `git worktree add`, or any equivalent. If a task appears to require a new branch, stop and surface a work.failed with a clear reason — the user, not the agent, decides when to branch."
     - "ABSOLUTE PROHIBITION: NEVER kill, signal, or terminate any `ralph` / `ralph-orchestrator` process — including `kill`, `pkill`, `killall`, `kill -9`, `kill -TERM`, `kill -HUP`, `taskkill`, or any equivalent process-control command targeting the loop's parent PID, the TUI subprocess PID recorded in `.ralph/loop.lock`, any PID listed in `.ralph/loops.json`, or any PID returned by `ps` / `pgrep` matching `ralph`. The currently running ralph IS the parent process of this very agent iteration — killing it ends the agent itself mid-thought and corrupts orchestration state. If the loop needs to restart, emit `loop.cancel`, surface a `work.failed` / `plan.blocked` with a clear reason, or instruct the human operator to run `ralph loops stop <loop_id>`. Stopping the orchestrator is the operator's decision, not the agent's."
 
+# Skill dependency contract (2026-10-30 preset skill contract spec): the
+# single source of truth for hat -> skill dependencies. Evaluated by
+# `ralph preset check`, `ralph preflight`, `ralph tools skill check`, and
+# the `ralph run` startup gate — a failing required dep blocks the loop
+# before any backend spawns.
+skills:
+  contract:
+    - skill: ralph-tools-emit
+      hats: ["*"]
+      purpose: Emit discipline — `ralph emit --policy-check` OPAC precheck before every state-changing emit (per `ralph-tools` §5).
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded before the hat's first emit; the Policy-Check feedback applies to every emit."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+    - skill: ralph-html
+      hats: [reporter]
+      purpose: Entry guidance for offline single-file HTML deliverables (offline/escaping rules).
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded before the hat writes its .html artifact."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+    - skill: ralph-html-artifact
+      hats: [reporter]
+      purpose: Artifact-generation rules for the HTML deliverable.
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded with ralph-html before writing the .html artifact."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+    - skill: ralph-html-design
+      hats: [reporter]
+      purpose: Design direction for the HTML deliverable.
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded with ralph-html before writing the .html artifact."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+    - skill: ralph-html-ref-documents-and-presentations
+      hats: [reporter]
+      purpose: Reference-document and presentation guidance for the HTML deliverable.
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded with ralph-html for long-form report artifacts."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+
 hats:
   plan-reviewer:
     name: "Plan Reviewer"

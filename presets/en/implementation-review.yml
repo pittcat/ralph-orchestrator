@@ -748,6 +748,54 @@ mechanism:
     enforce_schema: hard
     state_idempotency: required
 
+# Skill dependency contract (2026-10-30 preset skill contract spec): the
+# single source of truth for hat -> skill dependencies. Evaluated by
+# `ralph preset check`, `ralph preflight`, `ralph tools skill check`, and
+# the `ralph run` startup gate — a failing required dep blocks the loop
+# before any backend spawns.
+skills:
+  contract:
+    - skill: ralph-tools-emit
+      hats: [finalizer, fix-planner, review-dispatcher, review-synthesizer, review-worker, scope-preparer]
+      purpose: Emit discipline — `ralph emit --policy-check` OPAC precheck before every state-changing emit (per `ralph-tools` §5).
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded before the hat's first emit; the Policy-Check feedback applies to every emit."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+    - skill: ralph-tools-wave
+      hats: [finalizer, review-dispatcher, review-synthesizer]
+      purpose: Wave dispatch reference — `ralph wave emit` mechanics for review fan-out.
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded when the hat prepares a wave fan-out."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+    - skill: ralph-html
+      hats: [finalizer, fix-planner, review-dispatcher, review-synthesizer, scope-preparer]
+      purpose: Entry guidance for offline single-file HTML deliverables (offline/escaping rules).
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded before the hat writes its .html artifact."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+    - skill: ralph-html-design
+      hats: [finalizer, fix-planner, review-dispatcher, review-synthesizer, scope-preparer]
+      purpose: Design direction for the HTML deliverable.
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded with ralph-html before writing the .html artifact."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+    - skill: ralph-html-plan
+      hats: [fix-planner]
+      purpose: HTML plan/report layout guidance for the deliverable.
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded when the deliverable is a plan/report document."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+
 hats:
   scope-preparer:
     name: "Scope Preparer"
