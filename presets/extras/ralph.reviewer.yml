@@ -11,6 +11,38 @@ event_loop:
 cli:
   backend: "claude"
 
+# Skill dependency contract (2026-10-30 preset skill contract spec): the
+# single source of truth for hat -> skill dependencies. Evaluated by
+# `ralph preset check`, `ralph preflight`, `ralph tools skill check`, and
+# the `ralph run` startup gate — a failing required dep blocks the loop
+# before any backend spawns.
+skills:
+  contract:
+    - skill: ralph-html
+      hats: [synthesizer]
+      purpose: Entry guidance for offline single-file HTML deliverables (offline/escaping rules).
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded before the hat writes its .html artifact."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+    - skill: ralph-html-artifact
+      hats: [synthesizer]
+      purpose: Artifact-generation rules for the HTML deliverable.
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded with ralph-html before writing the .html artifact."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+    - skill: ralph-html-design
+      hats: [synthesizer]
+      purpose: Design direction for the HTML deliverable.
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded with ralph-html before writing the .html artifact."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+
 hats:
   scoper:
     name: "Scoper"

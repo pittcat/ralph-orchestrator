@@ -910,6 +910,7 @@ mod skills_smoke_tests {
             enabled: true,
             dirs: vec![skills_fixtures_dir()],
             overrides: HashMap::new(),
+            ..Default::default()
         };
 
         let registry = SkillRegistry::from_config(&config, std::path::Path::new("."), None)
@@ -952,6 +953,7 @@ mod skills_smoke_tests {
             enabled: true,
             dirs: vec![skills_fixtures_dir()],
             overrides: HashMap::new(),
+            ..Default::default()
         };
 
         let registry =
@@ -998,6 +1000,7 @@ mod skills_smoke_tests {
             enabled: true,
             dirs: vec![skills_fixtures_dir()],
             overrides: HashMap::new(),
+            ..Default::default()
         };
 
         let registry =
@@ -1038,6 +1041,7 @@ mod skills_smoke_tests {
             enabled: true,
             dirs: vec![skills_fixtures_dir()],
             overrides: HashMap::new(),
+            ..Default::default()
         };
 
         let registry =
@@ -1221,6 +1225,7 @@ skills:
             enabled: true,
             dirs: vec![skills_fixtures_dir()],
             overrides,
+            ..Default::default()
         };
 
         let registry =
@@ -1282,6 +1287,7 @@ skills:
             enabled: true,
             dirs: vec![skills_fixtures_dir()],
             overrides: HashMap::new(),
+            ..Default::default()
         };
 
         let registry =

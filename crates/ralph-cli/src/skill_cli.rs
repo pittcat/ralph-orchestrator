@@ -43,6 +43,18 @@ pub enum SkillCommands {
 
     /// List available skills
     List(ListArgs),
+
+    /// Verify the preset's `skills.contract` against this environment —
+    /// same verdicts the `ralph run` startup gate enforces
+    Check(CheckArgs),
+}
+
+/// Arguments for `ralph tools skill check`.
+#[derive(Parser, Debug)]
+pub struct CheckArgs {
+    /// Output format
+    #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+    pub format: OutputFormat,
 }
 
 #[derive(Parser, Debug)]
@@ -60,16 +72,58 @@ pub struct ListArgs {
 }
 
 /// Execute a skill command.
-pub fn execute(args: SkillArgs, config_sources: &[crate::cli::shared::ConfigSource]) -> Result<()> {
+///
+/// `hats_source` is the global `-H/--hats` value parsed in `main` —
+/// `skill check` evaluates the contract of the hat collection the
+/// operator would run, exactly like `ralph run -H`.
+///
+/// When `-H` is absent, all subcommands fall back to
+/// `RALPH_HATS_SOURCE` (injected by the runner into hat subprocesses)
+/// so in-loop invocations build registries / evaluate contracts
+/// against the same merged config the startup gate verified.
+pub fn execute(
+    args: SkillArgs,
+    config_sources: &[crate::cli::shared::ConfigSource],
+    hats_source: Option<&crate::cli::HatsSource>,
+) -> Result<()> {
     let root = resolve_root(args.root)?;
     let ctx = OperationContext::detect(root.clone());
+    let resolved_hats_source = hats_source.cloned().or_else(hats_source_from_env);
 
     match args.command {
-        SkillCommands::Load(load_args) => {
-            execute_load(&root, &ctx, &load_args.name, config_sources)
-        }
-        SkillCommands::List(list_args) => execute_list(&root, &ctx, list_args, config_sources),
+        SkillCommands::Load(load_args) => execute_load(
+            &root,
+            &ctx,
+            &load_args.name,
+            config_sources,
+            resolved_hats_source.as_ref(),
+        ),
+        SkillCommands::List(list_args) => execute_list(
+            &root,
+            &ctx,
+            list_args,
+            config_sources,
+            resolved_hats_source.as_ref(),
+        ),
+        SkillCommands::Check(check_args) => execute_check(
+            &root,
+            &ctx,
+            check_args,
+            config_sources,
+            resolved_hats_source.as_ref(),
+        ),
     }
+}
+
+/// `RALPH_HATS_SOURCE` env fallback — set by the loop runner for every
+/// hat subprocess, consumed here when the operator did not pass `-H`.
+fn hats_source_from_env() -> Option<crate::cli::HatsSource> {
+    let raw = std::env::var("RALPH_HATS_SOURCE").ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(crate::cli::HatsSource::parse(raw))
 }
 
 /// Resolve the hat id used for skill visibility. Returns `None` only
@@ -93,8 +147,9 @@ fn execute_load(
     ctx: &OperationContext,
     name: &str,
     config_sources: &[crate::cli::shared::ConfigSource],
+    hats_source: Option<&crate::cli::HatsSource>,
 ) -> Result<()> {
-    let registry = build_registry(root, config_sources)?;
+    let registry = build_registry(root, config_sources, hats_source)?;
     let hat_filter = resolve_skill_hat_filter(ctx)?;
 
     // Agent load: only allow skills visible to the current hat, and
@@ -139,8 +194,9 @@ fn execute_list(
     ctx: &OperationContext,
     args: ListArgs,
     config_sources: &[crate::cli::shared::ConfigSource],
+    hats_source: Option<&crate::cli::HatsSource>,
 ) -> Result<()> {
-    let registry = build_registry(root, config_sources)?;
+    let registry = build_registry(root, config_sources, hats_source)?;
     let hat_filter = resolve_skill_hat_filter(ctx)?;
     let mut skills = registry.skills_for_hat(hat_filter.as_deref());
     skills.sort_by_key(|skill| skill.name.clone());
@@ -193,11 +249,211 @@ fn execute_list(
     Ok(())
 }
 
+/// `ralph tools skill check` — evaluate the effective config's
+/// `skills.contract` against this environment and report every
+/// dependency's status. Exits non-zero when any `Error`-severity
+/// finding exists, matching the `ralph run` startup gate verdict
+/// (the gate runs the same evaluator in strict mode).
+fn execute_check(
+    root: &Path,
+    _ctx: &OperationContext,
+    args: CheckArgs,
+    config_sources: &[crate::cli::shared::ConfigSource],
+    hats_source: Option<&crate::cli::HatsSource>,
+) -> Result<()> {
+    use ralph_core::preset_lint::{LintSeverity, LintStrictness, evaluate_skill_contract};
+
+    // Load the config exactly the way `ralph run` does — including
+    // `-H` hat-collection merge — so the contract the gate enforces
+    // is the one this command verifies. The missing-default warning
+    // fires only when the operator explicitly pointed at a config
+    // file (`-c`): an implicit default `ralph.yml` is optional for
+    // this command (skill deps may be all-builtin), and warning to
+    // stdout would corrupt `--format json` output.
+    let warn_on_missing_default = config_sources
+        .iter()
+        .any(|s| matches!(s, crate::cli::shared::ConfigSource::File(_)));
+    let config = crate::preflight::load_config_for_preflight_sync_with_missing_default_warning(
+        config_sources,
+        hats_source,
+        root,
+        warn_on_missing_default,
+    )
+    .context("failed to load config for skill contract check")?;
+
+    let outcome = evaluate_skill_contract(&config, LintStrictness::Strict);
+    let error_count = outcome
+        .findings
+        .iter()
+        .filter(|f| f.severity == LintSeverity::Error)
+        .count();
+    let warn_count = outcome
+        .findings
+        .iter()
+        .filter(|f| f.severity == LintSeverity::Warn)
+        .count();
+
+    match args.format {
+        OutputFormat::Json => {
+            let report = CheckReport::from(&outcome);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        OutputFormat::Quiet => {
+            for status in &outcome.statuses {
+                println!(
+                    "{}\t{}",
+                    status.skill,
+                    if status.ok { "ok" } else { "fail" }
+                );
+            }
+        }
+        OutputFormat::Table => {
+            if outcome.statuses.is_empty() {
+                println!("No skills.contract declared — nothing to verify.");
+            } else {
+                println!(
+                    "{:<28} {:<8} {:<9} {:<10} {:<8} STATUS",
+                    "Skill", "Required", "Resolved", "Source", "Hats"
+                );
+                println!("{}", "-".repeat(80));
+                for status in &outcome.statuses {
+                    let source = if status.builtin {
+                        "builtin".to_string()
+                    } else {
+                        status
+                            .source_path
+                            .as_ref()
+                            .map(|p| crate::display::truncate(&p.display().to_string(), 10))
+                            .unwrap_or_else(|| "-".to_string())
+                    };
+                    println!(
+                        "{:<28} {:<8} {:<9} {:<10} {:<8} {}",
+                        crate::display::truncate(&status.skill, 28),
+                        status.required,
+                        status.resolved,
+                        source,
+                        status.hats.join(","),
+                        if status.ok { "ok" } else { "FAIL" },
+                    );
+                    if let Some(hash) = &status.content_hash {
+                        println!("    hash: {hash}");
+                    }
+                }
+            }
+            if !outcome.findings.is_empty() {
+                println!("\nFindings:");
+                for finding in &outcome.findings {
+                    let sev = match finding.severity {
+                        LintSeverity::Error => "err",
+                        LintSeverity::Warn => "warn",
+                        LintSeverity::Pass => "pass",
+                    };
+                    println!("  [{sev}] {} — {}", finding.id, finding.message);
+                    if let Some(hint) = &finding.action_hint {
+                        println!("       fix: {hint}");
+                    }
+                }
+            }
+            println!("\nsummary: {error_count} error(s), {warn_count} warning(s)");
+        }
+    }
+
+    if error_count > 0 {
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+/// Serializable `skill check` report for `--format json`.
+#[derive(Serialize)]
+struct CheckReport {
+    error_count: usize,
+    warning_count: usize,
+    deps: Vec<CheckDepRow>,
+    findings: Vec<CheckFindingRow>,
+}
+
+#[derive(Serialize)]
+struct CheckDepRow {
+    skill: String,
+    required: bool,
+    resolved: bool,
+    builtin: bool,
+    source_path: Option<String>,
+    content_hash: Option<String>,
+    hats: Vec<String>,
+    invisible_hats: Vec<String>,
+    missing_tools: Vec<String>,
+    missing_env: Vec<String>,
+    missing_files: Vec<String>,
+    risk_markers: Vec<String>,
+    ok: bool,
+}
+
+#[derive(Serialize)]
+struct CheckFindingRow {
+    id: String,
+    severity: String,
+    message: String,
+    hat: Option<String>,
+    action_hint: Option<String>,
+}
+
+impl From<&ralph_core::preset_lint::SkillContractOutcome> for CheckReport {
+    fn from(outcome: &ralph_core::preset_lint::SkillContractOutcome) -> Self {
+        let error_count = outcome
+            .findings
+            .iter()
+            .filter(|f| f.severity == ralph_core::preset_lint::LintSeverity::Error)
+            .count();
+        let warning_count = outcome
+            .findings
+            .iter()
+            .filter(|f| f.severity == ralph_core::preset_lint::LintSeverity::Warn)
+            .count();
+        Self {
+            error_count,
+            warning_count,
+            deps: outcome
+                .statuses
+                .iter()
+                .map(|s| CheckDepRow {
+                    skill: s.skill.clone(),
+                    required: s.required,
+                    resolved: s.resolved,
+                    builtin: s.builtin,
+                    source_path: s.source_path.as_ref().map(|p| p.display().to_string()),
+                    content_hash: s.content_hash.clone(),
+                    hats: s.hats.clone(),
+                    invisible_hats: s.invisible_hats.clone(),
+                    missing_tools: s.missing_tools.clone(),
+                    missing_env: s.missing_env.clone(),
+                    missing_files: s.missing_files.clone(),
+                    risk_markers: s.risk_markers.clone(),
+                    ok: s.ok,
+                })
+                .collect(),
+            findings: outcome
+                .findings
+                .iter()
+                .map(|f| CheckFindingRow {
+                    id: f.id.to_string(),
+                    severity: format!("{}", f.severity),
+                    message: f.message.clone(),
+                    hat: f.hat.clone(),
+                    action_hint: f.action_hint.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
 fn build_registry(
     root: &Path,
     config_sources: &[crate::cli::shared::ConfigSource],
+    hats_source: Option<&crate::cli::HatsSource>,
 ) -> Result<SkillRegistry> {
-    let config = load_config(root, config_sources);
+    let config = load_config(root, config_sources, hats_source);
     let active_backend = Some(config.cli.backend.as_str());
     SkillRegistry::from_config(&config.skills, root, active_backend)
         .context("Failed to build skill registry")
@@ -328,7 +584,6 @@ fn resolve_configured_skills_dir(root: &Path, dir: &Path) -> PathBuf {
 }
 
 /// Load config from workspace root, falling back to defaults.
-/// Load config from workspace root, falling back to defaults.
 ///
 /// 2026-07-13-001 plan U4 + review #C3: when the caller passes
 /// `config_sources` (e.g. `-c custom.yml` from the top-level CLI),
@@ -336,7 +591,21 @@ fn resolve_configured_skills_dir(root: &Path, dir: &Path) -> PathBuf {
 /// SSOT. With `config_sources` empty we still consult
 /// `RALPH_CONFIG` (via the SSOT helper) so agents inheriting the
 /// runner-injected env continue to work.
-fn load_config(root: &Path, config_sources: &[crate::cli::shared::ConfigSource]) -> RalphConfig {
+///
+/// 2026-10-30 skill contract spec: when a hats source is in effect
+/// (explicit `-H` or inherited `RALPH_HATS_SOURCE`), merge the hat
+/// overlay through the same `merge_hats_overlay` the `ralph run`
+/// loader uses — preset-declared `skills.dirs`/`overrides`/`contract`
+/// must be visible to `skill load`/`list`, otherwise the startup
+/// gate's verdict would diverge from what hats can actually load at
+/// runtime. Merge failures degrade with a warning instead of failing:
+/// `skill list`/`load` are read tools, and the gate already enforced
+/// the overlay could load before the loop started.
+fn load_config(
+    root: &Path,
+    config_sources: &[crate::cli::shared::ConfigSource],
+    hats_source: Option<&crate::cli::HatsSource>,
+) -> RalphConfig {
     let mut merged = match config_resolution::default_core_value() {
         Ok(value) => value,
         Err(_) => return RalphConfig::default(),
@@ -359,6 +628,32 @@ fn load_config(root: &Path, config_sources: &[crate::cli::shared::ConfigSource])
             merged = next;
         } else {
             return RalphConfig::default();
+        }
+    }
+
+    if let Some(source) = hats_source {
+        match crate::preflight::load_hats_value_sync(source) {
+            Ok(mut hats_value) => {
+                crate::preflight::anchor_preset_skill_dirs(&mut hats_value, source);
+                match crate::preflight::merge_hats_overlay(merged.clone(), hats_value) {
+                    Ok(next) => merged = next,
+                    Err(err) => {
+                        tracing::warn!(
+                            "skill registry: hats overlay merge failed ({}); \
+                             using unmerged config",
+                            err
+                        );
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "skill registry: could not load hats source '{}': {}; \
+                     using unmerged config",
+                    source.label(),
+                    err
+                );
+            }
         }
     }
 

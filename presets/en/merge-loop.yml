@@ -134,6 +134,22 @@ core:
     - "OPAC Confirm: `ralph events --events-source hat-channel`（单 emit）或 `--events-source main`（wave emit 写入主 ledger）."
     - "ABSOLUTE PROHIBITION: NEVER kill, signal, or terminate any `ralph` / `ralph-orchestrator` process — including `kill`, `pkill`, `killall`, `kill -9`, `kill -TERM`, `kill -HUP`, `taskkill`, or any equivalent process-control command targeting the loop's parent PID, the TUI subprocess PID recorded in `.ralph/loop.lock`, any PID listed in `.ralph/loops.json`, or any PID returned by `ps` / `pgrep` matching `ralph`. The currently running ralph IS the parent process of this very agent iteration — killing it ends the agent itself mid-thought and corrupts orchestration state (stale lock, in_progress tasks, lost events, partial commits). If the loop needs to restart to pick up new configuration, emit `loop.cancel`, surface a `merge.failed` / `MERGE_COMPLETE` with a clear reason, or instruct the human operator to run `ralph loops stop <loop_id>`. Stopping the orchestrator is the operator's decision, not the agent's."
 
+# Skill dependency contract (2026-10-30 preset skill contract spec): the
+# single source of truth for hat -> skill dependencies. Evaluated by
+# `ralph preset check`, `ralph preflight`, `ralph tools skill check`, and
+# the `ralph run` startup gate — a failing required dep blocks the loop
+# before any backend spawns.
+skills:
+  contract:
+    - skill: ralph-tools-emit
+      hats: [cleaner, failure_handler, merger, resolver, tester]
+      purpose: Emit discipline — `ralph emit --policy-check` OPAC precheck before every state-changing emit (per `ralph-tools` §5).
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded before the hat's first emit; the Policy-Check feedback applies to every emit."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+
 hats:
   merger:
     name: "Branch Merger"

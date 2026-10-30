@@ -786,6 +786,102 @@ pub const FINDING_RECOVERY_GUIDANCE_UNSAFE_ITEM: &str = "preset.recovery_guidanc
 /// mode, `Error` in strict.
 pub const FINDING_DUPLICATE_RULE_ID: &str = "preset.duplicate_rule_id";
 
+// ──────────────────────────────────────────────────────────────────────────
+// 2026-10-30 preset skill contract spec: skill dependency contract
+// finding IDs. `skills.contract` is the single source of truth for
+// "which hat needs which skill"; these findings cover declaration
+// shape, environment verification, unattended fit, and the
+// instruction-reference coverage audit.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// A `skills.contract` entry fails declaration-shape validation
+/// (empty `skill`, empty/unknown `hats`, empty `purpose`, optional
+/// dep without `missing_behavior`). Always `Error` — the declaration
+/// itself is unusable.
+pub const FINDING_SKILL_CONTRACT_INVALID: &str = "preset.skill_contract_invalid";
+
+/// `skills.contract_file` is declared but missing or unparseable.
+/// Always `Error` — a referenced contract that cannot be read is a
+/// broken single source of truth.
+pub const FINDING_SKILL_CONTRACT_FILE_ERROR: &str = "preset.skill_contract_file_error";
+
+/// The skill registry could not be built (bad `skills.dirs` etc.), so
+/// no dependency can be verified. Always `Error`.
+pub const FINDING_SKILL_CONTRACT_REGISTRY_ERROR: &str = "preset.skill_contract_registry_error";
+
+/// Instruction text (`hats.*.instructions` / `extra_instructions` /
+/// `core.guardrails`) references `skill load <name>` that no contract
+/// entry covers. `Warn` when the preset declares no contract at all;
+/// otherwise graded by strictness (`Error` at the `ralph run` gate).
+pub const FINDING_SKILL_CONTRACT_UNDECLARED_REFERENCE: &str =
+    "preset.skill_contract_undeclared_reference";
+
+/// A `required: true` contract dep does not resolve in the effective
+/// registry (built-ins + `skills.dirs`, overrides applied). Always
+/// `Error` — required deps never silently degrade.
+pub const FINDING_SKILL_REQUIRED_MISSING: &str = "preset.skill_required_missing";
+
+/// A `required: false` contract dep does not resolve. `Warn` — the
+/// optional dep falls back to its documented `missing_behavior`.
+pub const FINDING_SKILL_OPTIONAL_MISSING: &str = "preset.skill_optional_missing";
+
+/// `skills.enabled: false` while the contract still declares
+/// dependencies — no hat can load any skill at runtime. `Error` for
+/// required deps, `Warn` for optional.
+pub const FINDING_SKILL_SKILLS_DISABLED: &str = "preset.skill_skills_disabled";
+
+/// The resolved skill's `SkillSource` disagrees with the contract's
+/// `source:` constraint (e.g. `source: builtin` resolved to a file).
+/// `Error` for required deps, `Warn` for optional.
+pub const FINDING_SKILL_SOURCE_MISMATCH: &str = "preset.skill_source_mismatch";
+
+/// The skill resolves but a declared consuming hat cannot see it —
+/// the skill's effective `hats:`/`backends:` filter hides it, so the
+/// hat's `ralph tools skill load` call would be refused. `Error` for
+/// required deps, `Warn` for optional.
+pub const FINDING_SKILL_NOT_VISIBLE_TO_HAT: &str = "preset.skill_not_visible_to_hat";
+
+/// Contract declares `load: auto_inject` but the effective skill has
+/// `auto_inject: false` — the prompt injector would never deliver it.
+/// `Error` for required deps, `Warn` for optional.
+pub const FINDING_SKILL_AUTOINJECT_MISMATCH: &str = "preset.skill_autoinject_mismatch";
+
+/// A `requires.tools` executable is not found in `PATH`. `Error` for
+/// required deps, `Warn` for optional.
+pub const FINDING_SKILL_REQUIRES_TOOL_MISSING: &str = "preset.skill_requires_tool_missing";
+
+/// A `requires.env` variable is not set (presence only — values are
+/// never surfaced). `Error` for required deps, `Warn` for optional.
+pub const FINDING_SKILL_REQUIRES_ENV_MISSING: &str = "preset.skill_requires_env_missing";
+
+/// A `requires.files` companion file is missing under the workspace
+/// root. `Error` for required deps, `Warn` for optional.
+pub const FINDING_SKILL_REQUIRES_FILE_MISSING: &str = "preset.skill_requires_file_missing";
+
+/// A filesystem dep has no `unattended` declaration — presence on
+/// disk is not evidence of unattended fit. `Error` for required
+/// deps, `Warn` for optional.
+pub const FINDING_SKILL_UNATTENDED_UNDECLARED: &str = "preset.skill_unattended_undeclared";
+
+/// `unattended.status: needs_review` — the unattended-fit review was
+/// never completed. `Error` for required deps, `Warn` for optional.
+pub const FINDING_SKILL_UNATTENDED_UNVERIFIED: &str = "preset.skill_unattended_unverified";
+
+/// `unattended.status: interactive` — the skill inherently requires
+/// human interaction and cannot satisfy an unattended loop dep.
+/// `Error` for required deps, `Warn` for optional.
+pub const FINDING_SKILL_UNATTENDED_INTERACTIVE: &str = "preset.skill_unattended_interactive";
+
+/// `unattended.status: approved` on a filesystem skill without a
+/// `sha256:` `content_hash` — a self-declared flag is not evidence.
+/// `Error` for required deps, `Warn` for optional.
+pub const FINDING_SKILL_UNATTENDED_MISSING_HASH: &str = "preset.skill_unattended_missing_hash";
+
+/// `unattended.content_hash` no longer matches the resolved content —
+/// the skill changed since the approval, voiding it and forcing
+/// re-review. `Error` for required deps, `Warn` for optional.
+pub const FINDING_SKILL_UNATTENDED_STALE: &str = "preset.skill_unattended_stale";
+
 /// Inventory of every finding id in this module. Use this in tests
 /// that assert the lint surface does not silently re-introduce a
 /// serial-only or coordinator-loop finding. Plan 2026-07-07-006
@@ -867,4 +963,22 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_RECOVERY_GUIDANCE_EMPTY_ITEM,
     FINDING_RECOVERY_GUIDANCE_UNSAFE_ITEM,
     FINDING_DUPLICATE_RULE_ID,
+    FINDING_SKILL_CONTRACT_INVALID,
+    FINDING_SKILL_CONTRACT_FILE_ERROR,
+    FINDING_SKILL_CONTRACT_REGISTRY_ERROR,
+    FINDING_SKILL_CONTRACT_UNDECLARED_REFERENCE,
+    FINDING_SKILL_REQUIRED_MISSING,
+    FINDING_SKILL_OPTIONAL_MISSING,
+    FINDING_SKILL_SKILLS_DISABLED,
+    FINDING_SKILL_SOURCE_MISMATCH,
+    FINDING_SKILL_NOT_VISIBLE_TO_HAT,
+    FINDING_SKILL_AUTOINJECT_MISMATCH,
+    FINDING_SKILL_REQUIRES_TOOL_MISSING,
+    FINDING_SKILL_REQUIRES_ENV_MISSING,
+    FINDING_SKILL_REQUIRES_FILE_MISSING,
+    FINDING_SKILL_UNATTENDED_UNDECLARED,
+    FINDING_SKILL_UNATTENDED_UNVERIFIED,
+    FINDING_SKILL_UNATTENDED_INTERACTIVE,
+    FINDING_SKILL_UNATTENDED_MISSING_HASH,
+    FINDING_SKILL_UNATTENDED_STALE,
 ];

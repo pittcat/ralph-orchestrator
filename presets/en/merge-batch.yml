@@ -206,6 +206,46 @@ core:
     - "Stabilizer: publish merge.stabilized with passed: true ONLY when integration_complete was true AND verification passes. Publish merge.stabilized with passed: false when merge was incomplete, stabilization is exhausted (attempt ≥ 35), or verification cannot be fixed. Never publish merge.retest without updating stabilize-log and stabilize-state."
     - "Scope contract: integrator must write and validate .ralph/merge/scope-manifest.json before merge.integrated; downstream hats must preserve its digest and never upgrade unresolved scope evidence."
 
+# Skill dependency contract (2026-10-30 preset skill contract spec): the
+# single source of truth for hat -> skill dependencies. Evaluated by
+# `ralph preset check`, `ralph preflight`, `ralph tools skill check`, and
+# the `ralph run` startup gate — a failing required dep blocks the loop
+# before any backend spawns.
+skills:
+  contract:
+    - skill: ralph-tools-emit
+      hats: [integrator, reporter, reviewer, stabilizer]
+      purpose: Emit discipline — `ralph emit --policy-check` OPAC precheck before every state-changing emit (per `ralph-tools` §5).
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded before the hat's first emit; the Policy-Check feedback applies to every emit."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+    - skill: ralph-html
+      hats: [reporter]
+      purpose: Entry guidance for offline single-file HTML deliverables (offline/escaping rules).
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded before the hat writes its .html artifact."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+    - skill: ralph-html-design
+      hats: [reporter]
+      purpose: Design direction for the HTML deliverable.
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded with ralph-html before writing the .html artifact."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+    - skill: ralph-html-ref-documents-and-presentations
+      hats: [reporter]
+      purpose: Reference-document and presentation guidance for the HTML deliverable.
+      required: true
+      load: on_demand
+      source: builtin
+      when: "Loaded with ralph-html for long-form report artifacts."
+      install_hint: "Embedded in the ralph binary — no install needed; a resolution failure means `skills.overrides` or the registry is misconfigured."
+
 hats:
   reviewer:
     name: "Merge Reviewer"

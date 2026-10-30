@@ -136,6 +136,21 @@ pub(crate) fn default_core_value() -> Result<Value> {
             tasks.remove(Value::String("enabled".to_string()));
         }
 
+        // 2026-10-30 preset skill contract spec: strip
+        // `skills.enabled` for the same reason — the framework default
+        // `enabled: true` serialises as a concrete value, and the
+        // `skills` merge branch's operator-wins-when-declared rule
+        // would treat the placeholder as "operator declared" and
+        // silently drop a preset's `skills.enabled: false` opt-in.
+        // An operator's real declaration still wins (it comes from the
+        // merged user/project config, not this default layer).
+        if let Some(skills) = mapping
+            .get_mut(Value::String("skills".to_string()))
+            .and_then(|v| v.as_mapping_mut())
+        {
+            skills.remove(Value::String("enabled".to_string()));
+        }
+
         if let Some(telemetry) = mapping
             .get_mut(Value::String("telemetry".to_string()))
             .and_then(|v| v.as_mapping_mut())

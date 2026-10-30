@@ -68,6 +68,40 @@ ralph tools skill load ralph-tools | head -n 10
 
 ---
 
+## `ralph tools skill check`
+
+校验当前生效配置的 `skills.contract`（preset 技能依赖合同）在本环境是否全部可解。与 `ralph run` 启动门禁、`ralph preset check --strict` 运行同一评估器——此命令失败 = 启动门禁同样失败。
+
+> **真·全局选项**：`-c/--config`、`-H/--hats`、`-v/--verbose`、`--color`。
+> 合同来自 `-H` 指向的 preset（或 `-c` 配置），与 `ralph run` 的合并路径一致。
+
+**语法：**
+```bash
+ralph tools skill check [OPTIONS]
+```
+
+**参数：**
+
+| 参数 | 类型 | 必需 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `--format <FORMAT>` | enum | 否 | `table` | `table` / `json` / `quiet`（每行 `skill<TAB>ok|fail`） |
+
+**输出（table）**：每条依赖的 `Required / Resolved / Source / Hats / STATUS` + `lint.preset.skill_*` finding（含 `action_hint` 修复指引）+ error/warn 汇总。`--format json` 输出 `CheckReport`（`deps[]` 含 `invisible_hats` / `missing_tools` / `missing_env` / `missing_files` / `risk_markers` / `content_hash`）。
+
+**退出码**：任一 Error-severity finding → `2`（与启动门禁同判）；全部通过 → `0`。
+
+**反模式 / 注意事项：**
+- 🔴 「同名文件存在于机器别处」**不满足**依赖——必须在生效 registry（`skills.dirs` + overrides）中可解析、对声明 hat 可见。
+- 🔴 文件系统 skill 的 `unattended.status: approved` 需 `content_hash` 与当前内容匹配；skill 改动后 hash 失效，需重新评审适配。
+- 修复后重跑本命令即为复检路径。
+
+**校验：**
+```bash
+ralph tools skill check -H presets/en/plan-executor-pipeline.yml --format json
+```
+
+---
+
 ## `ralph run`
 
 启动主编排循环。

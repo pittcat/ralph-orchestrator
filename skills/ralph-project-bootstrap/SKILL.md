@@ -203,6 +203,18 @@ rolls every target back to its pre-write state.
    `preflight --strict` → `ralph run --dry-run`, every argv carrying
    `-c ralph.<stem>.yml -H <preset>`. A blocker skips the tail stages
    with typed evidence (see Static Validation below).
+   - **Skill dependency contract (2026-10-30 spec)**: `preset check
+     --strict` already evaluates the preset's `skills.contract`
+     (missing/disabled/hidden required deps are `lint.preset.skill_*`
+     errors). For the operator-facing dependency inventory — especially
+     filesystem skills needing `unattended` approval or `requires.*`
+     tools/env/files — run `ralph tools skill check -H <preset>` on the
+     resolved suite and surface every non-`ok` row in the handoff as an
+     unresolved precondition: what to install (the entry's
+     `install_hint`), what inputs to supply, or what unattended
+     adaptation is pending (`status: needs_review` / stale
+     `content_hash` / `status: interactive`). The same command is the
+     documented recheck entry after the operator fixes a dep.
 5. **smoke (authorized replay only)** — authorization compares the
    preset's RESOLVED backend (`cli.backend`) against
    `content_fixed_replay` BEFORE any subprocess is constructed. Only a

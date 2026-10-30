@@ -1151,7 +1151,11 @@ fn ensure_directory(path: &Path, created: &mut Vec<String>) -> anyhow::Result<()
     Ok(())
 }
 
-fn find_executable(command: &str) -> Option<PathBuf> {
+/// `pub(crate)` so the skill-contract evaluator (`preset_lint::
+/// skill_contract`) can verify `requires.tools` with the same
+/// executable-resolution rules preflight uses — a single definition
+/// keeps the two checks from diverging.
+pub(crate) fn find_executable(command: &str) -> Option<PathBuf> {
     let path = Path::new(command);
     if path.components().count() > 1 {
         return if path.is_file() {
