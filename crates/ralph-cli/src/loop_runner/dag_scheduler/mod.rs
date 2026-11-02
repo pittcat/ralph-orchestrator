@@ -570,8 +570,8 @@ impl DagSchedulerRuntime {
                         );
                         continue;
                     };
-                    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None) {
-                        Ok(()) | Err(nix::errno::Errno::EPERM) => {
+                    match ralph_core::pid_probe::probe_pid(pid) {
+                        ralph_core::pid_probe::PidState::Alive => {
                             let timeout = self
                                 .exec
                                 .as_ref()
@@ -589,10 +589,10 @@ impl DagSchedulerRuntime {
                                 );
                             }
                         }
-                        Err(nix::errno::Errno::ESRCH) => {
+                        ralph_core::pid_probe::PidState::Dead => {
                             self.settle_recovered_dead_job(&job.identity);
                         }
-                        Err(_) => {
+                        ralph_core::pid_probe::PidState::Unknown => {
                             self.block_plan(
                                 &plan_key,
                                 "recovered job liveness probe was inconclusive",

@@ -1178,7 +1178,7 @@ fn collect_slot_pids(store: &dyn ralph_core::supervisor::SupervisorStore) -> Vec
 /// configured, so the JSON is always present and
 /// machine-parseable.
 pub fn compute_supervisor_state(workspace_root: &Path) -> SupervisorStateSummary {
-    let db_path = workspace_root.join(".ralph/supervisor.db");
+    let db_path = workspace_root.join(".ralph").join("supervisor.db");
     let db_path_str = db_path.display().to_string();
 
     #[cfg(feature = "supervisor-db")]

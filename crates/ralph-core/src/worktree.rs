@@ -973,10 +973,13 @@ pub fn clean_worktree_runtime_artifacts(
         crate::parallel_forge_resume::write_manifest(&manifest, &archive_dir)?;
     }
 
+    // Render the relative path with `/` — it lands in an agent-facing
+    // markdown file where forward slashes read portably on every OS.
     let archive_relative = archive_dir
         .strip_prefix(worktree_path)
         .unwrap_or(&archive_dir)
-        .to_string_lossy();
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
     fs::write(
         agent_dir.join("resume-context.md"),
         format!(
@@ -1087,6 +1090,22 @@ fn copy_file_with_structure(
             }
             unix_fs::symlink(&link_target, &dest)?;
             return Ok(true);
+        }
+    }
+
+    // Handle symlinks on Windows: recreate as a symlink when permitted,
+    // otherwise fall through to a content copy (same net result as
+    // copying through the link).
+    #[cfg(windows)]
+    {
+        if source.is_symlink() {
+            let link_target = fs::read_link(&source)?;
+            if dest.exists() || dest.is_symlink() {
+                fs::remove_file(&dest)?;
+            }
+            if std::os::windows::fs::symlink_file(&link_target, &dest).is_ok() {
+                return Ok(true);
+            }
         }
     }
 

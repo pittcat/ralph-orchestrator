@@ -338,7 +338,27 @@ fn is_executable_file(path: &Path) -> bool {
 
     #[cfg(not(unix))]
     {
-        true
+        // Windows has no mode bits; a file is spawnable when its extension
+        // is in PATHEXT or maps to a known interpreter (pwsh/bash/python).
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase());
+        if matches!(ext.as_deref(), Some("ps1" | "sh" | "bash" | "py")) {
+            return true;
+        }
+        let pathext =
+            std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+        pathext
+            .split(';')
+            .filter(|e| !e.trim().is_empty())
+            .any(|e| {
+                Some(
+                    e.trim()
+                        .trim_start_matches('.')
+                        .to_ascii_lowercase()
+                        .as_str(),
+                ) == ext.as_deref()
+            })
     }
 }
 

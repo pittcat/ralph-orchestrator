@@ -9,6 +9,7 @@ members = [
     "crates/ralph-bench",
     "crates/ralph-e2e",
     "crates/ralph-api",
+    "xtask",
 ]
 exclude = [
     ".eval-sandbox",  # Evaluation sandbox - should never be in workspace
@@ -147,6 +148,11 @@ strip-ansi-escapes = "0.2"
 # Cross-platform process tree enumeration for reliable cleanup
 sysinfo = "0.33"
 
+# Windows support (plan 2026-10-29-1330): safe-wrappers only, no unsafe.
+which = "7"
+dunce = "1"
+junction = "1"
+
 # Internal crates (version required for crates.io publishing)
 ralph-proto = { version = "0.1.0", path = "crates/ralph-proto" }
 ralph-core = { version = "0.1.0", path = "crates/ralph-core", features = ["recording"] }
@@ -162,10 +168,9 @@ ralph-api = { version = "0.1.0", path = "crates/ralph-api" }
 # CI backends to support
 ci = "github"
 # Target platforms to build apps for (Rust target-triple syntax)
-# Windows excluded: Ralph requires Unix PTY and signal handling
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # The installers to generate for each app
-installers = ["shell", "npm"]
+installers = ["shell", "powershell", "npm"]
 # npm package scope (creates @ralph-orchestrator/ralph)
 npm-scope = "@ralph-orchestrator"
 # Publish jobs to run in CI

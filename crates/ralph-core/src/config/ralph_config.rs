@@ -4038,7 +4038,7 @@ event_loop:
   event_policy:
     enabled: true
     mode: observe
-    schema_file: "{}"
+    schema_file: '{}'
 "#,
             schema_path.display()
         );

@@ -697,7 +697,11 @@ fn identity_paths_match(recorded: &str, expected: &str) -> bool {
 
     let recorded = Path::new(recorded);
     let expected = Path::new(expected);
-    match (recorded.is_absolute(), expected.is_absolute()) {
+    // `/repo/...` is POSIX-absolute even though Windows
+    // `Path::is_absolute` ignores it (no drive prefix) — the
+    // parent/child boundary emits this shape on every OS.
+    let is_abs = |p: &Path| p.is_absolute() || p.to_string_lossy().starts_with(['/', '\\']);
+    match (is_abs(recorded), is_abs(expected)) {
         (true, false) => recorded.ends_with(expected),
         (false, true) => expected.ends_with(recorded),
         _ => false,
@@ -932,11 +936,17 @@ fn relativize_artifact_path(raw: &str, worktree_path: &Path) -> Option<String> {
         return canonical_raw
             .strip_prefix(&canonical_worktree)
             .ok()
-            .map(|rel| rel.to_string_lossy().into_owned());
+            .map(|rel| {
+                rel.to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/")
+            });
     }
     for prefix in [&canonical_worktree, worktree_path] {
         if let Ok(rel) = path.strip_prefix(prefix) {
-            return Some(rel.to_string_lossy().into_owned());
+            return Some(
+                rel.to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/"),
+            );
         }
     }
     None

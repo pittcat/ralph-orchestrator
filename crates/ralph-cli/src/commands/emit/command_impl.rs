@@ -670,11 +670,31 @@ fn write_cli_emit_recovery_envelope(
 
 pub fn emit_command(
     color_mode: ColorMode,
-    args: EmitArgs,
+    mut args: EmitArgs,
     hats_source: Option<&HatsSource>,
     config_sources: &[ConfigSource],
     config_was_explicit: bool,
 ) -> Result<()> {
+    // `--payload-file` (or `-` for stdin) resolves before everything
+    // else so downstream sees a plain `args.payload`.
+    if let Some(path) = args.payload_file.clone() {
+        use anyhow::Context;
+        if !args.payload.is_empty() {
+            anyhow::bail!("--payload-file conflicts with a positional payload argument");
+        }
+        args.payload = if path.as_os_str() == "-" {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin()
+                .lock()
+                .read_to_string(&mut buf)
+                .context("failed to read payload from stdin")?;
+            buf
+        } else {
+            std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read payload file {}", path.display()))?
+        };
+    }
     emit_command_with_root_and_hats(
         color_mode,
         args,

@@ -487,7 +487,12 @@ fn backend_check_name(backend: &str, command: &str) -> String {
 }
 
 fn command_version_ok(command: &str) -> bool {
-    Command::new(command)
+    // `spawn_program` resolves via `which`/PATHEXT on Windows so npm
+    // `.cmd` shims are probed correctly (`Command::new("claude")` would
+    // only try `claude.exe` through CreateProcess).
+    let (program, arg_prefix) = ralph_core::shell::spawn_program(command);
+    Command::new(program)
+        .args(arg_prefix)
         .arg("--version")
         .output()
         .map(|output| output.status.success())

@@ -123,7 +123,7 @@ pub fn validate_allowed_path(rule: &str) -> Result<(), PathError> {
     if rule.is_empty() {
         return Err(PathError::Empty);
     }
-    if rule.starts_with('/') {
+    if rule.starts_with('/') || std::path::Path::new(rule).is_absolute() {
         return Err(PathError::Absolute);
     }
     if rule.contains('\\') {

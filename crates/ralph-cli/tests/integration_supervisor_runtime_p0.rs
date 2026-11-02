@@ -287,7 +287,7 @@ impl SupervisorP0Fixture {
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
             .arg(format!(
-                "(env -0 > {}) && exit {}",
+                "(env -0 > '{}') && exit {}",
                 echo_target.display(),
                 exit_code
             ))

@@ -74,6 +74,43 @@ jobs:
   # Clippy and Format checks also run in lint.yml on fork PRs
   # (pull_request_target, no secrets needed for fmt-only)
 
+  # Windows gate (plan 2026-10-29-1330): keeps the cfg(windows)
+  # branches compiling and warning-free on x86_64-pc-windows-msvc, and
+  # runs a targeted nextest subset covering the Windows-specific
+  # runtime surface (platform matrix, ConPTY lifecycle/stdin, shell
+  # resolution, env policy). Full-workspace nextest stays Linux-only —
+  # it costs ~25 min on Windows runners for near-zero marginal signal.
+  windows-check:
+    name: Windows check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Check workspace compiles on Windows
+        run: cargo check --workspace --all-targets
+      - name: Clippy on Windows
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        continue-on-error: true
+      # tool-version must match mise.toml `"cargo:cargo-nextest"` pin.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+        with:
+          tool-version: 0.9.140
+      # Windows runners ship Git for Windows (bash/cat under
+      # `C:\Program Files\Git`) and PowerShell 7, which the matrix and
+      # PTY tests resolve through the same PATH chain as production.
+      - name: Windows platform matrix tests
+        run: cargo nextest run -p ralph-core --test windows_platform_matrix
+      - name: Windows PTY + env policy tests
+        run: |
+          cargo nextest run -p ralph-adapters -E 'test(/stdin_eof_windows|stdin_native_line_reader/)'
+          cargo nextest run -p ralph-cli --bin ralph -E 'test(/pty_job_completes_and_delivers_stdin_on_windows|loop_runner::runtime_job::environment/)'
+
   web-tests:
     name: Web Tests
     runs-on: ubuntu-latest

@@ -109,7 +109,7 @@ pub(crate) fn prepare_normal_merge(
         Err(first_err) => {
             let channel_still_present = channel_path.as_deref().is_some_and(|path| path.exists());
             if pre_bytes.unwrap_or(0) > 0 && channel_still_present {
-                #[cfg(test)]
+                #[cfg(all(test, unix))]
                 run_merge_retry_test_hook();
                 match merge_once() {
                     Ok(()) => {
@@ -249,17 +249,17 @@ pub(crate) fn write_activation_outcome_for_normal_merge(
     );
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 std::thread_local! {
     static MERGE_RETRY_TEST_HOOK: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn set_merge_retry_test_hook(hook: Option<fn()>) {
     MERGE_RETRY_TEST_HOOK.with(|cell| cell.set(hook));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn run_merge_retry_test_hook() {
     MERGE_RETRY_TEST_HOOK.with(|cell| {
         if let Some(hook) = cell.get() {

@@ -35,7 +35,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read};
+#[cfg(unix)]
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -175,7 +177,11 @@ impl LoopEntry {
 
     #[cfg(not(unix))]
     pub fn is_alive(&self) -> bool {
-        // On non-Unix platforms, check worktree existence at minimum
+        if !crate::pid_probe::pid_alive(self.pid) {
+            return false;
+        }
+        // Match the Unix branch: a worktree loop whose directory vanished
+        // is a zombie even if the PID is still alive.
         if let Some(ref wt_path) = self.worktree_path {
             return std::path::Path::new(wt_path).is_dir();
         }
@@ -198,7 +204,7 @@ impl LoopEntry {
 
     #[cfg(not(unix))]
     pub fn is_pid_alive(&self) -> bool {
-        true
+        crate::pid_probe::pid_alive(self.pid)
     }
 }
 
@@ -233,6 +239,7 @@ pub enum RegistryError {
 /// Provides thread-safe registration and discovery of running loops.
 pub struct LoopRegistry {
     /// Path to the registry file.
+    #[cfg_attr(not(unix), allow(dead_code))]
     registry_path: PathBuf,
 }
 
@@ -366,11 +373,49 @@ impl LoopRegistry {
     }
 
     #[cfg(not(unix))]
-    fn with_lock<F>(&self, _f: F) -> Result<(), RegistryError>
+    fn with_lock<F>(&self, f: F) -> Result<(), RegistryError>
     where
         F: FnOnce(&mut RegistryData),
     {
-        Err(RegistryError::UnsupportedPlatform)
+        // Windows: lock a `.guard` sidecar and read/write the registry
+        // through plain handles — the registry file itself is never
+        // locked, so concurrent readers never hit mandatory-lock errors.
+        if let Some(parent) = self.registry_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let mut guard_os = self.registry_path.as_os_str().to_os_string();
+        guard_os.push(".guard");
+        let guard = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&guard_os)?;
+        guard.lock()?;
+
+        let mut contents = String::new();
+        if let Ok(mut file) = File::open(&self.registry_path) {
+            file.read_to_string(&mut contents)?;
+        }
+        let mut data: RegistryData = if contents.trim().is_empty() {
+            RegistryData::default()
+        } else {
+            serde_json::from_str(&contents).map_err(|e| RegistryError::ParseError(e.to_string()))?
+        };
+
+        // Clean stale entries before any operation (dead PIDs only);
+        // zombie worktree entries (PID alive, worktree gone) stay so
+        // callers can still discover and explicitly stop/clean them.
+        data.loops.retain(|e| e.is_pid_alive());
+
+        f(&mut data);
+
+        let json = serde_json::to_string_pretty(&data)
+            .map_err(|e| RegistryError::ParseError(e.to_string()))?;
+        fs::write(&self.registry_path, json)?;
+
+        Ok(())
     }
 
     /// Reads registry data from a locked file.

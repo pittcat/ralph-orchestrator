@@ -333,7 +333,8 @@ pub fn extract_readable_delta(line: &str, output_format: BackendOutputFormat) ->
 /// off-spec `"type"` field instead of `"topic"`.  Without this
 /// normalization step, the aggregator would silently drop those events.
 pub fn read_worker_events(path: &Path) -> Vec<ralph_core::Event> {
-    let Ok(content) = fs::read_to_string(path) else {
+    // Tolerate UTF-8 BOM / UTF-16 (agent-written files on Windows shells).
+    let Ok(content) = ralph_core::read_file_text(path) else {
         return Vec::new();
     };
 

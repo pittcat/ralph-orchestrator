@@ -151,7 +151,8 @@ fn check_node_with(node_cmd: &OsStr) -> Result<String> {
 
 /// Check that npm is installed and working. Returns the version string.
 fn check_npm_with(npm_cmd: &OsStr) -> Result<String> {
-    let output = run_command_with_retry(npm_cmd, &["--version"]).map_err(|_| {
+    let npm_cmd = ralph_core::shell::resolve_exe(&npm_cmd.to_string_lossy());
+    let output = run_command_with_retry(&npm_cmd, &["--version"]).map_err(|_| {
         anyhow::anyhow!(
             "npm is not installed or not in PATH.\n\
              npm should come with Node.js. Try reinstalling Node: https://nodejs.org/"
@@ -351,13 +352,16 @@ async fn preflight_with(
 }
 
 async fn preflight(root: &Path, backend_dir: &Path, legacy_node_api: bool) -> Result<()> {
+    // `resolve_exe` is a no-op on Unix; on Windows it resolves through
+    // which/PATHEXT so `npm.cmd`/`npx.cmd` shims spawn correctly (bare
+    // `Command::new("npm")` only probes `<name>.exe`).
     preflight_with(
         root,
         backend_dir,
         legacy_node_api,
-        OsStr::new("node"),
-        OsStr::new("npm"),
-        OsStr::new("npx"),
+        &ralph_core::shell::resolve_exe("node"),
+        &ralph_core::shell::resolve_exe("npm"),
+        &ralph_core::shell::resolve_exe("npx"),
     )
     .await
 }
@@ -431,7 +435,7 @@ async fn execute_monitor(args: &WebArgs, workspace_root: &Path) -> Result<()> {
     check_port_available(args.backend_port)?;
 
     let dist_dir = workspace_root.join("frontend/ralph-web/dist");
-    let mut monitor = AsyncCommand::new("npm")
+    let mut monitor = AsyncCommand::new(ralph_core::shell::resolve_exe("npm"))
         .args(["run", "start", "-w", "@ralph-monitor/server"])
         .current_dir(workspace_root)
         .env("RALPH_MONITOR_PORT", args.backend_port.to_string())
@@ -441,6 +445,11 @@ async fn execute_monitor(args: &WebArgs, workspace_root: &Path) -> Result<()> {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .context("Failed to start monitor server. Is npm installed and deps set up?")?;
+
+    #[cfg(windows)]
+    let _monitor_kill_job = monitor
+        .raw_handle()
+        .and_then(ralph_core::pid_probe::assign_handle_to_kill_job);
 
     let stdout = monitor.stdout.take().expect("monitor stdout piped");
     let stderr = monitor.stderr.take().expect("monitor stderr piped");
@@ -489,6 +498,25 @@ async fn execute_monitor(args: &WebArgs, workspace_root: &Path) -> Result<()> {
             sigterm.recv().await;
             println!("\nReceived SIGTERM, shutting down monitor...");
             let _ = shutdown_tx_sigterm.send(true);
+        });
+    }
+    #[cfg(windows)]
+    {
+        let shutdown_tx_close = shutdown_tx.clone();
+        tokio::spawn(async move {
+            if let Ok(mut s) = tokio::signal::windows::ctrl_close() {
+                s.recv().await;
+                println!("\nReceived console close, shutting down monitor...");
+                let _ = shutdown_tx_close.send(true);
+            }
+        });
+        let shutdown_tx_break = shutdown_tx.clone();
+        tokio::spawn(async move {
+            if let Ok(mut s) = tokio::signal::windows::ctrl_break() {
+                s.recv().await;
+                println!("\nReceived Ctrl+Break, shutting down monitor...");
+                let _ = shutdown_tx_break.send(true);
+            }
         });
     }
 
@@ -555,7 +583,7 @@ pub async fn execute(args: WebArgs) -> Result<()> {
     };
 
     let mut backend = if args.legacy_node_api {
-        AsyncCommand::new("npm")
+        AsyncCommand::new(ralph_core::shell::resolve_exe("npm"))
             .args(["run", "dev"])
             .current_dir(&backend_dir)
             .env("RALPH_WORKSPACE_ROOT", &workspace_root)
@@ -587,8 +615,15 @@ pub async fn execute(args: WebArgs) -> Result<()> {
             })?
     };
 
+    // Windows: both dev servers are bound to KILL_ON_JOB_CLOSE jobs so a
+    // `ralph web` crash cannot orphan them holding the ports.
+    #[cfg(windows)]
+    let _backend_kill_job = backend
+        .raw_handle()
+        .and_then(ralph_core::pid_probe::assign_handle_to_kill_job);
+
     // Pass --port for Vite and RALPH_BACKEND_PORT for proxy config.
-    let mut frontend = AsyncCommand::new("npm")
+    let mut frontend = AsyncCommand::new(ralph_core::shell::resolve_exe("npm"))
         .args([
             "run",
             "dev",
@@ -608,6 +643,11 @@ pub async fn execute(args: WebArgs) -> Result<()> {
                 e
             )
         })?;
+
+    #[cfg(windows)]
+    let _frontend_kill_job = frontend
+        .raw_handle()
+        .and_then(ralph_core::pid_probe::assign_handle_to_kill_job);
 
     // Take ownership of stdout/stderr pipes.
     let backend_stdout = backend.stdout.take().expect("backend stdout piped");
@@ -714,6 +754,34 @@ pub async fn execute(args: WebArgs) -> Result<()> {
         });
     }
 
+    #[cfg(windows)]
+    {
+        let shutdown_tx_close = shutdown_tx.clone();
+        tokio::spawn(async move {
+            if let Ok(mut s) = tokio::signal::windows::ctrl_close() {
+                s.recv().await;
+                println!("\nReceived console close, shutting down servers...");
+                let _ = shutdown_tx_close.send(true);
+            }
+        });
+        let shutdown_tx_break = shutdown_tx.clone();
+        tokio::spawn(async move {
+            if let Ok(mut s) = tokio::signal::windows::ctrl_break() {
+                s.recv().await;
+                println!("\nReceived Ctrl+Break, shutting down servers...");
+                let _ = shutdown_tx_break.send(true);
+            }
+        });
+        let shutdown_tx_shutdown = shutdown_tx.clone();
+        tokio::spawn(async move {
+            if let Ok(mut s) = tokio::signal::windows::ctrl_shutdown() {
+                s.recv().await;
+                println!("\nReceived system shutdown, shutting down servers...");
+                let _ = shutdown_tx_shutdown.send(true);
+            }
+        });
+    }
+
     // Wait for shutdown signal or server exit
     tokio::select! {
         _ = shutdown_rx.changed() => {
@@ -775,6 +843,11 @@ async fn terminate_gracefully(child: &mut Child, grace_period: Duration) {
 /// Gracefully terminate a child process (non-Unix fallback using start_kill)
 #[cfg(not(unix))]
 async fn terminate_gracefully(child: &mut Child, _grace_period: Duration) {
+    // Kill the whole tree: npm/node spawn grandchildren (vite, tsc) that
+    // would otherwise orphan and keep ports 3000/5173 bound.
+    if let Some(pid) = child.id() {
+        crate::cli::process_tree::kill_process_tree(pid, true);
+    }
     let _ = child.start_kill();
     let _ = child.wait().await;
 }
@@ -784,6 +857,7 @@ mod tests {
     use super::*;
     use std::ffi::OsStr;
     use std::net::TcpListener;
+    #[cfg(unix)]
     use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::TempDir;

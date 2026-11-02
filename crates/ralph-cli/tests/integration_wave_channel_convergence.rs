@@ -64,6 +64,10 @@
 //! - No `sleep`. All waits are event-polled (`wait_for_file` /
 //!   `wait_for_event`) with a bounded deadline (5 s default).
 
+// The fake workers are bash scripts + `os::unix` permissions; the whole
+// scenario matrix is a Unix harness. Skip compiling on Windows.
+#![cfg(unix)]
+
 mod common;
 
 use common::scrub_agent_runtime_env;

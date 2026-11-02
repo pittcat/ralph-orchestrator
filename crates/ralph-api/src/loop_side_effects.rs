@@ -16,7 +16,11 @@ pub fn spawn_retry_merge_flow(
     ralph_command: &str,
     loop_id: &str,
 ) -> Result<(), ApiError> {
-    let status = Command::new(ralph_command)
+    // `spawn_program` resolves `.cmd` shims / script interpreters on
+    // Windows; on Unix it returns the command verbatim.
+    let (program, arg_prefix) = ralph_core::shell::spawn_program(ralph_command);
+    let status = Command::new(program)
+        .args(arg_prefix)
         .args(["loops", "retry", loop_id])
         .current_dir(workspace_root)
         .status()

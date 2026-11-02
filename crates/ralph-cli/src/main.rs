@@ -234,7 +234,6 @@ fn read_telemetry_write_artifacts(ralph_yml_path: &std::path::Path) -> bool {
 #[tokio::main]
 async fn main() -> Result<()> {
     install_panic_hook();
-
     let cli = Cli::parse();
 
     let tui_enabled = match &cli.command {
@@ -785,6 +784,7 @@ mod tests {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         }));
         assert!(!is_diagnostics_eligible_command(command.as_ref()));
     }

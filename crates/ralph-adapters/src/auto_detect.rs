@@ -76,7 +76,9 @@ impl std::error::Error for NoBackendError {}
 /// "traecli" backend uses "trae-cli" command).
 pub fn is_backend_available(backend: &str) -> bool {
     let command = detection_command(backend);
-    let result = Command::new(command).arg("--version").output();
+    let (program, arg_prefix) = ralph_core::shell::spawn_program(command);
+    let mut cmd = Command::new(&program);
+    let result = cmd.args(arg_prefix).arg("--version").output();
 
     match result {
         Ok(output) => {

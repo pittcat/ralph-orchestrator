@@ -337,7 +337,9 @@ impl PtyExecutor {
             self.backend.build_command(prompt, self.config.interactive)
         };
 
-        let mut cmd_builder = CommandBuilder::new(&cmd);
+        let (resolved_cmd, arg_prefix) = ralph_core::shell::spawn_program(&cmd);
+        let mut cmd_builder = CommandBuilder::new(&resolved_cmd);
+        cmd_builder.args(&arg_prefix);
         cmd_builder.args(&args);
 
         // Set explicit working directory from config (captured at startup to avoid
@@ -401,7 +403,25 @@ impl PtyExecutor {
             .try_clone_reader()
             .map_err(|e| io::Error::other(e.to_string()))?;
 
-        // Write stdin input if present (for stdin prompt mode)
+        // Write stdin input if present (for stdin prompt mode).
+        //
+        // Unix: the writer is dropped right after the write — the child
+        // sees stdin EOF (original semantics; the dup'd reader keeps the
+        // master fd alive independently).
+        //
+        // Windows: the writer is the sole write end of the ConPTY input
+        // pipe — dropping it ends the whole pseudo-console session
+        // (children die with 0xC0000142), so it must be retained until
+        // this function returns. `\r` is the Enter keystroke ConPTY
+        // delivers; `\n` alone does not complete a line for native
+        // cooked-mode readers (cygwin maps CR→NL either way). There is
+        // no native stdin-EOF channel under ConPTY (raw input mode; ^Z
+        // is a literal char), so we append `\x04` (EOT): cygwin/MSYS
+        // children implement POSIX VEOF in their console layer and exit
+        // cleanly, native readers that only need the prompt line simply
+        // never consume the byte. Do NOT send ^Z — cygwin maps it to
+        // SIGTSTP and flushes pending input, breaking the EOT path.
+        #[cfg(unix)]
         if let Some(ref input) = stdin_input {
             // Small delay to let process initialize
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -413,6 +433,22 @@ impl PtyExecutor {
             writer.write_all(b"\n")?;
             writer.flush()?;
         }
+        #[cfg(windows)]
+        let _stdin_writer = if let Some(ref input) = stdin_input {
+            // Small delay to let process initialize
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut writer = pair
+                .master
+                .take_writer()
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            writer.write_all(input.as_bytes())?;
+            writer.write_all(b"\r")?;
+            writer.write_all(b"\x04")?;
+            writer.flush()?;
+            Some(writer)
+        } else {
+            None
+        };
 
         // Drop the slave to signal EOF when master closes
         drop(pair.slave);
@@ -495,6 +531,13 @@ impl PtyExecutor {
             }
         });
 
+        // Windows: wake the loop when the child pid dies — a ConPTY host
+        // that outlives the client never EOFs the output pipe, so output
+        // events alone cannot detect a silent exit. See `child_exit_watcher`.
+        // `child_exited` guards re-polling the completed oneshot future.
+        let mut child_exit = std::pin::pin!(child_exit_watcher(child.process_id()));
+        let mut child_exited = false;
+
         // Main event loop using tokio::select! for interruptibility
         loop {
             // Calculate timeout for idle check
@@ -517,6 +560,12 @@ impl PtyExecutor {
                         let _ = self.terminate_child(&mut child, true).await;
                         break;
                     }
+                }
+
+                // Child pid died (Windows ConPTY hosts may not EOF the
+                // output pipe). Fall through to the `try_wait` check below.
+                _ = &mut child_exit, if !child_exited => {
+                    child_exited = true;
                 }
 
                 // Check for output from reader thread
@@ -708,7 +757,17 @@ impl PtyExecutor {
             .try_clone_reader()
             .map_err(|e| io::Error::other(e.to_string()))?;
 
-        // Write stdin input if present (for stdin prompt mode)
+        // Write stdin input if present (for stdin prompt mode). See the
+        // matching note in `run`: Unix drops the writer after the write
+        // (delivering EOF as before); Windows retains it for the session
+        // lifetime, terminates the prompt line with `\r` (the Enter
+        // keystroke ConPTY delivers — `\n` alone does not complete a
+        // line for native cooked-mode readers) and appends `\x04` (EOT)
+        // — the only EOF channel that exists under ConPTY, honored by
+        // cygwin/MSYS readers. Do NOT append ^Z: it is a literal char
+        // for native readers and maps to SIGTSTP + input flush for
+        // cygwin readers.
+        #[cfg(unix)]
         if let Some(ref input) = stdin_input {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let mut writer = pair
@@ -719,6 +778,21 @@ impl PtyExecutor {
             writer.write_all(b"\n")?;
             writer.flush()?;
         }
+        #[cfg(windows)]
+        let _stdin_writer = if let Some(ref input) = stdin_input {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut writer = pair
+                .master
+                .take_writer()
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            writer.write_all(input.as_bytes())?;
+            writer.write_all(b"\r")?;
+            writer.write_all(b"\x04")?;
+            writer.flush()?;
+            Some(writer)
+        } else {
+            None
+        };
 
         drop(pair.slave);
 
@@ -800,6 +874,11 @@ impl PtyExecutor {
             }
         });
 
+        // See `run_observe`: on Windows a ConPTY host may outlive the
+        // client without EOFing the output pipe, so watch the pid too.
+        let mut child_exit = std::pin::pin!(child_exit_watcher(child.process_id()));
+        let mut child_exited = false;
+
         // Main event loop with JSON line parsing
         loop {
             let idle_timeout = timeout_duration.map(|d| {
@@ -820,6 +899,11 @@ impl PtyExecutor {
                         let _ = self.terminate_child(&mut child, true).await;
                         break;
                     }
+                }
+
+                // Child pid died — fall through to `try_wait` below.
+                _ = &mut child_exit, if !child_exited => {
+                    child_exited = true;
                 }
 
                 event = output_rx.recv() => {
@@ -1494,14 +1578,25 @@ impl PtyExecutor {
         };
 
         // Write stdin input after threads are spawned (so we capture any output)
-        // Give Claude's TUI a moment to initialize before sending the prompt
+        // Give Claude's TUI a moment to initialize before sending the prompt.
+        // `\r` is the Enter keystroke ConPTY delivers — `\n` arrives as a
+        // `^J` key event that TUI backends do not treat as submit.
         if let Some(ref input) = pending_stdin {
             tokio::time::sleep(Duration::from_millis(100)).await;
             writer.write_all(input.as_bytes())?;
+            #[cfg(windows)]
+            writer.write_all(b"\r")?;
+            #[cfg(not(windows))]
             writer.write_all(b"\n")?;
             writer.flush()?;
             last_activity = Instant::now();
         }
+
+        // See `run_observe`: on Windows a ConPTY host may outlive the
+        // client without EOFing the output pipe, so watch the pid too —
+        // a silently-exiting child must not hang the interactive loop.
+        let mut child_exit = std::pin::pin!(child_exit_watcher(child.process_id()));
+        let mut child_exited = false;
 
         // Main select loop - this is the key fix for blocking I/O
         // We use tokio::select! to multiplex between output, input, and timeout
@@ -1582,6 +1677,12 @@ impl PtyExecutor {
             };
 
             tokio::select! {
+                // Child pid died (Windows ConPTY hosts may not EOF the
+                // output pipe) — wake so `try_wait` above reaps the exit.
+                _ = &mut child_exit, if !child_exited => {
+                    child_exited = true;
+                }
+
                 // PTY output received
                 output_event = output_rx.recv() => {
                     match output_event {
@@ -1801,6 +1902,11 @@ impl PtyExecutor {
         child: &mut Box<dyn portable_pty::Child + Send>,
         _graceful: bool,
     ) -> io::Result<()> {
+        // Kill the whole tree: the PTY shell may have spawned
+        // grandchildren (build/test tools) that outlive a plain kill.
+        if let Some(pid) = child.process_id() {
+            ralph_core::pid_probe::kill_process_tree(pid);
+        }
         child.kill()
     }
 
@@ -1894,6 +2000,41 @@ impl PtyExecutor {
             }
         }
     }
+}
+
+/// Wakes the PTY select loops when the child pid dies.
+///
+/// Windows: ConPTY hosts are not guaranteed to exit with the client
+/// (e.g. third-party OpenConsole builds keep the output pipe open), so
+/// the reader's `read()` may never see EOF and a silently-exiting child
+/// would hang the loop forever. A polling thread watches the pid and
+/// completes the returned future once it is gone so the loop wakes and
+/// `try_wait` reaps the exit status.
+///
+/// Unix: PTY EOF is reliable, so this returns a forever-pending future
+/// — no polling thread, zero cost, unchanged behavior.
+#[cfg(windows)]
+fn child_exit_watcher(pid: Option<u32>) -> impl std::future::Future<Output = ()> + Send {
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    if let Some(pid) = pid {
+        std::thread::spawn(move || {
+            while ralph_core::pid_probe::pid_alive(pid) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let _ = tx.send(());
+        });
+    }
+    async move {
+        let _ = rx.await;
+    }
+}
+
+/// Unix counterpart of [`child_exit_watcher`]: PTY EOF is reliable, so
+/// no pid polling is needed — a pending future keeps the select arm
+/// inert at zero cost.
+#[cfg(not(windows))]
+fn child_exit_watcher(_pid: Option<u32>) -> impl std::future::Future<Output = ()> + Send {
+    std::future::pending()
 }
 
 fn handle_trae_stream_line<H: StreamHandler>(
@@ -2202,10 +2343,8 @@ fn build_result(
 mod tests {
     use super::*;
     use crate::claude_stream::{AssistantMessage, UserMessage};
-    #[cfg(unix)]
     use crate::cli_backend::PromptMode;
     use crate::stream_handler::{SessionResult, StreamHandler};
-    #[cfg(unix)]
     use tempfile::TempDir;
 
     #[test]
@@ -2724,6 +2863,109 @@ mod tests {
         assert!(result.output.contains("stdin-line"));
         assert!(result.stripped_output.contains("stdin-line"));
         assert_eq!(result.termination, TerminationType::Natural);
+    }
+
+    /// Windows regression: `run_observe` with a stdin-prompt backend must
+    /// (a) keep the ConPTY input writer alive for the session (dropping it
+    /// kills the whole pseudo-console with 0xC0000142) and (b) deliver the
+    /// `\x04` EOT that cygwin/MSYS readers translate to a real POSIX VEOF.
+    /// Native Windows programs have no stdin-EOF channel under ConPTY —
+    /// `findstr`/`more` would wait forever — so this uses Git Bash `cat`,
+    /// which is also the real shape of script-backed backends.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_run_observe_stdin_eof_windows() {
+        let cat = std::path::PathBuf::from(ralph_core::shell::resolve_exe("cat"));
+        if cat.file_name().is_none_or(|n| n != "cat.exe") {
+            // Unresolvable (`resolve_exe` fell back to the bare name) —
+            // no Git Bash on this machine, nothing to exercise.
+            eprintln!("skipping: Git Bash cat not resolvable");
+            return;
+        }
+        let temp_dir = TempDir::new().expect("temp dir");
+        let backend = CliBackend {
+            command: cat.to_string_lossy().into_owned(),
+            args: vec![],
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: vec![],
+        };
+        let config = PtyConfig {
+            interactive: false,
+            idle_timeout_secs: 0,
+            cols: 80,
+            rows: 24,
+            workspace_root: temp_dir.path().to_path_buf(),
+        };
+        let executor = PtyExecutor::new(backend, config);
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            executor.run_observe("stdin-prompt-marker", rx),
+        )
+        .await
+        .expect("run_observe timed out — ConPTY EOT EOF not delivered")
+        .expect("run_observe");
+
+        assert!(result.success, "result: {result:?}");
+        assert!(
+            result.output.contains("stdin-prompt-marker"),
+            "output missing prompt echo: {:?}",
+            result.output
+        );
+        assert_eq!(result.exit_code, Some(0));
+    }
+
+    /// Windows regression companion: a native Windows line-reader must
+    /// receive the prompt line through ConPTY input and proceed without
+    /// any EOF (native readers have no stdin-EOF channel — they read the
+    /// line and run, which is the real prompt-mode contract). The prompt
+    /// is terminated with `\r`, the Enter keystroke ConPTY delivers.
+    /// `cmd /v:on /c "set /p x=& echo got-!x!"` reads exactly one line.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_run_observe_stdin_native_line_reader_windows() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let backend = CliBackend {
+            command: "cmd".to_string(),
+            args: vec![
+                "/v:on".to_string(),
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "set /p x=& echo got-!x!".to_string(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: vec![],
+        };
+        let config = PtyConfig {
+            interactive: false,
+            idle_timeout_secs: 0,
+            cols: 80,
+            rows: 24,
+            workspace_root: temp_dir.path().to_path_buf(),
+        };
+        let executor = PtyExecutor::new(backend, config);
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            executor.run_observe("native-line-marker", rx),
+        )
+        .await
+        .expect("run_observe timed out — native line reader blocked")
+        .expect("run_observe");
+
+        assert!(result.success, "result: {result:?}");
+        assert!(
+            result.output.contains("got-native-line-marker"),
+            "output missing line-reader echo: {:?}",
+            result.output
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────────

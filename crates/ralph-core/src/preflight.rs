@@ -222,9 +222,7 @@ impl PreflightCheck for ExternalCommandCheck {
         let cmd = substitute_hook_vars(&self.command, config);
         let cwd = &config.core.workspace_root;
 
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(&cmd)
+        let output = crate::shell::shell_command(&cmd)
             .current_dir(cwd)
             .envs(std::env::vars())
             .output();
@@ -263,10 +261,13 @@ impl PreflightCheck for ExternalCommandCheck {
 }
 
 fn substitute_hook_vars(command: &str, config: &RalphConfig) -> String {
+    // `dunce::canonicalize` strips the `\\?\` verbatim prefix on
+    // Windows — hook commands run under a shell that cannot parse it
+    // (identity behaviour on Unix).
     let (config_path, config_dir) = config.config_path.as_ref().map_or_else(
         || (std::path::PathBuf::new(), String::new()),
         |path| {
-            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+            let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.clone());
             let dir = canonical
                 .parent()
                 .map(|p| p.to_string_lossy().to_string())
@@ -274,10 +275,7 @@ fn substitute_hook_vars(command: &str, config: &RalphConfig) -> String {
             (canonical, dir)
         },
     );
-    let project_root = config
-        .core
-        .workspace_root
-        .canonicalize()
+    let project_root = dunce::canonicalize(&config.core.workspace_root)
         .unwrap_or_else(|_| config.core.workspace_root.clone())
         .to_string_lossy()
         .to_string();
@@ -553,7 +551,27 @@ fn is_executable_file(path: &Path) -> bool {
 
     #[cfg(not(unix))]
     {
-        true
+        // Windows has no mode bits; a file is spawnable when its extension
+        // is in PATHEXT or maps to a known interpreter (pwsh/bash/python).
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase());
+        if matches!(ext.as_deref(), Some("ps1" | "sh" | "bash" | "py")) {
+            return true;
+        }
+        let pathext =
+            std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+        pathext
+            .split(';')
+            .filter(|e| !e.trim().is_empty())
+            .any(|e| {
+                Some(
+                    e.trim()
+                        .trim_start_matches('.')
+                        .to_ascii_lowercase()
+                        .as_str(),
+                ) == ext.as_deref()
+            })
     }
 }
 
@@ -1131,7 +1149,11 @@ fn command_supports_version(backend: &str) -> bool {
 }
 
 fn command_available(command: &str) -> bool {
-    Command::new(command)
+    // `spawn_program` resolves via `which`/PATHEXT on Windows so npm
+    // `.cmd` shims probe correctly.
+    let (program, arg_prefix) = crate::shell::spawn_program(command);
+    Command::new(program)
+        .args(arg_prefix)
         .arg("--version")
         .output()
         .map(|output| output.status.success())

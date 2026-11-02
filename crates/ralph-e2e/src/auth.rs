@@ -137,8 +137,12 @@ impl AuthChecker {
 
     /// Checks if the CLI command is available on PATH.
     pub async fn is_available(backend: Backend) -> bool {
-        // Use `which` on Unix systems to find the command
-        let result = Command::new("which")
+        // `which` on Unix, `where` on Windows (stock equivalent).
+        #[cfg(unix)]
+        let probe = "which";
+        #[cfg(windows)]
+        let probe = "where";
+        let result = Command::new(probe)
             .arg(backend.command())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -150,7 +154,9 @@ impl AuthChecker {
 
     /// Gets the CLI version string.
     pub async fn get_version(backend: Backend) -> Option<String> {
-        let output = Command::new(backend.command())
+        let (program, arg_prefix) = ralph_core::shell::spawn_program(backend.command());
+        let output = Command::new(program)
+            .args(arg_prefix)
             .arg("--version")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -198,7 +204,9 @@ impl AuthChecker {
         // Claude CLI stores auth in ~/.config/claude/ or uses ANTHROPIC_API_KEY
         // We can try running `claude doctor` or check if config exists
         // For now, check if version command succeeds (indicates basic setup)
-        let output = Command::new(Backend::Claude.command())
+        let (program, arg_prefix) = ralph_core::shell::spawn_program(Backend::Claude.command());
+        let output = Command::new(program)
+            .args(arg_prefix)
             .arg("--version")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -211,7 +219,9 @@ impl AuthChecker {
     /// OpenCode-specific authentication check.
     async fn check_opencode_auth() -> bool {
         // Similar to Claude
-        let output = Command::new(Backend::OpenCode.command())
+        let (program, arg_prefix) = ralph_core::shell::spawn_program(Backend::OpenCode.command());
+        let output = Command::new(program)
+            .args(arg_prefix)
             .arg("--version")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

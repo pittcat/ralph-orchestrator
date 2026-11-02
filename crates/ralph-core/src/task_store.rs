@@ -85,6 +85,29 @@ fn atomic_tmp_path_for(target: &Path) -> std::path::PathBuf {
 /// the directory entry swap), and the target would be unchanged
 /// — except for a stray tmp sibling. On POSIX this closes the
 /// data-durability gap.
+/// Windows can transiently refuse a rename-over-existing while another
+/// process (a `tail`, AV scanner, or indexer) holds the target open —
+/// `ERROR_ACCESS_DENIED` (5) / `ERROR_SHARING_VIOLATION` (32). Retry a
+/// few times with backoff before giving up.
+#[cfg(windows)]
+fn rename_atomic(tmp: &Path, target: &Path) -> io::Result<()> {
+    let mut attempt = 0u32;
+    loop {
+        match std::fs::rename(tmp, target) {
+            Err(e) if attempt < 5 && matches!(e.raw_os_error(), Some(5) | Some(32)) => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20 * u64::from(attempt)));
+            }
+            result => return result,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn rename_atomic(tmp: &Path, target: &Path) -> io::Result<()> {
+    std::fs::rename(tmp, target)
+}
+
 fn write_jsonl_atomic(target: &Path, body: &str) -> io::Result<()> {
     use std::io::Write;
     let tmp_path = atomic_tmp_path_for(target);
@@ -101,7 +124,7 @@ fn write_jsonl_atomic(target: &Path, body: &str) -> io::Result<()> {
             return Err(e);
         }
     }
-    if let Err(e) = std::fs::rename(&tmp_path, target) {
+    if let Err(e) = rename_atomic(&tmp_path, target) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e);
     }

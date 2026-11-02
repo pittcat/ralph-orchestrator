@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub fn detect_solo_output_completion(
     registry: &ralph_core::HatRegistry,
     output: &str,

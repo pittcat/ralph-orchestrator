@@ -12,6 +12,7 @@ use ralph_core::diagnostics::probe_session_dir_writable;
 use ralph_core::diagnostics::{DiagnosticsCollector, DiagnosticsOptions};
 use ralph_core::{LoopContext, RalphConfig};
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 /// The schema round-trip remains a unit-level guard for the fixed fields;
@@ -95,6 +96,7 @@ fn probe_session_dir_writable_rejects_non_directory() {
 /// disable `input_bundle` (None) instead of silently wrapping the
 /// bundle in a misleading `Some(Arc<Mutex<...>>)` that the
 /// reporter then projects as `Legacy` / `Degraded`.
+#[cfg(unix)]
 #[test]
 fn collector_disables_input_bundle_when_initial_write_fails() {
     let tmp = tempfile::TempDir::new().expect("TempDir");

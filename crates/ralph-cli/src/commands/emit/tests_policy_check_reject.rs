@@ -50,6 +50,7 @@ event_loop:
         schema: None,
         output: "json".to_string(),
         policy_check_token: None,
+        payload_file: None,
     };
 
     // The handler should still return Err so the exit code is non-zero,
@@ -99,6 +100,7 @@ event_loop:
         schema: None,
         output: "json".to_string(),
         policy_check_token: None,
+        payload_file: None,
     };
 
     let result = super::emit_command_with_root(ColorMode::Never, args, Some(&workspace));

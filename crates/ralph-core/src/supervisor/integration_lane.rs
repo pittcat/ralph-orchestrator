@@ -376,7 +376,12 @@ impl RealGitIntegrationPort {
     fn run_gate_commands_in(&self, worktree_path: &str, unit_id: &str) -> LaneResult<GateOutcome> {
         const GATE_TIMEOUT: Duration = Duration::from_secs(30);
         for spec in &self.gate_commands {
-            let mut cmd = std::process::Command::new(&spec.program);
+            // Resolve via `spawn_program` so Windows PATHEXT shims
+            // (`.cmd`) and script interpreters resolve the same as
+            // backend commands elsewhere.
+            let (program, arg_prefix) = crate::shell::spawn_program(&spec.program);
+            let mut cmd = std::process::Command::new(program);
+            cmd.args(arg_prefix);
             cmd.args(&spec.args);
             cmd.current_dir(worktree_path);
             // Read-only hygiene: strip inherited env so the gate
@@ -393,6 +398,12 @@ impl RealGitIntegrationPort {
                 .stderr(std::process::Stdio::piped())
                 .spawn()
                 .map_err(|e| LaneError::StateError(format!("gate {}: spawn: {e}", spec.program)))?;
+
+            // Windows: bind the gate child into a KILL_ON_JOB_CLOSE job —
+            // belt-and-suspenders alongside the timeout tree-kill so a
+            // ralph crash cannot leave gate grandchildren running.
+            #[cfg(windows)]
+            let _kill_job = crate::pid_probe::assign_to_kill_job(&child);
             let started = Instant::now();
             let mut timed_out = false;
             loop {
@@ -413,6 +424,11 @@ impl RealGitIntegrationPort {
                         use nix::unistd::Pid;
                         let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
                     }
+                    // Windows has no process group — kill the whole
+                    // descendant tree so a timed-out gate cannot leak
+                    // grandchildren holding the gate worktree open.
+                    #[cfg(not(unix))]
+                    crate::pid_probe::kill_process_tree(child.id());
                     let _ = child.kill();
                     break;
                 }

@@ -152,7 +152,7 @@ impl Tui {
             Err(_) => Stdio::null(),
         };
 
-        let mut cmd = Command::new("ralph");
+        let mut cmd = Command::new(ralph_core::shell::resolve_exe("ralph"));
         cmd.arg("run")
             .arg("--rpc")
             .args(&args)

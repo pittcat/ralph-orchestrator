@@ -56,6 +56,7 @@ fn test_emit_command_resolves_marker_relative_to_workspace_root_from_nested_dir(
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -118,6 +119,7 @@ fn test_emit_from_nested_cwd_uses_ralph_workspace_root_for_markers() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     );
@@ -174,6 +176,7 @@ fn test_emit_command_blocks_once_when_urgent_steer_pending() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -246,6 +249,7 @@ event_loop:
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -308,6 +312,7 @@ event_loop:
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -367,6 +372,7 @@ event_loop:
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -445,6 +451,7 @@ fn test_emit_with_provenance_flags() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -533,6 +540,7 @@ fn test_emit_ralph_hat_rejects_business_topic_review_passed() {
                 schema: None,
                 output: "text".to_string(),
                 policy_check_token: None,
+                payload_file: None,
             },
             Some(&workspace),
         )
@@ -574,6 +582,7 @@ fn test_emit_ralph_hat_rejects_business_topic_work_start() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -605,6 +614,7 @@ fn test_emit_ralph_hat_allows_control_topic_loop_complete() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -637,6 +647,7 @@ fn test_emit_ralph_hat_allows_task_resume() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -670,6 +681,7 @@ fn test_emit_executor_hat_unaffected_by_ralph_guard() {
                 schema: None,
                 output: "text".to_string(),
                 policy_check_token: None,
+                payload_file: None,
             },
             Some(&workspace),
         )
@@ -704,6 +716,7 @@ fn test_emit_no_hat_unaffected_by_ralph_guard() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -760,6 +773,7 @@ event_loop:
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -812,6 +826,7 @@ event_loop:
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -865,6 +880,7 @@ event_loop:
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -928,6 +944,7 @@ event_loop:
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -984,6 +1001,7 @@ event_loop:
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -1042,6 +1060,7 @@ event_loop:
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -1099,6 +1118,7 @@ event_loop:
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -1156,6 +1176,7 @@ event_loop:
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -1277,6 +1298,7 @@ fn test_fixture_cli_valid_chain_accepted() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -1316,6 +1338,7 @@ fn test_fixture_cli_duplicate_terminal_rejected() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -1362,6 +1385,7 @@ fn test_fixture_cli_business_after_terminal_rejected() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -1402,6 +1426,7 @@ fn test_fixture_cli_missing_required_fields_rejected_when_strict() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -1484,6 +1509,7 @@ fn test_fixture_cross_cutting_cli_and_event_loop_agree() {
                 schema: None,
                 output: "text".to_string(),
                 policy_check_token: None,
+                payload_file: None,
             },
             Some(&workspace),
         );
@@ -1567,6 +1593,7 @@ fn test_provenance_fields_preserved_by_reader() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -1779,6 +1806,7 @@ fn test_emit_path_traversal_rejected() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn test_emit_symlink_to_other_loop_rejected() {
     let tmp = TempDir::new().unwrap();
@@ -1860,6 +1888,7 @@ fn test_emit_cwd_drift_rejected_in_isolated_hat_context() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     );
@@ -1941,6 +1970,7 @@ hats:
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -2003,6 +2033,7 @@ fn test_emit_control_topic_preserves_missing_hat_behavior_with_active_hat_channe
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -2055,6 +2086,7 @@ fn test_emit_cwd_matches_workspace_root_allowed() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     );
@@ -2125,6 +2157,7 @@ fn test_emit_cwd_drift_with_explicit_file_is_exempt() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     );
@@ -2766,6 +2799,7 @@ fn test_emit_auto_detects_json_payload_without_json_flag() {
         schema: None,
         output: "text".to_string(),
         policy_check_token: None,
+        payload_file: None,
     };
 
     emit_command_with_root(ColorMode::Never, args, Some(&workspace)).unwrap();
@@ -2801,6 +2835,7 @@ fn test_emit_leaves_plain_string_as_string() {
         schema: None,
         output: "text".to_string(),
         policy_check_token: None,
+        payload_file: None,
     };
 
     emit_command_with_root(ColorMode::Never, args, Some(&workspace)).unwrap();
@@ -2877,6 +2912,7 @@ fn test_emit_schema_prints_protocol_view_without_writing_events() {
         schema: Some("work.done".to_string()),
         output: "text".to_string(),
         policy_check_token: None,
+        payload_file: None,
     };
 
     // R6: read-only mode must succeed without producing an event.
@@ -2993,6 +3029,7 @@ fn test_emit_schema_fails_closed_when_no_config() {
         schema: Some("work.done".to_string()),
         output: "text".to_string(),
         policy_check_token: None,
+        payload_file: None,
     };
 
     let err = emit_command_with_root(ColorMode::Never, args, Some(&workspace))
@@ -3079,6 +3116,7 @@ fn test_emit_policy_check_rejects_missing_required_field() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -3120,6 +3158,7 @@ fn test_emit_policy_check_accepts_valid_payload() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -3155,6 +3194,7 @@ fn test_emit_policy_check_rejects_with_unified_envelope() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -3189,6 +3229,7 @@ fn test_emit_rejects_empty_task_id_in_payload() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -3229,6 +3270,7 @@ fn test_emit_allows_non_empty_task_id_in_payload() {
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     )
@@ -3291,6 +3333,7 @@ hats:
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     );
@@ -3357,6 +3400,7 @@ hats:
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     );
@@ -3416,6 +3460,7 @@ hats:
             schema: None,
             output: "text".to_string(),
             policy_check_token: None,
+            payload_file: None,
         },
         Some(&workspace),
     );

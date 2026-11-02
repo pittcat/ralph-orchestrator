@@ -94,7 +94,16 @@ impl Drop for LockGuard {
                 tracing::debug!("Truncated loop lock file at {}", self.lock_path.display());
             }
         }
-        // The Flock is automatically released when dropped.
+        #[cfg(not(unix))]
+        {
+            // Same cleanup as Unix: clear stale metadata before the guard
+            // handle closes (closing releases the Windows file lock).
+            if let Ok(file) = OpenOptions::new().write(true).open(&self.lock_path) {
+                let _ = file.set_len(0);
+                let _ = file.sync_all();
+            }
+        }
+        // The lock is automatically released when the file handle closes.
         tracing::debug!("Releasing loop lock at {}", self.lock_path.display());
     }
 }
@@ -196,9 +205,31 @@ impl LoopLock {
 
         #[cfg(not(unix))]
         {
-            let _ = file;
-            let _ = prompt;
-            Err(LockError::UnsupportedPlatform)
+            // Windows: lock a `.guard` sidecar file so `loop.lock` stays
+            // readable while the lock is held (LockFileEx is mandatory —
+            // readers of a locked file get ERROR_LOCK_VIOLATION).
+            use std::fs::TryLockError;
+            let guard_path = Self::guard_sidecar_path(&lock_path);
+            let guard_file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&guard_path)?;
+            match guard_file.try_lock() {
+                Ok(()) => {
+                    Self::write_metadata(&file, prompt)?;
+                    Ok(LockGuard {
+                        _file: guard_file,
+                        lock_path,
+                    })
+                }
+                Err(TryLockError::WouldBlock) => {
+                    let metadata = Self::read_metadata(&file)?;
+                    Err(LockError::AlreadyLocked(metadata))
+                }
+                Err(TryLockError::Error(e)) => Err(LockError::Io(e)),
+            }
         }
     }
 
@@ -259,9 +290,19 @@ impl LoopLock {
 
         #[cfg(not(unix))]
         {
-            let _ = file;
-            let _ = prompt;
-            Err(LockError::UnsupportedPlatform)
+            let guard_path = Self::guard_sidecar_path(&lock_path);
+            let guard_file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&guard_path)?;
+            guard_file.lock()?;
+            Self::write_metadata(&file, prompt)?;
+            Ok(LockGuard {
+                _file: guard_file,
+                lock_path,
+            })
         }
     }
 
@@ -325,8 +366,20 @@ impl LoopLock {
 
         #[cfg(not(unix))]
         {
+            use std::fs::TryLockError;
             let _ = file;
-            Err(LockError::UnsupportedPlatform)
+            let guard_path = Self::guard_sidecar_path(&lock_path);
+            let guard_file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&guard_path)?;
+            match guard_file.try_lock() {
+                Ok(()) => Ok(false),
+                Err(TryLockError::WouldBlock) => Ok(true),
+                Err(TryLockError::Error(e)) => Err(LockError::Io(e)),
+            }
         }
     }
 
@@ -384,7 +437,20 @@ impl LoopLock {
 
         #[cfg(not(unix))]
         {
-            Err(LockError::UnsupportedPlatform)
+            use std::fs::TryLockError;
+            let guard_path = Self::guard_sidecar_path(&lock_path);
+            let guard_file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&guard_path)?;
+            match guard_file.try_lock() {
+                // Free guard means no process holds the lock → stale.
+                Ok(()) => Ok(LockStatus::Stale(metadata)),
+                Err(TryLockError::WouldBlock) => Ok(LockStatus::Active(metadata)),
+                Err(TryLockError::Error(e)) => Err(LockError::Io(e)),
+            }
         }
     }
 
@@ -401,6 +467,7 @@ impl LoopLock {
     /// full plaintext is NOT recoverable from the lock file; if a future
     /// feature needs the original for diagnostics, write a sidecar with
     /// mode `0600` next to the lock file.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn redact_prompt(prompt: &str) -> String {
         if prompt.len() > 64 {
             // Byte-64 may fall mid-character for multi-byte UTF-8 prompts
@@ -415,6 +482,7 @@ impl LoopLock {
     }
 
     /// Write lock metadata to the file.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn write_metadata(file: &File, prompt: &str) -> Result<(), LockError> {
         let metadata = LockMetadata {
             pid: process::id(),
@@ -434,6 +502,15 @@ impl LoopLock {
         file_clone.sync_all()?;
 
         Ok(())
+    }
+
+    /// Path of the `.guard` sidecar used for locking on Windows
+    /// (`loop.lock.guard` next to `loop.lock`).
+    #[cfg(not(unix))]
+    fn guard_sidecar_path(lock_path: &Path) -> PathBuf {
+        let mut os = lock_path.as_os_str().to_os_string();
+        os.push(".guard");
+        PathBuf::from(os)
     }
 
     /// Read lock metadata from the file.

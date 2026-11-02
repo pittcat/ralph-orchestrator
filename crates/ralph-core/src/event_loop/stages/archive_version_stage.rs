@@ -102,7 +102,9 @@ pub fn archive_state_for_loop(
     }
 
     let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
-    let archive_name = format!("{}.{}", old_loop_id, timestamp);
+    // `:` in the RFC3339 timestamp is illegal on NTFS — percent-encode on
+    // Windows via the shared stem helper (identity on Unix).
+    let archive_name = crate::path::filename_stem(&format!("{old_loop_id}.{timestamp}"));
     let archive_dir = workspace.join(ARCHIVE_DIR).join(&archive_name);
     fs::create_dir_all(&archive_dir)?;
 

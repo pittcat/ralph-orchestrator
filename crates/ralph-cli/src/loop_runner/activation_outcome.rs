@@ -32,7 +32,7 @@ use ralph_core::event_loop::ProcessedEvents;
 use ralph_core::{EventLoop, LoopContext, TerminationReason};
 use ralph_proto::HatId;
 use serde_json::{Map, Value};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use tracing::warn;
 
 use super::execution::ExecutionOutcome;
@@ -463,7 +463,7 @@ pub fn log_activation_outcome_with_diagnostics(
 /// Test-only compatibility helper for direct row-shape tests. Production
 /// callers must use `log_activation_outcome_with_diagnostics` so writes go
 /// through the collector's shared logger and degraded-state handling.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub fn log_activation_outcome(
     session_dir: Option<&Path>,
     iteration: u64,

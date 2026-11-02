@@ -8,6 +8,7 @@
 // `#[test]` 函数都能直接调用。
 
 use super::*;
+#[cfg(unix)]
 use ralph_core::diagnostics::HookRunTelemetryEntry;
 
 // ──────────────────────────────────────────────────────────────────────
@@ -32,6 +33,7 @@ pub(super) fn dispatch_test_event_loop_with_context(
     (event_loop, context)
 }
 
+#[cfg(unix)]
 pub(super) fn dispatch_test_event_loop_from_yaml_with_context(
     workspace_root: &Path,
     yaml: &str,
@@ -120,10 +122,12 @@ pub(super) fn suspend_outcome_with_mode(
     }
 }
 
+#[cfg(unix)]
 pub(super) fn suspend_outcome(phase_event: HookPhaseEvent, hook_name: &str) -> HookDispatchOutcome {
     suspend_outcome_with_mode(phase_event, hook_name, HookSuspendMode::WaitForResume)
 }
 
+#[cfg(unix)]
 pub(super) fn block_on_test_future<F>(future: F) -> F::Output
 where
     F: std::future::Future,
@@ -156,6 +160,7 @@ pub(super) fn empty_hook_metadata() -> serde_json::Map<String, serde_json::Value
 // `use super::super::*;` 不会引入,`#[test]` 内的 `build_*_payload_input(...)`
 // 调用解析为本模块(同 `loop_runner::tests::legacy` 命名空间下)的包装 fn。
 // 本模块 4 个 fn 名字保持 `build_*_payload_input`(原 tests.rs 字面相同)。
+#[cfg(unix)]
 pub(super) fn build_loop_start_payload_input(
     loop_id: &str,
     ctx: &LoopContext,
@@ -173,6 +178,7 @@ pub(super) fn build_loop_start_payload_input(
     )
 }
 
+#[cfg(unix)]
 pub(super) fn build_iteration_start_payload_input(
     loop_id: &str,
     ctx: &LoopContext,
@@ -194,6 +200,7 @@ pub(super) fn build_iteration_start_payload_input(
     )
 }
 
+#[cfg(unix)]
 pub(super) fn build_plan_created_payload_input(
     loop_id: &str,
     ctx: &LoopContext,
@@ -246,6 +253,7 @@ pub(super) fn build_loop_termination_payload_input(
 // 包装 fn 名字保持与原 tests.rs 字面相同(`dispatch_pre/post_loop_termination_hooks`),
 // 依赖 `loop_runner/mod.rs` 的 `pub use payload_inputs::*;` 改为精确
 // `pub use ... as _;` 形式以避免重名歧义。
+#[cfg(unix)]
 pub(super) async fn dispatch_pre_loop_termination_hooks(
     event_loop: &EventLoop,
     hooks_dispatch_enabled: bool,
@@ -273,6 +281,7 @@ pub(super) async fn dispatch_pre_loop_termination_hooks(
     .await
 }
 
+#[cfg(unix)]
 pub(super) async fn dispatch_post_loop_termination_hooks(
     event_loop: &EventLoop,
     hooks_dispatch_enabled: bool,

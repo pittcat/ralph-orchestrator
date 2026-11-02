@@ -40,6 +40,12 @@ pub struct EmitArgs {
     #[arg(default_value = "")]
     pub payload: String,
 
+    /// Read the payload from a file instead of the positional argument;
+    /// `-` reads from stdin. Recommended on PowerShell, where embedding
+    /// JSON inline loses inner double quotes.
+    #[arg(long, value_name = "PATH", conflicts_with = "schema")]
+    pub payload_file: Option<PathBuf>,
+
     /// Parse payload as JSON object instead of string
     #[arg(long, short)]
     pub json: bool,

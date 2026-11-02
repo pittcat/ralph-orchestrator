@@ -324,8 +324,12 @@ impl CollectionDomain {
         // is required when the API spawns ralph: interactive mode tries to
         // read from a tty the background process doesn't own and gets
         // SIGSTOP'd by the OS. Autonomous mode implies --no-tui.
-        let child = std::process::Command::new(ralph_command)
+        // `spawn_program` resolves `.cmd` shims / script interpreters on
+        // Windows; on Unix it returns the command verbatim.
+        let (program, arg_prefix) = ralph_core::shell::spawn_program(ralph_command);
+        let child = std::process::Command::new(program)
             .current_dir(workspace_root)
+            .args(&arg_prefix)
             .args([
                 "run",
                 "-H",
@@ -529,6 +533,7 @@ mod tests {
         (temp, domain, record.id)
     }
 
+    #[cfg(unix)]
     #[test]
     fn run_surfaces_stderr_from_failed_spawn() {
         // A stub "ralph" that prints a distinctive error and exits non-zero.

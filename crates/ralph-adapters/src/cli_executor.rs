@@ -19,9 +19,12 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tracing::{debug, info, warn};
+#[cfg(unix)]
+use tracing::info;
+use tracing::{debug, warn};
 
 const POST_EVENT_GRACE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg_attr(not(unix), allow(dead_code))]
 const TERMINATION_GRACE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Apply backend env overrides on top of runtime env (already injected
@@ -120,8 +123,9 @@ impl CliExecutor {
         // Some Arg-mode backends use temp-file indirection for very large prompts.
         let (cmd, args, stdin_input, _temp_file) = self.backend.build_command(prompt, false);
 
-        let mut command = Command::new(&cmd);
-        command.args(&args);
+        let (program, arg_prefix) = ralph_core::shell::spawn_program(&cmd);
+        let mut command = Command::new(program);
+        command.args(arg_prefix).args(&args);
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         #[cfg(unix)]
@@ -167,6 +171,14 @@ impl CliExecutor {
                 ),
             )
         })?;
+
+        // Windows: bind the backend into a KILL_ON_JOB_CLOSE job so a
+        // ralph crash cannot orphan the backend process tree. The guard
+        // lives until `execute` returns (i.e. past the child's await).
+        #[cfg(windows)]
+        let _kill_job = child
+            .raw_handle()
+            .and_then(ralph_core::pid_probe::assign_handle_to_kill_job);
 
         #[cfg(unix)]
         {
@@ -407,7 +419,12 @@ impl CliExecutor {
     ) -> std::io::Result<std::process::ExitStatus> {
         #[cfg(not(unix))]
         {
-            child.start_kill()?;
+            // Kill the whole tree (backend-spawned grandchildren too).
+            if let Some(pid) = child.id() {
+                ralph_core::pid_probe::kill_process_tree(pid);
+            } else {
+                child.start_kill()?;
+            }
             return child.wait().await;
         }
 
@@ -708,7 +725,15 @@ mod tests {
         };
 
         let executor = CliExecutor::new(backend);
-        let timeout = Some(Duration::from_millis(300));
+        // Git Bash `sh.exe` cold-starts in ~300-600ms on Windows — a
+        // 300ms inactivity window could expire before the first output
+        // arrives. Keep the inactivity>activity-gap contract by widening
+        // the window, not the sleeps.
+        let timeout = Some(Duration::from_millis(if cfg!(windows) {
+            3000
+        } else {
+            300
+        }));
         let result = executor
             .execute_capture_with_timeout(
                 "printf 'start\\n'; sleep 0.2; printf 'middle\\n'; sleep 0.2; printf 'done\\n'",
@@ -965,20 +990,14 @@ mod tests {
         // Real trae-cli NDJSON shape (verified 2026-06-05, trae-cli 0.120.37):
         // assistant.message has `role` + `content` (no `type` tag), result has
         // a `result` field with the final output.
-        let backend = CliBackend {
-            command: "printf".to_string(),
-            args: vec![
-                "%s\n%s\n%s\n".to_string(),
-                r#"{"type":"system","subtype":"init","session_id":"abc"}"#.to_string(),
-                r#"{"type":"assistant","session_id":"abc","message":{"role":"assistant","content":"hello from trae"}}"#
-                    .to_string(),
-                r#"{"type":"result","subtype":"success","session_id":"abc","result":"hello from trae","is_error":false,"duration_ms":1234}"#.to_string(),
+        let backend = fake_ndjson_backend(
+            &[
+                r#"{"type":"system","subtype":"init","session_id":"abc"}"#,
+                r#"{"type":"assistant","session_id":"abc","message":{"role":"assistant","content":"hello from trae"}}"#,
+                r#"{"type":"result","subtype":"success","session_id":"abc","result":"hello from trae","is_error":false,"duration_ms":1234}"#,
             ],
-            prompt_mode: PromptMode::Stdin,
-            prompt_flag: None,
-            output_format: OutputFormat::TraeStreamJson,
-            env_vars: vec![],
-        };
+            OutputFormat::TraeStreamJson,
+        );
 
         let executor = CliExecutor::new(backend);
         let mut output = Vec::new();
@@ -1000,18 +1019,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_agent_stream_falls_back_to_terminal_result() {
-        let backend = CliBackend {
-            command: "printf".to_string(),
-            args: vec![
-                "%s\n%s\n".to_string(),
-                r#"{"type":"tool_call","subtype":"started","call_id":"call_1","tool_call":{"readToolCall":{"args":{"path":"README.md"}}}}"#.to_string(),
-                r#"{"type":"result","subtype":"success","result":"final answer","is_error":false}"#.to_string(),
+        let backend = fake_ndjson_backend(
+            &[
+                r#"{"type":"tool_call","subtype":"started","call_id":"call_1","tool_call":{"readToolCall":{"args":{"path":"README.md"}}}}"#,
+                r#"{"type":"result","subtype":"success","result":"final answer","is_error":false}"#,
             ],
-            prompt_mode: PromptMode::Stdin,
-            prompt_flag: None,
-            output_format: OutputFormat::AgentStreamJson,
-            env_vars: vec![],
-        };
+            OutputFormat::AgentStreamJson,
+        );
         let executor = CliExecutor::new(backend);
         let mut output = Vec::new();
 
@@ -1026,18 +1040,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_agent_stream_does_not_duplicate_terminal_result() {
-        let backend = CliBackend {
-            command: "printf".to_string(),
-            args: vec![
-                "%s\n%s\n".to_string(),
-                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"final answer"}]}}"#.to_string(),
-                r#"{"type":"result","subtype":"success","result":"final answer","is_error":false}"#.to_string(),
+        let backend = fake_ndjson_backend(
+            &[
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"final answer"}]}}"#,
+                r#"{"type":"result","subtype":"success","result":"final answer","is_error":false}"#,
             ],
-            prompt_mode: PromptMode::Stdin,
-            prompt_flag: None,
-            output_format: OutputFormat::AgentStreamJson,
-            env_vars: vec![],
-        };
+            OutputFormat::AgentStreamJson,
+        );
         let executor = CliExecutor::new(backend);
         let mut output = Vec::new();
 
@@ -1055,19 +1064,14 @@ mod tests {
         // Real trae-cli shape: assistant.message.tool_calls uses function.{name, arguments}
         // (arguments is a JSON-encoded string); user tool_result has no `message`
         // field — it has top-level subtype/tool_use_id/content instead.
-        let backend = CliBackend {
-            command: "printf".to_string(),
-            args: vec![
-                "%s\n%s\n%s\n".to_string(),
-                r#"{"type":"assistant","message":{"role":"assistant","content":"","tool_calls":[{"id":"t1","type":"function","function":{"name":"shell","arguments":"{\"cmd\":\"ls\"}"}}]}}"#.to_string(),
-                r#"{"type":"user","subtype":"tool_result","tool_use_id":"t1","tool_name":"shell","content":{"content":[{"type":"text","text":"file1\nfile2"}]}}"#.to_string(),
-                r#"{"type":"assistant","message":{"role":"assistant","content":"done"}}"#.to_string(),
+        let backend = fake_ndjson_backend(
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","content":"","tool_calls":[{"id":"t1","type":"function","function":{"name":"shell","arguments":"{\"cmd\":\"ls\"}"}}]}}"#,
+                r#"{"type":"user","subtype":"tool_result","tool_use_id":"t1","tool_name":"shell","content":{"content":[{"type":"text","text":"file1\nfile2"}]}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":"done"}}"#,
             ],
-            prompt_mode: PromptMode::Stdin,
-            prompt_flag: None,
-            output_format: OutputFormat::TraeStreamJson,
-            env_vars: vec![],
-        };
+            OutputFormat::TraeStreamJson,
+        );
 
         let executor = CliExecutor::new(backend);
         let mut output = Vec::new();
@@ -1086,20 +1090,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_trae_stream_skips_malformed_lines() {
-        let backend = CliBackend {
-            command: "printf".to_string(),
-            args: vec![
-                "%s\n%s\n%s\n".to_string(),
-                "not valid json at all".to_string(),
-                r#"{"type":"assistant","message":{"role":"assistant","content":"valid"}}"#
-                    .to_string(),
-                String::new(),
+        let backend = fake_ndjson_backend(
+            &[
+                "not valid json at all",
+                r#"{"type":"assistant","message":{"role":"assistant","content":"valid"}}"#,
+                "",
             ],
-            prompt_mode: PromptMode::Stdin,
-            prompt_flag: None,
-            output_format: OutputFormat::TraeStreamJson,
-            env_vars: vec![],
-        };
+            OutputFormat::TraeStreamJson,
+        );
 
         let executor = CliExecutor::new(backend);
         let mut output = Vec::new();
@@ -1179,6 +1177,47 @@ mod tests {
             stdout.contains(&format!("PWD={expected_pwd}")),
             "PWD should match the explicit workspace ({expected_pwd}): {stdout}"
         );
+    }
+
+    /// Build a backend that prints `lines` (one per line) on stdout.
+    ///
+    /// Unix keeps the historical `printf` fake verbatim. On Windows the
+    /// resolved `printf.exe` is an MSYS2 binary whose CRT argv parser
+    /// brace-glob-mangles `{`-prefixed JSON args into empty strings, so we
+    /// write the lines to a file under the shared test workspace and `cat`
+    /// it — a single plain path arg is immune to that munging.
+    fn fake_ndjson_backend(lines: &[&str], output_format: OutputFormat) -> CliBackend {
+        #[cfg(unix)]
+        {
+            let mut args = vec!["%s\n".repeat(lines.len())];
+            args.extend(lines.iter().map(|line| (*line).to_string()));
+            CliBackend {
+                command: "printf".to_string(),
+                args,
+                prompt_mode: PromptMode::Stdin,
+                prompt_flag: None,
+                output_format,
+                env_vars: vec![],
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static COUNTER: AtomicUsize = AtomicUsize::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = test_workspace().join(format!("ndjson-fake-{}-{n}.txt", std::process::id()));
+            let mut content = lines.join("\n");
+            content.push('\n');
+            std::fs::write(&path, content).expect("write fake ndjson file");
+            CliBackend {
+                command: "cat".to_string(),
+                args: vec![path.to_string_lossy().to_string()],
+                prompt_mode: PromptMode::Stdin,
+                prompt_flag: None,
+                output_format,
+                env_vars: vec![],
+            }
+        }
     }
 
     /// U4 (2026-06-14-002): Verify inject_ralph_runtime_env can be called with any path.

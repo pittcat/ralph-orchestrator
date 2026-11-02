@@ -8,7 +8,9 @@
 //! that need access to `merge_isolated_channel_on_interrupt` without
 //! making the helper public at the parent module level.
 
+#[cfg(unix)]
 use ralph_core::{EventLoop, LoopContext, RalphConfig};
+#[cfg(unix)]
 use std::path::Path;
 
 #[cfg(test)]
@@ -194,6 +196,7 @@ tasks:
 // tests that cannot access private runner items.
 #[cfg(test)]
 pub mod runner_inner_test_api {
+    #[cfg(unix)]
     use super::*;
 
     /// Best-effort merge of the isolated hat-channel into the main events
@@ -210,6 +213,7 @@ pub mod runner_inner_test_api {
     ///
     /// Re-exported here so integration tests (which cannot reach private
     /// items) can call the helper directly.
+    #[cfg(unix)]
     pub fn merge_isolated_channel_on_interrupt(
         ctx: &LoopContext,
         config: &RalphConfig,

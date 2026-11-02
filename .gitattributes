@@ -1,0 +1,27 @@
+# Normalize line endings so Windows checkouts with core.autocrlf=true do
+# not corrupt embedded files, golden fixtures, or shell scripts.
+* text=auto eol=lf
+
+# Explicitly LF: executed by bash on Unix and embedded via include_str!.
+*.sh   text eol=lf
+*.bash text eol=lf
+*.zsh  text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+*.md   text eol=lf
+
+# Binaries
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.woff binary
+*.woff2 binary
+*.lock -diff

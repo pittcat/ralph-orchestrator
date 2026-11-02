@@ -330,7 +330,10 @@ fn authorise_path(
 }
 
 fn validate_path_shape(path: &Path) -> Result<(), ChangedPathError> {
-    if path.is_absolute() {
+    // Diff paths are repo-relative POSIX-style strings — reject a
+    // leading `/` or `\` even on platforms where `Path::is_absolute`
+    // does not consider them absolute (`/etc/passwd` on Windows).
+    if path.is_absolute() || path.to_string_lossy().starts_with(['/', '\\']) {
         return Err(ChangedPathError::BadPathShape(format!(
             "absolute path: {}",
             path.display()

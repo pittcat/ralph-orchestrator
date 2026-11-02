@@ -24,16 +24,31 @@ fn ralph(temp_path: &std::path::Path, args: &[&str]) -> Output {
 fn fake_ralph_path_dir(home: &std::path::Path) -> std::path::PathBuf {
     let bin = home.join("fakebin");
     fs::create_dir_all(&bin).unwrap();
-    let script = bin.join("ralph");
-    fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let script = bin.join("ralph");
+        fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
         let mut p = fs::metadata(&script).unwrap().permissions();
         p.set_mode(0o755);
         fs::set_permissions(&script, p).unwrap();
     }
+    #[cfg(windows)]
+    {
+        // PATHEXT resolution needs a real extension — `ralph.cmd`.
+        fs::write(bin.join("ralph.cmd"), "@echo off\r\nexit /b 0\r\n").unwrap();
+    }
     bin
+}
+
+/// PATH with `dir` prepended, honouring the platform separator (`;` on
+/// Windows, `:` on Unix).
+fn prepend_path_dir(dir: &std::path::Path) -> std::ffi::OsString {
+    let mut dirs = vec![dir.to_path_buf()];
+    if let Some(existing) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&existing));
+    }
+    std::env::join_paths(dirs).expect("join PATH")
 }
 
 fn last_stdout_line_json(out: &Output) -> Value {
@@ -117,10 +132,7 @@ fn test_retry_json_receipt() {
         .args(["loops", "retry", "loop-rev-1", "--format", "json"])
         .current_dir(temp.path())
         .env("HOME", home.path())
-        .env(
-            "PATH",
-            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
-        )
+        .env("PATH", prepend_path_dir(&bin))
         .output()
         .unwrap();
     assert!(
@@ -149,10 +161,7 @@ fn test_merge_json_receipt() {
         .args(["loops", "merge", "loop-mg-1", "--format", "json"])
         .current_dir(temp.path())
         .env("HOME", home.path())
-        .env(
-            "PATH",
-            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
-        )
+        .env("PATH", prepend_path_dir(&bin))
         .output()
         .unwrap();
     assert!(

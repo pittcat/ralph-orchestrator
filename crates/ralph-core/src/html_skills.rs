@@ -260,12 +260,7 @@ pub fn register_html_skills(registry: &mut SkillRegistry) -> Result<()> {
         .collect();
     for spec in HTML_SKILLS {
         let content = rewrite_links(spec.name, spec.raw)?;
-        registry.register_builtin_scoped(
-            spec.name,
-            &content,
-            spec.description,
-            hats.clone(),
-        )?;
+        registry.register_builtin_scoped(spec.name, &content, spec.description, hats.clone())?;
     }
     Ok(())
 }
@@ -322,7 +317,11 @@ mod tests {
             );
         }
         let artifact = registry.get("ralph-html-artifact").unwrap();
-        assert!(artifact.content.contains("ralph tools skill load ralph-html-design"));
+        assert!(
+            artifact
+                .content
+                .contains("ralph tools skill load ralph-html-design")
+        );
         assert!(
             artifact
                 .content
@@ -332,11 +331,7 @@ mod tests {
 
     #[test]
     fn rewrite_rejects_unmapped_vendored_link() {
-        let err = rewrite_links(
-            "test-skill",
-            "see [`x`](../phantom/SKILL.md) now",
-        )
-        .unwrap_err();
+        let err = rewrite_links("test-skill", "see [`x`](../phantom/SKILL.md) now").unwrap_err();
         assert!(err.to_string().contains("unmapped vendored link target"));
     }
 

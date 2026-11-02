@@ -20,6 +20,7 @@ mod fake_path;
 mod hard_gate;
 mod hard_gate_payload_contract;
 mod hooks;
+#[cfg(unix)] // bash fake-path fixtures + unix-only helpers
 mod legacy;
 mod notifications;
 mod wave;

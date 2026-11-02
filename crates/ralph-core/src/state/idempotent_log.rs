@@ -54,6 +54,12 @@
 //!     .unwrap();
 //! ```
 
+// Map an idempotency key to its on-disk file stem — shared with the
+// archive naming path via [`crate::path::filename_stem`]. Keys look like
+// `task:{id}:loop:{loop}`; `:` is POSIX-legal but NTFS-illegal, so the
+// physical name is percent-encoded on Windows while the logical key in
+// the JSON stays verbatim.
+use crate::path::filename_stem as key_file_name;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -338,7 +344,7 @@ impl IdempotentLog {
 
         let key_path = self
             .workspace
-            .join(format!("{}.jsonl", record._idempotency_key));
+            .join(format!("{}.jsonl", key_file_name(&record._idempotency_key)));
 
         // 1. Acquire OS lock.
         let _guard = acquire_exclusive_lock(&key_path)?;
@@ -534,7 +540,7 @@ fn merge_records(existing: IdempotentRecord, new: IdempotentRecord) -> Idempoten
 #[cfg(unix)]
 struct LockGuard(#[allow(dead_code)] Flock<File>);
 #[cfg(not(unix))]
-struct LockGuard;
+struct LockGuard(#[allow(dead_code)] File);
 
 #[cfg(unix)]
 fn acquire_exclusive_lock(path: &Path) -> Result<LockGuard, IdempotentError> {
@@ -551,8 +557,19 @@ fn acquire_exclusive_lock(path: &Path) -> Result<LockGuard, IdempotentError> {
 }
 
 #[cfg(not(unix))]
-fn acquire_exclusive_lock(_path: &Path) -> Result<LockGuard, IdempotentError> {
-    Err(IdempotentError::NoOsLock)
+fn acquire_exclusive_lock(path: &Path) -> Result<LockGuard, IdempotentError> {
+    // Windows: lock a `.guard` sidecar so mandatory-lock semantics never
+    // block readers of the record file itself.
+    let mut guard_os = path.as_os_str().to_os_string();
+    guard_os.push(".guard");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open(&guard_os)?;
+    file.lock()?;
+    Ok(LockGuard(file))
 }
 
 #[cfg(test)]

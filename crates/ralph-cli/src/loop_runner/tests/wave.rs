@@ -3,7 +3,9 @@
 // real loop-runner paths; shared fixtures come from the sibling modules.
 
 use super::super::*;
+#[cfg(unix)]
 use super::fake_path::*;
+#[cfg(unix)]
 use std::collections::HashSet;
 
 #[cfg(unix)]

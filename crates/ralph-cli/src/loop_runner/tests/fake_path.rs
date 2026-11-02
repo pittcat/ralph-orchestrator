@@ -9,6 +9,7 @@
 // values remain an implementation detail of this test fixture; callers use
 // the guard and accessor APIs below.
 
+#[cfg(unix)]
 use std::path::Path;
 
 #[cfg(unix)]
