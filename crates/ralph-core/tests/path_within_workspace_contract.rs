@@ -58,8 +58,11 @@ fn path_within_workspace_rejects_symlink_chain_escape() {
     let link = ws.join("legit");
     #[cfg(unix)]
     std::os::unix::fs::symlink(&secret, &link).expect("symlink");
-    #[cfg(not(unix))]
-    return;
+    if !cfg!(unix) {
+        // No symlink primitive on Windows here; containment is still
+        // covered by the preceding non-symlink assertions.
+        return;
+    }
 
     assert!(
         !path_within_workspace(&ws, &link).expect("probe"),

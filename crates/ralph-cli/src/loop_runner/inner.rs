@@ -1589,6 +1589,35 @@ pub(super) async fn run_loop_impl_inner(
         });
     }
 
+    // Windows equivalents: Ctrl+Break/shutdown ≈ SIGTERM, close ≈ SIGHUP.
+    #[cfg(windows)]
+    {
+        let interrupt_tx_break = interrupt_tx.clone();
+        tokio::spawn(async move {
+            if let Ok(mut s) = tokio::signal::windows::ctrl_break() {
+                s.recv().await;
+                debug!("Ctrl+Break received, terminating immediately...");
+                let _ = interrupt_tx_break.send(true);
+            }
+        });
+        let interrupt_tx_close = interrupt_tx.clone();
+        tokio::spawn(async move {
+            if let Ok(mut s) = tokio::signal::windows::ctrl_close() {
+                s.recv().await;
+                warn!("Console close received (SIGHUP equivalent), terminating immediately...");
+                let _ = interrupt_tx_close.send(true);
+            }
+        });
+        let interrupt_tx_shutdown = interrupt_tx.clone();
+        tokio::spawn(async move {
+            if let Ok(mut s) = tokio::signal::windows::ctrl_shutdown() {
+                s.recv().await;
+                debug!("System shutdown received, terminating immediately...");
+                let _ = interrupt_tx_shutdown.send(true);
+            }
+        });
+    }
+
     // Log execution mode - hat info already logged by initialize()
     let exec_mode = if user_interactive {
         "interactive"

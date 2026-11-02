@@ -225,8 +225,7 @@ impl TaskWorkspace {
                 fs::copy(&script_path, &script_dst)?;
 
                 // Execute it
-                let output = Command::new("bash")
-                    .arg(&script_dst)
+                let output = crate::shell::script_command(&script_dst)
                     .current_dir(&self.path)
                     .output()?;
 
@@ -367,8 +366,7 @@ impl TaskWorkspace {
             verification.command
         );
 
-        let output = Command::new("bash")
-            .args(["-c", &verification.command])
+        let output = crate::shell::bash_command(&verification.command)
             .current_dir(&self.path)
             .output()
             .map_err(|e| WorkspaceError::Verification(format!("Failed to execute: {}", e)))?;

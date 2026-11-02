@@ -3,6 +3,7 @@
 // real loop-runner event loop. Shared helpers come from the sibling modules.
 
 use super::super::*;
+#[cfg(unix)]
 use super::common;
 use super::common::*;
 

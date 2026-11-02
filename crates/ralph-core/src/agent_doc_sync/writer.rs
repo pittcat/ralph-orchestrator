@@ -726,6 +726,12 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
         }
+        #[cfg(windows)]
+        {
+            let mut p = fs::metadata(&path).unwrap().permissions();
+            p.set_readonly(true);
+            fs::set_permissions(&path, p).unwrap();
+        }
 
         let block = sample_block();
         let result = sync_file(&FileSyncConfig {
@@ -743,6 +749,14 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         }
+        #[cfg(windows)]
+        {
+            // Restore writability so the TempDir cleanup can delete.
+            let mut p = fs::metadata(&path).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            p.set_readonly(false);
+            fs::set_permissions(&path, p).unwrap();
+        }
     }
 
     #[test]
@@ -755,6 +769,12 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let mut p = fs::metadata(&path).unwrap().permissions();
+            p.set_readonly(true);
+            fs::set_permissions(&path, p).unwrap();
         }
 
         let block = sample_block();
@@ -774,6 +794,14 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            // Restore writability so the TempDir cleanup can delete.
+            let mut p = fs::metadata(&path).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            p.set_readonly(false);
+            fs::set_permissions(&path, p).unwrap();
         }
     }
 

@@ -67,7 +67,12 @@ mod tests {
 
     #[test]
     fn resolve_workspace_root_preserves_absolute_paths() -> Result<()> {
-        let path = PathBuf::from("/tmp/ralph-workspace");
+        // `/tmp` is not absolute on Windows (no drive prefix).
+        let path = if cfg!(windows) {
+            PathBuf::from("C:\\ralph-workspace")
+        } else {
+            PathBuf::from("/tmp/ralph-workspace")
+        };
         assert_eq!(resolve_workspace_root(Some(path.clone()))?, Some(path));
         Ok(())
     }
@@ -76,7 +81,9 @@ mod tests {
     fn resolve_workspace_root_resolves_relative_paths_from_current_dir() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
         let canonical = temp_dir.path().canonicalize()?;
-        let _guard = CwdGuard::set(temp_dir.path());
+        // chdir into the canonical form so `current_dir()` returns the
+        // same representation on Windows (`\\?\` prefix, no 8.3 alias).
+        let _guard = CwdGuard::set(&canonical);
 
         let resolved = resolve_workspace_root(Some(PathBuf::from("nested/workspace")))?;
         assert_eq!(resolved, Some(canonical.join("nested/workspace")));

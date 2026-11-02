@@ -220,7 +220,10 @@ pub fn create_merge_subprocess_log_file(
 }
 
 pub fn process_pending_merges(repo_root: &Path) {
-    process_pending_merges_with_command(repo_root, OsStr::new("ralph"));
+    // `resolve_exe` is a no-op on Unix; on Windows it resolves
+    // `ralph.exe` through which/PATHEXT instead of relying on
+    // CreateProcess `.exe` probing.
+    process_pending_merges_with_command(repo_root, &ralph_core::shell::resolve_exe("ralph"));
 }
 
 /// Public wrapper for CLI invocation of process_pending_merges.

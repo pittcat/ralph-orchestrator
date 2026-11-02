@@ -76,7 +76,7 @@ pub mod dag_scheduler;
 pub mod runtime_job;
 pub mod wave;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use execution::ExecutionOutcome;
 pub(crate) use loop_owner::register_loop_owner;
 #[cfg(test)]
@@ -105,7 +105,7 @@ pub use preset_lint_gate::{
     EXIT_CODE_AGENT_DOC_SYNC_STRICT, EXIT_CODE_LINT_GATE, PresetLintGateError,
     enforce_preset_lint_gate_with_preset_name, write_preset_lint_artifact,
 };
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub use runner::resolve_loop_id;
 pub use runner::run_loop_impl;
 // Compatibility shims for callers that reached the original

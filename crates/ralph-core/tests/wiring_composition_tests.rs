@@ -18,6 +18,7 @@ use ralph_core::event_loop::stages::archive_version_stage::archive_state_for_loo
 use ralph_core::event_loop::stages::emit_schema_gate_stage::EmitSchemaGateStage;
 use ralph_core::event_loop::stages::flow_step_scope_stage::FlowStepScopeStage;
 use ralph_core::event_loop::stages::verdict_gate_stage::VerdictGateStage;
+use ralph_core::path::filename_stem;
 use ralph_core::state::idempotent_log::{IdempotentError, IdempotentLog, IdempotentRecord};
 use ralph_proto::{Event, EventBus};
 use serde_json::json;
@@ -355,9 +356,11 @@ fn wiring_composition_idempotent_final_under_concurrency() {
     );
 
     // On-disk file has exactly one final record.
-    let content =
-        std::fs::read_to_string(workspace.join("recovery:race-100:loop:loop-race-100.jsonl"))
-            .unwrap();
+    let file_stem = format!(
+        "{}.jsonl",
+        filename_stem("recovery:race-100:loop:loop-race-100")
+    );
+    let content = std::fs::read_to_string(workspace.join(&file_stem)).unwrap();
     let line_count = content.lines().filter(|l| !l.trim().is_empty()).count();
     assert_eq!(
         line_count, 1,
@@ -383,7 +386,8 @@ fn wiring_composition_worktree_archive_version_bump() {
     let workspace = dir.path();
 
     // 第一次 run：写一个 jsonl + IdempotentLog。
-    std::fs::write(workspace.join("recovery:retry-A:loop:loop-A.jsonl"), "").unwrap();
+    let retry_file = format!("{}.jsonl", filename_stem("recovery:retry-A:loop:loop-A"));
+    std::fs::write(workspace.join(&retry_file), "").unwrap();
     {
         let mut log = IdempotentLog::open(workspace, "loop-A").unwrap();
         log.append(
@@ -401,16 +405,14 @@ fn wiring_composition_worktree_archive_version_bump() {
         .expect("archive dir must exist for different loop_id");
 
     // 1. 老 jsonl 已搬走。
-    let archived_file = archive_dir.join("recovery:retry-A:loop:loop-A.jsonl");
+    let archived_file = archive_dir.join(&retry_file);
     assert!(
         archived_file.exists(),
         "old jsonl must be moved into archive dir ({})",
         archived_file.display()
     );
     assert!(
-        !workspace
-            .join("recovery:retry-A:loop:loop-A.jsonl")
-            .exists(),
+        !workspace.join(&retry_file).exists(),
         "old jsonl must be removed from workspace root"
     );
 

@@ -19,6 +19,7 @@ use std::process::Command;
 /// read returns empty. `RALPH_LOOP_ITERATION` is not consulted by the
 /// spawned CLI but is stripped for consistency so the spawned process
 /// sees a uniform "no-loop" environment.
+#[allow(dead_code)] // unused in test binaries that don't spawn `ralph`
 pub const AGENT_CONTEXT_ENV_KEYS: &[&str] = &[
     "RALPH_CURRENT_HAT",
     "RALPH_CURRENT_LOOP_ID",
@@ -30,6 +31,7 @@ pub const AGENT_CONTEXT_ENV_KEYS: &[&str] = &[
     "RALPH_WORKSPACE_ROOT",
     "RALPH_CURRENT_BRANCH",
     "RALPH_LOOP_ITERATION",
+    "RALPH_DAG_STORE_PATH",
 ];
 
 /// Drop agent-context env so the spawned `ralph` sees a human CLI.
@@ -42,6 +44,7 @@ pub const AGENT_CONTEXT_ENV_KEYS: &[&str] = &[
 /// (and a live monitor never picks up temp projects). Tests exercising
 /// auto-registration re-enable it afterwards with
 /// `RALPH_MONITOR_AUTOREGISTER` + `RALPH_MONITOR_REGISTRY_DIR`.
+#[allow(dead_code)] // unused in test binaries that don't spawn `ralph`
 pub fn scrub_agent_runtime_env(cmd: &mut Command) {
     for key in AGENT_CONTEXT_ENV_KEYS {
         cmd.env_remove(*key);
@@ -50,6 +53,7 @@ pub fn scrub_agent_runtime_env(cmd: &mut Command) {
 }
 
 /// `ralph` binary command with agent-context env scrubbed.
+#[allow(dead_code)] // unused in test binaries that don't spawn `ralph`
 pub fn ralph_bin() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ralph"));
     scrub_agent_runtime_env(&mut cmd);

@@ -103,6 +103,7 @@ impl DagEnvPolicy {
     /// no error, no log, no echo. Test fakes rely on this
     /// behaviour to drive the "secret never reaches child"
     /// assertion.
+    #[cfg(not(windows))]
     pub fn filter_child_env(&self, candidate: &HashMap<String, String>) -> HashMap<String, String> {
         let mut out: HashMap<String, String> = HashMap::with_capacity(self.allowlist.len());
         for name in self.allowlist.names() {
@@ -112,7 +113,57 @@ impl DagEnvPolicy {
         }
         out
     }
+
+    /// Windows variant: names match **case-insensitively** (`Path`
+    /// satisfies `PATH`), and a fixed baseline of OS-required
+    /// variables is always admitted so children can resolve
+    /// executables, write temp files and load system DLLs. Still
+    /// name-only — values pass through verbatim, and secrets not on
+    /// the baseline are still dropped.
+    #[cfg(windows)]
+    pub fn filter_child_env(&self, candidate: &HashMap<String, String>) -> HashMap<String, String> {
+        use std::collections::HashSet;
+
+        let allowed: HashSet<String> = self
+            .allowlist
+            .names()
+            .iter()
+            .map(|n| n.to_uppercase())
+            .chain(WINDOWS_BASELINE_VARS.iter().map(|n| n.to_uppercase()))
+            .collect();
+        candidate
+            .iter()
+            .filter(|(k, _)| allowed.contains(&k.to_uppercase()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
 }
+
+/// Env vars every Windows child needs regardless of the declared
+/// allowlist. Chosen conservatively: OS plumbing only, no user
+/// secrets. Without `SystemRoot`/`windir` most tools fail to start;
+/// without `COMSPEC`/`PATHEXT` `.cmd` resolution breaks; without
+/// `TEMP`/`TMP` many libraries panic.
+#[cfg(windows)]
+const WINDOWS_BASELINE_VARS: &[&str] = &[
+    "PATH",
+    "PATHEXT",
+    "COMSPEC",
+    "SystemRoot",
+    "windir",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "USERNAME",
+    "USERDOMAIN",
+    "OS",
+    "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS",
+];
 
 /// Marker type documenting the **legacy inherited-env path** the
 /// wave worker uses today. U6 does **not** touch the wave worker
@@ -168,12 +219,26 @@ mod tests {
     }
 
     /// Empty allowlist admits nothing.
+    #[cfg(not(windows))]
     #[test]
     fn empty_allowlist_admits_nothing() {
         let policy = DagEnvPolicy::from_declared(Vec::<&str>::new());
         let candidate = map([("PATH", "/bin"), ("HOME", "/home/x")]);
         let out = policy.filter_child_env(&candidate);
         assert!(out.is_empty());
+    }
+
+    /// Windows: an empty allowlist still admits the OS baseline vars
+    /// present in the candidate (PATH is baseline, HOME is not).
+    #[cfg(windows)]
+    #[test]
+    fn empty_allowlist_admits_only_baseline() {
+        let policy = DagEnvPolicy::from_declared(Vec::<&str>::new());
+        let candidate = map([("PATH", "/bin"), ("HOME", "/home/x")]);
+        let out = policy.filter_child_env(&candidate);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out.get("PATH").map(String::as_str), Some("/bin"));
+        assert!(!out.contains_key("HOME"));
     }
 
     /// Only declared entries reach the child.
@@ -221,6 +286,33 @@ mod tests {
         assert!(!out.contains_key("RALPH_DAG"));
     }
 
+    /// Windows: names match case-insensitively and OS baseline vars
+    /// are always admitted; non-baseline secrets are still dropped.
+    #[cfg(windows)]
+    #[test]
+    fn windows_case_insensitive_matching_with_baseline() {
+        let policy = DagEnvPolicy::from_declared(["PATH", "RALPH_DAG"]);
+        let candidate = map([
+            ("Path", "C:\\Windows"),
+            ("SystemRoot", "C:\\Windows"),
+            ("COMSPEC", "C:\\Windows\\system32\\cmd.exe"),
+            ("RALPH_DAG", "key"),
+            ("AWS_SECRET", "super-secret"),
+        ]);
+        let out = policy.filter_child_env(&candidate);
+        assert_eq!(out.get("Path").map(String::as_str), Some("C:\\Windows"));
+        assert_eq!(
+            out.get("SystemRoot").map(String::as_str),
+            Some("C:\\Windows")
+        );
+        assert_eq!(
+            out.get("COMSPEC").map(String::as_str),
+            Some("C:\\Windows\\system32\\cmd.exe")
+        );
+        assert_eq!(out.get("RALPH_DAG").map(String::as_str), Some("key"));
+        assert!(!out.contains_key("AWS_SECRET"));
+    }
+
     /// The legacy marker is constructible and pinned (so a
     /// migration can grep for it). Body is empty by design.
     #[test]
@@ -228,5 +320,98 @@ mod tests {
         let _marker = LegacyEnvPolicy::marker();
         let note = LegacyEnvPolicy::legacy_path_note();
         assert!(note.contains("DagEnvPolicy"));
+    }
+
+    /// Windows fuzz: for random candidate env sets the output must (a)
+    /// contain only allowlist+baseline names matched case-insensitively,
+    /// (b) pass values through verbatim, and (c) never leak
+    /// non-baseline "secret-looking" names.
+    #[cfg(windows)]
+    #[test]
+    fn windows_filter_fuzz_never_leaks_non_baseline() {
+        use std::collections::HashSet;
+
+        struct XorShift(u64);
+        impl XorShift {
+            fn next(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
+            }
+            fn below(&mut self, n: usize) -> usize {
+                (self.next() % n as u64) as usize
+            }
+        }
+
+        let baseline: HashSet<String> = WINDOWS_BASELINE_VARS
+            .iter()
+            .map(|n| n.to_uppercase())
+            .collect();
+        let allow = ["RALPH_DAG", "MY_CUSTOM_VAR", "MixedCase"];
+        let policy = DagEnvPolicy::from_declared(allow);
+        let allowed: HashSet<String> = allow
+            .iter()
+            .map(|n| n.to_uppercase())
+            .chain(baseline.iter().cloned())
+            .collect();
+
+        let mut rng = XorShift(0xB529_7A4D_E951_3F17);
+        let name_pool = [
+            "PATH",
+            "Path",
+            "path",
+            "RALPH_DAG",
+            "ralph_dag",
+            "MY_CUSTOM_VAR",
+            "MixedCase",
+            "MIXEDCASE",
+            "SystemRoot",
+            "systemroot",
+            "TEMP",
+            "AWS_SECRET_ACCESS_KEY",
+            "PRIVATE_TOKEN",
+            "MY_SECRET",
+            "OS",
+            "USERNAME",
+            "NOT_ALLOWED",
+            "RandomVar",
+            "HOMEPATH",
+        ];
+        let value_pool = ["", "x", "C:\\a;b", "väl üé", "line\nbreak", "{}", "a b c"];
+
+        for _ in 0..3_000 {
+            let count = rng.below(name_pool.len());
+            let candidate: HashMap<String, String> = (0..count)
+                .map(|_| {
+                    (
+                        name_pool[rng.below(name_pool.len())].to_string(),
+                        value_pool[rng.below(value_pool.len())].to_string(),
+                    )
+                })
+                .collect();
+            let out = policy.filter_child_env(&candidate);
+
+            // (a) every emitted name is allowlist or baseline (CI match).
+            for key in out.keys() {
+                assert!(
+                    allowed.contains(&key.to_uppercase()),
+                    "leaked non-baseline env {key}"
+                );
+            }
+            // (b) values pass verbatim.
+            for (k, v) in &out {
+                assert_eq!(candidate.get(k), Some(v));
+            }
+            // (c) explicit secret-looking names never appear.
+            for secret in ["AWS_SECRET_ACCESS_KEY", "PRIVATE_TOKEN", "MY_SECRET"] {
+                assert!(
+                    !out.keys().any(|k| k.eq_ignore_ascii_case(secret)),
+                    "secret {secret} leaked"
+                );
+            }
+        }
     }
 }

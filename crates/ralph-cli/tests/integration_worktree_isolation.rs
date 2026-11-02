@@ -180,7 +180,7 @@ fn test_worktree_creates_exactly_one_and_registry_correct() {
         "In worktree mode, worktree_path must equal workspace"
     );
     assert!(
-        wt_path.contains("/worktree/"),
+        wt_path.contains("/worktree/") || wt_path.contains("\\worktree\\"),
         "workspace must point into the external worktree root, got: {}",
         wt_path
     );
@@ -949,6 +949,23 @@ fn test_worktree_context_md_does_not_expose_main_repo() {
 // 2026-08-08-001 plan U1: real headless pipeline worktree cwd/写盘 Red
 // ─────────────────────────────────────────────────────────────────────────
 
+/// Git Bash reports `pwd`/env paths in MSYS form (`/c/Users/...`); map the
+/// drive-letter prefix back to `C:/...` so `std::fs::canonicalize` can
+/// compare them with native Windows paths. Identity on non-MSYS input.
+#[cfg(windows)]
+fn msys_to_native(p: &str) -> std::borrow::Cow<'_, str> {
+    let b = p.as_bytes();
+    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b'/' {
+        return std::borrow::Cow::Owned(format!("{}:/{}", b[1] as char, &p[3..]));
+    }
+    std::borrow::Cow::Borrowed(p)
+}
+
+#[cfg(not(windows))]
+fn msys_to_native(p: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Borrowed(p)
+}
+
 /// Config that wires the loop to a custom-backend shell script which writes a
 /// marker into whatever cwd it runs in, then emits LOOP_COMPLETE. The script
 /// captures both the directory it actually saw (the `real_cwd` artifact) and
@@ -1099,8 +1116,9 @@ fn headless_worktree_backend_writes_only_to_worktree() {
         .lines()
         .next()
         .expect("marker must record pwd on line 1");
-    let recorded_pwd =
-        fs::canonicalize(recorded_pwd_raw).unwrap_or_else(|_| PathBuf::from(recorded_pwd_raw));
+    let recorded_pwd_native = msys_to_native(recorded_pwd_raw);
+    let recorded_pwd = fs::canonicalize(recorded_pwd_native.as_ref())
+        .unwrap_or_else(|_| PathBuf::from(recorded_pwd_native.as_ref()));
     let expected_pwd = fs::canonicalize(&worktree_path).unwrap_or_else(|_| worktree_path.clone());
     assert_eq!(
         recorded_pwd,
@@ -1121,8 +1139,9 @@ fn headless_worktree_backend_writes_only_to_worktree() {
         let prefix = format!("{var}=");
         line.strip_prefix(&prefix)
             .map(|rhs| {
-                rhs == expected_workspace
-                    || fs::canonicalize(rhs)
+                let rhs = msys_to_native(rhs);
+                rhs.as_ref() == expected_workspace
+                    || fs::canonicalize(rhs.as_ref())
                         .map(|p| p == Path::new(&expected_workspace))
                         .unwrap_or(false)
             })

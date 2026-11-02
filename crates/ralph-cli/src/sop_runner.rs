@@ -265,8 +265,12 @@ fn build_prompt(sop: Sop, user_input: Option<&str>, addendums: &[(&str, &str)]) 
 fn spawn_interactive(backend: &CliBackend, prompt: &str) -> Result<(), SopRunError> {
     let (command, args, _stdin_input, _temp_file) = backend.build_command(prompt, true);
 
-    let mut cmd = Command::new(&command);
-    cmd.args(&args)
+    // `spawn_program` resolves `.cmd` shims and script interpreters on
+    // Windows; on Unix it returns the command verbatim.
+    let (program, arg_prefix) = ralph_core::shell::spawn_program(&command);
+    let mut cmd = Command::new(program);
+    cmd.args(&arg_prefix)
+        .args(&args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());

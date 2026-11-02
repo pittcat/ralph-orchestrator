@@ -466,11 +466,34 @@ impl LoopContext {
         Ok(true)
     }
 
-    /// Creates the memory symlink in a worktree (non-Unix stub).
-    #[cfg(not(unix))]
+    /// Creates the memory link in a worktree (Windows).
+    ///
+    /// Tries `symlink_file` first (requires Developer Mode or admin); on
+    /// failure falls back to a hard link. `memory_store` writes in place
+    /// via `fs::write`, so a hard link stays shared. If both fail the
+    /// error propagates and worktree launch is refused rather than
+    /// silently diverging memories.
+    #[cfg(windows)]
     pub fn setup_memory_symlink(&self) -> std::io::Result<bool> {
-        // On non-Unix platforms, we don't create symlinks
-        // (worktree mode not supported)
+        if self.is_primary {
+            return Ok(false);
+        }
+
+        let memories_path = self.memories_path();
+        let main_memories = self.main_memories_path();
+
+        if memories_path.exists() || memories_path.is_symlink() {
+            return Ok(false);
+        }
+
+        self.ensure_agent_dir()?;
+        link_windows(&main_memories, &memories_path, false)?;
+        Ok(true)
+    }
+
+    /// Creates the memory symlink in a worktree (unsupported platforms).
+    #[cfg(all(not(unix), not(windows)))]
+    pub fn setup_memory_symlink(&self) -> std::io::Result<bool> {
         Ok(false)
     }
 
@@ -506,8 +529,30 @@ impl LoopContext {
         Ok(true)
     }
 
-    /// Creates the specs symlink in a worktree (non-Unix stub).
-    #[cfg(not(unix))]
+    /// Creates the specs link in a worktree (Windows).
+    ///
+    /// Tries `symlink_dir` first, then a directory junction (needs no
+    /// special privilege). Fails closed on total failure.
+    #[cfg(windows)]
+    pub fn setup_specs_symlink(&self) -> std::io::Result<bool> {
+        if self.is_primary {
+            return Ok(false);
+        }
+
+        let specs_path = self.specs_dir();
+        let main_specs = self.main_specs_dir();
+
+        if specs_path.exists() || specs_path.is_symlink() {
+            return Ok(false);
+        }
+
+        self.ensure_ralph_dir()?;
+        link_windows(&main_specs, &specs_path, true)?;
+        Ok(true)
+    }
+
+    /// Creates the specs symlink in a worktree (unsupported platforms).
+    #[cfg(all(not(unix), not(windows)))]
     pub fn setup_specs_symlink(&self) -> std::io::Result<bool> {
         Ok(false)
     }
@@ -544,8 +589,30 @@ impl LoopContext {
         Ok(true)
     }
 
-    /// Creates the code tasks symlink in a worktree (non-Unix stub).
-    #[cfg(not(unix))]
+    /// Creates the code tasks link in a worktree (Windows).
+    ///
+    /// Tries `symlink_dir` first, then a directory junction. Fails closed
+    /// on total failure.
+    #[cfg(windows)]
+    pub fn setup_code_tasks_symlink(&self) -> std::io::Result<bool> {
+        if self.is_primary {
+            return Ok(false);
+        }
+
+        let tasks_path = self.code_tasks_dir();
+        let main_tasks = self.main_code_tasks_dir();
+
+        if tasks_path.exists() || tasks_path.is_symlink() {
+            return Ok(false);
+        }
+
+        self.ensure_ralph_dir()?;
+        link_windows(&main_tasks, &tasks_path, true)?;
+        Ok(true)
+    }
+
+    /// Creates the code tasks symlink in a worktree (unsupported platforms).
+    #[cfg(all(not(unix), not(windows)))]
     pub fn setup_code_tasks_symlink(&self) -> std::io::Result<bool> {
         Ok(false)
     }
@@ -646,10 +713,56 @@ to this worktree.
         Ok(())
     }
 
-    /// Sets up all worktree symlinks (non-Unix stub).
-    #[cfg(not(unix))]
+    /// Sets up all worktree links (Windows: symlink → junction/hardlink).
+    #[cfg(windows)]
+    pub fn setup_worktree_symlinks(&self) -> std::io::Result<()> {
+        self.setup_memory_symlink()?;
+        self.setup_specs_symlink()?;
+        self.setup_code_tasks_symlink()?;
+        Ok(())
+    }
+
+    /// Sets up all worktree symlinks (unsupported platforms).
+    #[cfg(all(not(unix), not(windows)))]
     pub fn setup_worktree_symlinks(&self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+/// Links `link` to `target` on Windows.
+///
+/// Order: native symlink (Developer Mode / admin), then junction for
+/// directories or hard link for files. Returns a descriptive error when
+/// every mechanism fails so worktree setup fails closed instead of
+/// silently diverging `.ralph` state.
+#[cfg(windows)]
+fn link_windows(target: &Path, link: &Path, is_dir: bool) -> std::io::Result<()> {
+    let symlink_result = if is_dir {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    };
+    match symlink_result {
+        Ok(()) => Ok(()),
+        Err(symlink_err) => {
+            let fallback = if is_dir {
+                junction::create(target, link)
+            } else {
+                std::fs::hard_link(target, link)
+            };
+            fallback.map_err(|fallback_err| {
+                std::io::Error::new(
+                    fallback_err.kind(),
+                    format!(
+                        "failed to link {} -> {}: symlink failed ({symlink_err}); \
+                         fallback failed ({fallback_err}). Enable Windows Developer Mode \
+                         or run elevated to allow symlinks.",
+                        link.display(),
+                        target.display()
+                    ),
+                )
+            })
+        }
     }
 }
 

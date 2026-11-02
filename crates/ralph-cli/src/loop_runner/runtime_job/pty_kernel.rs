@@ -57,7 +57,13 @@ fn kill_process_group(pid: u32) {
 }
 
 #[cfg(not(unix))]
-fn kill_process_group(_pid: u32) {}
+fn kill_process_group(pid: u32) {
+    // Windows has no process-group kill. Killing only the ConPTY session
+    // leader orphans shell-launched grandchildren, which keep the console
+    // attached — the output pipe never reaches EOF and the reader join in
+    // `finish_pty_job` would hang. Terminate the whole descendant tree.
+    ralph_core::pid_probe::kill_process_tree(pid);
+}
 
 use crate::loop_runner::wave::heartbeat::{
     HeartbeatKind, LeaseConfig, LeaseDecision, LeaseState, classify_heartbeat_line,
@@ -99,8 +105,10 @@ pub enum PtyKernelError {
     /// `openpty` failed.
     PtyOpen(String),
     /// Creating the stdin prompt temp file failed.
+    #[cfg_attr(windows, allow(dead_code))]
     StdinTempFileCreate(String),
     /// Writing the stdin prompt temp file failed.
+    #[cfg_attr(windows, allow(dead_code))]
     StdinTempFileWrite(String),
     /// Spawning the child into the PTY slave failed.
     Spawn(String),
@@ -137,6 +145,23 @@ pub struct PtyJobHandle {
     /// Keeps the stdin prompt temp file alive for the child's
     /// lifetime; deleted when the handle drops.
     _stdin_prompt_file: Option<tempfile::NamedTempFile>,
+    /// Keeps the PTY master — and on Windows the underlying HPCON —
+    /// alive for the child's lifetime. Dropping it early destroys the
+    /// pseudo console while the child is still attaching, which fails
+    /// its console-client init (`STATUS_DLL_INIT_FAILED` 0xC0000142).
+    /// On Unix the dup'd reader fd masked this; the console object is
+    /// not dup'able.
+    _master: Box<dyn portable_pty::MasterPty + Send>,
+    /// Windows only: resolves once the ConPTY session leader exits.
+    /// The pseudo-console host keeps the output pipe open past the
+    /// last client's death, so EOF alone cannot bound the lease loop.
+    exit_rx: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// Keeps the PTY input pipe open for the job's lifetime. On
+    /// Windows, closing the ConPTY input stream ends the whole
+    /// pseudo-console session, so the writer must outlive the child;
+    /// dropping the handle closes it and delivers the session-end
+    /// signal at job completion. On Unix it is never populated.
+    _stdin_writer: Option<std::sync::Arc<std::sync::Mutex<Box<dyn std::io::Write + Send>>>>,
 }
 
 impl PtyJobHandle {
@@ -173,7 +198,9 @@ pub fn spawn_pty_job(spec: PtySpawnSpec) -> Result<PtyJobHandle, PtyKernelError>
         })
         .map_err(|e| PtyKernelError::PtyOpen(e.to_string()))?;
 
+    #[cfg_attr(windows, allow(unused_mut))]
     let mut stdin_prompt_file = None;
+    #[cfg(unix)]
     let (spawn_cmd, spawn_args) = if let Some(input) = stdin_input.as_ref() {
         let mut prompt_file = tempfile::NamedTempFile::new()
             .map_err(|e| PtyKernelError::StdinTempFileCreate(e.to_string()))?;
@@ -202,6 +229,19 @@ pub fn spawn_pty_job(spec: PtySpawnSpec) -> Result<PtyJobHandle, PtyKernelError>
     } else {
         (cmd, args)
     };
+    // Windows: no portable stdin-redirection shell. The prompt is written
+    // to the ConPTY master writer after spawn instead. portable-pty feeds
+    // the program straight to CreateProcessW — bare names like `sh` do
+    // not get Rust std's PATH/extension resolution, so resolve through
+    // `spawn_program` (which also routes .sh/.ps1 scripts to their
+    // interpreter).
+    #[cfg(windows)]
+    let (spawn_cmd, spawn_args) = {
+        let (program, arg_prefix) = ralph_core::shell::spawn_program(&cmd);
+        let mut all_args = arg_prefix;
+        all_args.extend(args.iter().map(std::ffi::OsString::from));
+        (program, all_args)
+    };
 
     let mut cmd_builder = portable_pty::CommandBuilder::new(&spawn_cmd);
     if clear_env {
@@ -222,13 +262,50 @@ pub fn spawn_pty_job(spec: PtySpawnSpec) -> Result<PtyJobHandle, PtyKernelError>
     let pid = child.process_id();
     drop(pty_pair.slave);
 
+    // Deliver stdin via the PTY master writer. On Unix this is only a
+    // fallback (stdin normally arrives through the prompt-file wrapper);
+    // on Windows it is the delivery path. A background thread performs
+    // the write so a child that is slow to read cannot block spawn.
+    // The writer is retained in the handle: closing the ConPTY input
+    // stream ends the pseudo-console session outright, so it must not
+    // be dropped while the child is running.
+    let use_master_writer = if cfg!(windows) {
+        true
+    } else {
+        stdin_prompt_file.is_none()
+    };
+    let mut stdin_writer = None;
     if let Some(input) = stdin_input
-        && stdin_prompt_file.is_none()
-        && let Ok(mut writer) = pty_pair.master.take_writer()
+        && use_master_writer
+        && let Ok(writer) = pty_pair.master.take_writer()
     {
-        let _ = writer.write_all(input.as_bytes());
-        let _ = writer.write_all(b"\n");
-        let _ = writer.flush();
+        let writer = std::sync::Arc::new(std::sync::Mutex::new(writer));
+        let thread_writer = std::sync::Arc::clone(&writer);
+        let input = input.clone();
+        std::thread::spawn(move || {
+            if let Ok(mut writer) = thread_writer.lock() {
+                let _ = writer.write_all(input.as_bytes());
+                // `\r` is the Enter keystroke ConPTY delivers; `\n` alone
+                // does not complete a line for native cooked-mode readers
+                // (cygwin maps CR→NL either way). Unix keeps `\n`.
+                #[cfg(windows)]
+                let _ = writer.write_all(b"\r");
+                #[cfg(not(windows))]
+                let _ = writer.write_all(b"\n");
+                // Windows has no native stdin-EOF channel under ConPTY
+                // (raw input mode; ^Z is a literal char), so emulate the
+                // EOF the Unix prompt-file redirect delivers via EOT:
+                // cygwin/MSYS children implement POSIX VEOF in their
+                // console layer and exit cleanly; native readers that
+                // only need the prompt line never consume the byte.
+                // Do NOT send ^Z — cygwin maps it to SIGTSTP and flushes
+                // pending input. Unix keeps byte-identical semantics.
+                #[cfg(windows)]
+                let _ = writer.write_all(b"\x04");
+                let _ = writer.flush();
+            }
+        });
+        stdin_writer = Some(writer);
     }
 
     let pty_reader = pty_pair
@@ -252,12 +329,38 @@ pub fn spawn_pty_job(spec: PtySpawnSpec) -> Result<PtyJobHandle, PtyKernelError>
         }
     });
 
+    // Windows: watch the session leader's liveness — the ConPTY host
+    // does not close the output pipe when the last client exits, so
+    // without this signal the lease loop would idle until its hard cap
+    // on every fast-exiting job.
+    #[cfg(windows)]
+    let exit_rx = {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        if let Some(pid) = pid {
+            std::thread::spawn(move || {
+                loop {
+                    if tx.is_closed() || !ralph_core::pid_probe::pid_alive(pid) {
+                        let _ = tx.send(());
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            });
+        }
+        Some(rx)
+    };
+    #[cfg(not(windows))]
+    let exit_rx = None;
+
     Ok(PtyJobHandle {
         child,
         reader_handle,
         line_rx,
         pid,
         _stdin_prompt_file: stdin_prompt_file,
+        _master: pty_pair.master,
+        exit_rx,
+        _stdin_writer: stdin_writer,
     })
 }
 
@@ -361,6 +464,19 @@ pub async fn drive_pty_lease_loop(
     let process_group_id = handle.pid();
     let child = &mut handle.child;
     let line_rx = &mut handle.line_rx;
+    // Once-future resolving when the ConPTY session leader exits.
+    // `pending` on Unix (or when the kernel exposed no pid) so the
+    // select arms below never fire there — Unix stream behaviour is
+    // unchanged.
+    let exit_watcher = async {
+        match handle.exit_rx.as_mut() {
+            Some(rx) => {
+                let _ = rx.await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(exit_watcher);
 
     // C4 helper: collapse the 9-place duplication of
     //   `let _ = child.kill(); kill_reason = ...; killed = true; timed_out = true;`
@@ -536,6 +652,24 @@ pub async fn drive_pty_lease_loop(
                         }
                     }
 
+                    // Windows: the ConPTY session leader exited — the
+                    // output pipe stays open past client death, so the
+                    // stream would otherwise idle until a deadline.
+                    // Flush lines still in flight, then stop.
+                    _ = &mut exit_watcher, if !killed => {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        while let Ok(line) = line_rx.try_recv() {
+                            let now_ms = start.elapsed().as_millis() as u64;
+                            on_line(&line);
+                            let _ = lease_state.tick(
+                                classify_heartbeat_line(&line, output_format),
+                                now_ms,
+                                cfg,
+                            );
+                        }
+                        break;
+                    }
+
                     // Events-file growth as strong signal.
                     _ = events_tick_interval.tick(), if events_file_ticker.is_some() => {
                         let (path, prev_key) = events_file_ticker.as_ref().unwrap();
@@ -609,6 +743,43 @@ pub async fn drive_pty_lease_loop(
             // behaviour so that `partial_timeout_events_visible` and
             // the S2 regression pin stay green.
             let mut line_count: u64 = 0;
+            #[cfg(windows)]
+            let stream_result = async {
+                loop {
+                    tokio::select! {
+                        line = line_rx.recv() => {
+                            match line {
+                                Some(line) => {
+                                    line_count += 1;
+                                    if line_count == 1 {
+                                        info!(
+                                            worker = worker_index,
+                                            line_len = line.len(),
+                                            ?output_format,
+                                            "Wave worker: first stdout line received"
+                                        );
+                                    }
+                                    on_line(&line);
+                                }
+                                None => break,
+                            }
+                        }
+                        _ = &mut exit_watcher => {
+                            // Session leader exited — the ConPTY output
+                            // pipe may never reach EOF, so drain queued
+                            // lines and stop here.
+                            tokio::time::sleep(Duration::from_millis(150)).await;
+                            while let Ok(line) = line_rx.try_recv() {
+                                line_count += 1;
+                                on_line(&line);
+                            }
+                            break;
+                        }
+                    }
+                }
+                Ok::<_, std::io::Error>(())
+            };
+            #[cfg(unix)]
             let stream_result = async {
                 while let Some(line) = line_rx.recv().await {
                     line_count += 1;
@@ -664,10 +835,17 @@ pub async fn finish_pty_job(handle: PtyJobHandle) -> std::io::Result<portable_pt
     let PtyJobHandle {
         mut child,
         reader_handle,
+        _master,
         ..
     } = handle;
     tokio::task::spawn_blocking(move || {
         let status = child.wait();
+        // The ConPTY host keeps the output pipe open after the last
+        // client exits, so the reader thread can only reach EOF once
+        // the pseudo console itself is closed. Close it now — the
+        // child is reaped. On Unix this is a plain fd close; the
+        // reader holds its own dup and is unaffected.
+        drop(_master);
         let _ = reader_handle.join();
         status
     })
@@ -724,6 +902,7 @@ mod tests {
     // ── Kernel-level behavioural tests: real (tiny) child
     // processes, no LLM calls. ───────────────────────────────────
 
+    #[cfg(unix)]
     fn sh_spec(script: &str) -> PtySpawnSpec {
         PtySpawnSpec {
             cmd: "sh".to_string(),
@@ -735,6 +914,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn dual_clock_mode(hard_cap_ms: u64, idle_window_ms: u64) -> PtyLeaseMode {
         PtyLeaseMode::DualClock {
             cfg: LeaseConfig {
@@ -957,5 +1137,85 @@ mod tests {
 
         let status = finish_pty_job(handle).await.expect("wait succeeds");
         assert!(status.success(), "clean exit must report success");
+    }
+
+    /// Windows ConPTY lifecycle canary: spawn, line streaming,
+    /// child-exit detection (the ConPTY host keeps the output pipe
+    /// open past client death, so EOF cannot bound the lease loop),
+    /// stdin delivery through the master writer, and clean reap.
+    /// `sh` resolves to Git Bash via `spawn_program`.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn pty_job_completes_and_delivers_stdin_on_windows() {
+        async fn run(
+            spec: PtySpawnSpec,
+            lines: &mut Vec<String>,
+        ) -> (PtyLeaseOutcome, portable_pty::ExitStatus) {
+            let mut handle = spawn_pty_job(spec).expect("spawn");
+            let outcome = drive_pty_lease_loop(
+                &mut handle,
+                &PtyLeaseMode::Legacy {
+                    hard_cap: Duration::from_secs(30),
+                },
+                OutputFormat::Text,
+                0,
+                &mut |line: &str| lines.push(line.to_string()),
+                Instant::now(),
+            )
+            .await;
+            let status = finish_pty_job(handle).await.expect("reap");
+            (outcome, status)
+        }
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cwd = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        let mut lines = Vec::new();
+        let (outcome, status) = run(
+            PtySpawnSpec {
+                cmd: "sh".to_string(),
+                args: vec!["-c".to_string(), "echo conpty-canary".to_string()],
+                stdin_input: None,
+                cwd: cwd(),
+                env: Vec::new(),
+                clear_env: false,
+            },
+            &mut lines,
+        )
+        .await;
+        assert!(!outcome.timed_out, "clean exit must not time out");
+        assert!(status.success());
+        assert!(
+            lines.iter().any(|l| l.contains("conpty-canary")),
+            "child output must reach the PTY reader: {lines:?}"
+        );
+
+        // stdin prompt delivery: `read`/`echo` are builtins — a
+        // non-login MSYS `sh` has a minimal PATH without coreutils.
+        let marker = tmp.path().join("stdin.txt");
+        let marker_fwd = marker.display().to_string().replace('\\', "/");
+        let mut lines = Vec::new();
+        let (outcome, status) = run(
+            PtySpawnSpec {
+                cmd: "sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    format!("IFS= read -r line; echo \"$line\" > {marker_fwd}"),
+                ],
+                stdin_input: Some("PTY-STDIN-CANARY".to_string()),
+                cwd: cwd(),
+                env: Vec::new(),
+                clear_env: false,
+            },
+            &mut lines,
+        )
+        .await;
+        assert!(!outcome.timed_out);
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap_or_default(),
+            "PTY-STDIN-CANARY\n",
+            "stdin written to the ConPTY master must reach the child"
+        );
     }
 }

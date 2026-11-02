@@ -831,6 +831,8 @@ fn normalize_path_policy(
         let path = trimmed.strip_suffix("/**").unwrap_or(trimmed);
         let valid = !path.is_empty()
             && !path.starts_with('/')
+            && !path.contains('\\')
+            && !std::path::Path::new(path).is_absolute()
             && !path.contains('*')
             && !path.contains('?')
             && !path

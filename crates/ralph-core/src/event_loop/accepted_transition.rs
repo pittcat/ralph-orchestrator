@@ -609,7 +609,14 @@ impl AcceptedTransition {
         }
         std::fs::rename(&tmp, &path)?;
         if let Some(parent) = path.parent() {
-            std::fs::File::open(parent)?.sync_all()?;
+            let dir_sync = std::fs::File::open(parent).and_then(|dir| dir.sync_all());
+            #[cfg(unix)]
+            dir_sync?;
+            // Windows cannot open a directory handle without
+            // FILE_FLAG_BACKUP_SEMANTICS — directory fsync is
+            // best-effort there (same tolerance as state::ledger).
+            #[cfg(not(unix))]
+            let _ = dir_sync;
         }
         Ok(())
     }

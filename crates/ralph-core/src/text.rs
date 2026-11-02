@@ -86,9 +86,60 @@ pub fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Decode file bytes to a `String`, tolerating UTF-8 BOM and UTF-16
+/// LE/BE BOMs. PowerShell 7 `>` / `Out-File` writes UTF-8 by default, but
+/// `powershell.exe` 5.1 and some tools emit UTF-16LE with BOM — agent
+/// written events/payload files on Windows hit this path.
+///
+/// Pure function over bytes; identical behaviour on all platforms
+/// (UTF-8 input without BOM is returned unchanged, zero cost).
+pub fn decode_file_text(bytes: &[u8]) -> String {
+    const UTF16_LE_BOM: &[u8] = b"\xff\xfe";
+    const UTF16_BE_BOM: &[u8] = b"\xfe\xff";
+    const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
+
+    if bytes.starts_with(UTF16_LE_BOM) {
+        let units: Vec<u16> = bytes[UTF16_LE_BOM.len()..]
+            .chunks(2)
+            .map_while(|c| <[u8; 2]>::try_from(c).ok().map(u16::from_le_bytes))
+            .collect();
+        return String::from_utf16_lossy(&units);
+    }
+    if bytes.starts_with(UTF16_BE_BOM) {
+        let units: Vec<u16> = bytes[UTF16_BE_BOM.len()..]
+            .chunks(2)
+            .map_while(|c| <[u8; 2]>::try_from(c).ok().map(u16::from_be_bytes))
+            .collect();
+        return String::from_utf16_lossy(&units);
+    }
+    let body = bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes);
+    String::from_utf8_lossy(body).into_owned()
+}
+
+/// `fs::read` + [`decode_file_text`]. Use this for files an agent or an
+/// external tool may have written (events, payloads) where the encoding
+/// is not runtime-controlled.
+pub fn read_file_text(path: &std::path::Path) -> std::io::Result<String> {
+    std::fs::read(path).map(|bytes| decode_file_text(&bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_decode_file_text() {
+        assert_eq!(decode_file_text(b"hello"), "hello");
+        // UTF-8 BOM stripped
+        assert_eq!(decode_file_text(b"\xef\xbb\xbfhello"), "hello");
+        // UTF-16LE BOM decoded
+        let mut le = vec![0xffu8, 0xfe];
+        le.extend_from_slice(&[b'h', 0, b'i', 0]);
+        assert_eq!(decode_file_text(&le), "hi");
+        // UTF-16BE BOM decoded
+        let be = vec![0xfeu8, 0xff, 0, b'h', 0, b'i'];
+        assert_eq!(decode_file_text(&be), "hi");
+    }
 
     #[test]
     fn test_floor_char_boundary_ascii() {

@@ -1001,7 +1001,7 @@ impl EventLoop {
             // Absolute paths are honoured as-is (operator
             // override); relative paths resolve under the
             // workspace's `.ralph/agent/` directory.
-            if configured.starts_with('/') {
+            if std::path::Path::new(configured.as_str()).is_absolute() {
                 return PathBuf::from(configured);
             }
             ctx.workspace()

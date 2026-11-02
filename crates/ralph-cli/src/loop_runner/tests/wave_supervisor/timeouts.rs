@@ -11,6 +11,7 @@ use super::fixtures::*;
 // dispatcher wires begin/finish around every `executor.execute`
 // call so these tests can read the receipts back via the
 // production store handle (U5RecordingBridge.store).
+#[cfg(unix)]
 use ralph_core::supervisor::AttemptStatus;
 
 /// U2 验收 #3: after a reported failure the slot is handed to a NEW

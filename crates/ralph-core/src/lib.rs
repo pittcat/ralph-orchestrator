@@ -115,6 +115,7 @@ pub mod merge_queue;
 pub mod monitor_registration;
 pub mod notifications;
 pub mod payload_contract;
+pub mod pid_probe;
 pub mod plan_baseline;
 pub mod planning_session;
 pub mod preflight;
@@ -139,6 +140,7 @@ pub mod runtime_contract;
 mod session_player;
 #[cfg(feature = "recording")]
 mod session_recorder;
+pub mod shell;
 pub mod skill;
 pub mod skill_registry;
 pub mod state;
@@ -307,7 +309,7 @@ pub use task_definition::{
     TaskDefinition, TaskDefinitionError, TaskSetup, TaskSuite, Verification,
 };
 pub use task_store::TaskStore;
-pub use text::{floor_char_boundary, truncate_with_ellipsis};
+pub use text::{decode_file_text, floor_char_boundary, read_file_text, truncate_with_ellipsis};
 pub use urgent_steer::{UrgentSteerRecord, UrgentSteerStore};
 pub use wave_detection::{
     DEFAULT_MAX_WAVE_TOTAL, DetectedWave, PartialWavePolicy, RejectedWave, WaveDetectionOutcome,

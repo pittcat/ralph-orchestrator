@@ -226,13 +226,17 @@ impl EphemeralIsolation {
                     e
                 );
             }
+            // Agent-facing relative paths — render `/` so the prompt
+            // reads identically on Windows and Unix.
             records.push(RelocationRecord {
-                from: rel.to_string_lossy().into_owned(),
+                from: rel
+                    .to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/"),
                 to: scratchpad
                     .strip_prefix(repo_root)
                     .unwrap_or(&scratchpad)
                     .to_string_lossy()
-                    .into_owned(),
+                    .replace(std::path::MAIN_SEPARATOR, "/"),
                 size_bytes,
             });
         }
@@ -384,7 +388,9 @@ fn is_forbidden_source_path(rel: &Path) -> bool {
 }
 
 fn path_is_allowed(rel: &Path, allowlist: &[&str]) -> bool {
-    let s = rel.to_string_lossy();
+    // Normalize separators so `/`-joined allowlist entries match on
+    // Windows (`rel` renders as `.ralph\agent` there).
+    let s = rel.to_string_lossy().replace('\\', "/");
     allowlist.iter().any(|p| {
         // Absolute allowlist entries (`/tmp`, `/var/tmp`) match by
         // string prefix; relative entries (`.ralph/agent`,

@@ -14,11 +14,23 @@
 
 use std::path::{Component, Path, PathBuf};
 
+/// Canonicalize without the `\\?\` verbatim prefix on Windows so
+/// component comparisons and downstream tool invocations behave.
+#[cfg(windows)]
+fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    dunce::canonicalize(path)
+}
+
+#[cfg(not(windows))]
+fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    path.canonicalize()
+}
+
 /// `Ok(true)` when `candidate` resolves to `workspace` itself or a
 /// descendant of it; `Ok(false)` when it escapes. Canonicalization
 /// failures are propagated so callers fail closed.
 pub fn path_within_workspace(workspace: &Path, candidate: &Path) -> std::io::Result<bool> {
-    let ws = workspace.canonicalize()?;
+    let ws = canonicalize(workspace)?;
     let cand = canonicalize_existing_ancestor(candidate)?;
     Ok(components_contained(&ws, &cand))
 }
@@ -28,7 +40,7 @@ pub fn path_within_workspace(workspace: &Path, candidate: &Path) -> std::io::Res
 /// non-existent tail components are re-appended verbatim after
 /// rejecting `..` so they cannot be used to climb out.
 fn canonicalize_existing_ancestor(path: &Path) -> std::io::Result<PathBuf> {
-    match path.canonicalize() {
+    match canonicalize(path) {
         Ok(p) => Ok(p),
         Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
         Err(err) => canonicalize_with_tail(path, err),
@@ -49,7 +61,7 @@ fn canonicalize_with_tail(path: &Path, original_err: std::io::Error) -> std::io:
             return Err(original_err);
         };
         tail.push(Component::Normal(name));
-        match parent.canonicalize() {
+        match canonicalize(parent) {
             Ok(mut base) => {
                 for comp in tail.iter().rev() {
                     base.push(comp.as_os_str());

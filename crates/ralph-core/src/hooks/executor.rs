@@ -229,7 +229,9 @@ impl HookExecutorContract for HookExecutor {
 
         let command_display = request.command.join(" ");
 
-        let mut command = Command::new(&resolved_command);
+        // Spawn the resolved command directly on Unix; on Windows route
+        // script extensions (.ps1/.sh/.py) through their interpreter.
+        let mut command = hook_spawn_command(&resolved_command);
         command.args(request.command.iter().skip(1));
         command.current_dir(&resolved_cwd);
         command.envs(&request.env);
@@ -266,6 +268,11 @@ impl HookExecutorContract for HookExecutor {
             }
         }
         let mut child = child.expect("spawn loop must break or return");
+
+        // Windows: assign the hook child to a KILL_ON_JOB_CLOSE job so a
+        // ralph crash/exit cannot orphan hook subprocess trees.
+        #[cfg(windows)]
+        let _kill_job = crate::pid_probe::assign_to_kill_job(&child);
 
         write_stdin_payload(
             &mut child,
@@ -619,6 +626,19 @@ fn executable_extensions() -> Vec<OsString> {
     }
 }
 
+/// Spawn `resolved` directly on Unix; on Windows, interpreter-map script
+/// extensions via [`crate::shell::script_command`].
+fn hook_spawn_command(resolved: &Path) -> Command {
+    #[cfg(unix)]
+    {
+        Command::new(resolved)
+    }
+    #[cfg(not(unix))]
+    {
+        crate::shell::script_command(resolved)
+    }
+}
+
 fn is_executable_file(path: &Path) -> bool {
     if !path.is_file() {
         return false;
@@ -635,7 +655,26 @@ fn is_executable_file(path: &Path) -> bool {
 
     #[cfg(not(unix))]
     {
-        true
+        // Windows has no mode bits; a file is spawnable when its extension
+        // is in PATHEXT or maps to a known interpreter (pwsh/bash/python).
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase());
+        if matches!(ext.as_deref(), Some("ps1" | "sh" | "bash" | "py")) {
+            return true;
+        }
+        let pathext = env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+        pathext
+            .split(';')
+            .filter(|e| !e.trim().is_empty())
+            .any(|e| {
+                Some(
+                    e.trim()
+                        .trim_start_matches('.')
+                        .to_ascii_lowercase()
+                        .as_str(),
+                ) == ext.as_deref()
+            })
     }
 }
 

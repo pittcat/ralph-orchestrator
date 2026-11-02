@@ -588,16 +588,16 @@ impl DagSchedulerRuntime {
         tokio::spawn(async move {
             let started = Instant::now();
             loop {
-                match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None) {
-                    Ok(()) | Err(nix::errno::Errno::EPERM) => {}
-                    Err(nix::errno::Errno::ESRCH) => {
+                match ralph_core::pid_probe::probe_pid(pid) {
+                    ralph_core::pid_probe::PidState::Alive => {}
+                    ralph_core::pid_probe::PidState::Dead => {
                         let _ = tx.send(JobCompletion::recovered(
                             identity.clone(),
                             events_file.clone(),
                         ));
                         break;
                     }
-                    Err(_) => {
+                    ralph_core::pid_probe::PidState::Unknown => {
                         let _ = tx.send(JobCompletion {
                             identity: identity.clone(),
                             events_file: events_file.clone(),
@@ -2735,6 +2735,14 @@ mod tests {
     use super::*;
     use crate::loop_runner::runtime_job::RuntimeJobError;
 
+    /// Completion-drain poll budget. Real workers run `sh` plus git
+    /// inside a ConPTY; MSYS cold start alone takes several hundred
+    /// ms on Windows, so the Unix-tuned budgets are stretched there
+    /// while keeping the poll cadence and mechanism identical.
+    fn drain_iters(unix: u32) -> u32 {
+        if cfg!(windows) { unix * 8 } else { unix }
+    }
+
     /// Routing table: executed → reviewer, reviewed ACCEPTED →
     /// verifier, reviewed REJECTED → fixer; verify topics and
     /// malformed verdicts produce no follow-up.
@@ -2857,7 +2865,9 @@ units:
             HatConfig {
                 name: HAT_EXECUTOR.to_string(),
                 instructions: "execute one fixture unit".to_string(),
-                timeout: Some(10),
+                // MSYS `sh` startup under ConPTY can exceed the
+                // Unix-oriented 10s budget on a loaded Windows host.
+                timeout: Some(if cfg!(windows) { 60 } else { 10 }),
                 ..HatConfig::default()
             },
         );
@@ -2887,7 +2897,9 @@ units:
             HatConfig {
                 name: HAT_EXECUTOR.to_string(),
                 instructions: "execute one recovery fixture unit".to_string(),
-                timeout: Some(10),
+                // MSYS `sh` startup under ConPTY can exceed the
+                // Unix-oriented 10s budget on a loaded Windows host.
+                timeout: Some(if cfg!(windows) { 60 } else { 10 }),
                 ..HatConfig::default()
             },
         );
@@ -3078,7 +3090,7 @@ units:
         runtime.attach_execution_context(real_job_exec_context(tmp.path()));
 
         runtime.maybe_spawn_executor("pf-test", "U1");
-        for _ in 0..100 {
+        for _ in 0..drain_iters(100) {
             runtime.drain_completions();
             if !runtime.merge_queue.is_empty() {
                 break;
@@ -3128,7 +3140,10 @@ units:
                 HatConfig {
                     name: hat.to_string(),
                     instructions: format!("run the {hat} stage of one fixture unit"),
-                    timeout: Some(10),
+                    // MSYS `sh` startup + git commit under ConPTY can
+                    // exceed the Unix-oriented 10s budget on a loaded
+                    // Windows host.
+                    timeout: Some(if cfg!(windows) { 60 } else { 10 }),
                     ..HatConfig::default()
                 },
             );
@@ -3197,7 +3212,7 @@ esac"#
 
         runtime.maybe_spawn_executor("pf-test", "U1");
         let mut executed_event = None;
-        for _ in 0..100 {
+        for _ in 0..drain_iters(100) {
             runtime.drain_completions();
             if let Some(merge) = runtime.merge_queue.front() {
                 executed_event = Some(merge.event.clone());
@@ -3240,7 +3255,7 @@ esac"#
 
         let mut reviewed_event = None;
         let mut seen: Vec<String> = Vec::new();
-        for _ in 0..200 {
+        for _ in 0..drain_iters(200) {
             runtime.drain_completions();
             while let Some(merge) = runtime.merge_queue.pop_front() {
                 if merge.event.topic.as_str() == "forge.unit.reviewed" {
@@ -3273,7 +3288,7 @@ esac"#
         assert_eq!(payload["verdict"], "ACCEPTED");
         // Drain U2's independent executor (admitted concurrently)
         // before asserting the runtime is fully settled.
-        for _ in 0..100 {
+        for _ in 0..drain_iters(100) {
             runtime.drain_completions();
             if runtime.active_jobs.is_empty() {
                 break;
@@ -3307,7 +3322,7 @@ esac"#
         first.attach_execution_context(counting_job_exec_context(tmp.path(), &counter));
         first.maybe_spawn_executor("pf-test", "U1");
 
-        for _ in 0..100 {
+        for _ in 0..drain_iters(100) {
             let pid_recorded = first
                 .journal()
                 .expect("durable journal")
@@ -3343,7 +3358,7 @@ esac"#
         );
         recovered.attach_execution_context(counting_job_exec_context(tmp.path(), &counter));
         recovered.recover_after_restart();
-        for _ in 0..200 {
+        for _ in 0..drain_iters(200) {
             recovered.drain_completions();
             if !recovered.merge_queue.is_empty() {
                 break;
@@ -3441,8 +3456,11 @@ esac"#
             // containment rule.
             return;
         }
-        #[cfg(not(unix))]
-        return;
+        if !cfg!(unix) {
+            // No symlink primitive on Windows — the happy + subdirectory
+            // assertions above already prove the containment rule.
+            return;
+        }
         let escape_attempt = ensure_events_file_in_workspace(
             &attack_workspace,
             "pf-attack",
@@ -4797,6 +4815,7 @@ esac"#
     /// canonicalize-then-open helper — `canonical.starts_with(
     /// canonical_worktree)` is the containment check that closes
     /// this surface.
+    #[cfg(unix)]
     #[test]
     fn open_under_canonical_worktree_rejects_symlink_escape() {
         let temp = tempfile::TempDir::new().expect("tempdir");
@@ -5007,7 +5026,10 @@ esac"#
     /// → `consume_stage_artifact` → containment check. Path::join
     /// treats the Windows-drive-relative string as a literal
     /// segment on POSIX, so a file literally named `C:foo` inside
-    /// the worktree is contained and the consume succeeds.
+    /// the worktree is contained and the consume succeeds. On
+    /// Windows `C:foo` is a drive-relative path that resolves
+    /// outside the worktree by definition — POSIX-only test.
+    #[cfg(unix)]
     #[test]
     fn u2_consume_windows_drive_relative_path_under_worktree() {
         let worktree = u1_worktree();

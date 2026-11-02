@@ -23,6 +23,7 @@ fn test_emit_schema_emit_result_prints_version() {
         schema: Some("EMIT_RESULT".to_string()),
         output: "text".to_string(),
         policy_check_token: None,
+        payload_file: None,
     };
 
     let workspace = tempfile::TempDir::new()
@@ -49,6 +50,7 @@ fn test_emit_schema_emit_result_mutually_exclusive_with_payload() {
         schema: Some("EMIT_RESULT".to_string()),
         output: "text".to_string(),
         policy_check_token: None,
+        payload_file: None,
     };
 
     let workspace = tempfile::TempDir::new()

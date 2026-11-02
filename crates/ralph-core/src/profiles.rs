@@ -314,9 +314,25 @@ where
                 Ok(trimmed)
             }
         }
-        None => Err(ProfilesError::HomeNotSet {
-            spec: format!("{}", spec.scope),
-        }),
+        None => {
+            // Windows: `HOME` is commonly unset under pwsh/cmd. Mirror the
+            // fallback chain used by `config_resolution` (USERPROFILE →
+            // HOMEDRIVE+HOMEPATH). On Unix these vars are absent so the
+            // error path is identical to before.
+            if let Some(profile) = env_lookup("USERPROFILE").filter(|v| !v.is_empty()) {
+                return Ok(PathBuf::from(profile));
+            }
+            match (env_lookup("HOMEDRIVE"), env_lookup("HOMEPATH")) {
+                (Some(drive), Some(path)) => {
+                    let mut combined = PathBuf::from(drive);
+                    combined.push(path);
+                    Ok(combined)
+                }
+                _ => Err(ProfilesError::HomeNotSet {
+                    spec: format!("{}", spec.scope),
+                }),
+            }
+        }
     }
 }
 
@@ -1286,6 +1302,7 @@ mod tests {
     /// when `symlink` itself fails — the path-traversal guard is only
     /// exercised when the platform supports it.
     #[test]
+    #[cfg(unix)]
     fn resolve_rejects_symlinked_fragment() {
         let tmp = TempDir::new().unwrap();
         let preset_dir = tmp

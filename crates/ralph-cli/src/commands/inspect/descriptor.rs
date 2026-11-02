@@ -126,10 +126,16 @@ fn safe_stem(name: &str) -> bool {
 }
 
 fn glob_is_safe(glob: &str) -> bool {
-    if glob.is_empty() || Path::new(glob).is_absolute() {
+    // Reject POSIX-style absolutes too — `/etc/passwd` is not
+    // `Path::is_absolute` on Windows but must still be refused.
+    if glob.is_empty()
+        || Path::new(glob).is_absolute()
+        || glob.starts_with('/')
+        || glob.starts_with('\\')
+    {
         return false;
     }
-    !glob.split('/').any(|seg| seg == "..")
+    !glob.split('/').any(|seg| seg == "..") && !glob.split('\\').any(|seg| seg == "..")
 }
 
 /// Parse + validate a descriptor document. Returns a diagnostic on

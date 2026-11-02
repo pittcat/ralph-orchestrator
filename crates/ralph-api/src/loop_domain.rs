@@ -198,7 +198,11 @@ impl LoopDomain {
             return Ok(());
         }
 
-        let status = Command::new(&self.ralph_command)
+        // `spawn_program` resolves `.cmd` shims / script interpreters on
+        // Windows; on Unix it returns the command verbatim.
+        let (program, arg_prefix) = ralph_core::shell::spawn_program(&self.ralph_command);
+        let status = Command::new(program)
+            .args(arg_prefix)
             .args(["loops", "process"])
             .current_dir(&self.workspace_root)
             .status()
@@ -309,21 +313,43 @@ impl LoopDomain {
                 )));
             }
 
-            let status = Command::new("kill")
-                .args(["-9", &lock_metadata.pid.to_string()])
-                .status()
-                .map_err(|error| {
-                    ApiError::internal(format!(
-                        "failed sending force stop signal to process {}: {error}",
-                        lock_metadata.pid
-                    ))
-                })?;
+            #[cfg(unix)]
+            {
+                let status = Command::new("kill")
+                    .args(["-9", &lock_metadata.pid.to_string()])
+                    .status()
+                    .map_err(|error| {
+                        ApiError::internal(format!(
+                            "failed sending force stop signal to process {}: {error}",
+                            lock_metadata.pid
+                        ))
+                    })?;
 
-            if !status.success() {
-                return Err(ApiError::internal(format!(
-                    "failed force-stopping process {}",
-                    lock_metadata.pid
-                )));
+                if !status.success() {
+                    return Err(ApiError::internal(format!(
+                        "failed force-stopping process {}",
+                        lock_metadata.pid
+                    )));
+                }
+            }
+
+            // Windows: terminate via sysinfo (TerminateProcess equivalent).
+            #[cfg(not(unix))]
+            {
+                let mut sys = sysinfo::System::new();
+                let target = sysinfo::Pid::from(lock_metadata.pid as usize);
+                sys.refresh_processes_specifics(
+                    sysinfo::ProcessesToUpdate::Some(&[target]),
+                    true,
+                    sysinfo::ProcessRefreshKind::nothing(),
+                );
+                let killed = sys.process(target).is_some_and(|p| p.kill());
+                if !killed {
+                    return Err(ApiError::internal(format!(
+                        "failed force-stopping process {}",
+                        lock_metadata.pid
+                    )));
+                }
             }
 
             return Ok(());

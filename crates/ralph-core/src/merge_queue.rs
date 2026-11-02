@@ -506,11 +506,15 @@ impl MergeQueue {
     }
 
     #[cfg(not(unix))]
-    fn with_shared_lock<T, F>(&self, _f: F) -> Result<T, MergeQueueError>
+    fn with_shared_lock<T, F>(&self, f: F) -> Result<T, MergeQueueError>
     where
         F: FnOnce(&File) -> Result<T, MergeQueueError>,
     {
-        Err(MergeQueueError::UnsupportedPlatform)
+        // Windows: hold a shared lock on a `.guard` sidecar; the queue file
+        // itself is never locked so mandatory-lock semantics never bite.
+        let _guard = self.lock_sidecar(false)?;
+        let file = File::open(&self.queue_path)?;
+        f(&file)
     }
 
     /// Executes an operation with an exclusive (write) lock on the queue file.
@@ -552,11 +556,46 @@ impl MergeQueue {
     }
 
     #[cfg(not(unix))]
-    fn with_exclusive_lock<T, F>(&self, _f: F) -> Result<T, MergeQueueError>
+    fn with_exclusive_lock<T, F>(&self, f: F) -> Result<T, MergeQueueError>
     where
         F: FnOnce(File) -> Result<T, MergeQueueError>,
     {
-        Err(MergeQueueError::UnsupportedPlatform)
+        let _guard = self.lock_sidecar(true)?;
+        if let Some(parent) = self.queue_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&self.queue_path)?;
+        f(file)
+    }
+
+    /// Lock the `.guard` sidecar next to the queue file.
+    ///
+    /// Returns the locked sidecar handle; the lock is released when the
+    /// returned `File` is dropped.
+    #[cfg(not(unix))]
+    fn lock_sidecar(&self, exclusive: bool) -> Result<File, MergeQueueError> {
+        if let Some(parent) = self.queue_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut guard_os = self.queue_path.as_os_str().to_os_string();
+        guard_os.push(".guard");
+        let guard = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&guard_os)?;
+        if exclusive {
+            guard.lock()?;
+        } else {
+            guard.lock_shared()?;
+        }
+        Ok(guard)
     }
 }
 
@@ -607,8 +646,7 @@ fn is_pid_alive(pid: u32) -> bool {
 
     #[cfg(not(unix))]
     {
-        // On non-Unix, assume the process is alive if we can't check
-        true
+        crate::pid_probe::pid_alive(pid)
     }
 }
 

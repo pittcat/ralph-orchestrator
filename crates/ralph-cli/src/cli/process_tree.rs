@@ -10,8 +10,10 @@
 /// The calling process and all of its ancestors are explicitly protected so
 /// that the cleanup never commits suicide.
 use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(unix)]
 use std::time::Duration;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+#[cfg(unix)]
 use tracing::{info, warn};
 
 /// Kill `root_pid` and all of its descendant processes.
@@ -74,9 +76,37 @@ pub fn kill_process_tree(root_pid: u32, include_root: bool) {
     }
 }
 
+/// Kill `root_pid` and all of its descendant processes (Windows).
+///
+/// Windows has no SIGTERM/SIGKILL split — `Process::kill` is
+/// `TerminateProcess`. `collect_descendants` is shared and already
+/// protects the calling process and its ancestors.
 #[cfg(not(unix))]
-pub fn kill_process_tree(_root_pid: u32, _include_root: bool) {
-    // No-op on non-Unix; process groups are not a portable concept.
+pub fn kill_process_tree(root_pid: u32, include_root: bool) {
+    let victims = collect_descendants(root_pid, include_root);
+    if victims.is_empty() {
+        return;
+    }
+
+    let mut sys = System::new_with_specifics(
+        RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
+    );
+    let targets: Vec<sysinfo::Pid> = victims
+        .iter()
+        .map(|pid| sysinfo::Pid::from(*pid as usize))
+        .collect();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&targets),
+        false,
+        ProcessRefreshKind::nothing(),
+    );
+
+    for pid in victims {
+        let spid = sysinfo::Pid::from(pid as usize);
+        if let Some(process) = sys.process(spid) {
+            let _ = process.kill();
+        }
+    }
 }
 
 /// Collect `root_pid` and all of its descendants.
@@ -84,6 +114,7 @@ pub fn kill_process_tree(_root_pid: u32, _include_root: bool) {
 /// The calling process and all of its ancestors are explicitly protected so
 /// that the cleanup never commits suicide (this matters in tests where the
 /// child shares the test runner's session).
+#[cfg_attr(not(unix), allow(dead_code))]
 fn collect_descendants(root_pid: u32, include_root: bool) -> Vec<u32> {
     let Ok(mut sys) = System::new_with_specifics(
         RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
@@ -152,6 +183,7 @@ fn collect_descendants(root_pid: u32, include_root: bool) -> Vec<u32> {
     result.into_iter().collect()
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn process_is_alive(pid: u32) -> bool {
     let Ok(mut sys) = System::new_with_specifics(
         RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
@@ -162,7 +194,7 @@ fn process_is_alive(pid: u32) -> bool {
     sys.process(sysinfo::Pid::from(pid as usize)).is_some()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;

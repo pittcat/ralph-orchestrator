@@ -42,7 +42,16 @@ pub fn prepare_hat_channel(
     })?;
 
     let marker = crate::loop_runner::paths::current_hat_events_marker(ctx);
-    fs::write(&marker, relative_path.to_string_lossy().as_bytes()).with_context(|| {
+    // Marker is an inter-process artifact consumed by the spawned hat —
+    // forward slashes resolve identically on Windows and Unix.
+    fs::write(
+        &marker,
+        relative_path
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/")
+            .as_bytes(),
+    )
+    .with_context(|| {
         format!(
             "Failed to write current-hat-events marker: {}",
             marker.display()

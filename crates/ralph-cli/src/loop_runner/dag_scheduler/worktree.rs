@@ -678,6 +678,7 @@ mod tests {
     ///
     /// invariant: 读-改-写序列中读失败不得降级为「读到空」;
     /// FAIL-CLOSED 是本仓库 fail 语义底线(PMI-017)。
+    #[cfg(unix)]
     #[test]
     fn tgp01_read_failure_must_fail_closed_not_clobber_exclude() {
         let (_tmp, repo, _base) = init_repo_with_initial_commit();

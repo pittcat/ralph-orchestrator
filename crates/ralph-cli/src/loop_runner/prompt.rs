@@ -16,7 +16,7 @@ pub fn get_last_commit_info_with_cmd(git_cmd: &OsStr) -> Option<String> {
 }
 
 pub fn get_last_commit_info() -> Option<String> {
-    get_last_commit_info_with_cmd(OsStr::new("git"))
+    get_last_commit_info_with_cmd(&ralph_core::shell::resolve_exe("git"))
 }
 
 /// Resolves prompt content with proper precedence.

@@ -22,7 +22,7 @@ pub async fn run_check_exit_conditions(ctx: &LoopContext) -> Result<CheckExitRes
     let project_root = ctx.workspace().to_string_lossy();
     let output_json = ctx.ralph_dir().join("check_exit_result.json");
 
-    let mut cmd = Command::new("python3");
+    let mut cmd = python_command();
     cmd.arg(&script_path)
         .arg("--project-root")
         .arg(project_root.as_ref())
@@ -94,7 +94,7 @@ pub async fn run_transition_script(ctx: &LoopContext, stop: bool) -> Result<()> 
 
     let project_root = ctx.workspace().to_string_lossy();
 
-    let mut cmd = Command::new("python3");
+    let mut cmd = python_command();
     cmd.arg(&script_path)
         .arg("--project-root")
         .arg(project_root.as_ref());
@@ -115,6 +115,25 @@ pub async fn run_transition_script(ctx: &LoopContext, stop: bool) -> Result<()> 
 
     info!("Phase transition script completed successfully");
     Ok(())
+}
+
+/// Python interpreter for the warmup phase scripts. Unix uses `python3`
+/// as before. On Windows, CPython installs as `python.exe` (`python3` is
+/// typically only a Store-alias stub), with the `py` launcher as a
+/// last resort.
+#[cfg(unix)]
+fn python_command() -> Command {
+    Command::new("python3")
+}
+
+/// Windows variant — see [`python_command`].
+#[cfg(windows)]
+fn python_command() -> Command {
+    let exe = which::which("python3")
+        .or_else(|_| which::which("python"))
+        .or_else(|_| which::which("py"))
+        .unwrap_or_else(|_| PathBuf::from("python"));
+    Command::new(exe)
 }
 
 /// Find a script in the skills directory.

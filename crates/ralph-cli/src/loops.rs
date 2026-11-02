@@ -265,8 +265,7 @@ fn is_process_alive(pid: u32) -> bool {
 
     #[cfg(not(unix))]
     {
-        let _ = pid;
-        false
+        ralph_core::pid_probe::pid_alive(pid)
     }
 }
 
@@ -665,15 +664,9 @@ fn show_logs(args: LogsArgs) -> Result<()> {
     }
 
     if args.follow {
-        // Use tail -f for following
-        let status = Command::new("tail")
-            .args(["-f", events_path.to_string_lossy().as_ref()])
-            .status()
-            .context("Failed to run tail")?;
-
-        if !status.success() {
-            bail!("tail exited with error");
-        }
+        // Unix keeps `tail -f`; Windows follows the file in-process so
+        // the feature does not depend on a coreutils install.
+        follow_events_file(&events_path)?;
     } else {
         // Just cat the file
         let contents =
@@ -682,6 +675,62 @@ fn show_logs(args: LogsArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// `tail -f` for the events file. On Unix this shells out to coreutils
+/// `tail` verbatim; elsewhere the file is polled and appended bytes are
+/// streamed to stdout until the user interrupts.
+#[cfg(unix)]
+fn follow_events_file(events_path: &std::path::Path) -> Result<()> {
+    let status = Command::new("tail")
+        .args(["-f", events_path.to_string_lossy().as_ref()])
+        .status()
+        .context("Failed to run tail")?;
+
+    if !status.success() {
+        bail!("tail exited with error");
+    }
+    Ok(())
+}
+
+/// `tail -f` equivalent: print the last lines, then stream appended
+/// data. Runs until the process receives Ctrl+C (the follow loop is
+/// intentionally endless, matching `tail -f` semantics).
+#[cfg(not(unix))]
+fn follow_events_file(events_path: &std::path::Path) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let mut file = std::fs::File::open(events_path)
+        .with_context(|| format!("Failed to open {}", events_path.display()))?;
+
+    // tail's default: dump the last ~10 lines before following.
+    let existing = std::fs::read_to_string(events_path).unwrap_or_default();
+    let tail: Vec<&str> = existing.lines().collect();
+    let skip = tail.len().saturating_sub(10);
+    for line in &tail[skip..] {
+        println!("{line}");
+    }
+    let _ = std::io::stdout().flush();
+
+    let mut pos = file.seek(SeekFrom::End(0))?;
+    let mut buf = Vec::new();
+    loop {
+        match file.metadata() {
+            Ok(meta) if meta.len() < pos => {
+                // File truncated/rotated — restart from the beginning.
+                pos = file.seek(SeekFrom::Start(0))?;
+            }
+            _ => {}
+        }
+        buf.clear();
+        let read = file.read_to_end(&mut buf)?;
+        pos += read as u64;
+        if read > 0 {
+            print!("{}", String::from_utf8_lossy(&buf));
+            let _ = std::io::stdout().flush();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
 }
 
 /// Show history for a loop.
@@ -901,6 +950,7 @@ fn cleanup_missing_worktree_artifacts(cwd: &Path, loop_id: &str) -> Result<()> {
 }
 
 /// Stop a running loop.
+#[cfg_attr(not(unix), allow(unreachable_code))]
 fn stop_loop(args: StopArgs) -> Result<()> {
     use ralph_core::LoopLock;
 
@@ -954,7 +1004,11 @@ fn stop_loop(args: StopArgs) -> Result<()> {
                 }
                 #[cfg(not(unix))]
                 {
-                    bail!("Signal sending not supported on this platform");
+                    println!(
+                        "Worktree gone. Terminating orphan loop '{}' (PID {})...",
+                        loop_id, entry.pid
+                    );
+                    crate::cli::process_tree::kill_process_tree(entry.pid, true);
                 }
 
                 let wait_timeout = orphan_stop_wait_timeout(args.force);
@@ -1022,7 +1076,20 @@ fn stop_loop(args: StopArgs) -> Result<()> {
 
         #[cfg(not(unix))]
         {
-            bail!("--force is only supported on Unix systems");
+            println!(
+                "Terminating loop '{}' (PID {}) and its process tree...",
+                loop_id, metadata.pid
+            );
+            crate::cli::process_tree::kill_process_tree(metadata.pid, true);
+            println!("Process tree terminated.");
+            emit_receipt(
+                args.format,
+                "stop",
+                &loop_id,
+                "process tree terminated",
+                &cwd,
+            );
+            return Ok(());
         }
     }
 
@@ -1157,7 +1224,14 @@ fn attach_to_loop(args: AttachArgs) -> Result<()> {
     println!("Attaching to loop '{}' at {}...", loop_id, wt_path);
     println!("Type 'exit' to return.\n");
 
+    #[cfg(unix)]
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    #[cfg(not(unix))]
+    let shell = std::env::var("RALPH_SHELL")
+        .ok()
+        .or_else(|| which::which("pwsh").ok().map(|p| p.display().to_string()))
+        .or_else(|| std::env::var("COMSPEC").ok())
+        .unwrap_or_else(|| "cmd.exe".to_string());
 
     let status = Command::new(&shell)
         .current_dir(&wt_path)
@@ -1385,7 +1459,7 @@ fn spawn_merge_ralph(cwd: &std::path::Path, loop_id: &str) -> Result<()> {
     // Spawn merge-ralph
     println!("Spawning merge-ralph for loop '{}'...", loop_id);
 
-    let status = Command::new("ralph")
+    let mut child = Command::new(ralph_core::shell::resolve_exe("ralph"))
         .args([
             "run",
             "-c",
@@ -1397,8 +1471,15 @@ fn spawn_merge_ralph(cwd: &std::path::Path, loop_id: &str) -> Result<()> {
             &format!("Merge loop {} from branch ralph/{}", loop_id, loop_id),
         ])
         .env("RALPH_MERGE_LOOP_ID", loop_id)
-        .status()
+        .spawn()
         .context("Failed to spawn merge-ralph")?;
+
+    // Windows: bind merge-ralph to a KILL_ON_JOB_CLOSE job for parity with
+    // Unix process-group signalling (Ctrl+C kills both).
+    #[cfg(windows)]
+    let _kill_job = ralph_core::pid_probe::assign_to_kill_job(&child);
+
+    let status = child.wait().context("Failed to wait for merge-ralph")?;
 
     if !status.success() {
         bail!("merge-ralph exited with error");
@@ -1469,10 +1550,10 @@ mod tests {
     use super::*;
     use crate::test_support::CwdGuard;
     use chrono::Utc;
+    #[cfg(unix)]
+    use ralph_core::LoopLock;
     use ralph_core::loop_registry::LoopEntry;
-    use ralph_core::{
-        HookPhaseEvent, HookSuspendMode, LoopLock, SuspendStateRecord, SuspendStateStore,
-    };
+    use ralph_core::{HookPhaseEvent, HookSuspendMode, SuspendStateRecord, SuspendStateStore};
     use std::process::Command;
 
     fn write_suspend_state(store: &SuspendStateStore, loop_id: &str) {
@@ -2231,11 +2312,13 @@ mod tests {
             .args(["config", "user.name", "CI"])
             .current_dir(temp_dir.path())
             .status();
-        let _ = Command::new("sh")
-            .args([
-                "-c",
-                "printf 'init' > README.md && git add README.md && git commit -qm 'init'",
-            ])
+        std::fs::write(temp_dir.path().join("README.md"), "init").expect("seed README");
+        let _ = Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(temp_dir.path())
+            .status();
+        let _ = Command::new("git")
+            .args(["commit", "-qm", "init"])
             .current_dir(temp_dir.path())
             .status();
 

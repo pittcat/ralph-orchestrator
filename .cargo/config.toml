@@ -32,3 +32,23 @@ NO_PROXY = { value = "127.0.0.1,localhost,::1", force = true }
 # defaults TMPDIR to the platform-correct temp directory
 # (`/tmp` on Linux, `/var/folders/...` on macOS) without help.
 # Removed: TMPDIR = { value = "/private/tmp", force = true }
+
+# Repo task runner: `cargo xtask test` mirrors scripts/run-tests.sh
+# cross-platform (Windows cannot execute the .sh entrypoint directly).
+[alias]
+xtask = "run --package xtask --"
+
+# Windows main-thread stack reserve.
+#
+# Windows gives the main thread a 1 MiB default stack vs 8 MiB on Linux.
+# The `clap` derive-generated `Cli::command()` construction for the full
+# `Commands` tree (28 subcommands + nested subcommand enums) uses large
+# stack frames in debug builds and overflows the 1 MiB reserve, so even
+# `ralph --version` crashes with "thread 'main' has overflowed its stack".
+# `/STACK:16777216` raises the PE header reserve to 16 MiB for every
+# workspace binary linked on MSVC (link.exe and rust-lld both honour it).
+# Unix targets are untouched — their default stack is already sufficient.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-args=/STACK:16777216"]
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "link-args=/STACK:16777216"]

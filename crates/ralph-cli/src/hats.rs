@@ -477,8 +477,12 @@ fn render_hat_dag_via_ai(
     // Build command for non-interactive mode
     let (command, args, stdin_input, _temp_file) = backend.build_command(&prompt, false);
 
-    // Spawn and capture output
-    let mut child = Command::new(&command)
+    // Spawn and capture output. Resolve through `spawn_program` so
+    // Windows PATHEXT shims (`.cmd`) and script interpreters work the
+    // same as on the main executor paths.
+    let (program, arg_prefix) = ralph_core::shell::spawn_program(&command);
+    let mut child = Command::new(program)
+        .args(arg_prefix)
         .args(&args)
         .stdin(if stdin_input.is_some() {
             Stdio::piped()

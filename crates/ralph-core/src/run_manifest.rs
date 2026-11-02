@@ -350,11 +350,11 @@ pub fn pid_alive(pid: u32) -> bool {
     kill(Pid::from_raw(pid as i32), None).is_ok()
 }
 
-/// Non-Unix fallback: assume alive (platforms without signal 0 cannot
-/// distinguish and must not claim death).
+/// Non-Unix: probe via `pid_probe` (Windows: sysinfo process table).
+/// `Unknown` counts as alive, matching the "must not claim death" rule.
 #[cfg(not(unix))]
-pub fn pid_alive(_pid: u32) -> bool {
-    true
+pub fn pid_alive(pid: u32) -> bool {
+    crate::pid_probe::pid_alive(pid)
 }
 
 /// Write `manifest` to `path` via a same-dir temp file + rename so

@@ -53,10 +53,7 @@ pub fn current_commit(workspace_root: &Path) -> String {
 }
 
 pub fn is_pid_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .is_ok_and(|status| status.success())
+    ralph_core::pid_probe::pid_alive(pid)
 }
 
 pub(crate) fn now_ts() -> String {

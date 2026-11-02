@@ -124,11 +124,17 @@ impl FileLock {
 
         #[cfg(not(unix))]
         {
-            let _ = (file, lock_type);
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "File locking not supported on this platform",
-            ))
+            // std File::lock* is LockFileEx on Windows. We lock a sidecar
+            // `.lock` file, so mandatory-lock semantics never block readers
+            // of the target file itself.
+            let result = match lock_type {
+                LockType::Shared => file.lock_shared(),
+                LockType::Exclusive => file.lock(),
+            };
+            result.map(|()| LockGuard {
+                _file: file,
+                _lock_type: lock_type,
+            })
         }
     }
 
@@ -163,11 +169,19 @@ impl FileLock {
 
         #[cfg(not(unix))]
         {
-            let _ = (file, lock_type);
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "File locking not supported on this platform",
-            ))
+            use std::fs::TryLockError;
+            let result = match lock_type {
+                LockType::Shared => file.try_lock_shared(),
+                LockType::Exclusive => file.try_lock(),
+            };
+            match result {
+                Ok(()) => Ok(Some(LockGuard {
+                    _file: file,
+                    _lock_type: lock_type,
+                })),
+                Err(TryLockError::WouldBlock) => Ok(None),
+                Err(TryLockError::Error(e)) => Err(e),
+            }
         }
     }
 
@@ -202,6 +216,10 @@ pub struct LockGuard {
     /// The flock guard (Unix only).
     #[cfg(unix)]
     _flock: nix::fcntl::Flock<File>,
+
+    /// The locked sidecar file; closing releases the lock (Windows).
+    #[cfg(not(unix))]
+    _file: File,
 
     /// The type of lock held.
     _lock_type: LockType,
@@ -454,6 +472,39 @@ mod tests {
         // With proper locking, final value should be 2
         let final_content = std::fs::read_to_string(temp_dir.path().join("counter.txt")).unwrap();
         assert_eq!(final_content.trim(), "2");
+    }
+
+    #[test]
+    fn probe_lock_release_then_rename() {
+        let temp_dir = TempDir::new().unwrap();
+        let data = temp_dir.path().join("outbox.jsonl");
+        std::fs::write(&data, "{\"a\":1}\n").unwrap();
+
+        let lock1 = FileLock::new(&data).unwrap();
+        let guard = lock1.exclusive().unwrap();
+        eprintln!("main: lock1 acquired");
+
+        let data2 = data.clone();
+        let handle = thread::spawn(move || {
+            eprintln!("ack: FileLock::new");
+            let lock2 = FileLock::new(&data2).unwrap();
+            eprintln!("ack: exclusive() blocking...");
+            let _g = lock2.exclusive().unwrap();
+            eprintln!("ack: exclusive() acquired");
+            let content = std::fs::read_to_string(&data2).unwrap();
+            eprintln!("ack: read ok {content:?}");
+            let tmp = data2.with_extension("tmp");
+            std::fs::write(&tmp, "{\"a\":2}\n").unwrap();
+            std::fs::rename(&tmp, &data2).unwrap();
+            eprintln!("ack: rename ok");
+        });
+
+        thread::sleep(Duration::from_millis(200));
+        eprintln!("main: releasing");
+        drop(guard);
+        drop(lock1);
+        handle.join().unwrap();
+        eprintln!("done");
     }
 
     #[test]

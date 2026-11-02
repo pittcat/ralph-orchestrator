@@ -1647,9 +1647,16 @@ mod tests {
 
         let mut tracker = ReviewStepTracker::default();
         // 一条覆盖整份 fix-plan 的 review.complete，只显式携带 fix-02。
-        let payload = format!(
-            r#"{{"plan_name":"p","task_id":"t1","task_key":"k1","step":"fix-02","verdict":"pass","fix_plan_file":"{fix_plan_str}"}}"#
-        );
+        // serde_json 转义 Windows 路径反斜杠，format! 直拼会产出非法 JSON。
+        let payload = serde_json::json!({
+            "plan_name": "p",
+            "task_id": "t1",
+            "task_key": "k1",
+            "step": "fix-02",
+            "verdict": "pass",
+            "fix_plan_file": fix_plan_str,
+        })
+        .to_string();
         let complete = jsonl("review.complete", "review-synthesizer", &payload);
         tracker.observe_accepted(&complete);
 

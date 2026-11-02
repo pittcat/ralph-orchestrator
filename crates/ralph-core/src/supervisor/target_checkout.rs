@@ -400,6 +400,9 @@ mod tests {
             git(&["init", "-q", "--initial-branch=main"]);
             git(&["config", "user.email", "u3@test.local"]);
             git(&["config", "user.name", "U3 Test"]);
+            // Git for Windows defaults to autocrlf — checkouts would
+            // rewrite `v1\n` to `v1\r\n` and break byte assertions.
+            git(&["config", "core.autocrlf", "false"]);
         }
         // Initial commit (this is the "expected_head"; we will
         // reset AWAY from it).

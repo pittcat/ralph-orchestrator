@@ -97,9 +97,11 @@ fn test_inspect_run_empty_workspace() {
 
     let json = inspect_run_json(temp_path);
     assert_eq!(json["schema_version"], "run-observation/v1");
+    // Windows may report the 8.3 short-name (`ADMINI~1`) or the `\\?\`
+    // verbatim form — canonicalise both sides for the comparison.
     assert_eq!(
-        json["workspace"].as_str().unwrap(),
-        fs::canonicalize(temp_path).unwrap().to_string_lossy()
+        fs::canonicalize(json["workspace"].as_str().unwrap()).unwrap(),
+        fs::canonicalize(temp_path).unwrap()
     );
     assert_eq!(json["runs"], Value::Array(vec![]));
 }
@@ -270,29 +272,26 @@ fn test_inspect_run_human_format_lists_runs() {
 fn write_manifest(temp_path: &std::path::Path, run_id: &str, preset: Option<&str>) {
     let runs_dir = temp_path.join(".ralph/runs");
     fs::create_dir_all(&runs_dir).expect("create runs dir");
-    let preset_field = preset
-        .map(|p| format!(r#", "preset": "{p}""#))
-        .unwrap_or_default();
+    let mut manifest = serde_json::json!({
+        "schema_version": "run-manifest/v1",
+        "run_id": run_id,
+        "kind": "primary",
+        "pid": 99999999,
+        "cwd": temp_path.display().to_string(),
+        "workspace": temp_path.display().to_string(),
+        "repo_root": temp_path.display().to_string(),
+        "prompt_preview": "descriptor test",
+        "prompt_sha256": "0".repeat(64),
+        "started_at": "2026-10-28T10:00:00Z",
+        "revision": 2,
+        "terminal": {"reason": "completed", "at": "2026-10-28T11:00:00Z"},
+    });
+    if let Some(p) = preset {
+        manifest["preset"] = serde_json::json!(p);
+    }
     fs::write(
         runs_dir.join(format!("{run_id}.manifest.json")),
-        format!(
-            r#"{{"schema_version": "run-manifest/v1",
-  "run_id": "{run_id}",
-  "kind": "primary",
-  "pid": 99999999,
-  "cwd": "{}",
-  "workspace": "{}",
-  "repo_root": "{}",
-  "prompt_preview": "descriptor test",
-  "prompt_sha256": "{:0>64}",
-  "started_at": "2026-10-28T10:00:00Z",
-  "revision": 2{preset_field},
-  "terminal": {{"reason": "completed", "at": "2026-10-28T11:00:00Z"}}}}"#,
-            temp_path.display(),
-            temp_path.display(),
-            temp_path.display(),
-            "0"
-        ),
+        serde_json::to_string_pretty(&manifest).expect("serialise manifest"),
     )
     .expect("write manifest");
 }

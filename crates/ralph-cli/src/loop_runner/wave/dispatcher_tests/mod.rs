@@ -2937,8 +2937,9 @@ fn u4_c4_runner_post_wave_gates_consult_late_termination_reason() {
     // test is a static-analysis gate — it catches regressions
     // where someone removes the `late_termination_reason.is_none()`
     // guard from the gate blocks (introduced in U4-C4) without
-    // re-reading plan §6 C4.
-    let runner_rs = include_str!("../../runner.rs");
+    // re-reading plan §6 C4. Normalise CRLF so the match works on
+    // Windows checkouts too.
+    let runner_rs = include_str!("../../runner.rs").replace("\r\n", "\n");
 
     // The post-wave gate blocks (missing-event gate + the
     // `else if` default_publishes fallback) share the

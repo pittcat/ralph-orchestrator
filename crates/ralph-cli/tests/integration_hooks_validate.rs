@@ -76,6 +76,7 @@ fn assert_report_shape(report: &Value) {
     }
 }
 
+#[allow(unused_variables)] // `path` is only consumed by the cfg(unix) branch
 fn make_executable(path: &Path) {
     #[cfg(unix)]
     {
@@ -298,8 +299,9 @@ hooks:
     assert_eq!(report["hooks_enabled"], true);
     assert_eq!(report["checked_hooks"], 1);
     let source = report["source"].as_str().expect("source should be string");
+    let expected_suffix = std::path::Path::new(".ralph").join("config.yml");
     assert!(
-        source.contains(".ralph/config.yml"),
+        source.contains(&expected_suffix.to_string_lossy().as_ref().to_owned()),
         "expected global config source, got: {source}"
     );
 }

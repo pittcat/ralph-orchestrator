@@ -37,4 +37,5 @@ mod slot_binding;
 mod supervisor;
 mod timeouts;
 
+#[cfg(unix)]
 pub(super) use crate::loop_runner::tests::fake_path;

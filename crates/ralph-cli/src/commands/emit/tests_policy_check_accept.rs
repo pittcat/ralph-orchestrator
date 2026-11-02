@@ -54,6 +54,7 @@ fn test_policy_check_accept_json_recorded_false() {
         schema: None,
         output: "json".to_string(),
         policy_check_token: None,
+        payload_file: None,
     };
 
     let result = super::emit_command_with_root(ColorMode::Never, args, Some(&workspace));

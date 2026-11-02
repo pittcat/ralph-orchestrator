@@ -56,8 +56,11 @@ fn idempotent_log_append_writes_final_record_to_disk() {
     )
     .unwrap();
 
-    let on_disk =
-        std::fs::read_to_string(dir.path().join("recovery:abc:loop:loop-1.jsonl")).unwrap();
+    let on_disk = std::fs::read_to_string(dir.path().join(format!(
+        "{}.jsonl",
+        key_file_name("recovery:abc:loop:loop-1")
+    )))
+    .unwrap();
     assert!(on_disk.contains("\"_idempotency_key\":\"recovery:abc:loop:loop-1\""));
     assert!(on_disk.contains("\"_final\":true"));
     assert!(on_disk.contains("\"retry_key\":\"abc\""));
@@ -91,7 +94,8 @@ fn idempotent_log_append_records_intermediate_transitions() {
     .unwrap();
 
     // The file contains exactly one line — the merged record.
-    let content = std::fs::read_to_string(dir.path().join(format!("{key}.jsonl"))).unwrap();
+    let content =
+        std::fs::read_to_string(dir.path().join(format!("{}.jsonl", key_file_name(key)))).unwrap();
     assert_eq!(content.lines().count(), 1);
 
     let parsed: IdempotentRecord = serde_json::from_str(content.lines().next().unwrap()).unwrap();
@@ -188,8 +192,11 @@ fn idempotent_log_concurrent_append_only_one_final_succeeds() {
     );
 
     // The on-disk file must contain exactly one line.
-    let content =
-        std::fs::read_to_string(workspace.join("recovery:race:loop:loop-race.jsonl")).unwrap();
+    let content = std::fs::read_to_string(workspace.join(format!(
+        "{}.jsonl",
+        key_file_name("recovery:race:loop:loop-race")
+    )))
+    .unwrap();
     assert_eq!(content.lines().count(), 1);
 }
 
@@ -256,9 +263,11 @@ fn idempotent_log_concurrent_final_process_child() {
     assert_eq!(ok, 1);
     assert_eq!(rejected, n - 1);
 
-    let content =
-        std::fs::read_to_string(workspace.join("recovery:child:loop:loop-child-race.jsonl"))
-            .unwrap();
+    let content = std::fs::read_to_string(workspace.join(format!(
+        "{}.jsonl",
+        key_file_name("recovery:child:loop:loop-child-race")
+    )))
+    .unwrap();
     assert_eq!(content.lines().count(), 1);
 }
 

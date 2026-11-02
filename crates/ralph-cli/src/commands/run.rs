@@ -2024,9 +2024,37 @@ pub async fn run_command(
             return Ok(());
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            anyhow::bail!("Restart via single-command shell restart is only supported on Unix");
+            use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+            info!("Restart requested — relaunching `ralph resume` detached");
+            std::process::Command::new(ralph_core::shell::resolve_exe("cargo"))
+                .args([
+                    "run",
+                    "--bin",
+                    "ralph",
+                    "--",
+                    "resume",
+                    "-c",
+                    "ralph.test.yml",
+                ])
+                .env("RALPH_DIAGNOSTICS", "1")
+                .current_dir(&workspace_root)
+                .stdin(std::process::Stdio::null())
+                .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+                .spawn()
+                .with_context(|| "Failed to spawn detached restart process")?;
+            return Ok(());
+        }
+
+        #[cfg(all(not(unix), not(windows)))]
+        {
+            anyhow::bail!(
+                "Restart via single-command shell restart is only supported on Unix/Windows"
+            );
         }
     }
 
@@ -2041,6 +2069,7 @@ pub async fn run_command(
     Ok(())
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn required_restart_command(pid: u32) -> String {
     format!("kill {pid} && RALPH_DIAGNOSTICS=1 cargo run --bin ralph -- resume -c ralph.test.yml")
 }
@@ -2627,7 +2656,38 @@ async fn wait_for_termination_signal() -> Option<&'static str> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+async fn wait_for_termination_signal() -> Option<&'static str> {
+    use tokio::signal::windows;
+    // Windows console control events: Ctrl+Break ≈ SIGTERM,
+    // window close ≈ SIGHUP, system shutdown/logoff ≈ SIGTERM.
+    let ctrl_break_fut = async {
+        match windows::ctrl_break() {
+            Ok(mut s) => s.recv().await,
+            Err(_) => std::future::pending().await,
+        }
+    };
+    let ctrl_close_fut = async {
+        match windows::ctrl_close() {
+            Ok(mut s) => s.recv().await,
+            Err(_) => std::future::pending().await,
+        }
+    };
+    let ctrl_shutdown_fut = async {
+        match windows::ctrl_shutdown() {
+            Ok(mut s) => s.recv().await,
+            Err(_) => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        res = tokio::signal::ctrl_c() => res.ok().map(|_| "SIGINT"),
+        _ = ctrl_break_fut => Some("SIGTERM"),
+        _ = ctrl_close_fut => Some("SIGHUP"),
+        _ = ctrl_shutdown_fut => Some("SIGTERM"),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 async fn wait_for_termination_signal() -> Option<&'static str> {
     tokio::signal::ctrl_c().await.ok().map(|_| "SIGINT")
 }
@@ -2648,6 +2708,7 @@ fn send_child_signal(child_id: Option<u32>, signal: Signal) {
 }
 
 #[cfg(not(unix))]
+#[allow(dead_code)]
 fn send_child_signal(_child_id: Option<u32>, _signal: &'static str) {
     // No-op on non-Unix; callers use `child.kill().await` directly.
 }
@@ -2701,6 +2762,7 @@ async fn graceful_terminate_child(
     }
     #[cfg(not(unix))]
     {
+        let _ = child_id;
         let _ = child.kill().await;
     }
     child.wait().await.ok()
@@ -3021,6 +3083,13 @@ async fn run_subprocess_tui(
         .stderr(stderr_stdio)
         .spawn()
         .context("Failed to spawn ralph subprocess for TUI")?;
+
+    // Windows: bind the subprocess-TUI child into a KILL_ON_JOB_CLOSE
+    // job so a parent crash cannot orphan it.
+    #[cfg(windows)]
+    let _kill_job = child
+        .raw_handle()
+        .and_then(ralph_core::pid_probe::assign_handle_to_kill_job);
 
     // R6: if spawn fails the guard above is dropped and restores the terminal.
     let child_id = child.id();
@@ -4549,11 +4618,21 @@ hats:
 
     #[tokio::test]
     async fn wait_or_terminate_child_returns_status_when_child_exits_quickly() {
-        let mut child = tokio::process::Command::new("echo")
-            .arg("hello")
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        // `echo` is a shell builtin on Windows (no stock echo.exe), so the
+        // probe child goes through `cmd /c` there; Unix keeps `echo`.
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut c = tokio::process::Command::new("cmd");
+            c.args(["/c", "echo", "hello"]);
+            c
+        };
+        #[cfg(unix)]
+        let mut cmd = {
+            let mut c = tokio::process::Command::new("echo");
+            c.arg("hello");
+            c
+        };
+        let mut child = cmd.stdout(std::process::Stdio::null()).spawn().unwrap();
         let child_id = child.id();
         let status =
             wait_or_terminate_child(&mut child, child_id, Duration::from_secs(5), "quick_exit")
